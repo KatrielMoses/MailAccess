@@ -262,6 +262,18 @@ def resolve_breach_identity(payload: dict[str, Any], module_name: str | None = N
     if module_name and module_name.lower() == "hudson_rock":
         return None
 
+    # Only process findings with at least one breach-specific indicator.
+    # Without this guard, profile findings (with "name" in metadata) get
+    # falsely collapsed as breaches by the fallback path below.
+    meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    _has_breach_indicator = any(
+        bool(src.get(k))
+        for src in (payload, meta)
+        for k in ("breach_name", "breach_id", "breach_source")
+    )
+    if not _has_breach_indicator:
+        return None
+
     alias_to_id, canonical_name_by_id = _load_catalog()
     candidates = _breach_candidates(payload)
 

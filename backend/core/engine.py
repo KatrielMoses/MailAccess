@@ -71,12 +71,12 @@ _MODULE_CAP: dict[str, int] = {
 
 _MODULE_DEFAULT_TIMEOUTS: dict[str, int] = {
     "breach_deep": 90,
-    "github_commits": 45,
+    "github_commits": 90,
 }
 
 _MODULE_TIMEOUT_FLOORS: dict[str, int] = {
     "account_discovery": 120,
-    "username_pivot": 60,
+    "username_pivot": 120,
     "user_scanner": 180,
     "whatsmyname": 200,
 }
@@ -289,6 +289,8 @@ class InvestigationEngine:
                 try:
                     if mod.name == "breach_deep":
                         coro = mod.run(canonical_email, force=explicit_module)
+                    elif mod.name in ("github_commits", "gravatar", "keybase", "npm_discovery", "pypi_discovery") and email != canonical_email:
+                        coro = mod.run(canonical_email, original_email=email)
                     else:
                         coro = mod.run(canonical_email)
                     result = await asyncio.wait_for(coro, timeout=timeout)

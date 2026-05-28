@@ -1562,10 +1562,204 @@ async def _investigate(
             if not all_other and not alt_emails:
                 out.print()
 
+        def render_profile_intelligence(rep: dict[str, Any]) -> None:
+            fbm = rep.get("findings_by_module", {})
+
+            # --- GitHub profile ---
+            gh_findings = [
+                f for f in fbm.get("github_commits", [])
+                if isinstance(f, dict) and f.get("platform") == "github_user"
+            ]
+            gh_profile: dict[str, Any] = {}
+            if gh_findings:
+                gh_profile = gh_findings[0].get("metadata", {}) or {}
+
+            # --- Gravatar profile ---
+            grav_findings = [
+                f for f in fbm.get("gravatar", [])
+                if isinstance(f, dict) and f.get("platform") == "gravatar_profile"
+            ]
+            grav_profile: dict[str, Any] = {}
+            if grav_findings:
+                grav_profile = grav_findings[0].get("metadata", {}) or {}
+
+            # --- Keybase profile ---
+            kb_findings = [
+                f for f in fbm.get("keybase", [])
+                if isinstance(f, dict) and f.get("platform") == "keybase_profile"
+            ]
+            kb_profile: dict[str, Any] = {}
+            if kb_findings:
+                kb_profile = kb_findings[0].get("metadata", {}) or {}
+
+            # --- PyPI packages ---
+            pypi_findings = [
+                f for f in fbm.get("pypi_discovery", [])
+                if isinstance(f, dict) and f.get("signal_type") == "package_authorship"
+            ]
+
+            # --- npm packages ---
+            npm_findings = [
+                f for f in fbm.get("npm_discovery", [])
+                if isinstance(f, dict) and f.get("signal_type") == "package_authorship"
+            ]
+
+            has_content = any([gh_profile, grav_profile, kb_profile, pypi_findings, npm_findings])
+            if not has_content:
+                return
+
+            out.print(Rule("PROFILE INTELLIGENCE", style="bold cyan"))
+            out.print()
+
+            if gh_profile:
+                login = str(gh_profile.get("login") or "")
+                label = f"GitHub ({login})" if login else "GitHub"
+                out.print(f"  [bold cyan]{label}[/bold cyan]")
+                for field_key, field_label in (
+                    ("name", "Name"),
+                    ("company", "Company"),
+                    ("location", "Location"),
+                    ("blog", "Website"),
+                    ("twitter_username", "Twitter"),
+                    ("public_email", "Email"),
+                ):
+                    val = str(gh_profile.get(field_key) or "").strip()
+                    if val:
+                        out.print(f"    {field_label:<10} {val}")
+                repos = int(gh_profile.get("public_repos") or 0)
+                followers = int(gh_profile.get("followers") or 0)
+                if repos or followers:
+                    out.print(f"    [dim]{repos} repos · {followers} followers[/dim]")
+                created = str(gh_profile.get("created_at") or "")[:4]
+                if created:
+                    out.print(f"    [dim]Joined: {created}[/dim]")
+                out.print()
+
+            if grav_profile:
+                grav_name = str(grav_profile.get("username") or grav_profile.get("name") or "")
+                label = f"Gravatar ({grav_name})" if grav_name else "Gravatar"
+                out.print(f"  [bold cyan]{label}[/bold cyan]")
+                for field_key, field_label in (
+                    ("name", "Name"),
+                    ("location", "Location"),
+                    ("bio", "Bio"),
+                ):
+                    val = str(grav_profile.get(field_key) or "").strip()
+                    if val:
+                        display = val[:60] + "..." if len(val) > 60 else val
+                        out.print(f"    {field_label:<10} {display}")
+                verified = grav_profile.get("verified_accounts")
+                if isinstance(verified, list) and verified:
+                    out.print(f"    Verified:  {', '.join(str(v) for v in verified[:8])}")
+                out.print()
+
+            if kb_profile:
+                kb_user = str(kb_profile.get("username") or "")
+                label = f"Keybase ({kb_user})" if kb_user else "Keybase"
+                out.print(f"  [bold cyan]{label}[/bold cyan]")
+                for field_key, field_label in (
+                    ("name", "Name"),
+                    ("location", "Location"),
+                    ("bio", "Bio"),
+                    ("twitter", "Twitter"),
+                    ("github", "GitHub"),
+                ):
+                    val = str(kb_profile.get(field_key) or "").strip()
+                    if val:
+                        out.print(f"    {field_label:<10} {val}")
+                proofs = kb_profile.get("verified_proofs")
+                if isinstance(proofs, list) and proofs:
+                    proof_str = ", ".join(
+                        f"{p} [green]✓[/green]" for p in dict.fromkeys(proofs)
+                    )
+                    out.print(f"    Verified:  {proof_str}")
+                out.print()
+
+            if pypi_findings:
+                out.print(f"  [bold cyan]PyPI packages: {len(pypi_findings)} found[/bold cyan]")
+                parts: list[str] = []
+                for f in pypi_findings[:6]:
+                    meta = f.get("metadata", {}) or {}
+                    pkg = str(meta.get("package_name") or "")
+                    role = str(meta.get("role") or "")
+                    if pkg:
+                        parts.append(f"{pkg} ({role})" if role else pkg)
+                if parts:
+                    out.print(f"    {', '.join(parts)}")
+                out.print()
+
+            if npm_findings:
+                out.print(f"  [bold cyan]npm packages: {len(npm_findings)} found[/bold cyan]")
+                parts2: list[str] = []
+                for f in npm_findings[:6]:
+                    meta = f.get("metadata", {}) or {}
+                    pkg = str(meta.get("package_name") or "")
+                    role = str(meta.get("role") or "")
+                    if pkg:
+                        parts2.append(f"{pkg} ({role})" if role else pkg)
+                if parts2:
+                    out.print(f"    {', '.join(parts2)}")
+                out.print()
+
+        def render_pii_findings(rep: dict[str, Any]) -> None:
+            pii_items: list[tuple[str, str, str, str]] = []  # (type, value, confidence, source_label)
+
+            # Scan all findings for PII signal types
+            for module_name, findings in rep.get("findings_by_module", {}).items():
+                for f in findings:
+                    if not isinstance(f, dict):
+                        continue
+                    sig = str(f.get("signal_type") or "")
+                    meta = f.get("metadata") if isinstance(f.get("metadata"), dict) else {}
+                    conf = str(f.get("confidence") or "medium").upper()
+                    source_field = str(meta.get("source_field") or "")
+                    source_platform = str(meta.get("source_platform") or module_name)
+                    source_label = f"{source_platform} {source_field}".strip().title()
+
+                    if sig == "phone_in_bio":
+                        phone = str(meta.get("phone") or "").strip()
+                        if phone:
+                            pii_items.append(("phone", phone, conf, source_label))
+                    elif sig == "email_in_bio":
+                        discovered = str(meta.get("email") or "").strip()
+                        if discovered:
+                            pii_items.append(("email", discovered, conf, source_label))
+
+            # OpenCorporates addresses
+            for f in rep.get("findings_by_module", {}).get("opencorporates", []):
+                if not isinstance(f, dict):
+                    continue
+                meta = f.get("metadata") if isinstance(f.get("metadata"), dict) else {}
+                addr = str(meta.get("registered_address") or "").strip()
+                company = str(meta.get("company_name") or "").strip()
+                if addr:
+                    label = f"OpenCorporates — {company}" if company else "OpenCorporates"
+                    pii_items.append(("address", addr, "MEDIUM", label))
+
+            if not pii_items:
+                return
+
+            out.print(Rule("PII EXTRACTED", style="bold yellow"))
+            out.print()
+            for pii_type, value, conf, source_label in pii_items:
+                conf_color = "green" if conf == "HIGH" else "yellow"
+                if pii_type == "phone":
+                    icon = "📞"
+                elif pii_type == "address":
+                    icon = "📍"
+                else:
+                    icon = "✉"
+                out.print(
+                    f"  {icon} [bold]{value}[/bold]   [{conf_color}][{conf}][/{conf_color}] {source_label}"
+                )
+            out.print()
+
         out.print("\n[bold green]Investigation Complete[/]\n")
         render_credibility_banner(report_data)
         render_summary(report_data)
         await render_clusters_output()
+        render_profile_intelligence(report_data)
+        render_pii_findings(report_data)
         render_timeline(report_data)
         out.print(Rule("Full Results", style="bold"))
         render_findings(report_data)

@@ -6,6 +6,8 @@ from typing import Any
 import httpx
 
 from ..config import settings
+from ..core.bio_analyzer import analyze_bio, is_aggregator_url
+from ..core.bio_link_extractor import extract_from_aggregator
 from ..core.http_client import build_client
 from ..core.rate_limiter import rate_limiter
 from .base import BaseModule, ModuleResult, ModuleStatus
@@ -31,12 +33,12 @@ def _is_rate_limited(response: httpx.Response) -> bool:
 class GitHubCommitsModule(BaseModule):
     name = "github_commits"
     description = (
-        "Search GitHub commit history for direct author-email matches and related "
-        "GitHub users."
+        "Search GitHub commit history for direct author-email matches, related "
+        "GitHub users, and deep profile extraction."
     )
     requires_key = False
 
-    async def run(self, email: str) -> ModuleResult:
+    async def run(self, email: str, original_email: str | None = None) -> ModuleResult:
         token = settings.github_token
         rate_limiter.set_delay("api.github.com", 2.0 if token else 6.0)
 
@@ -47,34 +49,44 @@ class GitHubCommitsModule(BaseModule):
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
+        domain = email.split("@", 1)[1] if "@" in email else None
         findings: list[dict[str, Any]] = []
         errors: list[str] = []
         partial = False
 
+        # Search original email first (exact git commit metadata match), then canonical.
+        emails_to_search: list[str] = []
+        if original_email and original_email.lower() != email.lower():
+            emails_to_search.append(original_email)
+        emails_to_search.append(email)
+
         try:
             async with build_client(base_url=_GITHUB_API, timeout=10.0) as client:
-                commit_findings, commit_errors, rate_limited = await self._search_commits(
-                    client, headers, email
-                )
+                seen_shas: set[str] = set()
+                commit_findings: list[dict[str, Any]] = []
+                for search_email in emails_to_search:
+                    cf, ce, rl = await self._search_commits(client, headers, search_email)
+                    for f in cf:
+                        sha = str(f.get("metadata", {}).get("commit_sha") or "")
+                        if sha not in seen_shas:
+                            seen_shas.add(sha)
+                            commit_findings.append(f)
+                    errors.extend(ce)
+                    partial = partial or rl
                 findings.extend(commit_findings)
-                errors.extend(commit_errors)
-                partial = partial or rate_limited
                 await self._enrich_commit_repos(client, headers, commit_findings)
 
-                user_finding, user_errors, rate_limited = await self._search_user(
-                    client, headers, email
+                user_findings, user_errors, rate_limited = await self._search_user(
+                    client, headers, email, domain, commit_findings
                 )
-                if user_finding:
-                    findings.append(user_finding)
+                findings.extend(user_findings)
                 errors.extend(user_errors)
                 partial = partial or rate_limited
         except httpx.TimeoutException:
             return ModuleResult(status=ModuleStatus.PARTIAL, errors=["GitHub request timed out"])
         except (httpx.ConnectError, httpx.NetworkError) as exc:
-            # True connection-level failure — network unreachable / DNS failure
             return ModuleResult(status=ModuleStatus.PARTIAL, errors=[f"GitHub unreachable: {exc}"])
         except Exception as exc:
-            # Unexpected error; degrade to PARTIAL rather than FAILED
             return ModuleResult(status=ModuleStatus.PARTIAL, errors=[f"GitHub unexpected error: {exc}"])
 
         commit_findings = [f for f in findings if f.get("platform") == "github_commit"]
@@ -108,19 +120,12 @@ class GitHubCommitsModule(BaseModule):
                 languages.append(language)
                 repos_counted_for_language.add(repo)
 
-        # Determine final status:
-        # - PARTIAL if rate-limited, auth-blocked, or we have some data alongside errors
-        # - FAILED only for genuine connection-level failures (caught above and returned early)
-        # - SKIPPED is set upstream; we never set it here
         status = ModuleStatus.SUCCESS
         if partial:
-            # partial=True is set when auth/rate-limit blocked commit search —
-            # user search may still have run; this is never a FAILED
             status = ModuleStatus.PARTIAL
         elif errors and findings:
             status = ModuleStatus.PARTIAL
         elif errors and not findings:
-            # errors with no findings = auth-blocked or empty result, not a crash
             status = ModuleStatus.PARTIAL
 
         return ModuleResult(
@@ -245,8 +250,13 @@ class GitHubCommitsModule(BaseModule):
         return data if isinstance(data, dict) else {}
 
     async def _search_user(
-        self, client: httpx.AsyncClient, headers: dict[str, str], email: str
-    ) -> tuple[dict[str, Any] | None, list[str], bool]:
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        email: str,
+        domain: str | None,
+        commit_findings: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[str], bool]:
         try:
             response = await client.get(
                 "/search/users",
@@ -254,21 +264,39 @@ class GitHubCommitsModule(BaseModule):
                 headers=headers,
             )
         except httpx.TimeoutException:
-            return None, ["GitHub user search timed out"], False
+            return [], ["GitHub user search timed out"], False
         except Exception as exc:
-            return None, [f"GitHub user search failed: {exc}"], False
+            return [], [f"GitHub user search failed: {exc}"], False
 
         if _is_rate_limited(response):
-            return None, ["GitHub API rate limit reached during user search"], True
+            return [], ["GitHub API rate limit reached during user search"], True
         if response.status_code != 200:
-            return None, [f"GitHub user search returned {response.status_code}"], False
+            return [], [f"GitHub user search returned {response.status_code}"], False
 
         try:
             items = response.json().get("items") or []
         except Exception:
-            return None, ["GitHub user search returned unparseable JSON"], False
+            return [], ["GitHub user search returned unparseable JSON"], False
+
         if not items or not isinstance(items[0], dict):
-            return None, [], False
+            # Fall back to looking up the repo owner extracted from commit findings.
+            if commit_findings:
+                owners: list[str] = []
+                for cf in commit_findings:
+                    repo = str(cf.get("metadata", {}).get("repo") or "")
+                    if "/" in repo:
+                        owner = repo.split("/", 1)[0]
+                        if owner and owner not in owners:
+                            owners.append(owner)
+                for owner in owners:
+                    detail, detail_error, rate_limited = await self._fetch_user_detail(
+                        client, headers, f"{_GITHUB_API}/users/{owner}"
+                    )
+                    if detail:
+                        findings = await self._build_user_findings(detail, domain, client)
+                        errors = [detail_error] if detail_error else []
+                        return findings, errors, rate_limited
+            return [], [], False
 
         user = dict(items[0])
         detail_url = user.get("url")
@@ -279,11 +307,14 @@ class GitHubCommitsModule(BaseModule):
             if detail:
                 user.update(detail)
             if detail_error:
-                return self._user_finding(user), [detail_error], rate_limited
+                findings = await self._build_user_findings(user, domain, client)
+                return findings, [detail_error], rate_limited
             if rate_limited:
-                return self._user_finding(user), [], True
+                findings = await self._build_user_findings(user, domain, client)
+                return findings, [], True
 
-        return self._user_finding(user), [], False
+        findings = await self._build_user_findings(user, domain, client)
+        return findings, [], False
 
     async def _fetch_user_detail(
         self, client: httpx.AsyncClient, headers: dict[str, str], url: str
@@ -304,18 +335,150 @@ class GitHubCommitsModule(BaseModule):
         except Exception:
             return None, "GitHub user detail lookup returned unparseable JSON", False
 
-    def _user_finding(self, user: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "platform": "github_user",
-            "profile_url": str(user.get("html_url") or ""),
-            "confidence": "high",
-            "metadata": {
-                "login": user.get("login"),
-                "name": user.get("name"),
-                "bio": user.get("bio"),
-                "public_repos": int(user.get("public_repos") or 0),
-                "followers": int(user.get("followers") or 0),
-                "avatar_url": user.get("avatar_url"),
-            },
-        }
+    async def _build_user_findings(
+        self,
+        user: dict[str, Any],
+        domain: str | None,
+        client: httpx.AsyncClient,
+    ) -> list[dict[str, Any]]:
+        findings: list[dict[str, Any]] = []
 
+        blog = str(user.get("blog") or "").strip()
+        bio_text = str(user.get("bio") or "").strip()
+        twitter = str(user.get("twitter_username") or "").strip()
+        public_email = str(user.get("email") or "").strip()
+
+        findings.append(
+            {
+                "platform": "github_user",
+                "profile_url": str(user.get("html_url") or ""),
+                "confidence": "high",
+                "source": "github_profile",
+                "signal_type": "profile",
+                "metadata": {
+                    "login": user.get("login"),
+                    "name": user.get("name"),
+                    "company": str(user.get("company") or "").strip() or None,
+                    "blog": blog or None,
+                    "location": str(user.get("location") or "").strip() or None,
+                    "bio": bio_text or None,
+                    "twitter_username": twitter or None,
+                    "public_email": public_email or None,
+                    "public_repos": int(user.get("public_repos") or 0),
+                    "followers": int(user.get("followers") or 0),
+                    "avatar_url": user.get("avatar_url"),
+                    "created_at": str(user.get("created_at") or ""),
+                },
+            }
+        )
+
+        # Bio PII extraction
+        if bio_text:
+            bio = analyze_bio(bio_text, exclude_domain=domain)
+            for phone in bio.phones:
+                findings.append(
+                    {
+                        "platform": "github_bio",
+                        "confidence": "medium",
+                        "source": "github_profile",
+                        "signal_type": "phone_in_bio",
+                        "metadata": {
+                            "phone": phone,
+                            "source_field": "bio",
+                            "source_platform": "github",
+                        },
+                    }
+                )
+            for extra_email in bio.emails:
+                findings.append(
+                    {
+                        "platform": "github_bio",
+                        "confidence": "high",
+                        "source": "github_profile",
+                        "signal_type": "email_in_bio",
+                        "metadata": {
+                            "email": extra_email,
+                            "source_field": "bio",
+                            "source_platform": "github",
+                        },
+                    }
+                )
+            # Aggregator sub-extraction from bio
+            for agg_url in bio.aggregator_urls:
+                agg_links = await extract_from_aggregator(agg_url, client)
+                findings.extend(_aggregator_findings(agg_links, agg_url, "github"))
+
+        # Blog URL — check if it's an aggregator
+        if blog and is_aggregator_url(blog):
+            agg_links = await extract_from_aggregator(blog, client)
+            findings.extend(_aggregator_findings(agg_links, blog, "github"))
+
+        return findings
+
+
+def _aggregator_findings(
+    links: list[Any], agg_url: str, source_platform: str
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for link in links:
+        if link.link_type == "phone":
+            out.append(
+                {
+                    "platform": "github_bio",
+                    "confidence": "medium",
+                    "source": "github_profile",
+                    "signal_type": "phone_in_bio",
+                    "metadata": {
+                        "phone": link.handle,
+                        "source_field": "aggregator",
+                        "source_url": agg_url,
+                        "source_platform": source_platform,
+                    },
+                }
+            )
+        elif link.link_type == "whatsapp":
+            out.append(
+                {
+                    "platform": "github_bio",
+                    "confidence": "medium",
+                    "source": "github_profile",
+                    "signal_type": "phone_in_bio",
+                    "metadata": {
+                        "phone": f"WhatsApp: {link.handle}",
+                        "source_field": "aggregator",
+                        "source_url": agg_url,
+                        "source_platform": source_platform,
+                    },
+                }
+            )
+        elif link.link_type == "email":
+            out.append(
+                {
+                    "platform": "github_bio",
+                    "confidence": "high",
+                    "source": "github_profile",
+                    "signal_type": "email_in_bio",
+                    "metadata": {
+                        "email": link.handle,
+                        "source_field": "aggregator",
+                        "source_url": agg_url,
+                        "source_platform": source_platform,
+                    },
+                }
+            )
+        elif link.link_type == "social":
+            out.append(
+                {
+                    "platform": f"github_aggregator_{link.platform}",
+                    "url": link.url,
+                    "confidence": "high",
+                    "source": "github_profile",
+                    "signal_type": "aggregator_link",
+                    "metadata": {
+                        "link_platform": link.platform,
+                        "handle": link.handle,
+                        "aggregator_url": agg_url,
+                    },
+                }
+            )
+    return out
