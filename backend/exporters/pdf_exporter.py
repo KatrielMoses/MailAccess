@@ -73,6 +73,7 @@ class PdfExporter(BaseExporter):
         findings_by_module = data.get("findings_by_module", {})
         score_drivers = data.get("score_drivers", [])
         recommended_actions = data.get("recommended_actions", [])
+        credibility_html = self._credibility_html(data.get("email_credibility"))
 
         score_display = str(score) if score is not None else "-"
         credential_display = str(credential_score) if credential_score is not None else "-"
@@ -81,6 +82,15 @@ class PdfExporter(BaseExporter):
         findings_html = self._findings_html(findings_by_module, runs)
         metadata_html = self._metadata_table_html(findings)
         log_html = self._module_log_html(runs, findings_by_module)
+        timeline_html = self._timeline_html(data.get("timeline"))
+        
+        alt_emails = [
+            f.get("data", f)
+            for f in findings
+            if f.get("module_name") == "alternate_email"
+        ]
+        alt_emails_html = self._alt_emails_html(alt_emails)
+        
         driver_html = self._string_list_html(
             score_drivers, empty="No credential risk drivers recorded."
         )
@@ -127,11 +137,19 @@ class PdfExporter(BaseExporter):
   <p class="summary-text">{_e(summary)}</p>
 </section>
 
+<h2>Email Credibility</h2>
+{credibility_html}
+
 <h2>Credential Risk Drivers</h2>
 {driver_html}
 
 <h2>Recommended Actions</h2>
 {action_html}
+
+<h2>Exposure Timeline</h2>
+{timeline_html}
+
+{alt_emails_html}
 
 <h2>Findings by Module</h2>
 {findings_html}
@@ -150,6 +168,88 @@ class PdfExporter(BaseExporter):
             return f'<p class="empty">{_e(empty)}</p>'
         items = "".join(f"<li>{_e(value)}</li>" for value in values)
         return f"<ul>{items}</ul>"
+
+    def _alt_emails_html(self, alt_emails: list[dict[str, Any]]) -> str:
+        if not alt_emails:
+            return ""
+        
+        cards = ""
+        for f in alt_emails:
+            meta = f.get("metadata", {})
+            disc_email = meta.get("discovered_email", "unknown")
+            conf = str(f.get("confidence", "unknown")).upper()
+            conf_class = _CONF_CLASS.get(conf.lower(), "conf-unknown")
+            source = meta.get("source", "unknown")
+            source_detail = meta.get("source_detail", "")
+            reason = meta.get("reason", "")
+            
+            source_str = source
+            if source_detail:
+                source_str += f" ({source_detail})"
+            
+            reason_html = f'<div style="font-size: 8pt; color: #a0aec0; margin-top: 4px;">"{_e(reason)}"</div>' if reason else ""
+            
+            cards += f"""
+<div class="finding-card">
+  <div class="finding-header">
+    <span class="platform-name">{_e(disc_email)}</span>
+    <span class="confidence-badge {conf_class}">{_e(conf)}</span>
+  </div>
+  <div style="font-size: 8.5pt; color: #cbd5e1;">Source: {_e(source_str)}</div>
+  {reason_html}
+</div>"""
+        
+        return f"<h2>Alternate Emails</h2>\n<div class=\"module-section\">\n{cards}\n</div>"
+
+    def _credibility_html(self, credibility: Any) -> str:
+        if not isinstance(credibility, dict) or not credibility:
+            return '<p class="empty">No email credibility data recorded.</p>'
+        rows = "".join(
+            f"<tr><td>{_e(key)}</td><td>{_e(value)}</td></tr>"
+            for key, value in credibility.items()
+            if value is not None and value != ""
+        )
+        return f'<table><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>{rows}</tbody></table>'
+
+    def _timeline_html(self, timeline: Any) -> str:
+        if not isinstance(timeline, dict):
+            return '<p class="empty">No dated exposure events recovered.</p>'
+        events = timeline.get("events")
+        if not isinstance(events, list) or not events:
+            return '<p class="empty">No dated exposure events recovered.</p>'
+
+        summary = (
+            '<div class="timeline-summary">'
+            f"<span><strong>First seen</strong> {_e(timeline.get('first_seen_date') or '-')}</span>"
+            f"<span><strong>Most recent</strong> "
+            f"{_e(timeline.get('most_recent_date') or '-')}</span>"
+            f"<span><strong>Active risk</strong> {_e(timeline.get('active_risk_count', 0))}</span>"
+            "</div>"
+        )
+        rows = ""
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            active = bool(event.get("is_active_risk"))
+            active_text = "active risk" if active else ""
+            active_class = "timeline-active" if active else ""
+            rows += (
+                f"<tr class=\"{active_class}\">"
+                f"<td>{_e(event.get('date', ''))}</td>"
+                f"<td>{_e(event.get('event_type', ''))}</td>"
+                f"<td>{_e(event.get('title', ''))}</td>"
+                f"<td>{_e(event.get('source_module', ''))}</td>"
+                f"<td>{_e(active_text)}</td>"
+                f"</tr>"
+            )
+        return (
+            f"{summary}"
+            "<table>"
+            "<thead><tr><th>Date</th><th>Type</th><th>Event</th>"
+            "<th>Source</th><th>Risk</th></tr></thead>"
+            f"<tbody>{rows}</tbody>"
+            "</table>"
+        )
 
     def _findings_html(self, findings_by_module: dict[str, list], runs: list[dict]) -> str:
         if not findings_by_module:
@@ -267,7 +367,9 @@ class PdfExporter(BaseExporter):
             "</table>"
         )
 
-    def _module_log_html(self, runs: list[dict[str, Any]], findings_by_module: dict[str, list]) -> str:
+    def _module_log_html(
+        self, runs: list[dict[str, Any]], findings_by_module: dict[str, list]
+    ) -> str:
         if not runs:
             return '<p class="empty">No modules ran.</p>'
 
@@ -426,6 +528,24 @@ body {
   font-size: 8.5pt;
   color: #718096;
   margin-top: 8px;
+}
+
+.timeline-summary {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  color: #a0aec0;
+  font-size: 8pt;
+}
+.timeline-summary span {
+  background: #111827;
+  border: 1px solid #374151;
+  border-radius: 3px;
+  padding: 3px 7px;
+}
+.timeline-active td {
+  color: #fbbf24;
 }
 
 h2 {

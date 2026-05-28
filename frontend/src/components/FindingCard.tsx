@@ -1,25 +1,29 @@
 const MODULE_LABELS: Record<string, string> = {
   haveibeenpwned: 'Have I Been Pwned',
-  hunter_io:      'Hunter.io',
-  emailrep:       'EmailRep',
-  gravatar:       'Gravatar',
-  google_search:  'Google Search',
-  shodan:         'Shodan',
-  dns_lookup:     'DNS Lookup',
-  whois_lookup:   'WHOIS Lookup',
-  social_links:   'Social Links',
+  hibp: 'Have I Been Pwned',
+  hunter_io: 'Hunter.io',
+  email_credibility: 'Email Credibility',
+  emailrep: 'EmailRep',
+  gravatar: 'Gravatar',
+  google_search: 'Google Search',
+  shodan: 'Shodan',
+  dns_lookup: 'DNS Lookup',
+  whois_lookup: 'WHOIS Lookup',
+  social_links: 'Social Links',
 }
 
 const MODULE_ACCENT: Record<string, string> = {
   haveibeenpwned: 'text-red-400',
-  hunter_io:      'text-cyan-400',
-  emailrep:       'text-blue-400',
-  gravatar:       'text-violet-400',
-  google_search:  'text-yellow-400',
-  shodan:         'text-orange-400',
-  dns_lookup:     'text-emerald-400',
-  whois_lookup:   'text-teal-400',
-  social_links:   'text-pink-400',
+  hibp: 'text-red-400',
+  hunter_io: 'text-cyan-400',
+  email_credibility: 'text-amber-300',
+  emailrep: 'text-blue-400',
+  gravatar: 'text-violet-400',
+  google_search: 'text-yellow-400',
+  shodan: 'text-orange-400',
+  dns_lookup: 'text-emerald-400',
+  whois_lookup: 'text-teal-400',
+  social_links: 'text-pink-400',
 }
 
 function isUrl(v: unknown): v is string {
@@ -47,13 +51,10 @@ export default function FindingCard({ module, data }: Props) {
   const label = MODULE_LABELS[module] ?? module
   const accent = MODULE_ACCENT[module] ?? 'text-cyan-400'
 
-  const entries = Object.entries(data).filter(
-    ([, v]) => v !== null && v !== undefined && v !== ''
-  )
+  const entries = Object.entries(data).filter(([, v]) => v !== null && v !== undefined && v !== '')
 
   return (
     <div className="bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors rounded-sm overflow-hidden">
-      {/* Card header */}
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-zinc-800/80">
         <span className={`text-xs font-bold uppercase tracking-widest font-mono ${accent}`}>
           {label}
@@ -62,7 +63,6 @@ export default function FindingCard({ module, data }: Props) {
         <span className="text-zinc-700 text-xs font-mono">{entries.length} fields</span>
       </div>
 
-      {/* Card body */}
       <div className="px-4 py-3">
         {entries.length === 0 ? (
           <p className="text-zinc-700 text-xs">No data fields.</p>

@@ -20,6 +20,13 @@ class MaltegoExporter(BaseExporter):
         recommended_actions = " | ".join(
             str(item) for item in data.get("recommended_actions", [])
         )
+        credibility = data.get("email_credibility") if isinstance(data.get("email_credibility"), dict) else {}
+        canonical_email = str(credibility.get("canonical_email") or data.get("canonical_email") or email)
+        provider_family = str(credibility.get("provider_family") or "")
+        reputation_verdict = str(credibility.get("reputation_verdict") or "clean")
+        reputation_flags = ", ".join(str(item) for item in credibility.get("reputation_flags", []))
+        is_disposable = bool(credibility.get("is_disposable"))
+        is_malicious = bool(credibility.get("is_malicious"))
 
         buf = io.StringIO()
         writer = csv.writer(buf)
@@ -50,6 +57,35 @@ class MaltegoExporter(BaseExporter):
                 email,
             ]
         )
+
+        writer.writerow(
+            [
+                "maltego.Phrase",
+                f"Email credibility: {reputation_verdict}",
+                90 if is_malicious else 60 if is_disposable else 40,
+                reputation_flags,
+                credential_score,
+                credential_band,
+                score_drivers,
+                recommended_actions,
+                canonical_email,
+            ]
+        )
+
+        if provider_family:
+            writer.writerow(
+                [
+                    "maltego.Phrase",
+                    f"Provider family: {provider_family}",
+                    30,
+                    "",
+                    credential_score,
+                    credential_band,
+                    score_drivers,
+                    recommended_actions,
+                    canonical_email,
+                ]
+            )
 
         seen_persons: set[str] = set()
 

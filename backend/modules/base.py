@@ -34,6 +34,7 @@ class BaseModule(ABC):
     name: str
     description: str
     requires_key: bool = False
+    priority: int = 100
 
     @abstractmethod
     async def run(self, email: str) -> ModuleResult:

@@ -2,40 +2,41 @@ import { useInvestigationStore } from '../store/investigationStore'
 import type { ModuleStatus } from '../types'
 
 const MODULE_META: Record<string, { label: string; icon: string }> = {
-  hibp:           { label: 'HIBP',       icon: '⚠' },
-  hunter_io:      { label: 'Hunter',     icon: '◎' },
-  emailrep:       { label: 'EmailRep',   icon: '≡' },
-  gravatar:       { label: 'Gravatar',   icon: '◉' },
-  google_dork:    { label: 'Dork',       icon: '◈' },
-  google_search:  { label: 'Google',     icon: '◈' },
-  domain_intel:   { label: 'Domain',     icon: '⬡' },
-  shodan:         { label: 'Shodan',     icon: '⬡' },
-  dns_lookup:     { label: 'DNS',        icon: '⬢' },
-  whois_lookup:   { label: 'WHOIS',      icon: '⎖' },
-  social:         { label: 'Social',     icon: '⊕' },
-  social_links:   { label: 'SocLinks',   icon: '⊕' },
-  duolingo:       { label: 'Duolingo',   icon: 'D' },
-  spotify:        { label: 'Spotify',    icon: '♪' },
-  adobe:          { label: 'Adobe',      icon: 'A' },
-  github:         { label: 'GitHub',     icon: '' },
-  patreon:        { label: 'Patreon',    icon: 'ⓟ' },
-  snapchat:       { label: 'Snapchat',   icon: '👻' },
-  skype_microsoft:{ label: 'Skype',      icon: 'S' },
-  zoom:           { label: 'Zoom',       icon: 'Z' },
-  dropbox:        { label: 'Dropbox',    icon: 'D' },
-  apple:          { label: 'Apple',      icon: '' },
-  linkedin:       { label: 'LinkedIn',   icon: 'in' },
-  discord:        { label: 'Discord',    icon: '👾' },
-  account_discovery:      { label: 'AcctDisc', icon: '⊞' },
-  whatsmyname:            { label: 'WMN',      icon: '⊙' },
-  user_scanner:           { label: 'UsrScan',  icon: '⊛' },
-  username_pivot:         { label: 'UsrPivot', icon: '↻' },
-  breachdirectory:        { label: 'BrchDir',  icon: '⚠' },
-  hudson_rock:            { label: 'HudsnRck', icon: '☠' },
-  permutation_discovery:  { label: 'Permute',  icon: '⇌' },
-  ghunt:                  { label: 'GHunt',    icon: '◉' },
-  phone_intel:            { label: 'Phone',    icon: '☎' },
-  messaging_hints:        { label: 'MsgHint',  icon: '✉' },
+  hibp: { label: 'HIBP', icon: '⚠' },
+  email_credibility: { label: 'Cred', icon: 'ℹ' },
+  hunter_io: { label: 'Hunter', icon: '◎' },
+  emailrep: { label: 'EmailRep', icon: '≡' },
+  gravatar: { label: 'Gravatar', icon: '◉' },
+  google_dork: { label: 'Dork', icon: '◈' },
+  google_search: { label: 'Google', icon: '◈' },
+  domain_intel: { label: 'Domain', icon: '⬡' },
+  shodan: { label: 'Shodan', icon: '⬡' },
+  dns_lookup: { label: 'DNS', icon: '⬢' },
+  whois_lookup: { label: 'WHOIS', icon: '⎖' },
+  social: { label: 'Social', icon: '⊕' },
+  social_links: { label: 'SocLinks', icon: '⊕' },
+  duolingo: { label: 'Duolingo', icon: 'D' },
+  spotify: { label: 'Spotify', icon: '♪' },
+  adobe: { label: 'Adobe', icon: 'A' },
+  github: { label: 'GitHub', icon: '' },
+  patreon: { label: 'Patreon', icon: 'ⓟ' },
+  snapchat: { label: 'Snapchat', icon: '👻' },
+  skype_microsoft: { label: 'Skype', icon: 'S' },
+  zoom: { label: 'Zoom', icon: 'Z' },
+  dropbox: { label: 'Dropbox', icon: 'D' },
+  apple: { label: 'Apple', icon: '' },
+  linkedin: { label: 'LinkedIn', icon: 'in' },
+  discord: { label: 'Discord', icon: '👾' },
+  account_discovery: { label: 'AcctDisc', icon: '⌞' },
+  whatsmyname: { label: 'WMN', icon: '⊙' },
+  user_scanner: { label: 'UsrScan', icon: '⊛' },
+  username_pivot: { label: 'UsrPivot', icon: '↻' },
+  breachdirectory: { label: 'BrchDir', icon: '⚠' },
+  hudson_rock: { label: 'HudsnRck', icon: '☠' },
+  permutation_discovery: { label: 'Permute', icon: '⇌' },
+  ghunt: { label: 'GHunt', icon: '◉' },
+  phone_intel: { label: 'Phone', icon: '☎' },
+  messaging_hints: { label: 'MsgHint', icon: '✉' },
 }
 
 interface DotProps {
@@ -62,9 +63,9 @@ function labelColor(status: ModuleStatus): string {
   switch (status) {
     case 'running': return 'text-cyan-400'
     case 'success': return 'text-zinc-300'
-    case 'failed':  return 'text-red-400'
+    case 'failed': return 'text-red-400'
     case 'skipped': return 'text-zinc-600'
-    default:        return 'text-zinc-700'
+    default: return 'text-zinc-700'
   }
 }
 
@@ -79,7 +80,7 @@ export default function ModuleStatusRail() {
 
       <div className="py-1">
         {Object.values(modules).map(mod => {
-          const meta = MODULE_META[mod.name] ?? { label: mod.name, icon: '○' }
+          const meta = MODULE_META[mod.name] ?? { label: mod.name, icon: '◌' }
           return (
             <div
               key={mod.name}
@@ -88,7 +89,7 @@ export default function ModuleStatusRail() {
               }`}
             >
               <StatusDot status={mod.status} />
-              <span className={`text-sm flex-shrink-0 opacity-60`}>{meta.icon}</span>
+              <span className="text-sm flex-shrink-0 opacity-60">{meta.icon}</span>
               <div className="min-w-0 flex-1">
                 <div className={`text-xs font-mono font-medium truncate ${labelColor(mod.status)}`}>
                   {meta.label}

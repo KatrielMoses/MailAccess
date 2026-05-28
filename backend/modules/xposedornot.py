@@ -240,8 +240,11 @@ def _build_finding(
     data_classes = _extract_data_classes(detail)
     severity = _severity_from_data_classes(data_classes)
     breach_domain = str(detail.get("domain") or "").strip()
-    breached_date = detail.get("breachedDate") or detail.get("xposed_date") or detail.get(
-        "breach_date"
+    breached_date = (
+        detail.get("breachedDate")
+        or detail.get("breached_date")
+        or detail.get("xposed_date")
+        or detail.get("breach_date")
     )
     added_date = detail.get("addedDate")
     logo = detail.get("logo")

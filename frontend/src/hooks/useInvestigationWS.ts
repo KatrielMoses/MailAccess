@@ -35,10 +35,12 @@ export function useInvestigationWS(investigationId: string | null) {
           break
         case 'investigation_complete':
           store.handleWsComplete(
+            frame.canonical_email ?? null,
             frame.exposure_score,
             frame.risk_level,
             frame.credential_risk_score,
-            frame.credential_risk_band
+            frame.credential_risk_band,
+            frame.timeline
           )
           break
         case 'error':

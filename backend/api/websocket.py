@@ -33,7 +33,8 @@ async def ws_investigate(investigation_id: str, websocket: WebSocket) -> None:
           "exposure_score": 72,
           "risk_level": "high",
           "credential_risk_score": 81,
-          "credential_risk_band": "CRITICAL"
+          "credential_risk_band": "CRITICAL",
+          "timeline": { ... }
         }
     """
     await websocket.accept()
@@ -64,15 +65,18 @@ async def ws_investigate(investigation_id: str, websocket: WebSocket) -> None:
                     inv = await db.get(Investigation, investigation_id)
                 score = inv.exposure_score if inv else None
                 credential_score = inv.credential_risk_score if inv else None
+                timeline = inv.timeline_json if inv else None
                 await websocket.send_json(
                     {
                         "type": "investigation_complete",
+                        "canonical_email": inv.canonical_email if inv else None,
                         "exposure_score": score,
                         "risk_level": "unknown" if score is None else (
                             "low" if score <= 20 else "medium" if score <= 50 else "high" if score <= 80 else "critical"
                         ),
                         "credential_risk_score": credential_score,
                         "credential_risk_band": credential_risk_band(credential_score),
+                        "timeline": timeline or {},
                     }
                 )
                 # Give the client 5 s to drain the frame before we close.

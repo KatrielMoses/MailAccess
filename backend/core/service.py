@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, select
@@ -11,7 +12,9 @@ from ..config import settings
 from ..db.models import Finding, Investigation, InvestigationStatus, ModuleRun
 from .breach_normalizer import collapse_breach_findings
 from .credential_risk import assess_credential_risk_from_report, credential_risk_band
+from .email_credibility import normalize_email_address
 from .engine import InvestigationEngine
+from .timeline import build_timeline
 
 
 def _risk_level(score: int | None) -> str:
@@ -37,14 +40,34 @@ def _build_summary(data: dict) -> str:
     return f"Ran {total} modules ({success} success, {partial} partial, {failed} failed, {skipped} skipped). Found {len(findings)} data points."
 
 
+def _email_credibility_from_report(data: dict) -> dict | None:
+    findings_by_module = data.get("findings_by_module", {})
+    if not isinstance(findings_by_module, dict):
+        return None
+    findings = findings_by_module.get("email_credibility")
+    if not isinstance(findings, list) or not findings:
+        return None
+    first = findings[0]
+    if not isinstance(first, dict):
+        return None
+    metadata = first.get("metadata")
+    return metadata if isinstance(metadata, dict) else first
+
+
 def enrich_report(data: dict) -> dict:
     score = data.get("exposure_score")
     data["risk_level"] = _risk_level(score)
     data.pop("credential_risk", None)
+    data["original_email"] = data.get("email")
 
     findings = collapse_breach_findings(data.get("findings", []))
     data["findings"] = findings
     data["summary"] = _build_summary(data)
+    timeline = data.get("timeline_json") or data.get("timeline")
+    if not isinstance(timeline, dict):
+        timeline = asdict(build_timeline(findings))
+    data["timeline"] = timeline
+    data.pop("timeline_json", None)
 
     data["metadata_table"] = {
         r["module_name"]: r.get("run_metadata") or {}
@@ -55,6 +78,19 @@ def enrich_report(data: dict) -> dict:
     for f in findings:
         findings_by_module.setdefault(f["module_name"], []).append(f["data"])
     data["findings_by_module"] = findings_by_module
+
+    credibility = _email_credibility_from_report(data)
+    if isinstance(credibility, dict):
+        data["email_credibility"] = credibility
+        canonical_email = credibility.get("canonical_email") or data.get("canonical_email")
+        if isinstance(canonical_email, str) and canonical_email.strip():
+            data["canonical_email"] = canonical_email.strip()
+        elif data.get("canonical_email") is None:
+            data["canonical_email"] = data.get("email")
+    else:
+        data["email_credibility"] = {}
+        if data.get("canonical_email") is None:
+            data["canonical_email"] = data.get("email")
 
     credential_assessment = assess_credential_risk_from_report(data)
     stored_credential_score = data.get("credential_risk_score")
@@ -83,15 +119,22 @@ class InvestigationService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def _find_recent_complete(self, email: str) -> Investigation | None:
+    async def _find_recent_complete(
+        self,
+        email: str,
+        canonical_email: str | None = None,
+    ) -> Investigation | None:
         """Return the most recent COMPLETE investigation for `email` within the
         configured cache window, or None if none qualifies."""
         window = timedelta(minutes=settings.investigation_cache_window_minutes)
         cutoff = datetime.now(timezone.utc) - window
+        candidates = [email]
+        if canonical_email and canonical_email not in candidates:
+            candidates.append(canonical_email)
         result = await self._session.execute(
             select(Investigation)
             .where(
-                Investigation.email == email,
+                Investigation.email.in_(candidates),
                 Investigation.status == InvestigationStatus.COMPLETE,
                 Investigation.created_at >= cutoff,
             )
@@ -119,16 +162,21 @@ class InvestigationService:
         The caller is responsible for storing the queue in the registry so
         WebSocket handlers can consume it (skip when cached=True).
         """
+        canonical_email = normalize_email_address(email).canonical_email
         if (
             not force
             and settings.enable_investigation_cache
             and module_names is None
         ):
-            recent = await self._find_recent_complete(email)
+            recent = await self._find_recent_complete(email, canonical_email)
             if recent is not None:
                 return recent.id, recent.created_at, None, True
 
-        inv = Investigation(email=email, status=InvestigationStatus.PENDING)
+        inv = Investigation(
+            email=email,
+            canonical_email=canonical_email,
+            status=InvestigationStatus.PENDING,
+        )
         self._session.add(inv)
         await self._session.flush()
         investigation_id = inv.id
@@ -159,10 +207,12 @@ class InvestigationService:
         return {
             "id": inv.id,
             "email": inv.email,
+            "canonical_email": inv.canonical_email,
             "status": inv.status.value,
             "exposure_score": inv.exposure_score,
             "credential_risk_score": inv.credential_risk_score,
             "graph_data": inv.graph_data,
+            "timeline_json": inv.timeline_json,
             "created_at": inv.created_at.isoformat(),
             "completed_at": inv.completed_at.isoformat() if inv.completed_at else None,
             "findings": [
@@ -218,6 +268,7 @@ class InvestigationService:
                 {
                     "id": inv.id,
                     "email": inv.email,
+                    "canonical_email": inv.canonical_email,
                     "status": inv.status.value,
                     "exposure_score": inv.exposure_score,
                     "credential_risk_score": inv.credential_risk_score,

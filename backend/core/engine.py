@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import update
 
 from ..db.database import AsyncSessionLocal
 from ..db.models import Finding, Investigation, InvestigationStatus, ModuleRun
+from .email_credibility import normalize_email_address
 from .breach_normalizer import collapse_breach_findings
 from .credential_risk import assess_credential_risk_from_results
+from .timeline import TimelineBuilder
 from ..modules import get_all_modules
 from ..modules.base import ModuleResult, ModuleStatus
 
@@ -29,7 +31,7 @@ _SOCIAL_MODULES = frozenset({
     "email_discovery",
     "social",
 })
-_POST_PRIMARY_ONLY = frozenset({"username_pivot", "phone_intel", "email_discovery"})
+_POST_PRIMARY_ONLY = frozenset({"username_pivot", "phone_intel", "email_discovery", "alternate_email"})
 
 _WEIGHT_INFOSTEALER = 20  # critical: active malware compromise
 _WEIGHT_BREACH = 15       # high: credential exposure
@@ -206,16 +208,69 @@ class InvestigationEngine:
         complete and DB persistence finishes. Pass module_names to run a subset;
         None (default) runs all registered modules.
         """
+        normalized = normalize_email_address(email)
+        canonical_email = normalized.canonical_email
+
         if module_names is not None:
             classes = [c for c in get_all_modules() if c.name in module_names]
         else:
-            classes = get_all_modules()
-        classes = [c for c in classes if c.name not in _POST_PRIMARY_ONLY]
+            classes = [
+                c
+                for c in get_all_modules()
+                if c.name not in _POST_PRIMARY_ONLY and c.name != "emailrep"
+            ]
+        classes = [c for c in classes if c.name != "email_credibility"]
+        classes = sorted(classes, key=lambda c: (getattr(c, "priority", 100), c.name))
 
         queue: asyncio.Queue[QueueEvent | None] = asyncio.Queue()
         semaphore = asyncio.Semaphore(self._max_concurrency)
         collected: dict[str, ModuleResult] = {}
         started_at = datetime.now(timezone.utc)
+        credibility_result: ModuleResult | None = None
+
+        cred_cls = next((cls for cls in get_all_modules() if cls.name == "email_credibility"), None)
+        if cred_cls is not None:
+            cred_mod = cred_cls()
+            await queue.put(QueueEvent(type="module_start", module_name=cred_mod.name))
+            try:
+                from ..config import settings
+
+                cred_timeout = _resolve_module_timeout(
+                    cred_mod.name,
+                    settings.module_timeout_seconds,
+                    settings.module_timeout_overrides,
+                )
+                credibility_result = await asyncio.wait_for(
+                    cred_mod.run(email),
+                    timeout=cred_timeout,
+                )
+            except asyncio.TimeoutError:
+                credibility_result = ModuleResult(
+                    status=ModuleStatus.FAILED,
+                    errors=["timed out during email credibility preflight"],
+                )
+            except Exception as exc:
+                credibility_result = ModuleResult(
+                    status=ModuleStatus.FAILED,
+                    errors=[str(exc)],
+                )
+            collected[cred_mod.name] = credibility_result
+            await queue.put(
+                QueueEvent(
+                    type=(
+                        "module_error"
+                        if credibility_result.status == ModuleStatus.FAILED
+                        else "module_result"
+                    ),
+                    module_name=cred_mod.name,
+                    result=credibility_result,
+                )
+            )
+
+            cred_payload = credibility_result.metadata or {}
+            canonical_email = str(cred_payload.get("canonical_email") or canonical_email)
+            if bool(cred_payload.get("is_disposable")):
+                classes = [c for c in classes if c.name in _BREACH_MODULES]
 
         async def _run_one(cls) -> None:
             mod = cls()
@@ -233,12 +288,10 @@ class InvestigationEngine:
                 await queue.put(QueueEvent(type="module_start", module_name=mod.name))
                 try:
                     if mod.name == "breach_deep":
-                        coro = mod.run(email, force=explicit_module)
+                        coro = mod.run(canonical_email, force=explicit_module)
                     else:
-                        coro = mod.run(email)
-                    result = await asyncio.wait_for(
-                        coro, timeout=timeout
-                    )
+                        coro = mod.run(canonical_email)
+                    result = await asyncio.wait_for(coro, timeout=timeout)
                 except asyncio.TimeoutError:
                     result = ModuleResult(
                         status=ModuleStatus.FAILED,
@@ -384,6 +437,40 @@ class InvestigationEngine:
                         )
                     )
 
+                from ..modules.alternate_email import AlternateEmailModule
+                
+                _alt_email = AlternateEmailModule()
+                _alt_timeout = _resolve_module_timeout(
+                    _alt_email.name,
+                    _cfg.module_timeout_seconds,
+                    _cfg.module_timeout_overrides,
+                )
+                await queue.put(QueueEvent(type="module_start", module_name=_alt_email.name))
+                try:
+                    _alt_result = await asyncio.wait_for(
+                        _alt_email.run(email, collected), timeout=_alt_timeout
+                    )
+                except asyncio.TimeoutError:
+                    _alt_result = ModuleResult(
+                        status=ModuleStatus.FAILED,
+                        errors=[f"timed out after {_alt_timeout}s"],
+                    )
+                except Exception as _exc:
+                    _alt_result = ModuleResult(
+                        status=ModuleStatus.FAILED, errors=[str(_exc)]
+                    )
+                collected[_alt_email.name] = _alt_result
+                _alt_evt = (
+                    "module_error"
+                    if _alt_result.status == ModuleStatus.FAILED
+                    else "module_result"
+                )
+                await queue.put(
+                    QueueEvent(
+                        type=_alt_evt, module_name=_alt_email.name, result=_alt_result
+                    )
+                )
+
                 if _cfg.enable_phone_intel:
                     from ..core.phone_extractor import extract_phones
                     from ..modules.phone_intel import PhoneIntelModule
@@ -465,7 +552,7 @@ class InvestigationEngine:
                                 _findings_flat.append({"module_name": _mod, "data": _f})
                     _findings_flat = collapse_breach_findings(_findings_flat)
                     graph_data = IdentityGraph.build(
-                        {"email": email, "findings": _findings_flat}
+                        {"email": canonical_email, "findings": _findings_flat}
                     ).to_d3()
                 except Exception:
                     graph_data = None
@@ -522,7 +609,13 @@ class InvestigationEngine:
                 # Persist before sentinel so consumers see the final score in the DB.
                 self.status = InvestigationStatus.COMPLETE
                 try:
-                    await self._persist(investigation_id, _final, started_at, graph_data)
+                    await self._persist(
+                        investigation_id,
+                        _final,
+                        started_at,
+                        canonical_email,
+                        graph_data,
+                    )
 
                     # Dispatch webhooks if configured
                     try:
@@ -581,19 +674,27 @@ class InvestigationEngine:
         investigation_id: str,
         collected: dict[str, ModuleResult],
         started_at: datetime,
+        canonical_email: str,
         graph_data: dict | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
         score = _compute_exposure_score(collected)
         credential_risk = assess_credential_risk_from_results(collected, as_of=now)
+        timeline_rows: list[dict] = []
+        for module_name, result in collected.items():
+            for finding_data in result.findings:
+                timeline_rows.append({"module_name": module_name, "data": finding_data})
+        timeline_json = asdict(TimelineBuilder(as_of=now).build_timeline(timeline_rows))
 
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 values: dict = {
                     "status": InvestigationStatus.COMPLETE,
                     "completed_at": now,
+                    "canonical_email": canonical_email,
                     "exposure_score": score,
                     "credential_risk_score": credential_risk.score,
+                    "timeline_json": timeline_json,
                 }
                 if graph_data is not None:
                     values["graph_data"] = graph_data

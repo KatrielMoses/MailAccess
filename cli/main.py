@@ -570,6 +570,58 @@ async def _investigate(
             band = rep.get("credential_risk_band")
             return str(band) if band is not None else "UNKNOWN"
 
+        def _cred_meta(rep: dict[str, Any]) -> dict[str, Any]:
+            cred = rep.get("email_credibility")
+            return cred if isinstance(cred, dict) else {}
+
+        def _cred_provider(rep: dict[str, Any]) -> str:
+            cred = _cred_meta(rep)
+            canonical = str(
+                cred.get("canonical_email")
+                or rep.get("canonical_email")
+                or rep.get("email")
+                or ""
+            ).strip()
+            if "@" in canonical:
+                return canonical.rsplit("@", 1)[-1]
+            return str(cred.get("provider_family") or "other")
+
+        def render_credibility_banner(rep: dict[str, Any]) -> None:
+            cred = _cred_meta(rep)
+            canonical = str(
+                cred.get("canonical_email")
+                or rep.get("canonical_email")
+                or rep.get("email")
+                or ""
+            ).strip()
+            original = str(rep.get("email") or "").strip()
+            provider = _cred_provider(rep)
+            aliases = cred.get("aliases_detected") if isinstance(cred.get("aliases_detected"), list) else []
+            verdict = str(cred.get("reputation_verdict") or "clean").lower()
+            flags = [str(flag) for flag in cred.get("reputation_flags", []) if str(flag).strip()]
+            is_disposable = bool(cred.get("is_disposable"))
+            is_malicious = bool(cred.get("is_malicious"))
+
+            if is_disposable:
+                out.print("[yellow]⚠ DISPOSABLE EMAIL DETECTED[/yellow]")
+                out.print(f"Provider: {provider or 'unknown'}")
+                out.print("[yellow]This address is unlikely to represent a persistent identity.[/yellow]")
+            elif verdict == "malicious" or is_malicious:
+                out.print("[yellow]⚠ SUSPICIOUS EMAIL ADDRESS[/yellow]")
+                if flags:
+                    out.print(f"Flags: {', '.join(flags)}")
+                out.print("[yellow]Context: this may be a threat actor address, not a victim address.[/yellow]")
+            else:
+                out.print(f"[green]✓ {provider or 'other'} — established provider[/green]")
+
+            if canonical and original and canonical != original:
+                if aliases:
+                    out.print(f"[dim]Aliases: {' = '.join(str(a) for a in aliases if str(a).strip())}[/dim]")
+                else:
+                    out.print(f"[dim]Alias detected: {original}[/dim]")
+                out.print(f"[dim]Investigating canonical: {canonical}[/dim]")
+            out.print()
+
         _progress_table = Table(title="Module Progress", box=None)
 
         def update_progress_table(rep: dict[str, Any]) -> Table:
@@ -600,11 +652,16 @@ async def _investigate(
                     emails_seen.setdefault(discovered.lower(), discovered.strip())
             return [emails_seen[key] for key in sorted(emails_seen)]
 
+        def _get_alternate_emails(rep: dict[str, Any]) -> list[dict[str, Any]]:
+            findings = rep.get("findings_by_module", {}).get("alternate_email", [])
+            return [f for f in findings if isinstance(f, dict)]
+
         def render_summary(rep: dict[str, Any]) -> None:
             score = _get_score(rep)
             risk = _get_risk(rep)
             credential_score = _get_credential_score(rep)
             credential_band = _get_credential_band(rep)
+            cred = _cred_meta(rep)
             findings_count = len(rep.get("findings", []))
             
             module_runs = rep.get("module_runs", [])
@@ -627,6 +684,9 @@ async def _investigate(
                 if credential_score is not None
                 else f"N/A {credential_band}"
             )
+            provider = _cred_provider(rep)
+            disposable = bool(cred.get("is_disposable"))
+            malicious = bool(cred.get("is_malicious"))
             def _finding_payload(finding: dict[str, Any]) -> dict[str, Any]:
                 data = finding.get("data")
                 return data if isinstance(data, dict) else finding
@@ -651,15 +711,183 @@ async def _investigate(
                     if mod != "hudson_rock" and src != "hudson_rock":
                         breach_count += 1
 
+            provider_segment = f"[bold]{provider}[/]" if provider and not disposable else "[bold]⚠ DISPOSABLE[/]"
             summary = (
                 f" [bold]Exposure:[/] [{score_color}]{score_str}[/]  |  "
                 f"[bold]Cred Risk:[/] [{credential_color}]{credential_summary}[/]  |  "
+                f"{provider_segment}  |  "
                 f"[bold]Risk:[/] [{risk_color}]{risk.upper()}[/]  |  "
                 f"[bold]Breaches:[/] {breach_count} | [bold]Pastes:[/] {paste_count} | [bold]Stealer:[/] {stealer_count} "
             )
+            if malicious and not disposable:
+                summary += " | [bold red]SUSPICIOUS[/bold red]"
+            timeline = rep.get("timeline") if isinstance(rep.get("timeline"), dict) else {}
+            first_seen = str(timeline.get("first_seen_date") or "")
+            first_seen_year = first_seen[:4] if len(first_seen) >= 4 else "-"
+            try:
+                active_risk_count = int(timeline.get("active_risk_count") or 0)
+            except (TypeError, ValueError):
+                active_risk_count = 0
+            active_risk_text = (
+                "[red]YES[/red]" if active_risk_count > 0 else "[green]NO[/green]"
+            )
+            summary += (
+                f" | [bold]First seen:[/] {first_seen_year} "
+                f"| [bold]Active risk:[/] {active_risk_text}"
+            )
+            
+            alt_emails = _get_alternate_emails(rep)
+            if alt_emails:
+                summary += f" | [bold]Alt emails:[/] {len(alt_emails)}"
+                
             out.print(Panel(summary, border_style=score_color))
             if skipped_count > 3:
                 out.print(f"[dim]{skipped_count} modules skipped — set API keys to improve coverage. Run: mailaccess keys list[/dim]")
+            out.print()
+
+        def render_timeline(rep: dict[str, Any]) -> None:
+            timeline = rep.get("timeline") if isinstance(rep.get("timeline"), dict) else {}
+            events = timeline.get("events") if isinstance(timeline.get("events"), list) else []
+            events = [event for event in events if isinstance(event, dict)]
+            if not events:
+                return
+
+            def _date_obj(value: Any):
+                text = str(value or "").strip()
+                if not text:
+                    return None
+                try:
+                    if len(text) == 7:
+                        return datetime.fromisoformat(f"{text}-01").date()
+                    return datetime.fromisoformat(text[:10]).date()
+                except Exception:
+                    return None
+
+            def _age_text(value: Any) -> str:
+                parsed = _date_obj(value)
+                if parsed is None:
+                    return "unknown age"
+                days = max((datetime.now(timezone.utc).date() - parsed).days, 0)
+                if days < 60:
+                    return f"{days} day{'s' if days != 1 else ''} ago"
+                months = max(round(days / 30), 1)
+                if months < 24:
+                    return f"{months} month{'s' if months != 1 else ''} ago"
+                years = max(days // 365, 1)
+                return f"{years} year{'s' if years != 1 else ''} ago"
+
+            def _event_sort_key(event: dict[str, Any]):
+                return _date_obj(event.get("date")) or datetime.min.date()
+
+            def _event_style(event: dict[str, Any]) -> tuple[str, str]:
+                event_type = str(event.get("event_type") or "")
+                active = bool(event.get("is_active_risk"))
+                if event_type == "stealer_log":
+                    return "red", "\u26a0 "
+                if event_type == "breach" and active:
+                    return "yellow", "\u26a0 "
+                if event_type == "breach":
+                    return "dim", ""
+                if event_type in ("commit", "archive_snapshot"):
+                    return "dim cyan", ""
+                if event_type == "first_seen":
+                    return "green", ""
+                return "dim", ""
+
+            events.sort(key=_event_sort_key)
+            first_seen = timeline.get("first_seen_date")
+            first_event = next(
+                (event for event in events if event.get("date") == first_seen),
+                None,
+            )
+            first_source = (
+                first_event.get("title")
+                if isinstance(first_event, dict) and first_event.get("title")
+                else timeline.get("first_seen_source") or "unknown"
+            )
+            most_recent = timeline.get("most_recent_date")
+            most_recent_event = timeline.get("most_recent_event") or "unknown"
+            age_years = timeline.get("identity_age_years")
+            age_label = (
+                f"{age_years} year{'s' if age_years != 1 else ''} ago"
+                if isinstance(age_years, int)
+                else _age_text(first_seen)
+            )
+
+            out.print(Rule("EXPOSURE TIMELINE", style="bold magenta"))
+            out.print(
+                f"  [bold]First seen:[/]   {first_seen or '-'} ({age_label}) - {first_source}"
+            )
+            out.print(
+                f"  [bold]Most recent:[/]  {most_recent or '-'} - {most_recent_event}"
+            )
+            out.print()
+
+            commit_events = [
+                event for event in events if str(event.get("event_type") or "") == "commit"
+            ]
+            visible_commit_events = sorted(
+                commit_events,
+                key=_event_sort_key,
+                reverse=True,
+            )[:3]
+            visible_commit_ids = {id(event) for event in visible_commit_events}
+
+            for event in events:
+                if str(event.get("event_type") or "") == "commit":
+                    if id(event) in visible_commit_ids:
+                        continue
+                    continue
+                style, marker = _event_style(event)
+                event_type = str(event.get("event_type") or "")[:16]
+                title = str(event.get("title") or "")
+                detail = str(event.get("detail") or "")
+                suffix = " (active risk)" if event.get("is_active_risk") else ""
+                line = (
+                    f"  {event.get('date', ''):<10}  {event_type:<16} "
+                    f"{marker}{title}{suffix}"
+                )
+                out.print(f"[{style}]{line}[/{style}]")
+                if detail:
+                    out.print(f"    [dim]{detail}[/dim]")
+
+            if visible_commit_events:
+                out.print()
+                for event in visible_commit_events:
+                    style = "dim cyan"
+                    date_text = str(event.get("date") or "")[:7] or "-"
+                    event_type = str(event.get("event_type") or "")[:16]
+                    title = str(event.get("title") or "")
+                    detail = str(event.get("detail") or "")
+                    line = f"  {date_text:<10}  {event_type:<16} {title}"
+                    if detail:
+                        line = f"{line} — {detail}"
+                    out.print(f"[{style}]{line}[/{style}]")
+                remaining_commits = len(commit_events) - len(visible_commit_events)
+                if remaining_commits > 0:
+                    out.print(f"  [dim]+{remaining_commits} more commits[/dim]")
+
+            active_events = [event for event in events if event.get("is_active_risk")]
+            if active_events:
+                latest_active = max(active_events, key=_event_sort_key)
+                out.print()
+                out.print(
+                    f"  [red]\u26a0 ACTIVE RISK[/red] - "
+                    f"{latest_active.get('title', 'exposure')} detected "
+                    f"{latest_active.get('date', '-')}"
+                )
+                out.print(
+                    f"    [dim]Most recent exposure: {_age_text(most_recent)}[/dim]"
+                )
+
+            if timeline.get("established_identity"):
+                out.print(
+                    f"  [dim]Established identity - first seen {age_label}[/dim]"
+                )
+            else:
+                out.print(
+                    "  [yellow]New or throwaway - first seen less than 3 years ago[/yellow]"
+                )
             out.print()
 
         def render_findings(rep: dict[str, Any]) -> None:
@@ -1219,6 +1447,7 @@ async def _investigate(
             sys.stdout.write(json.dumps({
                 "type": "complete",
                 "email": email,
+                "canonical_email": report_data.get("canonical_email"),
                 "score": score,
                 "risk": risk,
                 "credential_risk_score": credential_score,
@@ -1288,20 +1517,56 @@ async def _investigate(
                         out.print(f"    [dim]+ {len(findings) - 5} more accounts[/dim]")
                         break
                 out.print()
-            if discovered_emails:
-                out.print("  [cyan]â†’ Other emails found:[/cyan]")
-                for discovered in discovered_emails:
+            alt_emails = _get_alternate_emails(report_data)
+            all_other = list(discovered_emails)
+            for f in alt_emails:
+                e = f.get("metadata", {}).get("discovered_email")
+                if e and e not in all_other:
+                    all_other.append(e)
+            
+            if all_other:
+                out.print("  [cyan]→ Other emails found:[/cyan]")
+                for discovered in all_other:
                     out.print(f"    {discovered}")
                 out.print(
-                    f"  [dim]Run: mailaccess investigate {discovered_emails[0]} "
+                    f"  [dim]Run: mailaccess investigate {all_other[0]} "
                     "to continue investigation[/dim]"
                 )
                 out.print()
-            out.print()
+                
+            if alt_emails:
+                out.print(Rule(f"ALTERNATE EMAILS  ({len(alt_emails)} found)", style="bold cyan"))
+                for f in alt_emails:
+                    meta = f.get("metadata", {})
+                    disc_email = meta.get("discovered_email", "unknown")
+                    conf = str(f.get("confidence", "unknown")).upper()
+                    source = meta.get("source", "unknown")
+                    source_detail = meta.get("source_detail", "")
+                    reason = meta.get("reason", "")
+                    
+                    symbol = "✓" if conf == "HIGH" else "~"
+                    style = "green" if conf == "HIGH" else "yellow"
+                    
+                    out.print(f"  [{style}]{symbol}[/{style}] {disc_email:<29} {conf}")
+                    source_text = f"Source: {_normalize_module_name(source)}"
+                    if source_detail:
+                        source_text += f" ({source_detail})"
+                    out.print(f"    [dim]{source_text}[/dim]")
+                    if reason:
+                        out.print(f"    [dim]\"{reason}\"[/dim]")
+                    out.print()
+                out.print("  [dim]These emails belong to the same person.")
+                out.print("  Run mailaccess investigate <email> on each.[/dim]")
+                out.print()
+            
+            if not all_other and not alt_emails:
+                out.print()
 
         out.print("\n[bold green]Investigation Complete[/]\n")
+        render_credibility_banner(report_data)
         render_summary(report_data)
         await render_clusters_output()
+        render_timeline(report_data)
         out.print(Rule("Full Results", style="bold"))
         render_findings(report_data)
         render_skipped(report_data)

@@ -52,6 +52,7 @@ class StixExporter(BaseExporter):
         credential_band = data.get("credential_risk_band", "UNKNOWN")
         score_drivers = data.get("score_drivers", [])
         recommended_actions = data.get("recommended_actions", [])
+        credibility = data.get("email_credibility") if isinstance(data.get("email_credibility"), dict) else {}
 
         stix_objects: list[Any] = []
         all_ids: list[str] = []
@@ -62,6 +63,28 @@ class StixExporter(BaseExporter):
             return obj
 
         email_sco = register(stix2.EmailAddress(value=email))
+
+        if credibility:
+            credibility_lines = [
+                f"Canonical email: {credibility.get('canonical_email') or data.get('canonical_email') or email}",
+                f"Provider family: {credibility.get('provider_family') or 'other'}",
+                f"Verdict: {credibility.get('reputation_verdict') or 'clean'}",
+                f"Disposable: {credibility.get('is_disposable')}",
+                f"Malicious: {credibility.get('is_malicious')}",
+            ]
+            flags = credibility.get("reputation_flags") or []
+            if flags:
+                credibility_lines.append(f"Flags: {'; '.join(str(item) for item in flags)}")
+            first_seen = credibility.get("first_seen")
+            if first_seen:
+                credibility_lines.append(f"First seen: {first_seen}")
+            register(
+                stix2.Note(
+                    content="\n".join(credibility_lines),
+                    abstract="Email Credibility Assessment",
+                    object_refs=[email_sco.id],
+                )
+            )
 
         names_seen: set[str] = set()
         accounts_seen: set[tuple[str, str]] = set()

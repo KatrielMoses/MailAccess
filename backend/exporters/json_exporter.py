@@ -24,4 +24,13 @@ class JsonExporter(BaseExporter):
     def export(self, investigation_id: str, data: dict[str, Any]) -> bytes:
         payload = {"investigation_id": investigation_id, **data}
         payload.pop("credential_risk", None)
+        
+        alt_emails = []
+        for f in data.get("findings", []):
+            if f.get("module_name") == "alternate_email":
+                meta = f.get("data", {}).get("metadata", {})
+                if meta:
+                    alt_emails.append(meta)
+        payload["alternate_emails"] = alt_emails
+        
         return json.dumps(payload, cls=CustomJSONEncoder, indent=2).encode("utf-8")

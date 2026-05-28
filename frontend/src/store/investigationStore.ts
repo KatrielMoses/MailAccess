@@ -1,8 +1,9 @@
 import { create } from 'zustand'
-import type { ModuleState, ModuleStatus, InvStatus, RiskLevel } from '../types'
+import type { EmailCredibility, ModuleState, ModuleStatus, InvStatus, RiskLevel, Timeline } from '../types'
 
 const DEFAULT_MODULE_NAMES = [
   'hibp',
+  'email_credibility',
   'hunter_io',
   'emailrep',
   'gravatar',
@@ -25,11 +26,14 @@ function blankModules(): Record<string, ModuleState> {
 interface Store {
   id: string | null
   email: string
+  canonicalEmail: string | null
   status: InvStatus
   exposureScore: number | null
   riskLevel: RiskLevel
   credentialRiskScore: number | null
   credentialRiskBand: string
+  timeline: Timeline | null
+  emailCredibility: EmailCredibility | null
   scoreDrivers: string[]
   recommendedActions: string[]
   modules: Record<string, ModuleState>
@@ -42,10 +46,12 @@ interface Store {
   handleWsModuleResult: (module: string, findings: Record<string, unknown>[], status: string) => void
   handleWsModuleError: (module: string, error: string) => void
   handleWsComplete: (
+    canonicalEmail: string | null,
     score: number | null,
     riskLevel: string,
     credentialRiskScore: number | null,
-    credentialRiskBand: string
+    credentialRiskBand: string,
+    timeline?: Timeline
   ) => void
   setStatus: (status: InvStatus) => void
   reset: () => void
@@ -54,11 +60,14 @@ interface Store {
 export const useInvestigationStore = create<Store>((set) => ({
   id: null,
   email: '',
+  canonicalEmail: null,
   status: 'idle',
   exposureScore: null,
   riskLevel: 'unknown',
   credentialRiskScore: null,
   credentialRiskBand: 'UNKNOWN',
+  timeline: null,
+  emailCredibility: null,
   scoreDrivers: [],
   recommendedActions: [],
   modules: blankModules(),
@@ -69,11 +78,14 @@ export const useInvestigationStore = create<Store>((set) => ({
     set({
       id,
       email,
+      canonicalEmail: null,
       status: 'running',
       exposureScore: null,
       riskLevel: 'unknown',
       credentialRiskScore: null,
       credentialRiskBand: 'UNKNOWN',
+      timeline: null,
+      emailCredibility: null,
       scoreDrivers: [],
       recommendedActions: [],
       modules: blankModules(),
@@ -115,11 +127,14 @@ export const useInvestigationStore = create<Store>((set) => ({
     set({
       id: report.id as string,
       email: report.email as string,
+      canonicalEmail: (report.canonical_email as string | null) ?? null,
       status: invStatus,
       exposureScore: (report.exposure_score as number | null) ?? null,
       riskLevel: ((report.risk_level as string) || 'unknown') as RiskLevel,
       credentialRiskScore: (report.credential_risk_score as number | null) ?? null,
       credentialRiskBand: (report.credential_risk_band as string) || 'UNKNOWN',
+      timeline: (report.timeline as Timeline | undefined) ?? null,
+      emailCredibility: (report.email_credibility as EmailCredibility | undefined) ?? null,
       scoreDrivers: ((report.score_drivers as string[] | undefined) ?? []).map(String),
       recommendedActions: ((report.recommended_actions as string[] | undefined) ?? []).map(String),
       modules,
@@ -145,6 +160,16 @@ export const useInvestigationStore = create<Store>((set) => ({
       const prev = s.modules[module] ?? { name: module, findings: [] }
       const newFindings = [...prev.findings, ...findings]
       const status: ModuleStatus = statusStr === 'success' ? 'success' : 'failed'
+      let canonicalEmail = s.canonicalEmail
+      let emailCredibility = s.emailCredibility
+      if (module === 'email_credibility' && findings.length > 0) {
+        const first = findings[0] as Record<string, unknown>
+        const meta = (first.metadata as EmailCredibility | undefined) ?? undefined
+        if (meta) {
+          canonicalEmail = meta.canonical_email ?? canonicalEmail
+          emailCredibility = meta
+        }
+      }
       return {
         modules: { ...s.modules, [module]: { ...prev, status, findings: newFindings } },
         totalFindings: s.totalFindings + findings.length,
@@ -152,6 +177,8 @@ export const useInvestigationStore = create<Store>((set) => ({
           module === 'hibp'
             ? s.breachCount + findings.length
             : s.breachCount,
+        canonicalEmail,
+        emailCredibility,
       }
     })
   },
@@ -169,13 +196,15 @@ export const useInvestigationStore = create<Store>((set) => ({
     }))
   },
 
-  handleWsComplete(score, riskLevel, credentialRiskScore, credentialRiskBand) {
+  handleWsComplete(canonicalEmail, score, riskLevel, credentialRiskScore, credentialRiskBand, timeline) {
     set({
       status: 'complete',
+      canonicalEmail: canonicalEmail ?? null,
       exposureScore: score,
       riskLevel: riskLevel as RiskLevel,
       credentialRiskScore,
       credentialRiskBand,
+      timeline: timeline ?? null,
     })
   },
 
@@ -187,11 +216,14 @@ export const useInvestigationStore = create<Store>((set) => ({
     set({
       id: null,
       email: '',
+      canonicalEmail: null,
       status: 'idle',
       exposureScore: null,
       riskLevel: 'unknown',
       credentialRiskScore: null,
       credentialRiskBand: 'UNKNOWN',
+      timeline: null,
+      emailCredibility: null,
       scoreDrivers: [],
       recommendedActions: [],
       modules: blankModules(),

@@ -22,7 +22,7 @@ async def health_check(session: AsyncSession = Depends(get_db)):
 
     return {
         "status": "ok",
-        "version": "0.1.0",
+        "version": "0.6.0",
         "modules_loaded": modules_loaded,
         "db": db_status
     }

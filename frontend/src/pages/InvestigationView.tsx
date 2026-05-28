@@ -62,7 +62,14 @@ export default function InvestigationView() {
         <svg width="14" height="14" viewBox="0 0 28 28" fill="none" className="flex-shrink-0 opacity-60">
           <polygon points="14,2 26,8 26,20 14,26 2,20 2,8" stroke="#22d3ee" strokeWidth="1.5" fill="none" />
         </svg>
-        <span className="text-zinc-300 text-sm truncate">{store.email || id}</span>
+        <div className="min-w-0 flex flex-col">
+          <span className="text-zinc-300 text-sm truncate">{store.email || id}</span>
+          {store.canonicalEmail && store.canonicalEmail !== store.email && (
+            <span className="text-zinc-500 text-xs truncate">
+              canonical: {store.canonicalEmail}
+            </span>
+          )}
+        </div>
         <div className="flex-1" />
         <span className={`text-xs uppercase tracking-widest px-2 py-0.5 border rounded-sm ${statusStyle}`}>
           {store.status}

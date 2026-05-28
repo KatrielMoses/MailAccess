@@ -15,9 +15,37 @@ class MarkdownExporter(BaseExporter):
         email = data.get("email", "unknown")
         timestamp = data.get("created_at", "unknown")
 
+        def _cell(value: Any) -> str:
+            return str(value if value is not None else "").replace("\n", " ").replace("|", "\\|")
+
         lines.append("# MailAccess Investigation Report")
         lines.append(f"> {email} - {timestamp}")
         lines.append("")
+
+        credibility = data.get("email_credibility")
+        if isinstance(credibility, dict) and credibility:
+            lines.append("## Email Credibility")
+            lines.append("| Field | Value |")
+            lines.append("| --- | --- |")
+            for key in (
+                "canonical_email",
+                "provider_family",
+                "is_alias",
+                "aliases_detected",
+                "is_disposable",
+                "disposable_provider",
+                "reputation_verdict",
+                "reputation_flags",
+                "is_malicious",
+                "first_seen",
+                "domain_age_days",
+                "domain_age_note",
+            ):
+                value = credibility.get(key)
+                if value is None or value == "":
+                    continue
+                lines.append(f"| {key} | {value} |")
+            lines.append("")
 
         score = data.get("exposure_score")
         risk = data.get("risk_level", "unknown")
@@ -41,8 +69,9 @@ class MarkdownExporter(BaseExporter):
         lines.append("| --- | --- |")
         lines.append(f"| Exposure Score | {score if score is not None else 'N/A'} |")
         lines.append(f"| Risk Level | {risk} |")
+        credential_value = credential_score if credential_score is not None else "N/A"
         lines.append(
-            f"| Credential Risk | {credential_score if credential_score is not None else 'N/A'} ({credential_band}) |"
+            f"| Credential Risk | {credential_value} ({credential_band}) |"
         )
         lines.append(f"| Total Findings | {total_findings} |")
         lines.append(f"| Breach Count | {breach_count} |")
@@ -67,6 +96,63 @@ class MarkdownExporter(BaseExporter):
             else:
                 lines.append(f"- {action}")
         lines.append("")
+
+        timeline = data.get("timeline") if isinstance(data.get("timeline"), dict) else {}
+        events = timeline.get("events") if isinstance(timeline.get("events"), list) else []
+        lines.append("## Exposure Timeline")
+        if events:
+            lines.append(
+                f"- First seen: {timeline.get('first_seen_date') or 'unknown'} "
+                f"({timeline.get('first_seen_source') or 'unknown'})"
+            )
+            lines.append(
+                f"- Most recent: {timeline.get('most_recent_date') or 'unknown'} "
+                f"({timeline.get('most_recent_event') or 'unknown'})"
+            )
+            lines.append(
+                f"- Active risk count: {timeline.get('active_risk_count', 0)}"
+            )
+            lines.append("")
+            lines.append("| Date | Type | Event | Source | Detail |")
+            lines.append("| --- | --- | --- | --- | --- |")
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                marker = " (active risk)" if event.get("is_active_risk") else ""
+                lines.append(
+                    "| "
+                    f"{_cell(event.get('date', ''))} | "
+                    f"{_cell(event.get('event_type', ''))} | "
+                    f"{_cell(str(event.get('title', '')) + marker)} | "
+                    f"{_cell(event.get('source_module', ''))} | "
+                    f"{_cell(event.get('detail'))} |"
+                )
+        else:
+            lines.append("No dated exposure events recovered.")
+        lines.append("")
+
+        alt_emails = [
+            f.get("data", f)
+            for f in data.get("findings", [])
+            if f.get("module_name") == "alternate_email"
+        ]
+        if alt_emails:
+            lines.append("## Alternate Emails")
+            for f in alt_emails:
+                meta = f.get("metadata", {})
+                disc_email = meta.get("discovered_email", "unknown")
+                conf = str(f.get("confidence", "unknown")).upper()
+                source = meta.get("source", "unknown")
+                source_detail = meta.get("source_detail", "")
+                reason = meta.get("reason", "")
+                lines.append(f"- **{disc_email}** (Confidence: {conf})")
+                source_str = source
+                if source_detail:
+                    source_str += f" ({source_detail})"
+                lines.append(f"  - Source: {source_str}")
+                if reason:
+                    lines.append(f"  - Reason: {reason}")
+            lines.append("")
 
         lines.append("## Findings by Module")
         findings_by_module = data.get("findings_by_module", {})
