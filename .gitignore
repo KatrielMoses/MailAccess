@@ -52,10 +52,20 @@ coverage/
 # Agents
 .agents/
 
-# Report outputs (never commit personal investigation data)
-report.json
-report.pdf
+# Investigation outputs (never commit personal investigation data)
+results/
+/*.json
+/debug*.json
+/report.*
+/emails.*
+/*.txt
 .last_inv.json
+
+# SQLite databases in root
+/mailaccess*.db
+/data.db
+/test-sqlite.db
+/*.db
 
 # Documentation
 !.env.example

@@ -225,6 +225,8 @@ Open **http://localhost:3000** in your browser. Full setup guide: [docs/self-hos
 
 The `--output` / `-o` flag on `investigate` saves the report to a file. The extension determines the format: `.json`, `.csv`, `.pdf`, `.md`, `.stix.json`, `.maltego.csv`.
 
+When a bare filename is given (no directory component), the file is written to the `results/` directory automatically (e.g. `-o report.json` → `results/report.json`). This directory is git-ignored so investigation outputs are never accidentally committed. Absolute or relative paths that include a directory component (e.g. `-o /tmp/report.json`) are written as-is.
+
 ## API Keys
 
 | Key | Module | Where to get it | Required? |

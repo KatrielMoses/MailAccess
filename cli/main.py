@@ -1607,6 +1607,12 @@ def investigate(
     else:
         emails = [email]
 
+    # Route bare filenames (no directory component) into results/
+    if output_file and Path(output_file).parent == Path("."):
+        results_dir = Path(__file__).resolve().parent.parent / "results"
+        results_dir.mkdir(exist_ok=True)
+        output_file = str(results_dir / output_file)
+
     max_code = 0
     for i, target_email in enumerate(emails):
         if i > 0 and output_format not in ("json", "jsonl"):
