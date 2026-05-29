@@ -30,8 +30,14 @@ _SOCIAL_MODULES = frozenset({
     "username_pivot",
     "email_discovery",
     "social",
+    "twitter_profile",
+    "linkedin_serp",
+    "marketplace_profile",
 })
-_POST_PRIMARY_ONLY = frozenset({"username_pivot", "phone_intel", "email_discovery", "alternate_email"})
+_POST_PRIMARY_ONLY = frozenset({
+    "username_pivot", "phone_intel", "email_discovery", "alternate_email",
+    "twitter_profile", "linkedin_serp", "marketplace_profile",
+})
 
 _WEIGHT_INFOSTEALER = 20  # critical: active malware compromise
 _WEIGHT_BREACH = 15       # high: credential exposure
@@ -472,6 +478,63 @@ class InvestigationEngine:
                         type=_alt_evt, module_name=_alt_email.name, result=_alt_result
                     )
                 )
+
+                # Profile intelligence: Twitter/X, LinkedIn SERP, Etsy/eBay
+                # Run all three concurrently — each skips itself if no relevant
+                # confirmed username/name is present in collected findings.
+                from ..modules.twitter_profile import TwitterProfileModule
+                from ..modules.linkedin_serp import LinkedInSerpModule
+                from ..modules.marketplace_profile import MarketplaceProfileModule
+
+                _profile_modules = [
+                    TwitterProfileModule(),
+                    LinkedInSerpModule(),
+                    MarketplaceProfileModule(),
+                ]
+
+                async def _run_profile_module(mod) -> tuple[str, ModuleResult]:
+                    _timeout = _resolve_module_timeout(
+                        mod.name,
+                        _cfg.module_timeout_seconds,
+                        _cfg.module_timeout_overrides,
+                    )
+                    await queue.put(
+                        QueueEvent(type="module_start", module_name=mod.name)
+                    )
+                    try:
+                        result = await asyncio.wait_for(
+                            mod.run(email, collected), timeout=_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        result = ModuleResult(
+                            status=ModuleStatus.FAILED,
+                            errors=[f"timed out after {_timeout}s"],
+                        )
+                    except Exception as _exc:
+                        result = ModuleResult(
+                            status=ModuleStatus.FAILED, errors=[str(_exc)]
+                        )
+                    _evt = (
+                        "module_error"
+                        if result.status == ModuleStatus.FAILED
+                        else "module_result"
+                    )
+                    await queue.put(
+                        QueueEvent(
+                            type=_evt, module_name=mod.name, result=result
+                        )
+                    )
+                    return mod.name, result
+
+                _profile_results = await asyncio.gather(
+                    *[_run_profile_module(m) for m in _profile_modules],
+                    return_exceptions=True,
+                )
+                for _item in _profile_results:
+                    if isinstance(_item, BaseException):
+                        continue
+                    _pmod_name, _pmod_result = _item
+                    collected[_pmod_name] = _pmod_result
 
                 if _cfg.enable_phone_intel:
                     from ..core.phone_extractor import extract_phones

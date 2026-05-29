@@ -1604,7 +1604,46 @@ async def _investigate(
                 if isinstance(f, dict) and f.get("signal_type") == "package_authorship"
             ]
 
-            has_content = any([gh_profile, grav_profile, kb_profile, pypi_findings, npm_findings])
+            # --- Twitter/X profile ---
+            tw_findings = [
+                f for f in fbm.get("twitter_profile", [])
+                if isinstance(f, dict) and f.get("platform") == "twitter_profile"
+            ]
+            tw_profile: dict[str, Any] = {}
+            if tw_findings:
+                tw_profile = tw_findings[0].get("metadata", {}) or {}
+
+            # --- LinkedIn SERP snippet ---
+            li_findings = [
+                f for f in fbm.get("linkedin_serp", [])
+                if isinstance(f, dict) and f.get("platform") == "linkedin_snippet"
+            ]
+            li_profile: dict[str, Any] = {}
+            if li_findings:
+                li_profile = li_findings[0].get("metadata", {}) or {}
+
+            # --- Marketplace profiles ---
+            etsy_findings = [
+                f for f in fbm.get("marketplace_profile", [])
+                if isinstance(f, dict) and f.get("platform") == "etsy_shop"
+            ]
+            etsy_profile: dict[str, Any] = {}
+            if etsy_findings:
+                etsy_profile = etsy_findings[0].get("metadata", {}) or {}
+
+            ebay_findings = [
+                f for f in fbm.get("marketplace_profile", [])
+                if isinstance(f, dict) and f.get("platform") == "ebay_profile"
+            ]
+            ebay_profile: dict[str, Any] = {}
+            if ebay_findings:
+                ebay_profile = ebay_findings[0].get("metadata", {}) or {}
+
+            has_content = any([
+                gh_profile, grav_profile, kb_profile,
+                pypi_findings, npm_findings,
+                tw_profile, li_profile, etsy_profile, ebay_profile,
+            ])
             if not has_content:
                 return
 
@@ -1699,6 +1738,94 @@ async def _investigate(
                         parts2.append(f"{pkg} ({role})" if role else pkg)
                 if parts2:
                     out.print(f"    {', '.join(parts2)}")
+                out.print()
+
+            if tw_profile:
+                tw_user = str(
+                    tw_profile.get("username")
+                    or (tw_findings[0].get("username") if tw_findings else "")
+                    or ""
+                )
+                note = str(tw_profile.get("note") or "")
+                blocked = "existence_only" in str(tw_profile.get("extraction_method") or "")
+                label = f"Twitter/X (@{tw_user})" if tw_user else "Twitter/X"
+                out.print(f"  [bold cyan]{label}[/bold cyan]")
+                if blocked:
+                    out.print(f"    [dim]{note or 'Profile data unavailable without authentication'}[/dim]")
+                else:
+                    for field_key, field_label in (
+                        ("display_name", "Name"),
+                        ("bio", "Bio"),
+                        ("location", "Location"),
+                        ("website", "Website"),
+                        ("join_date", "Joined"),
+                    ):
+                        val = str(tw_profile.get(field_key) or "").strip()
+                        if val:
+                            display = val[:60] + "..." if len(val) > 60 else val
+                            out.print(f"    {field_label:<10} {display}")
+                    followers = tw_profile.get("followers_count")
+                    following = tw_profile.get("following_count")
+                    if followers is not None or following is not None:
+                        out.print(
+                            f"    [dim]Followers: {followers or 0} · "
+                            f"Following: {following or 0}[/dim]"
+                        )
+                out.print()
+
+            if li_profile:
+                li_url = str(li_profile.get("linkedin_url") or "")
+                slug = li_url.rstrip("/").rsplit("/", 1)[-1] if li_url else ""
+                label = f"LinkedIn ({slug})" if slug else "LinkedIn"
+                out.print(f"  [bold cyan]{label}[/bold cyan]")
+                for field_key, field_label in (
+                    ("display_name", "Name"),
+                    ("headline", "Headline"),
+                    ("employer", "Employer"),
+                    ("location", "Location"),
+                ):
+                    val = str(li_profile.get(field_key) or "").strip()
+                    if val:
+                        out.print(f"    {field_label:<10} {val}")
+                if li_url:
+                    out.print(f"    [dim]{_display_url(li_url)}[/dim]")
+                out.print(
+                    "    [dim yellow][medium confidence — from search snippet][/dim yellow]"
+                )
+                out.print()
+
+            if etsy_profile:
+                shop = str(etsy_profile.get("shop_name") or etsy_profile.get("username") or "")
+                label = f"Etsy Shop ({shop})" if shop else "Etsy Shop"
+                out.print(f"  [bold cyan]{label}[/bold cyan]")
+                for field_key, field_label in (
+                    ("owner_name", "Owner"),
+                    ("location", "Location"),
+                    ("member_since", "Member"),
+                ):
+                    val = str(etsy_profile.get(field_key) or "").strip()
+                    if val:
+                        out.print(f"    {field_label:<10} {val}")
+                sales = etsy_profile.get("sales_count")
+                if sales is not None:
+                    out.print(f"    [dim]{sales:,} sales[/dim]")
+                out.print()
+
+            if ebay_profile:
+                ebay_user_str = str(ebay_profile.get("username") or "")
+                label = f"eBay ({ebay_user_str})" if ebay_user_str else "eBay"
+                out.print(f"  [bold cyan]{label}[/bold cyan]")
+                for field_key, field_label in (
+                    ("location", "Location"),
+                    ("member_since", "Member"),
+                ):
+                    val = str(ebay_profile.get(field_key) or "").strip()
+                    if val:
+                        out.print(f"    {field_label:<10} {val}")
+                score = ebay_profile.get("feedback_score")
+                if score is not None:
+                    top = " · Top Rated" if ebay_profile.get("top_rated_seller") else ""
+                    out.print(f"    [dim]Feedback: {score}{top}[/dim]")
                 out.print()
 
         def render_pii_findings(rep: dict[str, Any]) -> None:
