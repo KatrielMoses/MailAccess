@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -12,6 +13,28 @@ from ..db.models import Investigation
 from . import queue_registry
 
 router = APIRouter()
+
+_MAX_WS_PAYLOAD_BYTES = 900 * 1024
+
+
+def _safe_payload(size_hint: int, extra: dict | None = None) -> dict:
+    extra = extra or {}
+    return {"_truncated": True, "findings_count": size_hint, **extra}
+
+
+def _prepare_module_result_payload(item: QueueEvent) -> dict:
+    assert item.result is not None
+    base = {
+        "type": "module_result",
+        "module": item.module_name,
+        "status": item.result.status.value,
+    }
+    raw = json.dumps({"findings": item.result.findings})
+    if len(raw.encode("utf-8")) <= _MAX_WS_PAYLOAD_BYTES:
+        base["findings"] = item.result.findings
+    else:
+        base.update(_safe_payload(len(item.result.findings)))
+    return base
 
 @router.websocket("/ws/investigate/{investigation_id}")
 async def ws_investigate(investigation_id: str, websocket: WebSocket) -> None:
@@ -93,14 +116,7 @@ async def ws_investigate(investigation_id: str, websocket: WebSocket) -> None:
                 )
             elif item.type == "module_result":
                 assert item.result is not None
-                await websocket.send_json(
-                    {
-                        "type": "module_result",
-                        "module": item.module_name,
-                        "findings": item.result.findings,
-                        "status": item.result.status.value,
-                    }
-                )
+                await websocket.send_json(_prepare_module_result_payload(item))
             elif item.type == "module_error":
                 assert item.result is not None
                 await websocket.send_json(

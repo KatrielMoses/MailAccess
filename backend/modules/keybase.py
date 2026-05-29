@@ -41,9 +41,12 @@ class KeybaseModule(BaseModule):
                         seen_usernames.add(kb_user)
                         findings.append(f)
 
-        status = ModuleStatus.SUCCESS
-        if errors:
-            status = ModuleStatus.PARTIAL if findings else ModuleStatus.FAILED
+        if errors and not findings:
+            status = ModuleStatus.PARTIAL
+        elif errors:
+            status = ModuleStatus.PARTIAL
+        else:
+            status = ModuleStatus.SUCCESS
 
         return ModuleResult(status=status, findings=findings, errors=errors)
 

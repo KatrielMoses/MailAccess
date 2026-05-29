@@ -132,7 +132,7 @@ class OpenCorporatesModule(BaseModule):
         if not findings and not errors:
             status = ModuleStatus.SUCCESS  # no results but clean run
         elif errors:
-            status = ModuleStatus.PARTIAL if findings else ModuleStatus.FAILED
+            status = ModuleStatus.PARTIAL  # network errors or rate limits
 
         return ModuleResult(
             status=status,

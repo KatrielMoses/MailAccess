@@ -367,14 +367,48 @@ def _score_color(score: int | None) -> str:
     return "red"
 
 
+_PLATFORM_DISPLAY_NAMES: dict[str, str] = {
+    "github_user": "GitHub Profile",
+    "github_commit": "GitHub",
+    "twitter_profile": "Twitter/X",
+    "linkedin_snippet": "LinkedIn",
+    "gravatar_profile": "Gravatar",
+    "keybase_profile": "Keybase",
+    "keybase_proof_twitter": "Keybase Proof: Twitter",
+    "keybase_proof_github": "Keybase Proof: GitHub",
+    "keybase_proof_reddit": "Keybase Proof: Reddit",
+    "keybase_proof_hackernews": "Keybase Proof: HN",
+    "keybase_proof_dns": "Keybase Proof: DNS",
+    "keybase_proof_generic_web_site": "Keybase Proof: Web",
+    "etsy_shop": "Etsy",
+    "ebay_profile": "eBay",
+    "wayback_machine": "Wayback Machine",
+    "commoncrawl": "Common Crawl",
+    "alternate_email": "Alternate Email",
+    "email_credibility": None,
+}
+
+
+def _platform_display_name(raw: str) -> str:
+    if raw in _PLATFORM_DISPLAY_NAMES:
+        mapped = _PLATFORM_DISPLAY_NAMES[raw]
+        return raw if mapped is None else mapped
+    for prefix in ("keybase_proof_",):
+        if raw.startswith(prefix):
+            proof_type = raw[len(prefix):].replace("_", " ").title()
+            return f"Keybase Proof: {proof_type}"
+    return raw
+
+
 def _extract_finding_line(finding: dict[str, Any], default_name: str) -> tuple[str, str]:
-    platform = (
+    raw_platform = (
         finding.get("platform")
         or finding.get("service")
         or finding.get("source")
         or finding.get("site")
         or default_name
     )
+    platform = _platform_display_name(raw_platform)
     url_like = (
         finding.get("url")
         or finding.get("profile_url")

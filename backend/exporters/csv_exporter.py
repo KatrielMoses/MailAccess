@@ -8,6 +8,39 @@ from typing import Any
 from .base import BaseExporter
 
 
+def _summary_profile_intelligence(fbm: dict[str, Any]) -> dict[str, Any]:
+    profile: dict[str, Any] = {}
+    gh_findings = [f for f in fbm.get("github_commits", []) if isinstance(f, dict) and f.get("platform") == "github_user"]
+    if gh_findings:
+        profile["github"] = gh_findings[0].get("metadata", {})
+    tw_findings = [f for f in fbm.get("twitter_profile", []) if isinstance(f, dict) and f.get("platform") == "twitter_profile"]
+    if tw_findings:
+        profile["twitter"] = tw_findings[0].get("metadata", {})
+    li_findings = [f for f in fbm.get("linkedin_serp", []) if isinstance(f, dict) and f.get("platform") == "linkedin_snippet"]
+    if li_findings:
+        profile["linkedin"] = li_findings[0].get("metadata", {})
+    return profile
+
+
+def _summary_pii(fbm: dict[str, Any]) -> list[dict[str, Any]]:
+    pii_items: list[dict[str, Any]] = []
+    for module_name, findings in fbm.items():
+        for f in findings:
+            if not isinstance(f, dict):
+                continue
+            sig = str(f.get("signal_type") or "")
+            meta = f.get("metadata") if isinstance(f.get("metadata"), dict) else {}
+            if sig == "phone_in_bio":
+                phone = str(meta.get("phone") or "").strip()
+                if phone:
+                    pii_items.append({"type": "phone", "value": phone, "module": module_name})
+            elif sig == "email_in_bio":
+                email = str(meta.get("email") or "").strip()
+                if email:
+                    pii_items.append({"type": "email", "value": email, "module": module_name})
+    return pii_items
+
+
 class CsvExporter(BaseExporter):
     format_name = "csv"
     content_type = "text/csv"
@@ -53,6 +86,13 @@ class CsvExporter(BaseExporter):
         alternate_email_count = len(alt_emails)
         alternate_emails_str = ",".join(alt_emails)
 
+        fbm = data.get("findings_by_module", {})
+        profile_intel = _summary_profile_intelligence(fbm)
+        profile_intel_json = json.dumps(profile_intel) if profile_intel else ""
+
+        pii_items = _summary_pii(fbm)
+        pii_json = json.dumps(pii_items) if pii_items else ""
+
         writer.writerow(
             [
                 "investigation_id",
@@ -76,6 +116,8 @@ class CsvExporter(BaseExporter):
                 "recommended_actions",
                 "alternate_email_count",
                 "alternate_emails",
+                "profile_intelligence",
+                "pii_findings",
                 "timestamp",
                 "module_name",
                 "platform",
@@ -112,6 +154,8 @@ class CsvExporter(BaseExporter):
                     recommended_actions,
                     alternate_email_count,
                     alternate_emails_str,
+                    profile_intel_json,
+                    pii_json,
                     "",
                     "",
                     "",
@@ -151,6 +195,8 @@ class CsvExporter(BaseExporter):
                     recommended_actions,
                     alternate_email_count,
                     alternate_emails_str,
+                    profile_intel_json,
+                    pii_json,
                     finding.get("created_at", ""),
                     finding.get("module_name", ""),
                     f_data.get("platform", ""),

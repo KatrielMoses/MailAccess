@@ -5,6 +5,42 @@ from typing import Any
 from .base import BaseExporter
 
 
+def _summary_profile_intelligence(fbm: dict[str, Any]) -> dict[str, Any]:
+    profile: dict[str, Any] = {}
+    gh = [f for f in fbm.get("github_commits", []) if isinstance(f, dict) and f.get("platform") == "github_user"]
+    if gh:
+        profile["github"] = gh[0].get("metadata", {})
+    tw = [f for f in fbm.get("twitter_profile", []) if isinstance(f, dict) and f.get("platform") == "twitter_profile"]
+    if tw:
+        profile["twitter"] = tw[0].get("metadata", {})
+    li = [f for f in fbm.get("linkedin_serp", []) if isinstance(f, dict) and f.get("platform") == "linkedin_snippet"]
+    if li:
+        profile["linkedin"] = li[0].get("metadata", {})
+    kb = [f for f in fbm.get("keybase", []) if isinstance(f, dict) and f.get("platform") == "keybase_profile"]
+    if kb:
+        profile["keybase"] = kb[0].get("metadata", {})
+    return profile
+
+
+def _summary_pii(fbm: dict[str, Any]) -> list[dict[str, Any]]:
+    pii_items: list[dict[str, Any]] = []
+    for module_name, findings in fbm.items():
+        for f in findings:
+            if not isinstance(f, dict):
+                continue
+            sig = str(f.get("signal_type") or "")
+            meta = f.get("metadata") if isinstance(f.get("metadata"), dict) else {}
+            if sig == "phone_in_bio":
+                phone = str(meta.get("phone") or "").strip()
+                if phone:
+                    pii_items.append({"type": "phone", "value": phone, "module": module_name})
+            elif sig == "email_in_bio":
+                email = str(meta.get("email") or "").strip()
+                if email:
+                    pii_items.append({"type": "email", "value": email, "module": module_name})
+    return pii_items
+
+
 class MarkdownExporter(BaseExporter):
     format_name = "markdown"
     content_type = "text/markdown"
@@ -152,6 +188,31 @@ class MarkdownExporter(BaseExporter):
                 lines.append(f"  - Source: {source_str}")
                 if reason:
                     lines.append(f"  - Reason: {reason}")
+            lines.append("")
+
+        fbm = data.get("findings_by_module", {})
+        profile = _summary_profile_intelligence(fbm)
+        if profile:
+            lines.append("## Profile Intelligence")
+            for section_name, section_data in profile.items():
+                if not section_data:
+                    continue
+                lines.append(f"### {section_name.title()}")
+                if isinstance(section_data, dict):
+                    for key, value in section_data.items():
+                        if value is None or value == "":
+                            continue
+                        if isinstance(value, list):
+                            continue
+                        lines.append(f"- **{key}**: {value}")
+                lines.append("")
+            lines.append("")
+
+        pii_items = _summary_pii(fbm)
+        if pii_items:
+            lines.append("## PII Extracted")
+            for item in pii_items:
+                lines.append(f"- **{item.get('type', 'unknown')}**: {item.get('value', '')} ({item.get('module', 'unknown')})")
             lines.append("")
 
         lines.append("## Findings by Module")

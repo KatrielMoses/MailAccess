@@ -13,7 +13,6 @@ from .email_credibility import normalize_email_address
 from .breach_normalizer import collapse_breach_findings
 from .credential_risk import assess_credential_risk_from_results
 from .timeline import TimelineBuilder
-from ..modules import get_all_modules
 from ..modules.base import ModuleResult, ModuleStatus
 
 # Module categories for exposure scoring
@@ -216,6 +215,8 @@ class InvestigationEngine:
         """
         normalized = normalize_email_address(email)
         canonical_email = normalized.canonical_email
+
+        from ..modules import get_all_modules
 
         if module_names is not None:
             classes = [c for c in get_all_modules() if c.name in module_names]

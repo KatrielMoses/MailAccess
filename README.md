@@ -242,6 +242,17 @@ When a bare filename is given (no directory component), the file is written to t
 
 ## Changelog
 
+### 0.6.5
+- QA pass: cosmetic label fixes, keybase 404
+  handling, WebSocket large payload fix
+- github_user, twitter_profile, linkedin_snippet
+  display names corrected in identity clusters
+- Alias normalization original email now passed
+  to all profile extraction modules
+- Timeline builder wired to all breach sources
+- Profile intelligence and PII findings in all
+  export formats
+
 ### 0.5.3
 - Cluster identity analysis no longer shows raw traceback
   on timeout — shows dim fallback message instead
