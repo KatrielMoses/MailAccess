@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.7.0&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.8.0&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -66,6 +66,9 @@ mailaccess investigate email -m all
 - **Phone number recovery** — pipeline to surface and validate numbers tied to the target
 - **Telegram / WhatsApp hints** — lightweight messaging-app footprint checks alongside other modules
 - **YAML-driven platform system** — social-style checks defined in `backend/platforms/`; community extensible without new Python for each site
+- **Native Maigret engine** — opt-in 2500+ platform coverage without a Maigret runtime dependency, including regional, niche, and international platforms not covered by WMN
+- **Catch-all detection** — excludes platforms that return false positives for arbitrary usernames before the sweep starts
+- **Platform deduplication** — merges WMN and Maigret results by profile URL domain so confirmed platforms are not double-counted
 - **Deep breach mode** — checks top 100 highest-severity breached sites for account existence
 - **Historical intelligence** — Wayback Machine archive search + GitHub commit author search
 - **Recursive email discovery** — recovers other emails owned by the same person via name correlation
@@ -110,6 +113,7 @@ mailaccess investigate email -m all
 | account_discovery | Holehe 120+ platforms | No | Yes |
 | user_scanner | 205+ platform vectors | No | Yes |
 | whatsmyname | 700+ platforms | No | Yes |
+| maigret_platforms | Native Maigret platform engine, 2500+ platforms | No | Yes (`ENABLE_MAIGRET_PLATFORMS=true`) |
 | breachdirectory | 2nd breach source | Yes | No |
 | username_pivot | WMN via recovered usernames | No | Yes |
 | permutation_discovery | 60 email variants | No | Yes |
@@ -118,7 +122,41 @@ mailaccess investigate email -m all
 | ghunt | Gmail deep intel | No (setup required) | Yes |
 | identity_graph | Cross-platform cluster analysis | No | No (automatic) |
 
-> 41 modules (35 + 6 new), 800+ platforms checked when all opt-in modules enabled. YAML platform system — add new platforms via PR, no Python required.
+> 43 modules, 800+ platforms by default, and 2500+ platforms when `ENABLE_MAIGRET_PLATFORMS=true`. The summary bar reports the actual unique platform count after deduplication.
+
+## Platform Coverage
+
+MailAccess checks usernames derived from the target email across multiple platform databases:
+
+| Source | Platforms | Default |
+|--------|-----------|---------|
+| WhatsMyName | 700+ | On |
+| Holehe | 120+ | On |
+| user-scanner | 205+ | On |
+| Maigret native engine | 2500+ | Off |
+
+Total with Maigret enabled: 2500+ unique platforms after deduplication.
+
+Enable Maigret:
+
+```bash
+ENABLE_MAIGRET_PLATFORMS=true mailaccess investigate email
+```
+
+Enable Maigret + Wave 2, the slower platform sweep:
+
+```bash
+ENABLE_MAIGRET_PLATFORMS=true ENABLE_MAIGRET_WAVE2=true mailaccess investigate email
+```
+
+The platform database is fetched from Maigret's GitHub repository (MIT licensed) and cached locally for 24 hours. Custom platforms can be added to `data/mailaccess-extra-sites.json` in the same format.
+
+Findings from WMN and Maigret are deduplicated by URL domain. When both tools confirm the same platform, the finding is marked dual-confirmed with high confidence.
+
+| Variable | Module | Key Required | Default | Description |
+|----------|--------|--------------|---------|-------------|
+| `ENABLE_MAIGRET_PLATFORMS` | `maigret_platforms` | None | `false` | Enable 2500+ platform sweep. Adds ~35-90s. |
+| `ENABLE_MAIGRET_WAVE2` | `maigret_platforms` (Wave 2) | None | `false` | Enable slow/fragile platform sweep. Requires `ENABLE_MAIGRET_PLATFORMS=true`. Adds ~90-150s. |
 
 ## Identity Graph
 
@@ -292,6 +330,16 @@ When a bare filename is given (no directory component), the file is written to t
 | `DISCORD_WEBHOOK_URL` | Webhooks | Discord server settings | No |
 
 ## Changelog
+
+### 0.8.0
+- Native Maigret platform engine: 2500+ platforms without Maigret runtime dependency
+- Two-wave architecture: Wave 1 is the fast default when enabled; Wave 2 adds slower and more fragile platforms
+- Catch-all detection: validates platforms against known-unclaimed usernames before sweep
+- Platform deduplication: WMN + Maigret merged by URL domain, dual-confirmed findings marked high confidence
+- Custom platform additions via `data/mailaccess-extra-sites.json`
+- `ENABLE_MAIGRET_PLATFORMS` env var, default `false`
+- `ENABLE_MAIGRET_WAVE2` env var, default `false`
+- Platform database auto-refreshed every 24h from Maigret GitHub (MIT licensed)
 
 ### 0.7.0
 - Name Consensus Engine: synthesizes name signals from all profile modules into Confirmed/Probable/Possible/Unknown with reasoning and source list

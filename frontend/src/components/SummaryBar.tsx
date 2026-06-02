@@ -41,6 +41,10 @@ export default function SummaryBar() {
   } = useInvestigationStore()
 
   const accountsFound = Object.values(modules).filter(m => m.findings.length > 0).length
+  const platformCount = Object.values(modules).reduce((best, mod) => {
+    const raw = mod.runMetadata?.unique_platforms
+    return typeof raw === 'number' ? Math.max(best, raw) : best
+  }, 0)
   const firstSeenYear = timeline?.first_seen_date ? timeline.first_seen_date.slice(0, 4) : '-'
   const activeRisk = (timeline?.active_risk_count ?? 0) > 0
   const providerLabel =
@@ -99,6 +103,7 @@ export default function SummaryBar() {
       <div className="flex gap-5 flex-shrink-0">
         <Metric label="Accounts" value={accountsFound} />
         <Metric label="Breaches" value={breachCount} highlight />
+        {platformCount > 0 && <Metric label="Platforms" value={platformCount} />}
         <Metric label="Data pts" value={totalFindings} />
       </div>
 

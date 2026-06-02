@@ -26,6 +26,7 @@ _SOCIAL_MODULES = frozenset({
     "google_search",
     "ghunt",
     "whatsmyname",
+    "maigret_platforms",
     "account_discovery",
     "user_scanner",
     "username_pivot",
@@ -63,6 +64,7 @@ _CONFIDENCE_MULTIPLIER: dict[str, float] = {
 # Breach/infostealer modules have higher caps because each hit is genuinely alarming.
 _MODULE_CAP: dict[str, int] = {
     "whatsmyname":      20,
+    "maigret_platforms": 25,
     "account_discovery": 15,
     "user_scanner":     15,
     "username_pivot":   10,
@@ -86,6 +88,7 @@ _MODULE_TIMEOUT_FLOORS: dict[str, int] = {
     "username_pivot": 120,
     "user_scanner": 180,
     "whatsmyname": 200,
+    "maigret_platforms": 180,
 }
 
 
@@ -313,6 +316,8 @@ class InvestigationEngine:
                 try:
                     if mod.name == "breach_deep":
                         coro = mod.run(canonical_email, force=explicit_module)
+                    elif mod.name == "maigret_platforms":
+                        coro = mod.run(canonical_email, force=explicit_module)
                     elif mod.name in ("github_commits", "gravatar", "keybase", "npm_discovery", "pypi_discovery") and email != canonical_email:
                         coro = mod.run(canonical_email, original_email=email)
                     else:
@@ -345,6 +350,7 @@ class InvestigationEngine:
                 "ghunt": "enable_ghunt",
                 "email_discovery": "enable_email_discovery",
                 "press_intel": "enable_press_intel",
+                "maigret_platforms": "enable_maigret_platforms",
             }
 
             override_flags = {
@@ -657,6 +663,9 @@ class InvestigationEngine:
                     )
                     for name, result in collected.items()
                 }
+                from .platform_dedup import deduplicate_platform_findings
+
+                deduplicate_platform_findings(_final)
                 _flat_findings: list[dict] = []
                 for _mod, _res in _final.items():
                     if hasattr(_res, "findings"):

@@ -1,6 +1,6 @@
 # Module Reference
 
-MailAccess ships 41 modules covering 800+ platforms. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
+MailAccess ships 43 modules covering 800+ platforms by default and 2500+ platforms when the native Maigret engine is enabled. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
 
 A module marked **key required** skips itself with `status: skipped` when its API key is absent — it does not cause the investigation to fail.
 
@@ -921,6 +921,83 @@ Opt-in (`ENABLE_WHATSMYNAME=true`) because the sweep fires one HTTP request per 
   "wmn_version": "1.4.0"
 }
 ```
+
+---
+
+## `maigret_platforms`
+
+Native platform checking engine using Maigret's MIT-licensed platform database. It checks 2500+ platforms via MailAccess's own `httpx` engine, with no Maigret runtime dependency.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Default** | Off |
+| **Enable** | `ENABLE_MAIGRET_PLATFORMS=true` |
+| **Wave 2** | `ENABLE_MAIGRET_WAVE2=true` for additional slower and more fragile platforms |
+| **Runtime** | ~35-90s for Wave 1, plus ~90-150s for Wave 2 |
+| **Platform database** | Fetched from Maigret GitHub and cached 24h at `~/.mailaccess/cache/maigret-data.json` |
+| **Custom additions** | `data/mailaccess-extra-sites.json` |
+| **Status** | Implemented, opt-in |
+
+Wave 1 covers roughly 1500 fast and reliable platforms: `status_code` checks, no bot protection, and higher Alexa rank. Wave 2 adds roughly 1000 slower, protected, regional, or message-based platforms.
+
+Before the sweep, MailAccess validates the top 50 `status_code` platforms against known-unclaimed usernames. Sites that return hits for non-existent users are treated as catch-alls and excluded from results.
+
+Username variants used by default:
+- raw local-part, such as `katriel.moses`
+- separators stripped, such as `katrielmoses`
+- underscore separator, such as `katriel_moses`
+
+**Finding schema:**
+```json
+{
+  "platform": "Example",
+  "profile_url": "https://example.com/katriel.moses",
+  "username": "katriel.moses",
+  "confidence": "high",
+  "tags": ["social"],
+  "check_type": "status_code",
+  "wave": 1,
+  "alexa_rank": 12345,
+  "dual_confirmed": true,
+  "sources": ["wmn", "maigret"]
+}
+```
+
+**Module metadata:**
+```json
+{
+  "sites_loaded": 2500,
+  "wave1_probes": 1500,
+  "wave2_probes": 0,
+  "catchalls_excluded": 12,
+  "platforms_confirmed": 5,
+  "platforms_not_found": 1480,
+  "platforms_errored": 3,
+  "username_variants_used": ["katriel.moses", "katrielmoses", "katriel_moses"],
+  "dual_confirmed": 2,
+  "unique_platforms": 5
+}
+```
+
+Finding fields: `platform`, `profile_url`, `username`, `confidence`, `tags`, `check_type`, `wave`, `alexa_rank`, `dual_confirmed`, `sources`.
+
+---
+
+## Platform Deduplication
+
+When multiple modules find the same platform, MailAccess deduplicates by normalized profile URL domain, such as `github.com`, not by display name.
+
+Rules:
+- Same domain from WMN + Maigret becomes one finding with `sources: ["wmn", "maigret"]` and `confidence: "high"`
+- Same domain from any two modules is merged
+- `api.*` subdomains are canonicalized to the root domain, such as `api.github.com` to `github.com`
+
+Metadata reported per investigation:
+- `wmn_hits`: raw WMN platform count
+- `maigret_hits`: raw Maigret platform count
+- `dual_confirmed`: platforms found by both
+- `unique_platforms`: deduplicated count used in the headline
 
 ---
 

@@ -113,6 +113,7 @@ export const useInvestigationStore = create<Store>((set) => ({
         findings: findings
           .filter(f => f.module_name === name)
           .map(f => f.data as Record<string, unknown>),
+        runMetadata: (run.run_metadata as Record<string, unknown> | undefined) ?? undefined,
         error: run.error as string | undefined,
       }
     }

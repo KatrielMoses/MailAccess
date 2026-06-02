@@ -94,10 +94,18 @@ Every setting is optional unless marked required.
 | `BREACH_DEEP_LIMIT` | `100` | Sites to probe; max 750 |
 | `BREACH_DEEP_FULL` | `false` | Probe all 750 HIBP sites |
 | `ENABLE_EMAIL_DISCOVERY` | `true` | Name-to-email dorks |
+| `ENABLE_MAIGRET_PLATFORMS` | `false` | Optional. Enable native Maigret platform engine (2500+ platforms). Adds ~35-90s to investigation. |
+| `ENABLE_MAIGRET_WAVE2` | `false` | Optional. Enable Wave 2 slow/fragile platform sweep. Requires `ENABLE_MAIGRET_PLATFORMS=true`. Adds ~90-150s. |
 | `GITHUB_TOKEN` | _(unset)_ | Optional. Required for GitHub commit author-email search. Without it, `github_commits` runs user profile search only. Get at: [github.com/settings/tokens](https://github.com/settings/tokens) |
 | `COMPANIES_HOUSE_API_KEY` | _(unset)_ | Optional. UK Companies House officer/address lookup. Free, no CC. Get at: [developer.company-information.service.gov.uk](https://developer.company-information.service.gov.uk) |
 
 MailAccess fetches the HIBP breach corpus on startup and caches it at `data/cache/breach_corpus.json` for 24h. No API key required for this fetch.
+
+The Maigret platform database (~3 MB JSON) is fetched automatically from GitHub on first use and cached at `~/.mailaccess/cache/maigret-data.json`. It refreshes every 24 hours. No manual setup is needed.
+
+To add custom platforms, edit `data/mailaccess-extra-sites.json` using the same format as Maigret's `data.json`. These custom additions are merged at runtime and are never overwritten by auto-refresh.
+
+Enabling `ENABLE_MAIGRET_PLATFORMS` adds 35-90 seconds to investigation time for Wave 1. Wave 2 adds a further 90-150 seconds. For automated or batch use, consider whether the extended coverage is worth the runtime cost for your use case.
 
 The Defender's Brief is generated automatically for every investigation. Suppress it with the CLI `--no-brief` flag or by setting `SHOW_DEFENDERS_BRIEF=false` in `.env`.
 
@@ -147,7 +155,7 @@ All API keys are optional. Modules that require a missing key skip themselves wi
 
 ## Enabling Opt-in Modules
 
-Four modules are opt-in and require explicit enabling per run or via `.env`:
+Six opt-in features require explicit enabling per run or via `.env`:
 
 | Module | Description |
 |--------|-------------|
@@ -155,6 +163,8 @@ Four modules are opt-in and require explicit enabling per run or via `.env`:
 | `ghunt` | Deep Gmail intel (requires one-time `ghunt login` setup) |
 | `press_intel` | Press release contact extraction for business domains |
 | `email_discovery` | Name → email dorks (requires `SERPAPI_KEY`) |
+| `maigret_platforms` | Native Maigret engine across 2500+ platforms (set `ENABLE_MAIGRET_PLATFORMS=true`) |
+| `maigret_platforms` Wave 2 | Slower and more fragile Maigret sweep (set `ENABLE_MAIGRET_WAVE2=true`) |
 
 **Enable for one run** using the `-m` / `--enable` flag:
 
@@ -168,6 +178,7 @@ mailaccess investigate email -m all
 
 ```env
 ENABLE_BREACH_DEEP=true
+ENABLE_MAIGRET_PLATFORMS=true
 ```
 
 `-m all` enables all opt-in modules for the current run only.

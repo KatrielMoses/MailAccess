@@ -128,7 +128,7 @@ Paginated list of past investigations, newest first.
 
 Full investigation report with all module runs and findings.
 
-The response includes `exposure_score` plus the separate credential risk fields: `credential_risk_score`, `credential_risk_band`, `score_drivers`, and `recommended_actions`. v0.7.0 also adds Name Consensus fields and the `defenders_brief` object.
+The response includes `exposure_score` plus the separate credential risk fields: `credential_risk_score`, `credential_risk_band`, `score_drivers`, and `recommended_actions`. It also includes Name Consensus fields, the `defenders_brief` object, and platform deduplication stats.
 
 > **Known issue:** The route handler for this endpoint is currently missing in `backend/api/routes/investigations.py` — the response code at lines 80–83 is present but the `@router.get` decorator and function signature are absent, making the endpoint unreachable. Use `GET /api/report/{id}/export?format=json` as a workaround until the route is added.
 
@@ -170,6 +170,12 @@ The response includes `exposure_score` plus the separate credential risk fields:
     "next_action": "Immediately rotate credentials and enforce hardware MFA.",
     "generated_at": "2026-05-19T12:00:15+00:00"
   },
+  "platform_stats": {
+    "wmn_hits": 4,
+    "maigret_hits": 6,
+    "dual_confirmed": 2,
+    "unique_platforms": 8
+  },
   "summary": "Ran 8 modules (7 successful, 1 failed). Found 14 data points.",
   "created_at": "2026-05-19T12:00:00+00:00",
   "completed_at": "2026-05-19T12:00:15+00:00",
@@ -187,6 +193,26 @@ The response includes `exposure_score` plus the separate credential risk fields:
       "errors": null,
       "started_at": "2026-05-19T12:00:01+00:00",
       "finished_at": "2026-05-19T12:00:02+00:00"
+    },
+    {
+      "id": "d4c3b2a1-...",
+      "module_name": "maigret_platforms",
+      "status": "success",
+      "run_metadata": {
+        "sites_loaded": 2500,
+        "wave1_probes": 1500,
+        "wave2_probes": 0,
+        "catchalls_excluded": 12,
+        "platforms_confirmed": 5,
+        "platforms_not_found": 1480,
+        "platforms_errored": 3,
+        "username_variants_used": ["janedoe", "jane.doe", "jane_doe"],
+        "dual_confirmed": 2,
+        "unique_platforms": 8
+      },
+      "errors": null,
+      "started_at": "2026-05-19T12:00:03+00:00",
+      "finished_at": "2026-05-19T12:01:12+00:00"
     }
   ],
   "findings": [

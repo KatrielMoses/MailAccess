@@ -99,6 +99,7 @@ _HARDCODED_MODULES = [
     ("dns_lookup",     "DNS",       "—",                 "No", "DNS record enumeration for email domain"),
     ("whois_lookup",   "WHOIS",     "—",                 "No", "WHOIS registration data for email domain"),
     ("social_links",   "Multi",     "—",                 "No", "Check email on social platforms"),
+    ("maigret_platforms", "Maigret", "—",                 "Yes", "Username sweep across 2500+ Maigret platforms"),
     ("domain_intel",   "Multi",     "SHODAN_API_KEY",    "No", "Domain intelligence and infrastructure recon"),
     ("ransomware_intel", "Ransomware", "—",              "No", "Check if domain is a ransomware victim"),
 ]
@@ -108,6 +109,7 @@ OPT_IN_MODULES = {
     "ghunt":             "enable_ghunt",
     "email_discovery":   "enable_email_discovery",
     "press_intel":       "enable_press_intel",
+    "maigret_platforms":  "enable_maigret_platforms",
 }
 
 
@@ -1295,7 +1297,7 @@ async def _investigate(
                     "ransomware_intel",
                 ],
                 "RECON MODULES": ["dns_lookup", "whois_lookup", "domain_intel", "google_dork", "email_discovery", "wayback", "github_commits", "shodan", "hunter_io"],
-                "OPTIONAL MODULES": ["ghunt", "user_scanner", "account_discovery", "whatsmyname", "username_pivot", "permutation_discovery", "phone_intel"]
+                "OPTIONAL MODULES": ["ghunt", "user_scanner", "account_discovery", "whatsmyname", "maigret_platforms", "username_pivot", "permutation_discovery", "phone_intel"]
             }
             
             key_hints = {
@@ -1309,7 +1311,8 @@ async def _investigate(
                 "domain_intel": "set SHODAN_API_KEY",
                 "hunter_io": "set HUNTER_IO_API_KEY",
                 "emailrep": "set EMAILREP_API_KEY",
-                "ghunt": "run mailaccess keys set GHUNT_CREDS_PATH /path/to/creds"
+                "ghunt": "run mailaccess keys set GHUNT_CREDS_PATH /path/to/creds",
+                "maigret_platforms": "set ENABLE_MAIGRET_PLATFORMS=true or use --modules maigret_platforms"
             }
 
             for group_name, mods in groups.items():

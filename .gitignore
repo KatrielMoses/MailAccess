@@ -28,6 +28,9 @@ logs/
 # Runtime data
 *.db
 data/
+!data/
+data/*
+!data/mailaccess-extra-sites.json
 maltego/*.mtz
 
 # IDE
@@ -45,6 +48,7 @@ maltego/*.mtz
 test_*.py
 !tests/test_name_consensus.py
 !tests/test_timeline.py
+!tests/test_maigret_platforms.py
 verify_*.py
 .pytest_cache/
 coverage/

@@ -48,6 +48,7 @@ export interface ModuleState {
   name: string
   status: ModuleStatus
   findings: Record<string, unknown>[]
+  runMetadata?: Record<string, unknown>
   error?: string
 }
 
