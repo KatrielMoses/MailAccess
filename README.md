@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.5.1&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.7.0&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -61,6 +61,8 @@ mailaccess investigate email -m all
 ## What It Does
 
 - **Identity graph** — cross-platform correlation of accounts, usernames, and signals from each investigation
+- **Name Consensus Engine** — confirms real identity from multiple independent name signals with confidence scoring
+- **Defender's Brief** — security-manager-ready risk summary with actionable findings and next step
 - **Phone number recovery** — pipeline to surface and validate numbers tied to the target
 - **Telegram / WhatsApp hints** — lightweight messaging-app footprint checks alongside other modules
 - **YAML-driven platform system** — social-style checks defined in `backend/platforms/`; community extensible without new Python for each site
@@ -94,6 +96,12 @@ mailaccess investigate email -m all
 | whois_lookup | Domain WHOIS, privacy detection | No | No |
 | wayback | Finds historical pages where email appeared publicly via Wayback Machine CDX | No | No |
 | github_commits | Finds repos committed to with this email, surfaces real name from git config. Requires GITHUB_TOKEN for commit search; user profile search works without token. | No (GITHUB_TOKEN optional, required for commit search) | No |
+| pgp_keyserver | PGP key UID name lookup | No | No |
+| orcid_lookup | ORCID researcher identity | No | No |
+| hackernews | HackerNews profile name | No | No |
+| sec_edgar | SEC EDGAR filing contact extraction | No | No |
+| companies_house | UK Companies House officers | Yes (COMPANIES_HOUSE_API_KEY, free) | No |
+| press_intel | Press release contact extraction | No | Yes |
 | xposedornot | Default-on direct email-to-breach corpus lookup with breach names, data classes, and risk indicators | No | No |
 | leakcheck | Default-on public breach corpus lookup with regional coverage and stealer routing | No | No |
 | ransomware_intel | Default-on domain victim correlation against ransomware lists; skips free providers | No | No |
@@ -110,7 +118,7 @@ mailaccess investigate email -m all
 | ghunt | Gmail deep intel | No (setup required) | Yes |
 | identity_graph | Cross-platform cluster analysis | No | No (automatic) |
 
-> 28 modules, 800+ platforms checked when all opt-in modules enabled. YAML platform system — add new platforms via PR, no Python required.
+> 41 modules (35 + 6 new), 800+ platforms checked when all opt-in modules enabled. YAML platform system — add new platforms via PR, no Python required.
 
 ## Identity Graph
 
@@ -121,6 +129,47 @@ Every investigation generates a cross-platform identity graph linking accounts b
 Export as D3-compatible JSON via `GET /api/report/{id}/graph` or fetch clusters with confidence scores via `GET /api/report/{id}/clusters`.
 
 Findings are automatically grouped into identity clusters with confidence scoring. Use `--show-collisions` to expand low-confidence matches in CLI output.
+
+## Name Consensus Engine
+
+MailAccess collects name signals from every module that returns profile data: GitHub, Gravatar, Keybase, PGP keys, ORCID, LinkedIn, git commits, and more. The Name Consensus Engine synthesizes those signals into a single defensible output:
+
+```text
+CONFIRMED IDENTITY
+  Name:     Katriel Moses  [CONFIRMED]
+  Sources:  GitHub · Gravatar · Keybase · PGP
+  Reasoning: 4 independent sources agree.
+```
+
+Confidence bands:
+- Confirmed: 3+ independent sources, score >= 2.5
+- Probable: 2+ sources, score >= 1.5
+- Possible: single source, score >= 0.5
+- Unknown: no reliable name signals
+
+Role/system email addresses (`noreply@`, `admin@`, `support@`, `info@`, and similar) are automatically detected and skipped.
+
+## Defender's Brief
+
+Every investigation includes a Defender's Brief: a 30-second risk summary designed for security managers, not just analysts.
+
+```text
+DEFENDER'S BRIEF
+  Risk:    CRITICAL
+  Summary: Active infostealer infection detected.
+  1. Active credential theft   [CRITICAL]
+     Infostealer detected via Hudson Rock.
+     -> Rotate credentials immediately.
+  2. Email in 8 breaches       [HIGH]
+     Spanning 2012-2024.
+     -> Audit password reuse.
+  3. Real identity confirmed   [HIGH]
+     John Doe - 2 independent sources.
+     -> Review public profile exposure.
+  Next action: Immediately rotate credentials and enforce hardware MFA.
+```
+
+Suppress it with `--no-brief`.
 
 ## Historical Intelligence
 
@@ -222,6 +271,7 @@ Open **http://localhost:3000** in your browser. Full setup guide: [docs/self-hos
 | `mailaccess commands` | List all CLI commands |
 | `mailaccess doctor` | Check configuration and module health _(coming soon)_ |
 | `mailaccess investigate <email> -m` / `--enable` | Enable opt-in modules for this run only. Comma-separated or `all`. Example: `-m breach_deep,ghunt` |
+| `mailaccess investigate <email> --no-brief` | Suppress Defender's Brief section |
 
 The `--output` / `-o` flag on `investigate` saves the report to a file. The extension determines the format: `.json`, `.csv`, `.pdf`, `.md`, `.stix.json`, `.maltego.csv`.
 
@@ -237,10 +287,24 @@ When a bare filename is given (no directory component), the file is written to t
 | `EMAILREP_API_KEY` | `emailrep` | https://emailrep.io | No |
 | `HUNTER_IO_API_KEY` | `hunter_io` | https://hunter.io | No |
 | `GITHUB_TOKEN` | `github_commits` | https://github.com/settings/tokens | No (optional) |
+| `COMPANIES_HOUSE_API_KEY` | `companies_house` | https://developer.company-information.service.gov.uk | No (free forever, no CC) |
 | `SLACK_WEBHOOK_URL` | Webhooks | https://api.slack.com/messaging/webhooks | No |
 | `DISCORD_WEBHOOK_URL` | Webhooks | Discord server settings | No |
 
 ## Changelog
+
+### 0.7.0
+- Name Consensus Engine: synthesizes name signals from all profile modules into Confirmed/Probable/Possible/Unknown with reasoning and source list
+- Defender's Brief: risk-first output with top 3 actionable findings and concrete next step. Suppressed with `--no-brief`.
+- PGP keyserver: email to UID name lookup via keys.openpgp.org, weight 1.0, highest trust
+- ORCID: researcher identity lookup, institutional verified names, weight 0.95
+- HackerNews profile: name extraction from about field via Firebase and Algolia APIs
+- SEC EDGAR: phone/contact extraction from public filings for business domains, no key
+- Companies House UK: officer names and registered address, free key required
+- Press intel: press release contact extraction, opt-in via `-m press_intel`
+- WHOIS/RDAP phone extraction: surviving post-GDPR registrars now surface phone numbers
+- Role/system email detection: `noreply@`, `admin@`, `support@`, and similar addresses skip name inference automatically
+- Name shown in summary bar when confirmed/probable
 
 ### 0.6.5
 - QA pass: cosmetic label fixes, keybase 404

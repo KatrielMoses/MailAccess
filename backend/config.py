@@ -154,6 +154,7 @@ class Settings(BaseSettings):
     # then probes each with Hudson Rock (+ HIBP if key is set)
     enable_permutation_discovery: bool = True
     enable_email_discovery: bool = False
+    enable_press_intel: bool = False
 
     # GHunt (opt-in — requires ghunt>=2.3 installed and a valid creds file from `ghunt login`)
     # Cookies expire periodically and require manual refresh via `ghunt login`.
@@ -195,6 +196,7 @@ class Settings(BaseSettings):
     shodan_api_key: str | None = None
     serpapi_key: str | None = None
     github_token: str | None = None
+    companies_house_api_key: str | None = None
 
     # Proxy
     proxy_url: str | None = None

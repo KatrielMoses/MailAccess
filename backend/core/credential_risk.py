@@ -27,6 +27,8 @@ _WEIGHTS = {
     "pastes": 8,
     "service_diversity": 5,
     "verified_fraction": 2,
+    "personal_phone": 15,
+    "business_phone": 8,
 }
 _LOW_SCORE_REASONS = (
     "No infostealer evidence was detected.",
@@ -186,6 +188,7 @@ def _assess(
     verified_fraction = (
         verified_true / verified_available if verified_available else 0.0
     )
+    personal_phone_count, business_phone_count = _phone_exposure_counts(rows)
 
     contributions = {
         "infostealer": _WEIGHTS["infostealer"] if infostealer_present else 0.0,
@@ -196,6 +199,8 @@ def _assess(
         "pastes": _WEIGHTS["pastes"] * paste_value,
         "service_diversity": _WEIGHTS["service_diversity"] * service_diversity_value,
         "verified_fraction": _WEIGHTS["verified_fraction"] * verified_fraction,
+        "personal_phone": _WEIGHTS["personal_phone"] if personal_phone_count else 0.0,
+        "business_phone": _WEIGHTS["business_phone"] if business_phone_count else 0.0,
     }
     raw_score = round(sum(contributions.values()))
     score = max(0, min(raw_score, 100))
@@ -218,6 +223,8 @@ def _assess(
         paste_count=paste_count,
         verified_true=verified_true,
         verified_available=verified_available,
+        personal_phone_count=personal_phone_count,
+        business_phone_count=business_phone_count,
     )
     recommended_actions = _recommended_actions(
         infostealer_present=infostealer_present,
@@ -546,6 +553,29 @@ def _historical_hit_count(rows: list[dict[str, Any]]) -> int:
     )
 
 
+def _phone_exposure_counts(rows: list[dict[str, Any]]) -> tuple[int, int]:
+    personal = 0
+    business = 0
+    for row in rows:
+        module_name = str(row.get("module_name") or "").strip().lower()
+        payload = _finding_payload(row)
+        signal_type = str(payload.get("signal_type") or "").strip().lower()
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        has_phone = bool(
+            metadata.get("phone")
+            or metadata.get("phone_number")
+            or payload.get("phone")
+            or payload.get("phone_number")
+        )
+        if not has_phone:
+            continue
+        if signal_type == "phone_in_bio":
+            personal += 1
+        elif module_name in {"whois_lookup", "press_intel", "sec_edgar"} or signal_type == "phone_number":
+            business += 1
+    return personal, business
+
+
 def _score_drivers(
     *,
     contributions: dict[str, float],
@@ -562,6 +592,8 @@ def _score_drivers(
     paste_count: int,
     verified_true: int,
     verified_available: int,
+    personal_phone_count: int,
+    business_phone_count: int,
 ) -> list[str]:
     candidates: list[tuple[float, str]] = []
 
@@ -678,6 +710,30 @@ def _score_drivers(
             (
                 contributions["verified_fraction"],
                 f"{verified_true}/{verified_available} breach match{'es' if verified_available != 1 else ''} are source-verified",
+            )
+        )
+
+    if personal_phone_count > 0 and contributions["personal_phone"] > 0:
+        candidates.append(
+            (
+                contributions["personal_phone"],
+                (
+                    "Personal phone exposure was identified"
+                    if personal_phone_count == 1
+                    else f"{personal_phone_count} personal phone exposures were identified"
+                ),
+            )
+        )
+
+    if business_phone_count > 0 and contributions["business_phone"] > 0:
+        candidates.append(
+            (
+                contributions["business_phone"],
+                (
+                    "Business phone exposure was identified"
+                    if business_phone_count == 1
+                    else f"{business_phone_count} business phone exposures were identified"
+                ),
             )
         )
 

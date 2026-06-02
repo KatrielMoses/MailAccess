@@ -43,6 +43,7 @@ maltego/*.mtz
 
 # Test artifacts
 test_*.py
+!tests/test_name_consensus.py
 !tests/test_timeline.py
 verify_*.py
 .pytest_cache/

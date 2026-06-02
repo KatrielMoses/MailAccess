@@ -48,8 +48,13 @@ class Investigation(Base):
     )
     exposure_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     credential_risk_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    confirmed_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    name_confidence: Mapped[str | None] = mapped_column(String, nullable=True)
+    name_reasoning: Mapped[str | None] = mapped_column(String, nullable=True)
+    name_sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
     graph_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     timeline_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    defenders_brief_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     module_runs: Mapped[list[ModuleRun]] = relationship(
         back_populates="investigation", cascade="all, delete-orphan"

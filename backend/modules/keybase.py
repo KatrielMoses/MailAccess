@@ -112,6 +112,7 @@ class KeybaseModule(BaseModule):
             profile_meta: dict[str, Any] = {"username": kb_username}
             if full_name:
                 profile_meta["name"] = full_name
+                profile_meta["full_name"] = full_name
             if bio:
                 profile_meta["bio"] = bio
             if location:

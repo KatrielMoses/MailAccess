@@ -139,6 +139,7 @@ class GravatarModule(BaseModule):
         profile_meta: dict[str, Any] = {}
         if full_name:
             profile_meta["name"] = full_name
+            profile_meta["display_name"] = full_name
         if location:
             profile_meta["location"] = location
         if about_me:

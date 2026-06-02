@@ -58,6 +58,48 @@ class MarkdownExporter(BaseExporter):
         lines.append(f"> {email} - {timestamp}")
         lines.append("")
 
+        brief = data.get("defenders_brief") if isinstance(data.get("defenders_brief"), dict) else {}
+        if brief:
+            lines.append("## Defender's Brief")
+            lines.append(f"**Risk:** {brief.get('risk_level', 'UNKNOWN')}")
+            summary = brief.get("risk_summary")
+            if summary:
+                lines.append(f"**Summary:** {summary}")
+            lines.append("")
+            findings = brief.get("top_findings") if isinstance(brief.get("top_findings"), list) else []
+            for index, finding in enumerate(findings[:3], 1):
+                if not isinstance(finding, dict):
+                    continue
+                severity = str(finding.get("severity") or "").upper()
+                lines.append(f"{index}. **{finding.get('title', '')}** [{severity}]")
+                detail = finding.get("detail")
+                remediation = finding.get("remediation")
+                if detail:
+                    lines.append(f"   {detail}")
+                if remediation:
+                    lines.append(f"   Action: {remediation}")
+            next_action = brief.get("next_action")
+            if next_action:
+                lines.append("")
+                lines.append(f"**Next action:** {next_action}")
+            lines.append("")
+
+        confirmed_name = data.get("confirmed_name")
+        name_confidence = str(data.get("name_confidence") or "unknown")
+        if confirmed_name and name_confidence != "unknown":
+            lines.append("## Confirmed Identity")
+            lines.append("| Field | Value |")
+            lines.append("| --- | --- |")
+            lines.append(f"| Name | {confirmed_name} |")
+            lines.append(f"| Confidence | {name_confidence} |")
+            sources = ", ".join(str(src) for src in data.get("name_sources", []))
+            if sources:
+                lines.append(f"| Sources | {sources} |")
+            reasoning = data.get("name_reasoning")
+            if reasoning:
+                lines.append(f"| Reasoning | {reasoning} |")
+            lines.append("")
+
         credibility = data.get("email_credibility")
         if isinstance(credibility, dict) and credibility:
             lines.append("## Email Credibility")

@@ -54,6 +54,29 @@ def normalize_e164(raw: str) -> str | None:
     return None
 
 
+def normalize_phone(raw: str, *, region: str | None = None) -> str | None:
+    """
+    Validate and normalize a raw phone number.
+
+    Uses phonenumbers when installed, otherwise falls back to the existing
+    E.164-ish validation so core phone discovery remains dependency-free.
+    """
+    value = raw.strip()
+    if not value:
+        return None
+    try:
+        import phonenumbers  # type: ignore[import-not-found]
+
+        parsed = phonenumbers.parse(value, region)
+        if not phonenumbers.is_possible_number(parsed):
+            return None
+        if not phonenumbers.is_valid_number(parsed):
+            return None
+        return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+    except Exception:
+        return normalize_e164(value)
+
+
 def _scan_value(value: Any, found: dict[str, str], current_key: str = "") -> None:
     if isinstance(value, dict):
         for k, v in value.items():

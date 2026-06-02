@@ -71,6 +71,7 @@ _API_KEYS: list[tuple[str, str, str]] = [
     ("SHODAN_API_KEY",      "domain_intel",  "shodan.io"),
     ("EMAILREP_API_KEY",    "emailrep",      "emailrep.io"),
     ("HUNTER_IO_API_KEY",   "hunter_io",     "hunter.io"),
+    ("COMPANIES_HOUSE_API_KEY", "companies_house", "developer.company-information.service.gov.uk"),
     ("SLACK_WEBHOOK_URL",   "notifications", "Slack app webhooks"),
     ("DISCORD_WEBHOOK_URL", "notifications", "Discord server webhooks"),
 ]
@@ -106,6 +107,7 @@ OPT_IN_MODULES = {
     "breach_deep":       "enable_breach_deep",
     "ghunt":             "enable_ghunt",
     "email_discovery":   "enable_email_discovery",
+    "press_intel":       "enable_press_intel",
 }
 
 
@@ -457,6 +459,7 @@ async def _investigate(
     force: bool = False,
     show_collisions: bool = False,
     enable: str | None = None,
+    no_brief: bool = False,
 ) -> int:
     base_url = get_backend_url()
     out = err_console if output_format in ("json", "jsonl") else console
@@ -690,6 +693,22 @@ async def _investigate(
             findings = rep.get("findings_by_module", {}).get("alternate_email", [])
             return [f for f in findings if isinstance(f, dict)]
 
+        def _name_consensus(rep: dict[str, Any]) -> dict[str, Any]:
+            consensus = rep.get("name_consensus")
+            if isinstance(consensus, dict):
+                return consensus
+            return {
+                "confirmed_name": rep.get("confirmed_name"),
+                "name_confidence": rep.get("name_confidence") or "unknown",
+                "name_reasoning": rep.get("name_reasoning") or "",
+                "name_sources": rep.get("name_sources") or [],
+            }
+
+        def _format_name_sources(sources: Any) -> str:
+            if not isinstance(sources, list):
+                return ""
+            return " · ".join(str(src).replace("_", " ").title() for src in sources if src)
+
         def render_summary(rep: dict[str, Any]) -> None:
             score = _get_score(rep)
             risk = _get_risk(rep)
@@ -753,6 +772,12 @@ async def _investigate(
                 f"[bold]Risk:[/] [{risk_color}]{risk.upper()}[/]  |  "
                 f"[bold]Breaches:[/] {breach_count} | [bold]Pastes:[/] {paste_count} | [bold]Stealer:[/] {stealer_count} "
             )
+            consensus = _name_consensus(rep)
+            if (
+                consensus.get("confirmed_name")
+                and str(consensus.get("name_confidence") or "").lower() == "confirmed"
+            ):
+                summary += f" | [bold]{consensus.get('confirmed_name')}[/]"
             if malicious and not disposable:
                 summary += " | [bold red]SUSPICIOUS[/bold red]"
             timeline = rep.get("timeline") if isinstance(rep.get("timeline"), dict) else {}
@@ -777,6 +802,54 @@ async def _investigate(
             out.print(Panel(summary, border_style=score_color))
             if skipped_count > 3:
                 out.print(f"[dim]{skipped_count} modules skipped — set API keys to improve coverage. Run: mailaccess keys list[/dim]")
+            out.print()
+
+        def render_defenders_brief(rep: dict[str, Any]) -> None:
+            brief = rep.get("defenders_brief")
+            if not isinstance(brief, dict) or not brief:
+                return
+            risk_level = str(brief.get("risk_level") or "UNKNOWN").upper()
+            summary = str(brief.get("risk_summary") or "").strip()
+            findings = [
+                finding
+                for finding in brief.get("top_findings", [])
+                if isinstance(finding, dict)
+            ][:3]
+            has_medium_or_above = any(
+                str(finding.get("severity") or "").lower()
+                in {"medium", "high", "critical"}
+                for finding in findings
+            )
+
+            out.print(Rule("DEFENDER'S BRIEF", style="bold magenta"))
+            if not has_medium_or_above:
+                condensed = f"  Risk: {risk_level}"
+                if summary:
+                    condensed += f" - {summary.split(' - ', 1)[-1]}"
+                out.print(condensed)
+                out.print(Rule(style="dim"))
+                out.print()
+                return
+
+            out.print(f"  {'Risk:':<10} {risk_level}")
+            if summary:
+                out.print(f"  {'Summary:':<10} {summary}")
+            out.print()
+            for index, finding in enumerate(findings, 1):
+                title = str(finding.get("title") or "").strip()
+                severity = str(finding.get("severity") or "").upper()
+                detail = str(finding.get("detail") or "").strip()
+                remediation = str(finding.get("remediation") or "").strip()
+                out.print(f"  {index}. [bold]{title}[/bold]   [{severity}]")
+                if detail:
+                    out.print(f"     {detail}")
+                if remediation:
+                    out.print(f"     -> {remediation}")
+                out.print()
+            next_action = str(brief.get("next_action") or "").strip()
+            if next_action:
+                out.print(f"  [bold]Next action:[/bold] {next_action}")
+            out.print(Rule(style="dim"))
             out.print()
 
         def render_timeline(rep: dict[str, Any]) -> None:
@@ -1497,12 +1570,22 @@ async def _investigate(
 
         async def render_clusters_output() -> None:
             discovered_emails = _get_discovered_emails(report_data)
+            consensus = _name_consensus(report_data)
+            confirmed_name = str(consensus.get("confirmed_name") or "").strip()
+            name_confidence = str(consensus.get("name_confidence") or "unknown").lower()
+            reasoning = str(consensus.get("name_reasoning") or "").strip()
+            inference_skipped = (
+                reasoning == "Role/system email address — name inference skipped"
+            )
+            show_name_consensus = bool(
+                (confirmed_name and name_confidence != "unknown") or inference_skipped
+            )
             try:
                 resp = await client.get(f"/api/report/{inv_id}/clusters", timeout=30)
                 resp.raise_for_status()
                 data = resp.json()
                 clusters = data.get("clusters", [])
-                if not clusters and not discovered_emails:
+                if not clusters and not discovered_emails and not show_name_consensus:
                     return
             except httpx.TimeoutException:
                 out.print(
@@ -1514,6 +1597,34 @@ async def _investigate(
                 
             out.print(Rule("IDENTITY ANALYSIS", style="bold blue"))
             out.print()
+
+            if show_name_consensus:
+                sources = _format_name_sources(consensus.get("name_sources"))
+                conflict = "conflict" in reasoning.lower()
+                label = name_confidence.upper()
+                if conflict:
+                    label += " - conflict"
+                title = (
+                    "NAME INFERENCE SKIPPED"
+                    if inference_skipped
+                    else
+                    "CONFIRMED IDENTITY"
+                    if name_confidence in ("confirmed", "probable")
+                    else "POSSIBLE IDENTITY"
+                )
+                out.print(f"  [bold cyan]{title}[/bold cyan]")
+                if confirmed_name:
+                    out.print(f"    {'Name:':<10} {confirmed_name}  [bold][{label}][/bold]")
+                if sources:
+                    out.print(f"    {'Sources:':<10} {sources}")
+                if reasoning:
+                    field = (
+                        "Reasoning:"
+                        if name_confidence in ("confirmed", "probable")
+                        else "Note:"
+                    )
+                    out.print(f"    {field:<10} {reasoning}")
+                out.print()
             
             for i, cluster in enumerate(clusters or [], 1):
                 conf = cluster.get("confidence", 0.0)
@@ -1881,10 +1992,28 @@ async def _investigate(
                         phone = str(meta.get("phone") or "").strip()
                         if phone:
                             pii_items.append(("phone", phone, conf, source_label))
+                    elif sig == "phone_number":
+                        phone = str(meta.get("phone") or meta.get("phone_number") or "").strip()
+                        if phone:
+                            label_map = {
+                                "whois_lookup": "WHOIS registrant",
+                                "whois_phone": "WHOIS registrant",
+                                "press_intel": "Press release",
+                                "sec_edgar": "SEC EDGAR",
+                            }
+                            platform = str(f.get("platform") or "").strip().lower()
+                            label = label_map.get(platform) or label_map.get(module_name, source_label)
+                            pii_items.append(("phone", phone, conf, label))
                     elif sig == "email_in_bio":
                         discovered = str(meta.get("email") or "").strip()
                         if discovered:
                             pii_items.append(("email", discovered, conf, source_label))
+                    elif sig == "company_registration" and module_name == "companies_house":
+                        addr = str(meta.get("registered_address") or "").strip()
+                        company = str(meta.get("company_name") or "").strip()
+                        if addr:
+                            label = f"Companies House - {company}" if company else "Companies House"
+                            pii_items.append(("address", addr, conf, label))
 
             # OpenCorporates addresses
             for f in rep.get("findings_by_module", {}).get("opencorporates", []):
@@ -1918,6 +2047,8 @@ async def _investigate(
         out.print("\n[bold green]Investigation Complete[/]\n")
         render_credibility_banner(report_data)
         render_summary(report_data)
+        if not no_brief:
+            render_defenders_brief(report_data)
         await render_clusters_output()
         render_profile_intelligence(report_data)
         render_pii_findings(report_data)
@@ -1954,6 +2085,9 @@ def investigate(
         None, "-m", "--enable",
         help="Enable opt-in modules for this run. Comma-separated or 'all'. Example: -m breach_deep,whatsmyname"
     ),
+    no_brief: bool = typer.Option(
+        False, "--no-brief", help="Suppress the Defender's Brief section."
+    ),
 ) -> None:
     """Run a full OSINT investigation against an email address.
     Exit codes: 0=clean 1=findings 2=breaches 3=error"""
@@ -1972,7 +2106,7 @@ def investigate(
     for i, target_email in enumerate(emails):
         if i > 0 and output_format not in ("json", "jsonl"):
             err_console.print("━" * 80)
-        code = asyncio.run(_investigate(target_email, output_format, modules, timeout, output_file, force, show_collisions, enable))
+        code = asyncio.run(_investigate(target_email, output_format, modules, timeout, output_file, force, show_collisions, enable, no_brief))
         if code > max_code:
             max_code = code
 

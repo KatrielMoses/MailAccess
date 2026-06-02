@@ -57,6 +57,8 @@ class CsvExporter(BaseExporter):
             str(item) for item in data.get("recommended_actions", [])
         )
         email = data.get("email", "")
+        confirmed_name = data.get("confirmed_name") or ""
+        name_confidence = data.get("name_confidence") or "unknown"
         credibility = data.get("email_credibility") if isinstance(data.get("email_credibility"), dict) else {}
         canonical_email = credibility.get("canonical_email", data.get("canonical_email", ""))
         provider_family = credibility.get("provider_family", "")
@@ -77,6 +79,8 @@ class CsvExporter(BaseExporter):
             if most_recent_date and most_recent_event
             else most_recent_event or most_recent_date
         )
+        defenders_brief = data.get("defenders_brief") if isinstance(data.get("defenders_brief"), dict) else {}
+        defenders_brief_risk_level = defenders_brief.get("risk_level", "")
 
         alt_emails = [
             f.get("data", {}).get("metadata", {}).get("discovered_email")
@@ -98,6 +102,9 @@ class CsvExporter(BaseExporter):
                 "investigation_id",
                 "email",
                 "canonical_email",
+                "defenders_brief_risk_level",
+                "confirmed_name",
+                "name_confidence",
                 "provider_family",
                 "is_disposable",
                 "disposable_provider",
@@ -136,6 +143,9 @@ class CsvExporter(BaseExporter):
                     investigation_id,
                     email,
                     canonical_email,
+                    defenders_brief_risk_level,
+                    confirmed_name,
+                    name_confidence,
                     provider_family,
                     is_disposable,
                     disposable_provider,
@@ -177,6 +187,9 @@ class CsvExporter(BaseExporter):
                     investigation_id,
                     email,
                     canonical_email,
+                    defenders_brief_risk_level,
+                    confirmed_name,
+                    name_confidence,
                     provider_family,
                     is_disposable,
                     disposable_provider,

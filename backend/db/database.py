@@ -69,6 +69,42 @@ def _migrate_add_timeline_json(sync_conn) -> None:
         )
 
 
+def _migrate_add_defenders_brief(sync_conn) -> None:
+    """Add defenders_brief_json column to investigations if missing."""
+    inspector = inspect(sync_conn)
+    if "investigations" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("investigations")}
+    if "defenders_brief_json" not in columns:
+        sync_conn.execute(
+            text("ALTER TABLE investigations ADD COLUMN defenders_brief_json JSON")
+        )
+
+
+def _migrate_add_name_consensus(sync_conn) -> None:
+    """Add name consensus columns to investigations if missing."""
+    inspector = inspect(sync_conn)
+    if "investigations" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("investigations")}
+    if "confirmed_name" not in columns:
+        sync_conn.execute(
+            text("ALTER TABLE investigations ADD COLUMN confirmed_name VARCHAR")
+        )
+    if "name_confidence" not in columns:
+        sync_conn.execute(
+            text("ALTER TABLE investigations ADD COLUMN name_confidence VARCHAR")
+        )
+    if "name_reasoning" not in columns:
+        sync_conn.execute(
+            text("ALTER TABLE investigations ADD COLUMN name_reasoning VARCHAR")
+        )
+    if "name_sources" not in columns:
+        sync_conn.execute(
+            text("ALTER TABLE investigations ADD COLUMN name_sources JSON")
+        )
+
+
 async def init_db() -> None:
     """Create all tables if they don't exist. Called once at app startup."""
     _ensure_db_dir()
@@ -78,6 +114,8 @@ async def init_db() -> None:
         await conn.run_sync(_migrate_add_credential_risk_score)
         await conn.run_sync(_migrate_add_canonical_email)
         await conn.run_sync(_migrate_add_timeline_json)
+        await conn.run_sync(_migrate_add_defenders_brief)
+        await conn.run_sync(_migrate_add_name_consensus)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

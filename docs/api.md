@@ -56,7 +56,7 @@ Start an investigation. Returns immediately with an ID — the investigation run
 
 `modules` is optional. Omit it to run all registered modules. Set `force: true` to bypass the investigation cache and always run a fresh investigation.
 
-`enable_modules` is a list of opt-in module names to enable for this run only. Equivalent to the CLI `-m` flag. Valid values: `breach_deep`, `ghunt`, `email_discovery`. Pass `["all"]` to enable all three opt-in modules.
+`enable_modules` is a list of opt-in module names to enable for this run only. Equivalent to the CLI `-m` flag. Valid values include `breach_deep`, `ghunt`, `email_discovery`, and `press_intel`. Pass `["all"]` to enable all opt-in modules.
 
 New modules available in 0.4.0: `breach_deep`, `email_discovery`, `wayback`, `github_commits`. Pass them in the `modules` array to run selectively:
 
@@ -128,7 +128,7 @@ Paginated list of past investigations, newest first.
 
 Full investigation report with all module runs and findings.
 
-The response includes `exposure_score` plus the separate credential risk fields: `credential_risk_score`, `credential_risk_band`, `score_drivers`, and `recommended_actions`.
+The response includes `exposure_score` plus the separate credential risk fields: `credential_risk_score`, `credential_risk_band`, `score_drivers`, and `recommended_actions`. v0.7.0 also adds Name Consensus fields and the `defenders_brief` object.
 
 > **Known issue:** The route handler for this endpoint is currently missing in `backend/api/routes/investigations.py` — the response code at lines 80–83 is present but the `@router.get` decorator and function signature are absent, making the endpoint unreachable. Use `GET /api/report/{id}/export?format=json` as a workaround until the route is added.
 
@@ -140,6 +140,10 @@ The response includes `exposure_score` plus the separate credential risk fields:
   "status": "complete",
   "exposure_score": 72,
   "risk_level": "high",
+  "confirmed_name": "Jane Doe",
+  "name_confidence": "confirmed",
+  "name_reasoning": "4 independent sources agree.",
+  "name_sources": ["github_user", "gravatar_profile", "pgp_keyserver"],
   "credential_risk_score": 84,
   "credential_risk_band": "CRITICAL",
   "score_drivers": [
@@ -152,6 +156,20 @@ The response includes `exposure_score` plus the separate credential risk fields:
     "Review MFA enrollment and strengthen account recovery settings",
     "Prioritize containment and analyst follow-up for exposed credentials"
   ],
+  "defenders_brief": {
+    "risk_level": "CRITICAL",
+    "risk_summary": "Active infostealer infection detected.",
+    "top_findings": [
+      {
+        "title": "Active credential theft",
+        "detail": "Infostealer detected via Hudson Rock.",
+        "severity": "CRITICAL",
+        "remediation": "Rotate credentials immediately."
+      }
+    ],
+    "next_action": "Immediately rotate credentials and enforce hardware MFA.",
+    "generated_at": "2026-05-19T12:00:15+00:00"
+  },
   "summary": "Ran 8 modules (7 successful, 1 failed). Found 14 data points.",
   "created_at": "2026-05-19T12:00:00+00:00",
   "completed_at": "2026-05-19T12:00:15+00:00",

@@ -74,6 +74,7 @@ Every setting is optional unless marked required.
 | `LOG_LEVEL` | `INFO` | Python logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated list of allowed CORS origins |
 | `MAILACCESS_API_KEY` | _(unset)_ | When set, all `/api/` routes require `X-API-Key: <value>`. Leave blank for open access. |
+| `SHOW_DEFENDERS_BRIEF` | `true` | Show Defender's Brief in CLI output. Set `false` to suppress for all investigations. |
 
 ### Worker
 
@@ -94,10 +95,11 @@ Every setting is optional unless marked required.
 | `BREACH_DEEP_FULL` | `false` | Probe all 750 HIBP sites |
 | `ENABLE_EMAIL_DISCOVERY` | `true` | Name-to-email dorks |
 | `GITHUB_TOKEN` | _(unset)_ | Optional. Required for GitHub commit author-email search. Without it, `github_commits` runs user profile search only. Get at: [github.com/settings/tokens](https://github.com/settings/tokens) |
+| `COMPANIES_HOUSE_API_KEY` | _(unset)_ | Optional. UK Companies House officer/address lookup. Free, no CC. Get at: [developer.company-information.service.gov.uk](https://developer.company-information.service.gov.uk) |
 
 MailAccess fetches the HIBP breach corpus on startup and caches it at `data/cache/breach_corpus.json` for 24h. No API key required for this fetch.
 
-v0.5.0 adds XposedOrNot and credential risk scoring without introducing any new environment variables.
+The Defender's Brief is generated automatically for every investigation. Suppress it with the CLI `--no-brief` flag or by setting `SHOW_DEFENDERS_BRIEF=false` in `.env`.
 
 ### Rate Limiting
 
@@ -133,6 +135,7 @@ All API keys are optional. Modules that require a missing key skip themselves wi
 | `HIBP_API_KEY` | `hibp` module | https://haveibeenpwned.com/API/Key |
 | `SERPAPI_KEY` | `google_dork` module | https://serpapi.com |
 | `GITHUB_TOKEN` | `github_commits` module (optional) | https://github.com/settings/tokens |
+| `COMPANIES_HOUSE_API_KEY` | `companies_house` module | https://developer.company-information.service.gov.uk |
 | `SHODAN_API_KEY` | `domain_intel` (optional), `shodan` module | https://account.shodan.io |
 | `EMAILREP_API_KEY` | `emailrep` module (raises rate limit) | https://emailrep.io |
 | `HUNTER_IO_API_KEY` | `hunter_io` module | https://hunter.io |
@@ -144,18 +147,20 @@ All API keys are optional. Modules that require a missing key skip themselves wi
 
 ## Enabling Opt-in Modules
 
-Three modules are opt-in and require explicit enabling per run or via `.env`:
+Four modules are opt-in and require explicit enabling per run or via `.env`:
 
 | Module | Description |
 |--------|-------------|
 | `breach_deep` | Probes 100 breach sites (slow, ~90 s) |
 | `ghunt` | Deep Gmail intel (requires one-time `ghunt login` setup) |
+| `press_intel` | Press release contact extraction for business domains |
 | `email_discovery` | Name → email dorks (requires `SERPAPI_KEY`) |
 
 **Enable for one run** using the `-m` / `--enable` flag:
 
 ```bash
 mailaccess investigate email -m breach_deep
+mailaccess investigate email -m press_intel
 mailaccess investigate email -m all
 ```
 
@@ -165,7 +170,7 @@ mailaccess investigate email -m all
 ENABLE_BREACH_DEEP=true
 ```
 
-`-m all` enables all three opt-in modules for the current run only.
+`-m all` enables all opt-in modules for the current run only.
 
 ---
 

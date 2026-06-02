@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import socket
 import whois
+from typing import Any
 from datetime import datetime
+from ..core.http_client import build_client
+from ..core.phone_extractor import normalize_phone
 from .base import BaseModule, ModuleResult, ModuleStatus
 from .domain_intel import _FREE_PROVIDERS
+
+_WHOIS_PHONE_RE = re.compile(r"(?:Phone|Tel|Telephone):\s*(\+?[\d\s\-\(\)\.]{7,20})", re.I)
 
 class WhoisLookupModule(BaseModule):
     name = "whois_lookup"
@@ -40,6 +46,8 @@ class WhoisLookupModule(BaseModule):
             primary_error = str(e)
             w = None
 
+        raw_whois_text = ""
+
         if w is None:
             # ---- IANA raw socket fallback ----
             def do_raw_whois() -> str:
@@ -62,6 +70,7 @@ class WhoisLookupModule(BaseModule):
                 raw_text = await asyncio.wait_for(
                     asyncio.to_thread(do_raw_whois), timeout=12.0
                 )
+                raw_whois_text = raw_text
 
                 class DummyWhois:
                     def __init__(self) -> None:
@@ -129,6 +138,9 @@ class WhoisLookupModule(BaseModule):
                         f"IANA fallback parse error: {e2}",
                     ],
                 )
+
+        if not raw_whois_text:
+            raw_whois_text = _extract_raw_whois_text(w)
 
         def parse_date(d: object) -> datetime | None:
             if isinstance(d, list):
@@ -202,6 +214,8 @@ class WhoisLookupModule(BaseModule):
             "confidence": confidence
         }
 
+        phone_findings = await self._phone_findings(domain, registrar, raw_whois_text)
+
         module_metadata = {
             "domain": domain,
             "is_privacy_protected": is_privacy_protected,
@@ -214,5 +228,124 @@ class WhoisLookupModule(BaseModule):
         return ModuleResult(
             status=ModuleStatus.PARTIAL if is_partial else ModuleStatus.SUCCESS,
             metadata=module_metadata,
-            findings=[finding]
+            findings=[finding, *phone_findings]
         )
+
+    async def _phone_findings(
+        self,
+        domain: str,
+        registrar: str | None,
+        raw_whois_text: str,
+    ) -> list[dict[str, Any]]:
+        phones: dict[str, dict[str, Any]] = {}
+
+        for raw_phone in _extract_whois_phones(raw_whois_text):
+            normalized = normalize_phone(raw_phone)
+            if normalized:
+                phones[normalized] = {
+                    "phone": normalized,
+                    "source": "whois",
+                    "registrar": registrar,
+                    "domain": domain,
+                }
+
+        rdap_data = await _fetch_rdap(domain)
+        if rdap_data:
+            for raw_phone in _extract_rdap_phones(rdap_data):
+                normalized = normalize_phone(raw_phone)
+                if normalized:
+                    phones[normalized] = {
+                        "phone": normalized,
+                        "source": "rdap",
+                        "registrar": registrar or _rdap_registrar(rdap_data),
+                        "domain": domain,
+                    }
+
+        return [
+            {
+                "platform": "whois_phone",
+                "signal_type": "phone_number",
+                "confidence": "medium",
+                "metadata": {k: v for k, v in metadata.items() if v},
+            }
+            for metadata in phones.values()
+        ]
+
+
+def _extract_raw_whois_text(whois_result: Any) -> str:
+    candidates: list[str] = []
+    for attr in ("text", "raw", "raw_text"):
+        value = getattr(whois_result, attr, None)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value)
+    try:
+        text = str(whois_result)
+    except Exception:
+        text = ""
+    if text:
+        candidates.append(text)
+    return "\n".join(candidates)
+
+
+def _extract_whois_phones(raw_text: str) -> list[str]:
+    return [match.group(1).strip() for match in _WHOIS_PHONE_RE.finditer(raw_text or "")]
+
+
+async def _fetch_rdap(domain: str) -> dict[str, Any] | None:
+    try:
+        async with build_client(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(f"https://rdap.org/domain/{domain}")
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _extract_rdap_phones(value: Any) -> list[str]:
+    phones: list[str] = []
+    if isinstance(value, dict):
+        if value.get("type") == "tel" and isinstance(value.get("value"), str):
+            phones.append(value["value"].strip())
+        for nested in value.values():
+            phones.extend(_extract_rdap_phones(nested))
+    elif isinstance(value, list):
+        if (
+            len(value) >= 4
+            and value[0] == "tel"
+            and isinstance(value[3], str)
+        ):
+            phones.append(value[3].strip())
+        for nested in value:
+            phones.extend(_extract_rdap_phones(nested))
+    return phones
+
+
+def _rdap_registrar(data: dict[str, Any]) -> str | None:
+    entities = data.get("entities")
+    if not isinstance(entities, list):
+        return None
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        roles = entity.get("roles")
+        if isinstance(roles, list) and "registrar" not in roles:
+            continue
+        name = entity.get("handle")
+        vcard = entity.get("vcardArray")
+        if isinstance(vcard, list):
+            for item in _extract_vcard_values(vcard, "fn"):
+                return item
+        return str(name) if name else None
+    return None
+
+
+def _extract_vcard_values(value: Any, prop_name: str) -> list[str]:
+    found: list[str] = []
+    if isinstance(value, list):
+        if len(value) >= 4 and value[0] == prop_name and isinstance(value[3], str):
+            found.append(value[3])
+        for nested in value:
+            found.extend(_extract_vcard_values(nested, prop_name))
+    return found

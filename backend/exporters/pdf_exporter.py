@@ -74,6 +74,8 @@ class PdfExporter(BaseExporter):
         score_drivers = data.get("score_drivers", [])
         recommended_actions = data.get("recommended_actions", [])
         credibility_html = self._credibility_html(data.get("email_credibility"))
+        identity_html = self._identity_html(data)
+        defenders_brief_html = self._defenders_brief_html(data.get("defenders_brief"))
 
         score_display = str(score) if score is not None else "-"
         credential_display = str(credential_score) if credential_score is not None else "-"
@@ -127,6 +129,7 @@ class PdfExporter(BaseExporter):
     <div class="credential-pill">
       Credential Risk: <strong>{_e(credential_display)}/100</strong> {_e(credential_band)}
     </div>
+    {identity_html}
   </div>
   <div class="stat-pills">
     <div class="pill"><strong>{_e(total_findings)}</strong>&nbsp;findings</div>
@@ -136,6 +139,8 @@ class PdfExporter(BaseExporter):
   </div>
   <p class="summary-text">{_e(summary)}</p>
 </section>
+
+{defenders_brief_html}
 
 <h2>Email Credibility</h2>
 {credibility_html}
@@ -169,6 +174,30 @@ class PdfExporter(BaseExporter):
         items = "".join(f"<li>{_e(value)}</li>" for value in values)
         return f"<ul>{items}</ul>"
 
+    def _defenders_brief_html(self, brief: Any) -> str:
+        if not isinstance(brief, dict) or not brief:
+            return ""
+        findings = brief.get("top_findings") if isinstance(brief.get("top_findings"), list) else []
+        finding_html = ""
+        for finding in findings[:3]:
+            if not isinstance(finding, dict):
+                continue
+            severity = str(finding.get("severity") or "").lower()
+            finding_html += f"""
+<div class="brief-finding">
+  <div><strong>{_e(finding.get('title', ''))}</strong> <span class="brief-severity">{_e(severity.upper())}</span></div>
+  <div>{_e(finding.get('detail', ''))}</div>
+  <div class="brief-action">{_e(finding.get('remediation', ''))}</div>
+</div>"""
+        return f"""
+<section class="brief-section">
+  <h2>Defender's Brief</h2>
+  <div class="brief-risk">Risk: <strong>{_e(brief.get('risk_level', 'UNKNOWN'))}</strong></div>
+  <p>{_e(brief.get('risk_summary', ''))}</p>
+  {finding_html}
+  <p class="brief-next"><strong>Next action:</strong> {_e(brief.get('next_action', ''))}</p>
+</section>"""
+
     def _alt_emails_html(self, alt_emails: list[dict[str, Any]]) -> str:
         if not alt_emails:
             return ""
@@ -200,6 +229,20 @@ class PdfExporter(BaseExporter):
 </div>"""
         
         return f"<h2>Alternate Emails</h2>\n<div class=\"module-section\">\n{cards}\n</div>"
+
+    def _identity_html(self, data: dict[str, Any]) -> str:
+        confirmed_name = data.get("confirmed_name")
+        confidence = str(data.get("name_confidence") or "unknown")
+        if not confirmed_name or confidence == "unknown":
+            return ""
+        sources = data.get("name_sources")
+        source_text = ", ".join(str(source) for source in sources) if isinstance(sources, list) else ""
+        return (
+            '<div class="credential-pill">'
+            f"Identity: <strong>{_e(confirmed_name)}</strong> {_e(confidence.upper())}"
+            f"{' - ' + _e(source_text) if source_text else ''}"
+            "</div>"
+        )
 
     def _credibility_html(self, credibility: Any) -> str:
         if not isinstance(credibility, dict) or not credibility:
@@ -528,6 +571,37 @@ body {
   font-size: 8.5pt;
   color: #718096;
   margin-top: 8px;
+}
+
+.brief-section {
+  background: #111827;
+  border: 1px solid #374151;
+  border-left: 4px solid #22d3ee;
+  border-radius: 5px;
+  padding: 12px 14px;
+  margin-bottom: 18px;
+}
+.brief-section h2 {
+  margin-top: 0;
+}
+.brief-risk {
+  font-size: 10pt;
+  margin-bottom: 5px;
+}
+.brief-finding {
+  border-top: 1px solid #2d3748;
+  padding-top: 7px;
+  margin-top: 7px;
+}
+.brief-severity {
+  color: #fbbf24;
+  font-size: 7pt;
+  margin-left: 4px;
+}
+.brief-action,
+.brief-next {
+  color: #cbd5e1;
+  margin-top: 4px;
 }
 
 .timeline-summary {

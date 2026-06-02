@@ -1,8 +1,125 @@
 # Module Reference
 
-MailAccess ships 28 modules covering 800+ platforms. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
+MailAccess ships 41 modules covering 800+ platforms. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
 
 A module marked **key required** skips itself with `status: skipped` when its API key is absent — it does not cause the investigation to fail.
+
+---
+
+## `pgp_keyserver`
+
+Search public PGP keyservers for keys tied to the target email and extract real names from UID packets.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Default** | On |
+| **Rate limit** | 1 request / second |
+| **Name weight** | 1.00 |
+| **Hit rate** | ~8-12% for technical/developer targets |
+| **Status** | Implemented |
+
+Checks `keys.openpgp.org` first, then falls back to `keyserver.ubuntu.com` when no OpenPGP.org key is found. A missing key returns `success` with no findings.
+
+**Finding schema:**
+```json
+{
+  "platform": "pgp_keyserver",
+  "profile_url": "https://keys.openpgp.org/search?q=jane@example.com",
+  "confidence": "high",
+  "metadata": {
+    "uid_name": "Jane Doe",
+    "uid_email": "jane@example.com",
+    "key_id": "ABCDEF1234567890",
+    "key_fingerprint": "0123456789ABCDEF0123456789ABCDEF12345678",
+    "key_created": "2022-01-01",
+    "key_algorithm": "RSAEncryptOrSign",
+    "source": "openpgp",
+    "all_uids": ["Jane Doe <jane@example.com>"]
+  }
+}
+```
+
+`uid_name` feeds the Name Consensus Engine as a cryptographic source with weight `1.00`.
+
+**Finding fields:** `uid_name`, `key_id`, `key_fingerprint`, `key_created`, `key_algorithm`, `source`, `all_uids`.
+
+---
+
+## `orcid_lookup`
+
+Search public ORCID records for researcher identities tied to the target email.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Default** | On |
+| **Rate limit** | 2 requests / second |
+| **Name weight** | 0.95 |
+| **Hit rate** | ~5% for researchers and academics |
+| **Status** | Implemented |
+
+Uses the unauthenticated ORCID public API to search by email, then fetches each matching `/person` record. Biography text is scanned for phone numbers and additional email addresses.
+
+**Finding schema:**
+```json
+{
+  "platform": "orcid_profile",
+  "profile_url": "https://orcid.org/0000-0000-0000-0000",
+  "confidence": "high",
+  "metadata": {
+    "orcid_id": "0000-0000-0000-0000",
+    "given_name": "Jane",
+    "family_name": "Doe",
+    "full_name": "Jane Doe",
+    "credit_name": null,
+    "biography": "Researcher biography...",
+    "researcher_urls": ["https://example.edu/~jane"],
+    "additional_emails": ["jane@university.edu"]
+  }
+}
+```
+
+Additional public emails are emitted as `alternate_email` findings. `full_name` or `credit_name` feeds the Name Consensus Engine as an institutional source with weight `0.95`.
+
+**Finding fields:** `orcid_id`, `given_name`, `family_name`, `full_name`, `credit_name`, `biography`, `researcher_urls`, `additional_emails`.
+
+---
+
+## `hackernews`
+
+Check Hacker News profiles for usernames derived from the target email local-part.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Default** | On |
+| **Rate limit** | 1 request / second per username |
+| **Name weight** | 0.35 |
+| **Status** | Implemented |
+
+Checks up to three username variants against the Firebase Hacker News API and falls back to Algolia user lookup. Profile `about` text is scanned for names, emails, phones, and linked URLs.
+
+**Finding schema:**
+```json
+{
+  "platform": "hackernews_profile",
+  "profile_url": "https://news.ycombinator.com/user?id=janedoe",
+  "confidence": "medium",
+  "metadata": {
+    "username": "janedoe",
+    "about": "I'm Jane Doe...",
+    "karma": 1200,
+    "member_since": "2018-04-10",
+    "extracted_name": "Jane Doe",
+    "linked_urls": ["https://github.com/janedoe"]
+  }
+}
+```
+
+`extracted_name` feeds the Name Consensus Engine as a social source with weight `0.35`.
+
+**Finding fields:** `username`, `about`, `karma`, `member_since`, `extracted_name`, `linked_urls`.
 
 ---
 
@@ -565,6 +682,114 @@ Full WHOIS registration data for the email's domain. Skips free email providers 
 
 When the domain uses a privacy shield, `privacy_protected` is `true` and registrant fields are omitted.
 
+RDAP vCards and raw WHOIS registrant fields are also scanned for registrant phone numbers on non-free-provider domains. The most useful post-GDPR registrars and TLDs are `.io`, `.co.uk`, `.de`, `.com.au`, `.ca`, and `.nz`. The module returns `PARTIAL` if RDAP returns phone data but WHOIS is privacy-protected.
+
+**Phone finding schema:**
+```json
+{
+  "platform": "whois_phone",
+  "signal_type": "phone_number",
+  "confidence": "medium",
+  "metadata": {
+    "phone": "+14155550123",
+    "source": "rdap",
+    "registrar": "Example Registrar",
+    "domain": "example.com"
+  }
+}
+```
+
+---
+
+## `press_intel`
+
+Opt-in search of public press release archives for contact phones tied to a business email domain. Skips free email providers.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Status** | Implemented, opt-in (`-m press_intel`) |
+
+Searches DuckDuckGo HTML results for PR Newswire, Business Wire, and GlobeNewswire mentions of the domain, then fetches up to three press releases and extracts contact-block phone numbers.
+
+**Findings schema:**
+```json
+{
+  "platform": "press_release",
+  "signal_type": "phone_number",
+  "confidence": "medium",
+  "metadata": {
+    "phone": "+14155550123",
+    "contact_name": "Media Contact Jane Doe",
+    "source_url": "https://www.prnewswire.com/news-releases/example.html",
+    "press_release_title": "Example Corp Announces ..."
+  }
+}
+```
+
+**Finding fields:** `phone`, `contact_name`, `source_url`, `press_release_title`.
+
+---
+
+## `sec_edgar`
+
+Searches SEC EDGAR full-text filings for phone numbers near the email domain. Skips free email providers.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Status** | Implemented |
+
+Fetches up to three filing documents from EDGAR search results and scans paragraphs containing the target domain.
+
+**Findings schema:**
+```json
+{
+  "platform": "sec_edgar",
+  "signal_type": "phone_number",
+  "confidence": "medium",
+  "metadata": {
+    "phone": "+14155550123",
+    "company_name": "EXAMPLE CORP",
+    "filing_type": "10-K",
+    "filing_url": "https://www.sec.gov/Archives/...",
+    "context": "Investor relations example.com +1 415 555 0123"
+  }
+}
+```
+
+---
+
+## `companies_house`
+
+Looks up UK company registration data from Companies House. Requires `COMPANIES_HOUSE_API_KEY` and skips free email providers.
+
+| | |
+|--|--|
+| **Requires key** | Yes (`COMPANIES_HOUSE_API_KEY`) |
+| **Default** | Runs when key set or for `.co.uk` / `.uk` domains |
+| **Status** | Implemented |
+
+The API key is free and does not require a credit card. Set it in `.env` to enable the module.
+
+**Findings schema:**
+```json
+{
+  "platform": "companies_house",
+  "signal_type": "company_registration",
+  "confidence": "medium",
+  "metadata": {
+    "company_name": "Example Ltd",
+    "company_number": "12345678",
+    "registered_address": "1 Example Street, London, EC1A 1BB",
+    "officers": [{"name": "JANE DOE", "role": "director"}],
+    "company_status": "active"
+  }
+}
+```
+
+**Finding fields:** `company_name`, `company_number`, `registered_address`, `officers`, `company_status`.
+
 ---
 
 ## `social`
@@ -1094,6 +1319,27 @@ Out of scope: credential verification, password hash lookup, dark web queries, a
 Metadata fields: `sites_checked`, `sites_confirmed`, `critical_hits`, `high_hits`, `total_records_potentially_exposed`, `top_breach`.
 
 Note: uses YAML probes for known platforms and generic reset-flow inference for unknown domains.
+
+---
+
+## Name Consensus Engine
+
+Not a standalone module: this is a core engine in `backend/core/` that runs after all modules complete. It reads name signals from profile, key, researcher, social, package, and commit findings, then emits one defensible identity result for the report and CLI.
+
+Sources include:
+- `github_user`
+- `gravatar_profile`
+- `keybase_profile`
+- `twitter_profile`
+- `linkedin_snippet`
+- `pgp_keyserver`
+- `orcid_profile`
+- `hackernews_profile`
+- `pypi_discovery`
+- `npm_discovery`
+- Git commit author names
+
+The engine outputs `confirmed_name`, `name_confidence`, `name_reasoning`, and `name_sources`. Role/system email addresses such as `noreply@`, `admin@`, `support@`, `postmaster@`, and `notifications@` are automatically skipped so service accounts do not receive inferred identities.
 
 ---
 

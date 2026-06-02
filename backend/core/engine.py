@@ -12,6 +12,8 @@ from ..db.models import Finding, Investigation, InvestigationStatus, ModuleRun
 from .email_credibility import normalize_email_address
 from .breach_normalizer import collapse_breach_findings
 from .credential_risk import assess_credential_risk_from_results
+from .defenders_brief import defenders_brief_to_dict, generate_defenders_brief
+from .name_consensus import NameConsensusEngine, extract_name_candidates
 from .timeline import TimelineBuilder
 from ..modules.base import ModuleResult, ModuleStatus
 
@@ -136,7 +138,10 @@ def _sort_collected(results: dict[str, ModuleResult]) -> dict[str, ModuleResult]
     return ordered
 
 
-def _compute_exposure_score(results: dict[str, ModuleResult]) -> int:
+def _compute_exposure_score(
+    results: dict[str, ModuleResult],
+    name_confidence: str | None = None,
+) -> int:
     """
     Confidence-weighted, per-module-capped exposure score, clamped to [0, 100].
 
@@ -167,7 +172,13 @@ def _compute_exposure_score(results: dict[str, ModuleResult]) -> int:
 
         total += module_score
 
-    return min(int(total), 100)
+    name_bonus = {
+        "confirmed": 10,
+        "probable": 5,
+        "possible": 2,
+    }.get(str(name_confidence or "").lower(), 0)
+
+    return min(int(total) + name_bonus, 100)
 
 
 @dataclass
@@ -225,6 +236,12 @@ class InvestigationEngine:
                 c
                 for c in get_all_modules()
                 if c.name not in _POST_PRIMARY_ONLY and c.name != "emailrep"
+            ]
+            enabled = set(enable_modules or [])
+            classes = [
+                c
+                for c in classes
+                if c.name != "press_intel" or c.name in enabled
             ]
         classes = [c for c in classes if c.name != "email_credibility"]
         classes = sorted(classes, key=lambda c: (getattr(c, "priority", 100), c.name))
@@ -327,6 +344,7 @@ class InvestigationEngine:
                 "breach_deep": "enable_breach_deep",
                 "ghunt": "enable_ghunt",
                 "email_discovery": "enable_email_discovery",
+                "press_intel": "enable_press_intel",
             }
 
             override_flags = {
@@ -680,13 +698,17 @@ class InvestigationEngine:
                         _final,
                         started_at,
                         canonical_email,
+                        email,
                         graph_data,
                     )
 
                     # Dispatch webhooks if configured
                     try:
                         from ..integrations.webhooks import WebhookDispatcher
-                        score = _compute_exposure_score(_final)
+                        name_result = NameConsensusEngine(email).resolve(
+                            extract_name_candidates(_final, email)
+                        )
+                        score = _compute_exposure_score(_final, name_result.name_confidence)
                         credential_risk = assess_credential_risk_from_results(_final)
                         await WebhookDispatcher().dispatch(
                             email,
@@ -741,16 +763,35 @@ class InvestigationEngine:
         collected: dict[str, ModuleResult],
         started_at: datetime,
         canonical_email: str,
+        original_email: str,
         graph_data: dict | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
-        score = _compute_exposure_score(collected)
+        name_result = NameConsensusEngine(original_email).resolve(
+            extract_name_candidates(collected, original_email)
+        )
+        score = _compute_exposure_score(collected, name_result.name_confidence)
         credential_risk = assess_credential_risk_from_results(collected, as_of=now)
         timeline_rows: list[dict] = []
         for module_name, result in collected.items():
             for finding_data in result.findings:
                 timeline_rows.append({"module_name": module_name, "data": finding_data})
-        timeline_json = asdict(TimelineBuilder(as_of=now).build_timeline(timeline_rows))
+        timeline = TimelineBuilder(as_of=now).build_timeline(timeline_rows)
+        timeline_json = asdict(timeline)
+        credibility = {}
+        credibility_result = collected.get("email_credibility")
+        if credibility_result and isinstance(credibility_result.metadata, dict):
+            credibility = credibility_result.metadata
+        defenders_brief = defenders_brief_to_dict(
+            generate_defenders_brief(
+                {"email": original_email},
+                timeline_rows,
+                credential_risk,
+                name_result,
+                timeline,
+                credibility,
+            )
+        )
 
         async with AsyncSessionLocal() as session:
             async with session.begin():
@@ -760,7 +801,12 @@ class InvestigationEngine:
                     "canonical_email": canonical_email,
                     "exposure_score": score,
                     "credential_risk_score": credential_risk.score,
+                    "confirmed_name": name_result.confirmed_name,
+                    "name_confidence": name_result.name_confidence,
+                    "name_reasoning": name_result.name_reasoning,
+                    "name_sources": name_result.name_sources,
                     "timeline_json": timeline_json,
+                    "defenders_brief_json": defenders_brief,
                 }
                 if graph_data is not None:
                     values["graph_data"] = graph_data
