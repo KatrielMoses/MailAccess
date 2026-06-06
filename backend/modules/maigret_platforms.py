@@ -88,18 +88,17 @@ class MaigretPlatformsModule(BaseModule):
     name = "maigret_platforms"
     description = (
         "Username enumeration across 2500+ platforms via the Maigret platform database. "
-        "Enable via ENABLE_MAIGRET_PLATFORMS=true."
+        "Disable via ENABLE_MAIGRET_PLATFORMS=false."
     )
     requires_key = False
-    default_enabled = False
+    default_enabled = True
 
     async def run(self, email: str, force: bool = False) -> ModuleResult:
         if not (settings.enable_maigret_platforms or force):
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
                 errors=[
-                    "Set ENABLE_MAIGRET_PLATFORMS=true or run with --modules "
-                    "maigret_platforms to enable. Checks 2500+ additional platforms."
+                    "maigret_platforms disabled \u2014 set ENABLE_MAIGRET_PLATFORMS=true to scan 2500+ platforms (default behavior)"
                 ],
             )
 

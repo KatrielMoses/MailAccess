@@ -66,7 +66,7 @@ mailaccess investigate email -m all
 - **Phone number recovery** — pipeline to surface and validate numbers tied to the target
 - **Telegram / WhatsApp hints** — lightweight messaging-app footprint checks alongside other modules
 - **YAML-driven platform system** — social-style checks defined in `backend/platforms/`; community extensible without new Python for each site
-- **Native Maigret engine** — opt-in 2500+ platform coverage without a Maigret runtime dependency, including regional, niche, and international platforms not covered by WMN
+- **Native Maigret engine** — 2500+ platform coverage without a Maigret runtime dependency, including regional, niche, and international platforms not covered by WMN
 - **Catch-all detection** — excludes platforms that return false positives for arbitrary usernames before the sweep starts
 - **Platform deduplication** — merges WMN and Maigret results by profile URL domain so confirmed platforms are not double-counted
 - **Deep breach mode** — checks top 100 highest-severity breached sites for account existence
@@ -113,7 +113,7 @@ mailaccess investigate email -m all
 | account_discovery | Holehe 120+ platforms | No | Yes |
 | user_scanner | 205+ platform vectors | No | Yes |
 | whatsmyname | 700+ platforms | No | Yes |
-| maigret_platforms | Native Maigret platform engine, 2500+ platforms | No | Yes (`ENABLE_MAIGRET_PLATFORMS=true`) |
+| maigret_platforms | Native Maigret platform engine, 2500+ platforms | No | No (disable via `ENABLE_MAIGRET_PLATFORMS=false`) |
 | breachdirectory | 2nd breach source | Yes | No |
 | username_pivot | WMN via recovered usernames | No | Yes |
 | permutation_discovery | 60 email variants | No | Yes |
@@ -122,7 +122,7 @@ mailaccess investigate email -m all
 | ghunt | Gmail deep intel | No (setup required) | Yes |
 | identity_graph | Cross-platform cluster analysis | No | No (automatic) |
 
-> 43 modules, 800+ platforms by default, and 2500+ platforms when `ENABLE_MAIGRET_PLATFORMS=true`. The summary bar reports the actual unique platform count after deduplication.
+> 43 modules, 2500+ platforms by default.
 
 ## Platform Coverage
 
@@ -133,7 +133,7 @@ MailAccess checks usernames derived from the target email across multiple platfo
 | WhatsMyName | 700+ | On |
 | Holehe | 120+ | On |
 | user-scanner | 205+ | On |
-| Maigret native engine | 2500+ | Off |
+| Maigret native engine | 2500+ | On |
 
 Total with Maigret enabled: 2500+ unique platforms after deduplication.
 
@@ -330,6 +330,11 @@ When a bare filename is given (no directory component), the file is written to t
 | `DISCORD_WEBHOOK_URL` | Webhooks | Discord server settings | No |
 
 ## Changelog
+
+### 0.8.1
+- maigret_platforms now default-on (2500+ platforms checked in every investigation)
+- Wave 2 remains opt-in via ENABLE_MAIGRET_WAVE2
+- ENABLE_MAIGRET_PLATFORMS=false to disable if investigation speed is a priority
 
 ### 0.8.0
 - Native Maigret platform engine: 2500+ platforms without Maigret runtime dependency

@@ -144,8 +144,8 @@ class Settings(BaseSettings):
     # WhatsMyName — username enumeration across 700+ platforms (~15s with concurrency)
     enable_whatsmyname: bool = True
 
-    # Maigret native platform engine — opt-in 2500+ platform username sweep
-    enable_maigret_platforms: bool = False
+    # Maigret native platform engine — 2500+ platform username sweep
+    enable_maigret_platforms: bool = True
     enable_maigret_wave2: bool = False
 
     # User-scanner — probes 205+ platforms via user-scanner (no API key required)

@@ -931,8 +931,8 @@ Native platform checking engine using Maigret's MIT-licensed platform database. 
 | | |
 |--|--|
 | **Requires key** | No |
-| **Default** | Off |
-| **Enable** | `ENABLE_MAIGRET_PLATFORMS=true` |
+| **Default** | On |
+| **Disable** | `ENABLE_MAIGRET_PLATFORMS=false` (only if investigation speed is a priority) |
 | **Wave 2** | `ENABLE_MAIGRET_WAVE2=true` for additional slower and more fragile platforms |
 | **Runtime** | ~35-90s for Wave 1, plus ~90-150s for Wave 2 |
 | **Platform database** | Fetched from Maigret GitHub and cached 24h at `~/.mailaccess/cache/maigret-data.json` |

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mailaccess"
-version = "0.8.0"
+version = "0.8.1"
 description = "Open-source OSINT email intelligence tool"
 readme = "README.md"
 requires-python = ">=3.10"

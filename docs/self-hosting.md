@@ -94,7 +94,7 @@ Every setting is optional unless marked required.
 | `BREACH_DEEP_LIMIT` | `100` | Sites to probe; max 750 |
 | `BREACH_DEEP_FULL` | `false` | Probe all 750 HIBP sites |
 | `ENABLE_EMAIL_DISCOVERY` | `true` | Name-to-email dorks |
-| `ENABLE_MAIGRET_PLATFORMS` | `false` | Optional. Enable native Maigret platform engine (2500+ platforms). Adds ~35-90s to investigation. |
+| `ENABLE_MAIGRET_PLATFORMS` | `true` | Default true. Set to false to disable 2500+ platform sweep and reduce investigation time by ~35-90s. |
 | `ENABLE_MAIGRET_WAVE2` | `false` | Optional. Enable Wave 2 slow/fragile platform sweep. Requires `ENABLE_MAIGRET_PLATFORMS=true`. Adds ~90-150s. |
 | `GITHUB_TOKEN` | _(unset)_ | Optional. Required for GitHub commit author-email search. Without it, `github_commits` runs user profile search only. Get at: [github.com/settings/tokens](https://github.com/settings/tokens) |
 | `COMPANIES_HOUSE_API_KEY` | _(unset)_ | Optional. UK Companies House officer/address lookup. Free, no CC. Get at: [developer.company-information.service.gov.uk](https://developer.company-information.service.gov.uk) |
