@@ -230,6 +230,7 @@ class InvestigationService:
             "email": inv.email,
             "canonical_email": inv.canonical_email,
             "status": inv.status.value,
+            "error": inv.error,
             "exposure_score": inv.exposure_score,
             "credential_risk_score": inv.credential_risk_score,
             "confirmed_name": inv.confirmed_name,
@@ -240,6 +241,7 @@ class InvestigationService:
             "timeline_json": inv.timeline_json,
             "defenders_brief_json": inv.defenders_brief_json,
             "created_at": inv.created_at.isoformat(),
+            "started_at": inv.started_at.isoformat() if inv.started_at else None,
             "completed_at": inv.completed_at.isoformat() if inv.completed_at else None,
             "findings": [
                 {

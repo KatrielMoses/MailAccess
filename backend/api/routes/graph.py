@@ -80,18 +80,30 @@ async def get_investigation_clusters(
         {"module_name": f.module_name, "data": f.data}
         for f in inv.findings
     ])
+    # Phase 6B.2 — supply the persisted name consensus to the V2
+    # shadow-profile detector so the CLI can render the SHADOW PROFILES
+    # section without re-running the engine.
+    name_consensus_dict: dict | None = None
+    if inv.confirmed_name:
+        name_consensus_dict = {
+            "confirmed_name": inv.confirmed_name,
+            "name_confidence": inv.name_confidence,
+        }
     graph_input = {
         "email": inv.email,
         "findings": raw_findings,
     }
-    graph = IdentityGraph.build(graph_input)
+    graph = IdentityGraph.build(
+        graph_input, name_consensus=name_consensus_dict
+    )
     clusters = graph.to_cli(raw_findings)
-    
+
     total_findings = len(raw_findings)
     collapsed_findings = sum(c["finding_count"] for c in clusters if c["is_collision"])
-    
+
     return {
         "clusters": clusters,
         "total_findings": total_findings,
-        "collapsed_findings": collapsed_findings
+        "collapsed_findings": collapsed_findings,
+        "shadow_findings": graph.shadow_findings,
     }

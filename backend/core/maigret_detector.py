@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import re
 from typing import Any
 from urllib.parse import urlparse
@@ -23,6 +24,8 @@ def _domains_match(left: str, right: str) -> bool:
 
 
 def _detect_message(defn: dict[str, Any], body: str) -> str:
+    body = html.unescape(body)
+
     for marker in _as_list(defn.get("absenceStrs")):
         if marker in body:
             return "miss"
@@ -38,6 +41,8 @@ def _detect_message(defn: dict[str, Any], body: str) -> str:
 
 def detect_hit(defn: dict[str, Any], body: str, status: int, final_url: str) -> str:
     """Classify a Maigret probe result as hit, miss, or inconclusive."""
+    body = html.unescape(body)
+
     for marker in (defn.get("errors") or {}):
         if str(marker) in body:
             return "inconclusive"
@@ -46,6 +51,16 @@ def detect_hit(defn: dict[str, Any], body: str, status: int, final_url: str) -> 
 
     if check_type == "status_code":
         if status == 200:
+            for marker in _as_list(defn.get("absenceStrs")):
+                if marker in body:
+                    return "miss"
+            min_response_bytes = defn.get("min_response_bytes", 500)
+            try:
+                min_response_bytes = int(min_response_bytes)
+            except (TypeError, ValueError):
+                min_response_bytes = 500
+            if len(body) < min_response_bytes:
+                return "inconclusive"
             return "hit"
         if status == 404:
             return "miss"

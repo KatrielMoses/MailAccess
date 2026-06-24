@@ -87,6 +87,10 @@ PDF exports use an async `generate()` method instead of `export()`; see `PdfExpo
 - [ ] No blocking I/O executed directly on the asyncio event loop
 - [ ] No hardcoded credentials, tokens, or identifying user-agent strings
 - [ ] Existing tests pass (`pytest`)
+- [ ] Tests are bundled in the same PR, not submitted separately
+- [ ] If the result shape changes, `docs/modules.md` and `docs/architecture.md` are updated in the same PR
+- [ ] Reasoning modules are wired into `backend/core/engine.py`, `backend/core/phases.py`, or the equivalent post-primary pipeline
+- [ ] No new third-party dependencies are added; use the standard library and existing project dependencies
 - [ ] PR description explains what data source is queried, what the findings look like, and why they are useful for OSINT
 
 ---
@@ -107,6 +111,42 @@ OSINT social / communication probes are defined as YAML files — no Python chan
 5. Open a PR with the YAML only. Invalid files are logged and skipped at runtime; they do not crash the server.
 
 Use `|` in `success_string` or `failure_string` for multiple alternative substrings (OR). Use `{email}`, `{username}`, or `{md5}` in URLs and bodies.
+
+---
+
+## Adding a Reasoning Module
+
+Reasoning modules run after primary collectors and do not fetch external data. They
+consume the existing `dict[str, ModuleResult]`, then emit synthesized clusters,
+scores, normalized findings, or other enriched output. See
+`backend/core/identity_graph.py`, `backend/core/name_consensus.py`,
+`backend/core/breach_normalizer.py`, and `backend/core/credential_risk.py`.
+
+Keep the contract narrow: accept the results dictionary, return an enriched copy or
+modify and return the same dictionary, and preserve each collector's provenance.
+Wire the component into `backend/core/engine.py`, `backend/core/phases.py`, or the
+equivalent post-primary pipeline; core reasoning files are not discovered through
+`backend/modules/__init__.py`.
+
+---
+
+## Testing Guidelines
+
+- `pytest` is the project test runner. `asyncio_mode = "auto"` in `pyproject.toml`
+  makes async test functions auto-detect.
+- Mock HTTP with `unittest.mock.patch` on `httpx.Client.get`, or use
+  `monkeypatch.setattr` on the module-level import. Do not add `respx` or
+  `httpx_mock`.
+- For settings-dependent tests, use
+  `monkeypatch.setattr(settings, "field_name", value)`; pytest restores the value
+  during teardown.
+- Isolate files with `tmp_path`. Cache tests should pass a path such as
+  `cache_path=tmp_path / "x.json"` instead of mutating global cache files.
+- Build result fixtures with
+  `ModuleResult(status=ModuleStatus.SUCCESS, findings=[...])`; see
+  `tests/test_platform_dedup.py`.
+- Use `caplog` for log assertions; see `tests/test_breach_normalizer.py`.
+- Follow the async orchestration patterns in `tests/test_phase_runner.py`.
 
 ---
 

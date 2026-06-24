@@ -31,6 +31,10 @@ data/
 !data/
 data/*
 !data/mailaccess-extra-sites.json
+!data/disposable_domains.json
+!data/reset_signals.json
+!data/sherlock_sites.json
+!data/service_categories.yaml
 maltego/*.mtz
 
 # IDE
@@ -49,6 +53,20 @@ test_*.py
 !tests/test_name_consensus.py
 !tests/test_timeline.py
 !tests/test_maigret_platforms.py
+!tests/test_disposable_domains.py
+!tests/test_reset_prober.py
+!tests/test_avatar_hasher.py
+!tests/test_avatar_clusters.py
+!tests/test_identity_graph.py
+!tests/test_bio_similarity.py
+!tests/test_bio_clusters.py
+!tests/test_sherlock_detector.py
+!tests/test_sherlock_platforms.py
+!tests/test_rate_limiter.py
+!tests/test_breach_corpus.py
+!tests/test_breach_deep.py
+!tests/test_proxy.py
+!tests/test_aggregator.py
 verify_*.py
 .pytest_cache/
 coverage/

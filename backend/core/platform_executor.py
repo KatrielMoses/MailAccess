@@ -8,8 +8,7 @@ from typing import Any
 import httpx
 
 from ..platforms.schema import PlatformCheck
-
-_DEFAULT_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+from .user_agents import random_user_agent
 
 
 def _split_alternatives(value: str | None) -> list[str]:
@@ -125,8 +124,6 @@ class PlatformExecutor:
             return await self._check_duolingo(platform, email, client)
         if slug == "adobe":
             return await self._check_adobe(platform, email, client)
-        if slug == "github":
-            return await self._check_github(platform, email, client)
         return await self._check_generic(platform, email, client, username=username)
 
     async def _request(
@@ -153,7 +150,7 @@ class PlatformExecutor:
             context.update(extra_context)
 
         req_url = _substitute(url or platform.url, context)
-        req_headers = {**_DEFAULT_HEADERS, **(platform.headers or {})}
+        req_headers = {"User-Agent": random_user_agent(), **(platform.headers or {})}
         if headers:
             req_headers.update(headers)
         req_body = _substitute_deep(body if body is not None else platform.body, context)
@@ -196,7 +193,16 @@ class PlatformExecutor:
         slug = platform.slug
         try:
             try:
-                resp = await self._request(platform, email, client, username=username)
+                extracted: dict[str, Any] = {}
+                if platform.multi_step:
+                    resp, extracted = await self._run_multi_step(
+                        platform,
+                        email,
+                        client,
+                        username=username,
+                    )
+                else:
+                    resp = await self._request(platform, email, client, username=username)
             except Exception:
                 if slug == "spotify":
                     return {"findings": []}
@@ -225,6 +231,7 @@ class PlatformExecutor:
                 return None
 
             metadata = self._build_metadata(platform, slug)
+            metadata.update(extracted)
             context = {"email": email, "username": username or email.split("@")[0]}
 
             if platform.extract and platform.check_type == "json_field":
@@ -266,6 +273,68 @@ class PlatformExecutor:
             err = repr(exc) if slug == "linkedin" and not str(exc) else str(exc)
             return {"error": f"{platform.name} failed: {err}"}
 
+    async def _run_multi_step(
+        self,
+        platform: PlatformCheck,
+        email: str,
+        client: httpx.AsyncClient,
+        *,
+        username: str | None = None,
+    ) -> tuple[httpx.Response | None, dict[str, Any]]:
+        context: dict[str, str] = {}
+        extracted: dict[str, Any] = {}
+        response: httpx.Response | None = None
+
+        for step in platform.multi_step or []:
+            response = await self._request(
+                platform,
+                email,
+                client,
+                username=username,
+                extra_context=context,
+                url=step.url,
+                method=step.method,
+                headers=step.headers,
+                body=step.body,
+            )
+            if response is None:
+                return None, {}
+
+            step_values = self._extract_step_fields(response, step.extract_fields)
+            extracted.update(step_values)
+            context.update({key: str(value) for key, value in step_values.items()})
+
+        return response, extracted
+
+    @staticmethod
+    def _extract_step_fields(
+        response: httpx.Response,
+        extract_fields: dict[str, str],
+    ) -> dict[str, Any]:
+        extracted: dict[str, Any] = {}
+        text = _response_text(response)
+        json_data: Any = None
+        json_loaded = False
+
+        for field, spec in extract_fields.items():
+            if spec.startswith("regex:"):
+                match = re.search(spec[6:], text)
+                if match:
+                    extracted[field] = match.group(1) if match.groups() else match.group(0)
+                continue
+
+            if not json_loaded:
+                json_loaded = True
+                try:
+                    json_data = response.json()
+                except Exception:
+                    json_data = None
+            value = _get_json_path(json_data, spec)
+            if value is not None:
+                extracted[field] = value
+
+        return extracted
+
     def _evaluate_success(
         self,
         platform: PlatformCheck,
@@ -280,50 +349,68 @@ class PlatformExecutor:
                 "not associated|invalid|not found|please try again"
             )
             if any(marker.lower() in lowered for marker in unregistered):
-                return False
-            return resp.status_code in (200, 302)
-
-        if slug == "apple" and resp.status_code == 200:
+                success = False
+            else:
+                success = resp.status_code in (200, 302)
+        elif slug == "apple" and resp.status_code == 200:
             try:
                 data = resp.json()
-                return any(
+                success = any(
                     data.get(key) is True for key in ("used", "exists", "isUsed")
                 )
             except Exception:
-                return False
-
-        if slug == "discord":
+                success = False
+        elif slug == "discord":
             try:
                 data = resp.json()
-                return "email" in data.get("errors", {})
+                success = "email" in data.get("errors", {})
             except Exception:
-                return False
-
-        if platform.check_type == "status":
-            return resp.status_code == platform.success_status
-        if platform.check_type == "body_contains":
+                success = False
+        elif platform.check_type == "status":
+            success = resp.status_code == platform.success_status
+        elif platform.check_type == "body_contains":
             lowered = text.lower()
             markers = _split_alternatives(platform.success_string)
-            return any(marker.lower() in lowered for marker in markers)
-        if platform.check_type == "body_not_contains":
+            matches = sum(marker.lower() in lowered for marker in markers)
+            if platform.presence_threshold > 0.0:
+                success = bool(markers) and matches / len(markers) >= platform.presence_threshold
+            else:
+                success = not markers or matches > 0
+        elif platform.check_type == "body_not_contains":
             lowered = text.lower()
             markers = _split_alternatives(platform.failure_string)
-            return not any(marker.lower() in lowered for marker in markers)
+            success = not any(marker.lower() in lowered for marker in markers)
+        elif resp.status_code != platform.success_status:
+            success = False
+        else:
+            try:
+                data = resp.json()
+            except Exception:
+                success = False
+            else:
+                if platform.json_success_path:
+                    value = _get_json_path(data, platform.json_success_path)
+                    if platform.json_success_value is None:
+                        success = value == 0 if slug == "skype_microsoft" else bool(value)
+                    else:
+                        success = str(value) == str(platform.json_success_value)
+                else:
+                    success = bool(data)
 
-        if resp.status_code != platform.success_status:
+        if not success:
             return False
-        try:
-            data = resp.json()
-        except Exception:
+
+        lowered = text.lower()
+        if platform.absence_strings and any(
+            marker.lower() in lowered for marker in platform.absence_strings
+        ):
             return False
-        if platform.json_success_path:
-            value = _get_json_path(data, platform.json_success_path)
-            if platform.json_success_value is None:
-                if slug == "skype_microsoft":
-                    return value == 0
-                return bool(value)
-            return str(value) == str(platform.json_success_value)
-        return bool(data)
+        if (
+            platform.min_content_length is not None
+            and len(resp.content) < platform.min_content_length
+        ):
+            return False
+        return True
 
     def _build_metadata(self, platform: PlatformCheck, slug: str) -> dict[str, Any]:
         if not platform.notes:
@@ -412,56 +499,6 @@ class PlatformExecutor:
         except Exception as exc:
             return {"error": f"Adobe failed: {exc!s}"}
 
-    async def _check_github(
-        self,
-        platform: PlatformCheck,
-        email: str,
-        client: httpx.AsyncClient,
-    ) -> dict[str, Any] | None:
-        try:
-            headers = platform.headers or {}
-            resp = await client.get(
-                platform.url,
-                headers={**_DEFAULT_HEADERS, **headers},
-                params={"q": f"{email} in:email"},
-                timeout=platform.timeout,
-            )
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if data.get("total_count", 0) <= 0:
-                return None
-            items = data.get("items", [])
-            if not items:
-                return None
-            first = items[0]
-            login = first.get("login")
-            if not login:
-                return None
-            metadata: dict[str, Any] = {
-                "login": login,
-                "avatar_url": first.get("avatar_url"),
-                "html_url": first.get("html_url"),
-                "type": first.get("type"),
-            }
-            user_resp = await client.get(
-                f"https://api.github.com/users/{login}",
-                headers={**_DEFAULT_HEADERS, **headers},
-                timeout=platform.timeout,
-            )
-            if user_resp.status_code == 200:
-                user_data = user_resp.json()
-                for key in ("name", "bio", "location", "public_repos", "followers", "company"):
-                    if user_data.get(key) is not None:
-                        metadata[key] = user_data.get(key)
-            return _finding(
-                platform,
-                profile_url=first.get("html_url"),
-                metadata=metadata,
-            )
-        except Exception as exc:
-            return {"error": f"GitHub failed: {exc!s}"}
-
     async def _check_gravatar_linked(
         self,
         platform: PlatformCheck,
@@ -479,7 +516,11 @@ class PlatformExecutor:
                 email_clean = email.strip().lower()
                 md5_hash = hashlib.md5(email_clean.encode("utf-8")).hexdigest()
                 url = f"https://www.gravatar.com/{md5_hash}.json"
-                resp = await client.get(url, headers=_DEFAULT_HEADERS, timeout=platform.timeout)
+                resp = await client.get(
+                    url,
+                    headers={"User-Agent": random_user_agent()},
+                    timeout=platform.timeout,
+                )
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("entry"):

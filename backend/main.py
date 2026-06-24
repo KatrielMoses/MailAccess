@@ -16,7 +16,7 @@ from .api.router import api_router, ws_router
 from .api.middleware.auth import APIKeyMiddleware, RequestIDMiddleware, request_id_contextvar
 from .api.routes.health import router as health_router
 from .api.routes.maltego import router as maltego_router
-from .config import settings
+from .config import APP_VERSION, settings
 from .db.database import init_db
 from .integrations.maltego_transform import generate_mtz_bundle
 
@@ -71,7 +71,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title="MailAccess",
     description="OSINT email intelligence API",
-    version="0.6.5",
+    version=APP_VERSION,
     lifespan=lifespan,
     debug=settings.debug,
 )

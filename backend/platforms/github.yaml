@@ -4,6 +4,24 @@ category: social
 method: GET
 headers:
   Accept: application/vnd.github+json
-check_type: json_field
-json_success_path: total_count
+multi_step:
+  - name: search users by email
+    url: "https://api.github.com/search/users?q={email}%20in:email"
+    extract_fields:
+      login: items.0.login
+      avatar_url: items.0.avatar_url
+      html_url: items.0.html_url
+      profile_url: items.0.html_url
+      type: items.0.type
+  - name: fetch user detail
+    url: https://api.github.com/users/{login}
+    extract_fields:
+      name: name
+      bio: bio
+      location: location
+      public_repos: public_repos
+      followers: followers
+      company: company
+check_type: status
+success_status: 200
 confidence: high

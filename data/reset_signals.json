@@ -1,0 +1,62 @@
+{
+  "EN": {
+    "success": ["check your email", "reset link sent", "if an account exists", "email has been sent", "password reset", "we sent", "instructions have been sent", "check your inbox"],
+    "failure": ["not found", "no account", "doesn't exist", "does not exist", "not registered", "invalid email", "no user found", "account not found"]
+  },
+  "RU": {
+    "success": ["письмо отправлено", "проверьте почту", "ссылка отправлена", "инструкции отправлены", "проверьте входящие", "восстановление пароля"],
+    "failure": ["пользователь не найден", "аккаунт не найден", "учетная запись не найдена", "такого пользователя нет", "не зарегистрирован", "неверный адрес электронной почты"]
+  },
+  "ES": {
+    "success": ["correo enviado", "revisa tu correo", "enlace enviado", "instrucciones enviadas", "revisa tu bandeja", "restablecer contraseña"],
+    "failure": ["usuario no encontrado", "cuenta no encontrada", "no existe una cuenta", "correo no registrado", "no está registrado", "correo electrónico no válido"]
+  },
+  "FR": {
+    "success": ["e-mail envoyé", "courriel envoyé", "consultez votre messagerie", "lien envoyé", "instructions envoyées", "vérifiez votre boîte de réception"],
+    "failure": ["utilisateur introuvable", "compte introuvable", "aucun compte", "n'existe pas", "adresse non enregistrée", "adresse e-mail invalide"]
+  },
+  "DE": {
+    "success": ["e-mail wurde gesendet", "überprüfen sie ihre e-mail", "link wurde gesendet", "anweisungen wurden gesendet", "prüfen sie ihren posteingang", "passwort zurücksetzen"],
+    "failure": ["benutzer nicht gefunden", "konto nicht gefunden", "kein konto", "existiert nicht", "nicht registriert", "ungültige e-mail-adresse"]
+  },
+  "PT": {
+    "success": ["e-mail enviado", "verifique seu e-mail", "link enviado", "instruções enviadas", "verifique sua caixa de entrada", "redefinir senha"],
+    "failure": ["usuário não encontrado", "conta não encontrada", "nenhuma conta", "não existe", "não cadastrado", "e-mail inválido"]
+  },
+  "ZH": {
+    "success": ["邮件已发送", "郵件已發送", "请检查您的邮箱", "請檢查您的郵箱", "重置链接已发送", "重設連結已傳送", "请查收邮件", "請查收郵件"],
+    "failure": ["未找到该账户", "未找到該賬戶", "未找到該帳戶", "用户不存在", "使用者不存在", "账户不存在", "帳戶不存在", "邮箱未注册", "郵箱未註冊"]
+  },
+  "JA": {
+    "success": ["メールを送信しました", "メールをご確認ください", "リンクを送信しました", "手順を送信しました", "受信トレイを確認", "パスワードをリセット"],
+    "failure": ["ユーザーが見つかりません", "アカウントが見つかりません", "アカウントは存在しません", "登録されていません", "未登録のメールアドレス", "メールアドレスが無効です"]
+  },
+  "KO": {
+    "success": ["이메일을 보냈습니다", "이메일을 확인하세요", "링크를 보냈습니다", "안내를 보냈습니다", "받은편지함을 확인하세요", "비밀번호 재설정"],
+    "failure": ["사용자를 찾을 수 없습니다", "계정을 찾을 수 없습니다", "계정이 존재하지 않습니다", "등록되지 않은 이메일", "가입되지 않은 계정", "잘못된 이메일 주소"]
+  },
+  "AR": {
+    "success": ["تم إرسال البريد", "تحقق من بريدك الإلكتروني", "تم إرسال الرابط", "تم إرسال التعليمات", "تحقق من صندوق الوارد", "إعادة تعيين كلمة المرور"],
+    "failure": ["المستخدم غير موجود", "الحساب غير موجود", "لم يتم العثور على الحساب", "البريد غير مسجل", "غير مسجل", "عنوان بريد إلكتروني غير صالح"]
+  },
+  "NL": {
+    "success": ["e-mail verzonden", "controleer uw e-mail", "link verzonden", "instructies verzonden", "controleer uw inbox", "wachtwoord opnieuw instellen"],
+    "failure": ["gebruiker niet gevonden", "account niet gevonden", "geen account", "bestaat niet", "niet geregistreerd", "ongeldig e-mailadres"]
+  },
+  "PL": {
+    "success": ["wiadomość została wysłana", "sprawdź pocztę", "link został wysłany", "instrukcje zostały wysłane", "sprawdź skrzynkę odbiorczą", "resetowanie hasła"],
+    "failure": ["nie znaleziono użytkownika", "nie znaleziono konta", "konto nie istnieje", "brak konta", "niezarejestrowany adres", "nieprawidłowy adres e-mail"]
+  },
+  "TR": {
+    "success": ["e-posta gönderildi", "e-postanızı kontrol edin", "bağlantı gönderildi", "talimatlar gönderildi", "gelen kutunuzu kontrol edin", "şifre sıfırlama"],
+    "failure": ["kullanıcı bulunamadı", "hesap bulunamadı", "hesap mevcut değil", "kayıtlı değil", "kayıtlı hesap yok", "geçersiz e-posta adresi"]
+  },
+  "IT": {
+    "success": ["e-mail inviata", "controlla la tua e-mail", "link inviato", "istruzioni inviate", "controlla la posta in arrivo", "reimposta password"],
+    "failure": ["utente non trovato", "account non trovato", "nessun account", "non esiste", "non registrato", "indirizzo e-mail non valido"]
+  },
+  "HI": {
+    "success": ["ईमेल भेज दिया गया", "अपना ईमेल जांचें", "लिंक भेज दिया गया", "निर्देश भेज दिए गए", "इनबॉक्स जांचें", "पासवर्ड रीसेट"],
+    "failure": ["उपयोगकर्ता नहीं मिला", "खाता नहीं मिला", "खाता मौजूद नहीं है", "पंजीकृत नहीं है", "कोई खाता नहीं", "अमान्य ईमेल पता"]
+  }
+}

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.config import APP_VERSION
 from backend.db.database import get_db
 from backend.modules import get_all_modules
 
@@ -22,7 +23,7 @@ async def health_check(session: AsyncSession = Depends(get_db)):
 
     return {
         "status": "ok",
-        "version": "0.6.0",
+        "version": APP_VERSION,
         "modules_loaded": modules_loaded,
         "db": db_status
     }

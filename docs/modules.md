@@ -1,6 +1,6 @@
 # Module Reference
 
-MailAccess ships 43 modules covering 800+ platforms by default and 2500+ platforms when the native Maigret engine is enabled. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
+MailAccess ships 55 modules covering 2500+ platforms. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
 
 A module marked **key required** skips itself with `status: skipped` when its API key is absent — it does not cause the investigation to fail.
 
@@ -943,6 +943,25 @@ Wave 1 covers roughly 1500 fast and reliable platforms: `status_code` checks, no
 
 Before the sweep, MailAccess validates the top 50 `status_code` platforms against known-unclaimed usernames. Sites that return hits for non-existent users are treated as catch-alls and excluded from results.
 
+**Phase 6D auto-demotion / auto-upgrade** — before each investigation, the
+module consults `platform_health.get_skip_set()`, `get_demote_set()`, and
+`get_upgrade_set()` to apply self-healing adjustments based on rolling probe
+stats:
+
+- **Skip**: a platform in the skip set is excluded entirely from the current
+  investigation's probe queue. The platform is *not* permanently disabled —
+  it is re-evaluated next investigation.
+- **Demote**: a Wave-1 platform in the demote set is routed to Wave 2 for the
+  current investigation.
+- **Upgrade**: a Wave-2 platform in the upgrade set is routed to Wave 1 for
+  the current investigation.
+
+Every applied action is logged to `~/.mailaccess/platform_demotion.log` and
+surfaced in `mailaccess platform-audit` output as `[AUTO-DEMOTED]`. To force
+a specific platform to run in its native wave regardless of health stats, set
+`MAIGRET_FORCE_<PLATFORM>=true` (mapping rule: strip non-alphanumerics,
+uppercase, prefix with `MAIGRET_FORCE_`).
+
 Username variants used by default:
 - raw local-part, such as `katriel.moses`
 - separators stripped, such as `katrielmoses`
@@ -984,6 +1003,24 @@ Finding fields: `platform`, `profile_url`, `username`, `confidence`, `tags`, `ch
 
 ---
 
+## `sherlock_platforms`
+
+Native Sherlock platform engine covering approximately 300 platforms. It uses
+a loader-and-detector pattern with no Sherlock runtime dependency, requires no
+API key, runs by default, and has `SOURCE_PRIORITY` 4.
+
+## `nexfil_platforms`
+
+Native Nexfil platform engine covering approximately 300 platforms. It uses a
+loader-and-detector pattern with no Nexfil runtime dependency, requires no API
+key, runs by default, and has `SOURCE_PRIORITY` 4.
+
+## `blackbird_platforms`
+
+Native Blackbird platform engine focused on social platforms. It uses a
+loader-and-detector pattern with no Blackbird runtime dependency, requires no
+API key, runs by default, and has `SOURCE_PRIORITY` 4.
+
 ## Platform Deduplication
 
 When multiple modules find the same platform, MailAccess deduplicates by normalized profile URL domain, such as `github.com`, not by display name.
@@ -998,6 +1035,19 @@ Metadata reported per investigation:
 - `maigret_hits`: raw Maigret platform count
 - `dual_confirmed`: platforms found by both
 - `unique_platforms`: deduplicated count used in the headline
+
+### Platform Dedup Priority
+
+When engines overlap, the lowest priority number supplies the canonical finding:
+
+| Priority | Source | Reason |
+|----------|--------|--------|
+| 0 | `whatsmyname`, `wmn` | Most strictly vetted |
+| 1 | `holehe` | Registration-probe accuracy |
+| 2 | `user_scanner` | Solid coverage |
+| 3 | `maigret`, `maigret_platforms` | Broad but less vetted |
+| 4 | `sherlock`, `nexfil`, `blackbird` | Newest additions |
+| 99 | `unknown` | Default fallback |
 
 ---
 
@@ -1399,9 +1449,41 @@ Note: uses YAML probes for known platforms and generic reset-flow inference for 
 
 ---
 
-## Name Consensus Engine
+## `domain_harvester`
+
+Multi-source domain email harvesting for custom domains. Core sources require no
+API key and the module runs by default for custom-domain investigations.
+
+## `fediverse_discovery`
+
+Discovers Fediverse and ActivityPub profiles. It requires no API key and runs by default.
+
+## `github_code_search`
+
+Searches public GitHub code and commits for the target email. `GITHUB_TOKEN` is
+optional but improves the rate limit; the module runs by default.
+
+## `gravatar_lookup`
+
+Performs extended Gravatar profile extraction. It requires no API key and runs by default.
+
+## `intelx_lookup`
+
+Queries the IntelligenceX free tier. It requires no key for free-tier access and runs by default.
+
+## `pastebin_search`
+
+Searches paste data through `psbdmp.ws`. It requires no API key and runs by default.
+
+## `name_consensus` (built-in)
 
 Not a standalone module: this is a core engine in `backend/core/` that runs after all modules complete. It reads name signals from profile, key, researcher, social, package, and commit findings, then emits one defensible identity result for the report and CLI.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic after collection |
+| **Status** | Implemented |
 
 Sources include:
 - `github_user`
@@ -1418,11 +1500,47 @@ Sources include:
 
 The engine outputs `confirmed_name`, `name_confidence`, `name_reasoning`, and `name_sources`. Role/system email addresses such as `noreply@`, `admin@`, `support@`, `postmaster@`, and `notifications@` are automatically skipped so service accounts do not receive inferred identities.
 
+Candidate names are Unicode-normalized and clustered with RapidFuzz so minor
+spelling and transliteration differences can corroborate one another. Timestamped
+signals receive temporal decay, while Cyrillic, Arabic, CJK, Devanagari, and other
+Unicode names remain eligible. Common-name matches are capped to avoid overconfident
+identity claims.
+
+**Result schema:**
+```json
+{
+  "confirmed_name": "Jane Doe",
+  "name_confidence": "probable",
+  "confidence_score": 2.18,
+  "name_sources": ["github_profile", "orcid_profile"],
+  "name_source_classes": ["developer", "institutional"],
+  "name_reasoning": "GitHub Profile, Orcid Profile support this name across 2 independent source classes.",
+  "conflicting_names": []
+}
+```
+
+**Result fields:** `confirmed_name`, `name_confidence`, `confidence_score`,
+`name_sources`, `name_source_classes`, `name_reasoning`, `conflicting_names`.
+
+No standalone `ModuleResult` metadata is emitted. Implementation settings:
+```json
+{
+  "fuzzy_threshold": 88,
+  "temporal_decay_time_constant_days": 1095,
+  "confidence_bands": ["confirmed", "probable", "possible", "unknown"]
+}
+```
+
 ---
 
 ## `identity_graph` (built-in)
 
 Not a standalone module — the identity graph is built automatically after all primary and post-primary modules complete. It cross-references findings by shared usernames, profile photos, display names, and breach data to produce confidence-scored identity clusters.
+
+Perceptual-avatar clusters add `same_avatar` edges, fuzzy bio clusters add
+`same_bio` edges, and coordinated account dates add `same_signup_window` edges.
+The graph also surfaces shadow-profile pairs when the same multi-token display name
+appears under different non-anchor email addresses.
 
 | | |
 |--|--|
@@ -1446,6 +1564,742 @@ The graph is available at:
     {"module": "social", "platform": "GitHub", "username": "janedoe"},
     {"module": "whatsmyname", "platform": "HackerNews", "username": "janedoe"}
   ]
+}
+```
+
+**Cluster fields:** `confidence`, `label`, `reasoning`, `findings`,
+`finding_count`, `is_collision`.
+
+**Graph schema (D3 endpoint):**
+```json
+{
+  "nodes": [
+    {"id": "platform:github", "type": "platform", "label": "github", "degree": 4}
+  ],
+  "links": [
+    {"source": "platform:github", "target": "platform:twitter", "type": "same_avatar"}
+  ]
+}
+```
+
+---
+
+## `platform_health` (built-in)
+
+Persists platform probe outcomes and feeds rolling health decisions back into the
+enumeration and reset-probe paths.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic; inspect with `mailaccess platform-health` |
+| **Status** | Implemented |
+
+Records live in `~/.mailaccess/platform_health.db`. A platform is skipped after 10
+consecutive misses, or after at least 30 probes in 30 days with a hit rate below
+0.05. Set `MAILACCESS_DISABLE_HEALTH=1` to bypass decisions without deleting
+history.
+
+The self-healing selectors are `get_skip_set()`, `get_demote_set()`, and
+`get_upgrade_set()`. Enumerators use `should_probe_async()` and
+`record_probe_async()` so SQLite work does not block the event loop.
+
+**Finding schema (health row):**
+```json
+{
+  "platform": "reset_prober:example.com",
+  "total_probes": 42,
+  "hits": 1,
+  "misses": 36,
+  "inconclusive": 5,
+  "hit_rate": 0.024,
+  "fragility": 0.31,
+  "consecutive_misses": 11,
+  "window_days": 30,
+  "first_seen": "2026-05-01T09:00:00+00:00",
+  "last_seen": "2026-06-22T10:30:00+00:00"
+}
+```
+
+**Finding fields:** `platform`, `total_probes`, `hits`, `misses`, `inconclusive`,
+`hit_rate`, `fragility`, `consecutive_misses`, `window_days`, `first_seen`,
+`last_seen`.
+
+**Module metadata (enumerator integration):**
+```json
+{
+  "health_tracked": 2180,
+  "health_skipped": 14,
+  "auto_demoted_skipped": 5,
+  "auto_demoted_to_wave2": 12,
+  "auto_upgraded_to_wave1": 3,
+  "auto_demotion_overrides": {
+    "NoisySite.com": "MAIGRET_FORCE_NOISYSITECOM"
+  }
+}
+```
+
+### Phase 6D audit trail
+
+Every auto-demotion / auto-upgrade event appends one JSONL line to
+`~/.mailaccess/platform_demotion.log`:
+
+```json
+{"timestamp": "2026-06-24T10:00:00Z", "platform": "NoisySite.com", "action": "skip",
+ "reason": "inconclusive_rate=0.82, probes=134",
+ "stats": {"inconclusive_rate": 0.82, "hit_rate": 0.08, "total_probes": 134},
+ "reversible_via": "MAIGRET_FORCE_NOISYSITECOM"}
+```
+
+The log is the user-visible audit trail behind
+`mailaccess platform-audit --show-demotions`.
+
+### Phase 6D.3 community health sharing (opt-in)
+
+```bash
+mailaccess platform-health --share
+```
+
+Posts anonymized platform stats (hit / miss / inconclusive rates, average
+latency, total probes, last probed) to a public GitHub Gist. **Strictly
+opt-in**: the `--share` flag is the only way this code path runs. No
+background-job sharing, no scheduled sharing, no auto-share on investigation
+completion. The payload contains platform-level metadata only — no user
+data, no email addresses, no investigation targets, no finding content.
+
+---
+
+## `temporal_cluster` (built-in)
+
+Clusters account creation dates into coordinated signup windows and adds temporal
+corroboration to the identity graph.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic during identity-graph construction |
+| **Status** | Implemented |
+
+The default window is 60 days and the default minimum cluster size is five.
+
+**Finding schema:**
+```json
+{
+  "platforms": ["github", "reddit", "twitter", "steam", "discord"],
+  "earliest": "2026-01-02T00:00:00+00:00",
+  "latest": "2026-02-10T00:00:00+00:00",
+  "span_days": 39,
+  "cluster_size": 5,
+  "score": 1.0
+}
+```
+
+**Finding fields:** `platforms`, `earliest`, `latest`, `span_days`,
+`cluster_size`, `score`.
+
+No standalone `ModuleResult` metadata is emitted. Implementation defaults:
+```json
+{
+  "window_days": 60,
+  "min_cluster_size": 5
+}
+```
+
+---
+
+## `shadow_profiles` (built-in)
+
+Finds same-name accounts associated with different non-anchor email addresses.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic during identity-graph construction |
+| **Status** | Implemented |
+
+Two or more normalized display-name tokens are required. Matching usernames raise
+confidence to `high`; display-name-only pairs remain `medium`.
+
+V2 is gated on a non-null `confirmed_name` and requires at least two platforms
+shared with the primary identity. V1 and V2 findings are rendered in the
+`IDENTITY ANALYSIS` section.
+
+**Finding schema:**
+```json
+{
+  "primary_email": "jane@gmail.com",
+  "primary_platform": "twitter",
+  "shadow_email": "jane@proton.me",
+  "shadow_platform": "steam",
+  "display_name": "Jane Doe",
+  "shared_username": "janedoe",
+  "confidence": "high"
+}
+```
+
+**Finding fields:** `primary_email`, `primary_platform`, `shadow_email`,
+`shadow_platform`, `display_name`, `shared_username`, `confidence`.
+
+No standalone `ModuleResult` metadata is emitted. Implementation defaults:
+```json
+{
+  "min_name_token_count": 2,
+  "anchor_email_excluded": true
+}
+```
+
+---
+
+## `avatar_clusters` (built-in)
+
+Groups cross-platform avatar observations by exact URL or perceptual-hash
+similarity.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic during identity-graph construction |
+| **Status** | Implemented |
+
+`backend/core/avatar_hasher.py` normalizes images to 8x8 grayscale pHashes. The
+clusterer accepts a maximum Hamming distance of five and omits singletons.
+This default-on post-primary enrichment is bounded to 20 avatar fetches per
+domain per run and feeds its clusters into the identity graph.
+
+**Finding schema:**
+```json
+{
+  "phash": "8f0f0f0f0f0f0f0f",
+  "platforms": ["github", "twitter", "reddit"],
+  "cluster_size": 3
+}
+```
+
+**Finding fields:** `phash`, `platforms`, `cluster_size`.
+
+No standalone `ModuleResult` metadata is emitted. Implementation limits:
+```json
+{
+  "max_hamming_distance": 5,
+  "max_avatar_urls_per_client": 20
+}
+```
+
+---
+
+## `domain_cluster` (post-primary, Phase 6B.1)
+
+Group platform domains by shared registrar + /24 IP subnet.  Emits an
+`infrastructure_correlation` finding whenever three or more platforms share
+the same registrar AND /24 subnet.  The identity graph picks the clusters up
+as `shared_infrastructure` edges (weight 0.4) so they also surface in
+`cluster_confidence`.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Default** | On (toggle via `ENABLE_DOMAIN_CLUSTER=false`) |
+| **Scope** | Post-primary; needs platform findings from primary phase |
+| **Cap** | `DOMAIN_CLUSTER_CAP` (default 20) — bounds WHOIS fan-out |
+| **Status** | Implemented |
+
+Free email providers (Gmail, Twitter, GitHub, Reddit, etc.) are excluded at
+the domain level so a handful of random public-service findings do not
+collapse into a meaningless cluster.
+
+**Algorithm:**
+1. Walk every primary-module finding, extract the platform's domain from
+   `profile_url` / `metadata.domain` / `metadata.breach_domain`.
+2. For each unique domain, run a short WHOIS lookup and a DNS-A query
+   (4-second per-call timeout).
+3. Group domains by `(registrar, /24 subnet)` and emit a cluster when the
+   union of platforms tied to the group is ≥ 3.
+4. Confidence scales with cluster size: 3 platforms → 0.5, capped at 0.9
+   (infrastructure is corroborating, never confirmatory).
+
+**Finding schema:**
+```json
+{
+  "platform": "infra_cluster",
+  "signal_type": "infrastructure_correlation",
+  "confidence": "medium",
+  "metadata": {
+    "cluster_id": "infra_8e5bf38c7029",
+    "platforms": ["twitter", "reddit", "blog_site"],
+    "domains": ["twitter.com", "reddit.com", "blog.example.com"],
+    "shared_registrar": "namecheap, inc.",
+    "shared_subnet": "93.184.216.0/24",
+    "shared_ip_subnet": "93.184.216.0/24",
+    "platform_count": 3,
+    "cluster_confidence": 0.5,
+    "signal": "3 platforms share registrar 'namecheap, inc.' and /24 subnet 93.184.216.0/24"
+  }
+}
+```
+
+**Finding fields:** `cluster_id`, `platforms`, `domains`, `shared_registrar`,
+`shared_subnet`, `shared_ip_subnet`, `platform_count`, `cluster_confidence`,
+`signal`.
+
+**Module metadata:**
+```json
+{
+  "domains_looked_up": 8,
+  "platforms_seen": 12,
+  "domains_with_registrar": 7,
+  "domains_with_ip": 6,
+  "clusters_emitted": 1,
+  "cap": 20,
+  "truncated": false
+}
+```
+
+Skip conditions: no platforms with parseable domains, free-provider-only
+investigation, or `ENABLE_DOMAIN_CLUSTER=false`.
+
+Graph integration: the identity-graph builder adds a `shared_infrastructure`
+edge between every pair of member platforms in each cluster (weight 0.4,
+weaker than `shared_username` / `same_avatar`).  `cluster_confidence` then
+applies a 1.10× boost at 3+ member platforms and 1.15× at 5+.
+
+---
+
+## `shadow_profile_v2` (built-in, Phase 6B.2)
+
+Extension to the Phase 2E `shadow_profile` detector.  V1 grouped findings by
+display name and emitted any pair with different non-anchor emails; V2 adds
+two new constraints to cut the false-positive rate:
+
+1. The primary investigation's `name_consensus.confirmed_name` must be
+   non-null.  Role / unknown identities skip V2 entirely.
+2. The alternate email must share at least **2 platforms** with the
+   primary investigation (configurable via `min_shared_platforms`).
+3. The alternate email must have at least one finding whose display name
+   normalises to the primary's confirmed name.
+
+V2 is additive: V1 still runs unchanged for analysts who want the looser
+signal.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Default** | Always on (V1 + V2 together) |
+| **Status** | Implemented |
+
+**Finding schema (V2):**
+```json
+{
+  "primary_email": "john@acmecorp.com",
+  "shadow_email": "alt@gmail.com",
+  "shared_name": "John Doe",
+  "name_confidence": "confirmed",
+  "shared_platforms": ["twitter", "steam", "github"],
+  "platform_overlap_count": 3
+}
+```
+
+The V2 finding appears in `graph.shadow_findings` with
+`type: "shadow_profile_v2"` so consumers can distinguish it from V1.  V2
+findings are sorted by `platform_overlap_count` descending — the strongest
+alternate identity surfaces first.
+
+CLI integration: the `IDENTITY ANALYSIS` section renders a
+`SHADOW PROFILES (N found)` block when any V1 or V2 finding is present.
+Each line reads:
+
+```
+─── SHADOW PROFILES ──────────────────────────
+  Possible alternate identity detected:
+    alt@gmail.com shares name "John Doe" and 3 platforms with john@acmecorp.com
+    Confidence: MEDIUM
+```
+
+V2 implementation lives in
+`backend/core/enrichment/shadow_profiles.py::ShadowProfileDetector.find_shadow_v2_pairs`.
+The identity-graph builder calls it from `IdentityGraph.build(...)` after
+V1.
+
+Implementation defaults:
+```json
+{
+  "min_shared_platforms": 2,
+  "v1_anchor_excluded": true,
+  "v2_requires_name_consensus": true
+}
+```
+
+---
+
+## `breach_corpus` (built-in cache)
+
+Fetches and severity-ranks the public HIBP breach catalog used by `breach_deep`.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | On first `breach_deep` corpus access |
+| **Status** | Implemented |
+
+The response is cached for 24 hours at `data/cache/breach_corpus.json`. Severity is
+`pwn_count` multiplied by 3 for passwords, 2 for credit cards, 2 for financial
+data, and 1.5 for phone numbers.
+
+**Finding schema (corpus record):**
+```json
+{
+  "domain": "example.com",
+  "breach_name": "Example",
+  "breach_date": "2024-01-12",
+  "pwn_count": 12000000,
+  "data_classes": ["Email addresses", "Passwords"],
+  "severity_score": 36000000.0,
+  "severity_label": "high"
+}
+```
+
+**Finding fields:** `domain`, `breach_name`, `breach_date`, `pwn_count`,
+`data_classes`, `severity_score`, `severity_label`.
+
+**Module metadata (`breach_deep` consumer):**
+```json
+{
+  "sites_checked": 100,
+  "sites_confirmed": 8,
+  "top_breach": "Example"
+}
+```
+
+---
+
+## `common_names` (built-in filter)
+
+Loads `data/common_names.json` to reduce confidence from common display names and
+usernames that lack independent corroboration.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic during name consensus and enumeration |
+| **Status** | Implemented |
+
+Common full-name tokens cap name-consensus confidence; common enumerator usernames
+are reduced to `low` confidence.
+
+**Finding schema:**
+```json
+{
+  "username": "john.smith",
+  "confidence": "low",
+  "metadata": {
+    "fp_warnings": ["common_username_no_corroboration"]
+  }
+}
+```
+
+**Finding fields:** `username`, `confidence`, `metadata.fp_warnings`.
+
+No standalone `ModuleResult` metadata is emitted. Filter configuration:
+```json
+{
+  "corpus": "data/common_names.json",
+  "warning": "common_username_no_corroboration"
+}
+```
+
+---
+
+## `disposable_domains` (built-in filter)
+
+Loads `data/disposable_domains.json` and downweights enumerator findings tied to a
+known disposable email domain.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic during preflight and enumeration |
+| **Status** | Implemented |
+
+The preflight credibility layer exposes `is_disposable`; affected enumerator
+findings use `metadata.fp_warnings` rather than a separate top-level flag.
+
+**Finding schema:**
+```json
+{
+  "username": "analyst@mailinator.com",
+  "confidence": "low",
+  "metadata": {
+    "fp_warnings": ["disposable_email_domain"]
+  }
+}
+```
+
+**Finding fields:** `username`, `confidence`, `metadata.fp_warnings`.
+
+No standalone `ModuleResult` metadata is emitted. Filter configuration:
+```json
+{
+  "corpus": "data/disposable_domains.json",
+  "warning": "disposable_email_domain"
+}
+```
+
+---
+
+## `reset_prober` (built-in helper)
+
+Classifies generic password-reset responses for breached domains that have no
+dedicated YAML probe.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Called by `breach_deep` |
+| **Status** | Implemented |
+
+It tries nine bounded endpoint patterns with JSON and form bodies, decodes HTML
+entities and URL encoding, and applies the multilingual corpus in
+`data/reset_signals.json`. `true` means a success signal, `false` means an explicit
+failure signal, and `null` means blocked, absent, unhealthy, or inconclusive.
+
+**Finding schema (probe result):**
+```json
+true
+```
+
+**Finding values:** `true` (success signal), `false` (failure signal), `null`
+(blocked, unavailable, unhealthy, or inconclusive).
+
+**Module metadata (`breach_deep` consumer):**
+```json
+{
+  "probe_method": "generic_reset"
+}
+```
+
+---
+
+## `maigret_detector` (built-in helper)
+
+Applies Maigret `status_code`, message, and response-URL rules with redirect and
+regex safeguards.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Called by `maigret_platforms` |
+| **Status** | Implemented |
+
+`backend/modules/maigret_platforms.py` also validates the top 50 eligible
+status-code sites against their known-unclaimed usernames before the main sweep.
+
+**Finding schema (`maigret_platforms`):**
+```json
+{
+  "platform": "GitHub",
+  "profile_url": "https://github.com/janedoe",
+  "username": "janedoe",
+  "confidence": "high",
+  "metadata": {
+    "check_type": "message",
+    "source": "maigret",
+    "wave": 1,
+    "dual_confirmed": false
+  }
+}
+```
+
+**Finding fields:** `platform`, `profile_url`, `username`, `confidence`,
+`metadata.check_type`, `metadata.source`, `metadata.wave`,
+`metadata.dual_confirmed`.
+
+**Module metadata (`maigret_platforms`):**
+```json
+{
+  "platforms_confirmed": 14,
+  "platforms_inconclusive": 9,
+  "catch_all_skipped": 3,
+  "regex_skipped": 21
+}
+```
+
+---
+
+## `sherlock_detector` (built-in helper)
+
+Hardens Sherlock hit detection across status-code, message, response-URL, and JSON
+rules with WAF awareness.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Called by `sherlock_platforms` |
+| **Status** | Implemented |
+
+**Finding schema (`sherlock_platforms`):**
+```json
+{
+  "platform": "sherlock:GitHub",
+  "profile_url": "https://github.com/janedoe",
+  "username": "janedoe",
+  "confidence": "medium",
+  "metadata": {
+    "error_type": "status_code",
+    "source": "sherlock",
+    "wave": 1,
+    "waf_protected": false,
+    "dual_confirmed": false
+  }
+}
+```
+
+**Finding fields:** `platform`, `profile_url`, `username`, `confidence`,
+`metadata.error_type`, `metadata.source`, `metadata.wave`,
+`metadata.waf_protected`, `metadata.dual_confirmed`.
+
+**Module metadata (`sherlock_platforms`):**
+```json
+{
+  "platforms_confirmed": 8,
+  "platforms_inconclusive": 5,
+  "catch_all_skipped": 2,
+  "health_skipped": 4
+}
+```
+
+---
+
+## `blackbird_detector` (built-in helper)
+
+Hardens Blackbird-style detection using distinct existing/missing status markers,
+optional response markers, POST bodies, and username cleaning.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Called by `blackbird_platforms` |
+| **Status** | Implemented |
+
+**Finding schema (`blackbird_platforms`):**
+```json
+{
+  "platform": "blackbird:Example",
+  "profile_url": "https://example.com/janedoe",
+  "username": "janedoe",
+  "confidence": "high",
+  "metadata": {
+    "source": "blackbird",
+    "wave": 1,
+    "method": "GET",
+    "waf_protected": false,
+    "e_code": 200,
+    "m_code": 404
+  }
+}
+```
+
+**Finding fields:** `platform`, `profile_url`, `username`, `confidence`,
+`metadata.source`, `metadata.wave`, `metadata.method`,
+`metadata.waf_protected`, `metadata.e_code`, `metadata.m_code`.
+
+**Module metadata (`blackbird_platforms`):**
+```json
+{
+  "platforms_confirmed": 11,
+  "platforms_inconclusive": 7,
+  "health_skipped": 3,
+  "fragile_demoted": 6
+}
+```
+
+---
+
+## `platform_dedup` (built-in)
+
+Merges cross-enumerator findings by normalized profile URL domain before report
+persistence.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic after collection |
+| **Status** | Implemented |
+
+Known host prefixes are stripped before grouping. At least two independent
+enumeration sources set `metadata.dual_confirmed: true` and raise confidence to
+`high`; more than two sources emit a warning for overlap review.
+
+**Finding schema:**
+```json
+{
+  "profile_url": "https://github.com/janedoe",
+  "confidence": "high",
+  "sources": ["maigret", "sherlock"],
+  "metadata": {
+    "dual_confirmed": true,
+    "alternate_urls": ["https://www.github.com/janedoe"]
+  }
+}
+```
+
+**Finding fields:** `profile_url`, `confidence`, `sources`,
+`metadata.dual_confirmed`, `metadata.alternate_urls`.
+
+**Module metadata:**
+```json
+{
+  "wmn_hits": 12,
+  "maigret_hits": 14,
+  "dual_confirmed": 5,
+  "unique_platforms": 21
+}
+```
+
+---
+
+## `breach_normalizer` (built-in)
+
+Collapses duplicate breach events into canonical records with complete source
+attribution.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic before scoring, graphing, and persistence |
+| **Status** | Implemented |
+
+The alias catalog at `data/breach_aliases.json` is LRU-cached. Host extraction
+tolerates whitespace inside URLs, while years and generic breach suffixes are
+removed before canonical matching.
+
+**Finding schema:**
+```json
+{
+  "platform": "LinkedIn",
+  "breach_name": "LinkedIn",
+  "breach_id": "linkedin",
+  "confidence": "high",
+  "severity": "high",
+  "sources": ["hibp", "xposedornot"],
+  "metadata": {
+    "canonical_breach_id": "linkedin",
+    "canonical_breach_name": "LinkedIn",
+    "source_breach_names": ["LinkedIn", "LinkedIn2016"],
+    "source_modules": ["hibp", "xposedornot"]
+  }
+}
+```
+
+**Finding fields:** `platform`, `breach_name`, `breach_id`, `confidence`,
+`severity`, `sources`, `metadata.canonical_breach_id`,
+`metadata.canonical_breach_name`, `metadata.source_breach_names`,
+`metadata.source_modules`.
+
+No standalone `ModuleResult` metadata is emitted. Normalized finding metadata:
+```json
+{
+  "canonical_breach_id": "linkedin",
+  "canonical_breach_name": "LinkedIn",
+  "source_modules": ["hibp", "xposedornot"]
 }
 ```
 

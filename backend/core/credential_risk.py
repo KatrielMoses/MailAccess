@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import math
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+import yaml
 
 from ..modules.base import ModuleResult
 from .breach_normalizer import collapse_breach_findings, is_breach_finding
@@ -18,6 +22,12 @@ _HISTORICAL_MODULES = frozenset({"wayback", "github_commits"})
 _ROW_OMIT_KEYS = frozenset({"id", "module_name", "created_at", "data"})
 _SERVICE_CATEGORY_CAP = 5
 _PASTE_COUNT_CAP = 10
+# Headroom-critical signals (infostealer evidence, recent breaches, exposed
+# credentials, and phone exposure) carry enough weight to determine the risk
+# band on their own. Volume and live-account signals add meaningful context,
+# while pastes, service diversity, and verification are deliberately lighter
+# tail signals. The total exceeds 100 so strong combinations saturate at the
+# existing clipping boundary without changing the underlying scaling model.
 _WEIGHTS = {
     "infostealer": 30,
     "breach_recency": 20,
@@ -35,56 +45,8 @@ _LOW_SCORE_REASONS = (
     "No confirmed breach records were detected.",
     "No live account confirmations were returned by account-enumeration modules.",
 )
-_FINANCE_SERVICES = (
-    "paypal",
-    "venmo",
-    "cashapp",
-    "stripe",
-    "chase",
-    "bank",
-    "coinbase",
-    "binance",
-    "kraken",
-)
-_DEV_SERVICES = (
-    "github",
-    "gitlab",
-    "bitbucket",
-    "docker",
-    "npm",
-    "stack",
-    "jira",
-)
-_GAMING_SERVICES = (
-    "steam",
-    "epic",
-    "riot",
-    "xbox",
-    "playstation",
-    "ea",
-    "ubisoft",
-    "battle.net",
-)
-_COMMUNICATION_SERVICES = (
-    "discord",
-    "skype",
-    "zoom",
-    "telegram",
-    "slack",
-    "whatsapp",
-)
-_SOCIAL_SERVICES = (
-    "facebook",
-    "instagram",
-    "linkedin",
-    "reddit",
-    "snapchat",
-    "spotify",
-    "tiktok",
-    "twitter",
-    "patreon",
-)
-_EDUCATION_SERVICES = ("duolingo", "coursera", "udemy")
+_SERVICE_CATEGORIES_PATH = Path(__file__).resolve().parents[2] / "data" / "service_categories.yaml"
+_SERVICE_CATEGORIES_CACHE: dict[str, list[str]] | None = None
 _WEAK_HASH_TOKENS = ("md5", "sha1", "unsalted", "easytocrack", "weakhash")
 _STRONG_HASH_TOKENS = ("bcrypt", "scrypt", "argon2", "pbkdf2", "hardtocrack", "stronghash")
 
@@ -95,6 +57,21 @@ class CredentialRiskAssessment:
     band: str
     score_drivers: list[str]
     recommended_actions: list[str]
+
+
+def load_service_categories() -> dict[str, list[str]]:
+    global _SERVICE_CATEGORIES_CACHE
+
+    if _SERVICE_CATEGORIES_CACHE is None:
+        raw = yaml.safe_load(_SERVICE_CATEGORIES_PATH.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("Service category catalog must be a mapping")
+        _SERVICE_CATEGORIES_CACHE = {
+            str(category).strip().lower(): [str(token).strip().lower() for token in tokens]
+            for category, tokens in raw.items()
+            if isinstance(tokens, list)
+        }
+    return _SERVICE_CATEGORIES_CACHE
 
 
 def assess_credential_risk_from_results(
@@ -157,10 +134,7 @@ def _assess(
         if str(row.get("module_name") or "").strip().lower() == "hudson_rock"
     ]
     hudson_meta = metadata_table.get("hudson_rock") or {}
-    infostealer_present = bool(
-        hudson_meta.get("is_infostealer_victim")
-        or infostealer_payloads
-    )
+    infostealer_present = bool(hudson_meta.get("is_infostealer_victim") or infostealer_payloads)
 
     most_recent_breach = _most_recent_breach_date(breach_payloads)
     recency_value = _breach_recency_value(most_recent_breach, reference_date)
@@ -185,9 +159,7 @@ def _assess(
     paste_value = min(paste_count, _PASTE_COUNT_CAP) / _PASTE_COUNT_CAP if paste_count else 0.0
 
     verified_true, verified_available = _verified_counts(breach_payloads)
-    verified_fraction = (
-        verified_true / verified_available if verified_available else 0.0
-    )
+    verified_fraction = verified_true / verified_available if verified_available else 0.0
     personal_phone_count, business_phone_count = _phone_exposure_counts(rows)
 
     contributions = {
@@ -359,7 +331,9 @@ def _password_material(payload: dict[str, Any]) -> tuple[float, str] | None:
         return (0.8, "weak_hash")
     if any(token in raw_text for token in _STRONG_HASH_TOKENS):
         return (0.3, "strong_hash")
-    if _truthy(metadata.get("has_password_hash")) or any("password" in item for item in data_classes):
+    if _truthy(metadata.get("has_password_hash")) or any(
+        "password" in item for item in data_classes
+    ):
         return (0.8, "password")
     return None
 
@@ -431,11 +405,12 @@ def _service_categories(payloads: list[dict[str, Any]]) -> set[str]:
 
 
 def _categorize_service(payload: dict[str, Any]) -> str | None:
+    catalog = load_service_categories()
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     raw_category = metadata.get("category")
     if isinstance(raw_category, str) and raw_category.strip():
         category = raw_category.strip().lower()
-        if category in {"communication", "social", "education", "gaming", "finance", "dev"}:
+        if category in catalog:
             return category
         if category in {"code", "developer", "development"}:
             return "dev"
@@ -444,27 +419,17 @@ def _categorize_service(payload: dict[str, Any]) -> str | None:
         return category
 
     platform = str(payload.get("platform") or "").strip().lower()
-    profile_url = str(
-        payload.get("profile_url") or payload.get("url") or ""
-    ).strip().lower()
+    profile_url = str(payload.get("profile_url") or payload.get("url") or "").strip().lower()
     host = ""
     if profile_url:
         parsed = urlparse(profile_url if "://" in profile_url else f"https://{profile_url}")
         host = (parsed.netloc or parsed.path).lower()
-    haystack = " ".join(part for part in (platform, host) if part)
+    service_tokens = {platform} if platform else set()
+    service_tokens.update(token for token in re.split(r"[.-]+", host) if token)
 
-    if any(token in haystack for token in _FINANCE_SERVICES):
-        return "finance"
-    if any(token in haystack for token in _DEV_SERVICES):
-        return "dev"
-    if any(token in haystack for token in _GAMING_SERVICES):
-        return "gaming"
-    if any(token in haystack for token in _COMMUNICATION_SERVICES):
-        return "communication"
-    if any(token in haystack for token in _EDUCATION_SERVICES):
-        return "education"
-    if any(token in haystack for token in _SOCIAL_SERVICES):
-        return "social"
+    for category, catalog_tokens in catalog.items():
+        if service_tokens.intersection(catalog_tokens):
+            return category
     return None
 
 
@@ -571,7 +536,10 @@ def _phone_exposure_counts(rows: list[dict[str, Any]]) -> tuple[int, int]:
             continue
         if signal_type == "phone_in_bio":
             personal += 1
-        elif module_name in {"whois_lookup", "press_intel", "sec_edgar"} or signal_type == "phone_number":
+        elif (
+            module_name in {"whois_lookup", "press_intel", "sec_edgar"}
+            or signal_type == "phone_number"
+        ):
             business += 1
     return personal, business
 
@@ -603,7 +571,11 @@ def _score_drivers(
         last_seen: datetime | None = None
         for payload in infostealer_payloads:
             metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-            for family in metadata.get("stealer_families", []) if isinstance(metadata.get("stealer_families"), list) else []:
+            for family in (
+                metadata.get("stealer_families", [])
+                if isinstance(metadata.get("stealer_families"), list)
+                else []
+            ):
                 family_text = str(family).strip()
                 if family_text and family_text not in seen:
                     seen.add(family_text)
@@ -637,7 +609,8 @@ def _score_drivers(
         candidates.append(
             (
                 contributions["breach_recency"],
-                f"Most recent breach exposure dates to {most_recent_breach.date().isoformat()} ({age_label})",
+                "Most recent breach exposure dates to "
+                f"{most_recent_breach.date().isoformat()} ({age_label})",
             )
         )
 
@@ -646,7 +619,8 @@ def _score_drivers(
             message = f"Passwords exposed in plaintext in {credential_class_count} breach match"
         elif credential_class_label == "weak_hash":
             message = (
-                f"Weak password hashes (MD5/SHA1-class) exposed in {credential_class_count} breach match"
+                "Weak password hashes (MD5/SHA1-class) exposed in "
+                f"{credential_class_count} breach match"
             )
         elif credential_class_label == "strong_hash":
             message = f"Password hashes exposed in {credential_class_count} breach match"
@@ -676,15 +650,18 @@ def _score_drivers(
         )
 
     if live_account_count > 0 and contributions["live_accounts"] > 0:
+        category_suffix = "ies" if len(service_categories) != 1 else "y"
         detail = (
-            f" across {len(service_categories)} service categor{'ies' if len(service_categories) != 1 else 'y'}"
+            f" across {len(service_categories)} service categor{category_suffix}"
             if service_categories
             else ""
         )
+        platform_suffix = "s" if live_account_count != 1 else ""
         candidates.append(
             (
                 contributions["live_accounts"],
-                f"Email actively used across {live_account_count} confirmed platform{'s' if live_account_count != 1 else ''}{detail}",
+                f"Email actively used across {live_account_count} confirmed "
+                f"platform{platform_suffix}{detail}",
             )
         )
 
@@ -701,15 +678,18 @@ def _score_drivers(
         candidates.append(
             (
                 contributions["service_diversity"],
-                f"Confirmed accounts span {len(service_categories)} service categories ({categories})",
+                f"Confirmed accounts span {len(service_categories)} service "
+                f"categories ({categories})",
             )
         )
 
     if verified_available > 0 and contributions["verified_fraction"] > 0:
+        match_suffix = "es" if verified_available != 1 else ""
         candidates.append(
             (
                 contributions["verified_fraction"],
-                f"{verified_true}/{verified_available} breach match{'es' if verified_available != 1 else ''} are source-verified",
+                f"{verified_true}/{verified_available} breach match{match_suffix} "
+                "are source-verified",
             )
         )
 
@@ -762,42 +742,51 @@ def _recommended_actions(
 
     if infostealer_present:
         actions.append(
-            "Prioritize endpoint triage and session invalidation for services exposed in Hudson Rock infostealer logs."
+            "Prioritize endpoint triage and session invalidation for services "
+            "exposed in Hudson Rock infostealer logs."
         )
     if breach_count > 0 and credential_class_score >= 0.8:
         actions.append(
-            "Reset credentials for breach-linked services first and check for password reuse on any confirmed live accounts."
+            "Reset credentials for breach-linked services first and check for "
+            "password reuse on any confirmed live accounts."
         )
     elif breach_count > 0 and recent_breach:
         actions.append(
-            "Prioritize recently breached services for password-reset and MFA verification follow-up."
+            "Prioritize recently breached services for password-reset and MFA "
+            "verification follow-up."
         )
 
     if live_account_count > 0:
         if service_categories & {"finance", "communication"}:
             actions.append(
-                "Pivot into confirmed finance and communication accounts first to map takeover paths and recovery-channel exposure."
+                "Pivot into confirmed finance and communication accounts first "
+                "to map takeover paths and recovery-channel exposure."
             )
         else:
             actions.append(
-                "Pivot into the confirmed live accounts to map recovery paths, MFA posture, and takeover opportunities."
+                "Pivot into the confirmed live accounts to map recovery paths, "
+                "MFA posture, and takeover opportunities."
             )
 
     if paste_count > 0:
         actions.append(
-            "Review XposedOrNot paste exposure details for leaked secrets, usernames, or recovery clues tied to the email."
+            "Review XposedOrNot paste exposure details for leaked secrets, "
+            "usernames, or recovery clues tied to the email."
         )
 
     if historical_hit_count > 0:
         actions.append(
-            "Review Wayback and GitHub history for legacy usernames, alternate emails, or leaked authentication clues tied to active accounts."
+            "Review Wayback and GitHub history for legacy usernames, alternate "
+            "emails, or leaked authentication clues tied to active accounts."
         )
 
     if not actions:
         actions.extend(
             [
-                "No immediate credential-containment pivot is indicated from the current evidence set.",
-                "Keep this address as a low-priority lead unless new breach or live-account evidence appears.",
+                "No immediate credential-containment pivot is indicated from the "
+                "current evidence set.",
+                "Keep this address as a low-priority lead unless new breach or "
+                "live-account evidence appears.",
             ]
         )
 

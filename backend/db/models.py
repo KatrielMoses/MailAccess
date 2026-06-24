@@ -43,9 +43,13 @@ class Investigation(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    error: Mapped[str | None] = mapped_column(String, nullable=True)
     exposure_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     credential_risk_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     confirmed_name: Mapped[str | None] = mapped_column(String, nullable=True)

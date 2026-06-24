@@ -1,0 +1,53 @@
+{
+  "_meta": {"source": "test_fixture", "site_count": 7},
+  "sites": {
+    "GitHub": {
+      "uri_check": "https://api.github.com/users/{account}",
+      "uri_pretty": "https://github.com/{account}",
+      "e_code": 200, "e_string": "\"login\":",
+      "m_code": 404, "m_string": "\"message\":\"Not Found\"",
+      "cat": "coding"
+    },
+    "ForumSite": {
+      "uri_check": "https://forum.example.com/u/{account}",
+      "e_code": 200, "e_string": "Profile of {account}",
+      "m_code": 404, "m_string": "User not found",
+      "cat": "social"
+    },
+    "GraphQLAPI": {
+      "uri_check": "https://api.example.com/graphql",
+      "uri_pretty": "https://example.com/user/{account}",
+      "post_body": "{\"query\":\"{user(name:\\\"{account}\\\"){id}}\"}",
+      "headers": {"Content-Type": "application/json"},
+      "e_code": 200, "e_string": "\"id\":",
+      "m_code": 404, "m_string": "\"errors\":",
+      "cat": "tech"
+    },
+    "SubdomainPattern": {
+      "uri_check": "https://{account}.blogspot.com",
+      "strip_bad_char": ".",
+      "e_code": 200, "e_string": "Blogger Template Style",
+      "m_code": 404, "m_string": "Blog not found",
+      "cat": "blog"
+    },
+    "CloudflareProtected": {
+      "uri_check": "https://protected.example.com/{account}",
+      "e_code": 200, "e_string": "Profile",
+      "m_code": 404, "m_string": "Not Found",
+      "cat": "social",
+      "protection": ["cloudflare"]
+    },
+    "NSFW": {
+      "uri_check": "https://nsfw.example.com/{account}",
+      "e_code": 200, "e_string": "Profile",
+      "m_code": 404, "m_string": "Not Found",
+      "cat": "xx NSFW xx"
+    },
+    "MissingPretty": {
+      "uri_check": "https://nopretty.example.com/{account}",
+      "e_code": 200, "e_string": "Profile",
+      "m_code": 404, "m_string": "Not Found",
+      "cat": "misc"
+    }
+  }
+}

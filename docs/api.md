@@ -30,13 +30,15 @@ Health check. Always unauthenticated.
 ```json
 {
   "status": "ok",
-  "version": "0.1.0",
+  "version": "0.9.0",
+  "uptime": 1842.7,
   "modules_loaded": ["hibp", "emailrep", "gravatar", "domain_intel", "social"],
   "db": "connected"
 }
 ```
 
-`db` is `"connected"` or `"error"`.
+`version` is read dynamically from the installed package. `uptime` is the
+number of seconds since process startup; `db` is `"connected"` or `"error"`.
 
 ---
 
@@ -128,9 +130,11 @@ Paginated list of past investigations, newest first.
 
 Full investigation report with all module runs and findings.
 
-The response includes `exposure_score` plus the separate credential risk fields: `credential_risk_score`, `credential_risk_band`, `score_drivers`, and `recommended_actions`. It also includes Name Consensus fields, the `defenders_brief` object, and platform deduplication stats.
-
-> **Known issue:** The route handler for this endpoint is currently missing in `backend/api/routes/investigations.py` — the response code at lines 80–83 is present but the `@router.get` decorator and function signature are absent, making the endpoint unreachable. Use `GET /api/report/{id}/export?format=json` as a workaround until the route is added.
+The response includes `exposure_score` plus the separate credential risk fields:
+`credential_risk_score`, `credential_risk_band`, `score_drivers`, and
+`recommended_actions`. It also includes Name Consensus fields, the
+`defenders_brief` object, platform deduplication stats, and enrichment results:
+`infrastructure_clusters`, `shadow_profiles`, and `avatar_clusters`.
 
 **Intended response `200`**
 ```json
@@ -176,6 +180,15 @@ The response includes `exposure_score` plus the separate credential risk fields:
     "dual_confirmed": 2,
     "unique_platforms": 8
   },
+  "infrastructure_clusters": [
+    {"cluster_id": "infra_8e5bf38c7029", "platforms": ["site-a", "site-b", "site-c"], "shared_subnet": "93.184.216.0/24"}
+  ],
+  "shadow_profiles": [
+    {"shadow_email": "jane.alt@example.net", "shared_name": "Jane Doe", "shared_platforms": ["github", "reddit"]}
+  ],
+  "avatar_clusters": [
+    {"phash": "8f0f0f0f0f0f0f0f", "platforms": ["github", "reddit"], "cluster_size": 2}
+  ],
   "summary": "Ran 8 modules (7 successful, 1 failed). Found 14 data points.",
   "created_at": "2026-05-19T12:00:00+00:00",
   "completed_at": "2026-05-19T12:00:15+00:00",

@@ -4,7 +4,7 @@ import re
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
-from sqlalchemy import inspect, text
+from sqlalchemy import func, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from ..config import settings
@@ -105,6 +105,20 @@ def _migrate_add_name_consensus(sync_conn) -> None:
         )
 
 
+def _migrate_add_recovery_fields(sync_conn) -> None:
+    """Add investigation lifecycle fields used by startup recovery."""
+    inspector = inspect(sync_conn)
+    if "investigations" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("investigations")}
+    if "started_at" not in columns:
+        sync_conn.execute(
+            text("ALTER TABLE investigations ADD COLUMN started_at DATETIME")
+        )
+    if "error" not in columns:
+        sync_conn.execute(text("ALTER TABLE investigations ADD COLUMN error VARCHAR"))
+
+
 async def init_db() -> None:
     """Create all tables if they don't exist. Called once at app startup."""
     _ensure_db_dir()
@@ -116,6 +130,45 @@ async def init_db() -> None:
         await conn.run_sync(_migrate_add_timeline_json)
         await conn.run_sync(_migrate_add_defenders_brief)
         await conn.run_sync(_migrate_add_name_consensus)
+        await conn.run_sync(_migrate_add_recovery_fields)
+    await _clean_stale_investigations()
+
+
+async def _clean_stale_investigations() -> None:
+    """Mark zombie investigations (stuck in RUNNING for >10 min) as FAILED.
+
+    Called on every server startup to prevent stale investigation records from
+    accumulating in the database after crashes or hangs.
+    """
+    from .models import Investigation, InvestigationStatus
+
+    stale_threshold_minutes = 10
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            from datetime import datetime, timedelta, timezone
+            from sqlalchemy import update
+
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_threshold_minutes)
+            result = await session.execute(
+                update(Investigation)
+                .where(
+                    Investigation.status == InvestigationStatus.RUNNING,
+                    func.coalesce(
+                        Investigation.started_at,
+                        Investigation.created_at,
+                    ) < cutoff,
+                )
+                .values(
+                    status=InvestigationStatus.FAILED,
+                    error="Recovered: server restart",
+                    completed_at=datetime.now(timezone.utc),
+                )
+            )
+            if result.rowcount > 0:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Cleaned %d stale zombie investigation(s) on startup.", result.rowcount
+                )
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

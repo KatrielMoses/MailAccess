@@ -19,6 +19,13 @@ _DEFAULT_CORS_ORIGINS = ["http://localhost:5173", "http://localhost:3000"]
 
 logger = logging.getLogger(__name__)
 
+# Dynamically read the installed package version so health / OpenAPI stay in sync.
+try:
+    from importlib.metadata import version as _pkg_version
+    APP_VERSION: str = _pkg_version("mailaccess")
+except Exception:
+    APP_VERSION = "0.0.0"
+
 
 def _coerce_cors_origins(value: Any) -> list[str]:
     if value is None:
@@ -39,12 +46,17 @@ def _coerce_cors_origins(value: Any) -> list[str]:
                     items = parsed
                     origins = [str(item).strip() for item in items if str(item).strip()]
                     return origins or list(_DEFAULT_CORS_ORIGINS)
-                logger.warning("CORS_ORIGINS JSON value is not a list; falling back to comma parsing")
+                logger.warning(
+                    "CORS_ORIGINS JSON value is not a list; falling back to comma parsing"
+                )
         items = raw.split(",")
     elif isinstance(value, (list, tuple, set)):
         items = list(value)
     else:
-        logger.warning("Unsupported CORS_ORIGINS value type %s; using defaults", type(value).__name__)
+        logger.warning(
+            "Unsupported CORS_ORIGINS value type %s; using defaults",
+            type(value).__name__,
+        )
         return list(_DEFAULT_CORS_ORIGINS)
 
     origins = [str(item).strip() for item in items if str(item).strip()]
@@ -73,7 +85,11 @@ def _coerce_mapping(
             return {}
         value = parsed
     elif not isinstance(value, dict):
-        logger.warning("Unsupported %s value type %s; using empty mapping", field_name, type(value).__name__)
+        logger.warning(
+            "Unsupported %s value type %s; using empty mapping",
+            field_name,
+            type(value).__name__,
+        )
         return {}
 
     parsed_mapping: dict[str, Any] = {}
@@ -148,6 +164,32 @@ class Settings(BaseSettings):
     enable_maigret_platforms: bool = True
     enable_maigret_wave2: bool = False
 
+    # Sherlock native platform engine — ~400 curated platforms (independent dataset)
+    enable_sherlock_platforms: bool = True
+    enable_sherlock_wave2: bool = True
+
+    # Phase 3D — Nexfil
+    enable_nexfil_platforms: bool = True
+    enable_nexfil_wave2: bool = True
+
+    # Phase 3C — Blackbird / WhatsMyName native two-marker platform engine
+    enable_blackbird_platforms: bool = True
+    enable_blackbird_wave2: bool = True
+    enable_blackbird_nsfw: bool = False
+    blackbird_concurrency: int = 60
+
+    # GitHub Code Search — surfaces email mentions in public code and gists
+    enable_github_code_search: bool = True
+
+    # Pastebin / paste-site search — aggregated via psbdmp.ws (no auth required)
+    enable_pastebin_search: bool = True
+
+    # Gravatar profile lookup — single public endpoint, no auth required
+    enable_gravatar_lookup: bool = True
+
+    # Fediverse discovery — WebFinger probes across ~50 popular instances
+    enable_fediverse_discovery: bool = True
+
     # User-scanner — probes 205+ platforms via user-scanner (no API key required)
     enable_user_scanner: bool = True
 
@@ -160,6 +202,23 @@ class Settings(BaseSettings):
     enable_email_discovery: bool = False
     enable_press_intel: bool = False
 
+    # Phase 3E — IntelligenceX leak/paste/darknet correlation
+    enable_intelx_lookup: bool = True
+    intelx_api_key: str | None = None
+    intelx_base_url: str | None = None
+    intelx_buckets: list[str] = ["leaks.public", "pastes"]
+    intelx_max_results: int = 50
+
+    # Domain harvester — theHarvester-style subdomain enumeration for the target email's domain
+    enable_domain_harvester: bool = True
+    personal_email_providers: list[str] = [
+        "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+        "protonmail.com", "icloud.com", "aol.com", "live.com",
+        "msn.com", "me.com", "mail.com", "proton.me", "pm.me",
+        "gmx.com", "gmx.net", "yandex.com", "yandex.ru", "mail.ru",
+        "zoho.com", "fastmail.com", "tutanota.com",
+    ]
+
     # GHunt (opt-in — requires ghunt>=2.3 installed and a valid creds file from `ghunt login`)
     # Cookies expire periodically and require manual refresh via `ghunt login`.
     enable_ghunt: bool = False
@@ -170,6 +229,12 @@ class Settings(BaseSettings):
 
     # Messaging hints: Telegram username checks during primary gather
     enable_messaging_hints: bool = True
+
+    # Domain infrastructure clustering (Phase 6B.1): groups platform domains
+    # by shared registrar + /24 subnet.  Emits infrastructure_correlation
+    # findings when 3+ platforms share infrastructure.
+    enable_domain_cluster: bool = True
+    domain_cluster_cap: int = 20
 
     # Deep breach probing: opt-in account-existence checks across top HIBP breach domains
     enable_breach_deep: bool = False
@@ -218,6 +283,11 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_cors_origins(cls, value: Any) -> list[str]:
         return _coerce_cors_origins(value)
+
+    def with_overrides(self, **kwargs: Any):
+        from .core._phase_runner import settings_override
+
+        return settings_override(self, **kwargs)
 
     @field_validator("module_timeout_overrides", mode="before")
     @classmethod

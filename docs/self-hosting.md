@@ -96,6 +96,11 @@ Every setting is optional unless marked required.
 | `ENABLE_EMAIL_DISCOVERY` | `true` | Name-to-email dorks |
 | `ENABLE_MAIGRET_PLATFORMS` | `true` | Default true. Set to false to disable 2500+ platform sweep and reduce investigation time by ~35-90s. |
 | `ENABLE_MAIGRET_WAVE2` | `false` | Optional. Enable Wave 2 slow/fragile platform sweep. Requires `ENABLE_MAIGRET_PLATFORMS=true`. Adds ~90-150s. |
+| `MAILACCESS_DISABLE_HEALTH` | `0` | Set to `1` to bypass platform-health skip decisions without deleting the SQLite probe history. |
+| `MAIGRET_FORCE_{PLATFORM}` | _(unset)_ | Per-platform demotion override. Replace `{PLATFORM}` with the uppercase, non-alphanumeric-stripped name. Example: `MAIGRET_FORCE_GITHUBCOM=true`. Any truthy value (`true`, `1`, `yes`, `on`) wins. |
+| `MAILACCESS_SHARE_HEALTH` | `false` | Phase 6D.3 documentation-only flag for `mailaccess platform-health --share`. The CLI requires the explicit `--share` flag — this env var is documentation only and never triggers sharing. |
+| `DOMAIN_CLUSTER_CAP` | `20` | Maximum platform domains checked for infrastructure clustering. |
+| `enable_domain_cluster` | `true` | Enable or disable domain infrastructure clustering. |
 | `GITHUB_TOKEN` | _(unset)_ | Optional. Required for GitHub commit author-email search. Without it, `github_commits` runs user profile search only. Get at: [github.com/settings/tokens](https://github.com/settings/tokens) |
 | `COMPANIES_HOUSE_API_KEY` | _(unset)_ | Optional. UK Companies House officer/address lookup. Free, no CC. Get at: [developer.company-information.service.gov.uk](https://developer.company-information.service.gov.uk) |
 
@@ -108,6 +113,93 @@ To add custom platforms, edit `data/mailaccess-extra-sites.json` using the same 
 Enabling `ENABLE_MAIGRET_PLATFORMS` adds 35-90 seconds to investigation time for Wave 1. Wave 2 adds a further 90-150 seconds. For automated or batch use, consider whether the extended coverage is worth the runtime cost for your use case.
 
 The Defender's Brief is generated automatically for every investigation. Suppress it with the CLI `--no-brief` flag or by setting `SHOW_DEFENDERS_BRIEF=false` in `.env`.
+
+### Platform Health Self-Healing (Phase 6D)
+
+> **Note:** `mailaccess platform-audit` shows platforms that have been probed
+> in your local investigations. This number grows over time. The full platform
+> database (2500+) is checked during every investigation regardless of how many
+> appear in the health DB.
+
+After every investigation, MailAccess automatically adjusts which platforms it
+probes based on the rolling health statistics:
+
+- **Auto-skip**: a platform with > 70% inconclusive probes over the last 30
+  days AND at least 50 probes AND a probe within the last 14 days is excluded
+  from the next investigation's probe queue. This is **not** a permanent
+  quarantine — the platform is re-evaluated next time.
+- **Auto-demote**: a Wave-1 platform with > 40% inconclusive probes over the
+  last 30 days AND at least 30 probes is moved to Wave 2 for the next
+  investigation.
+- **Auto-upgrade**: a Wave-2 platform with < 10% inconclusive probes over the
+  last 30 days AND at least 30 probes AND a probe within the last 30 days is
+  promoted to Wave 1 for the next investigation.
+
+Stale probe data (older than the freshness window) never triggers an
+auto-action. We never demote on stale stats.
+
+## Platform Health Files
+
+MailAccess maintains two files in `~/.mailaccess/`; both live outside the
+project repository and are never committed to Git:
+
+- `platform_health.db` — SQLite probe history containing per-platform hit,
+  miss, inconclusive, and latency observations over a rolling window. The
+  self-healing rules use this data for auto-demotion decisions.
+- `platform_demotion.log` — JSONL audit log containing every auto-demotion and
+  auto-upgrade event.
+
+#### Audit trail
+
+Every auto-action writes one JSONL line to `~/.mailaccess/platform_demotion.log`:
+
+```json
+{"timestamp": "2026-06-24T10:00:00Z", "platform": "NoisySite.com", "action": "skip",
+ "reason": "inconclusive_rate=0.82, probes=134",
+ "stats": {"inconclusive_rate": 0.82, "hit_rate": 0.08, "total_probes": 134},
+ "reversible_via": "MAIGRET_FORCE_NOISYSITECOM"}
+```
+
+The log is append-only and one JSON object per line. Use
+`mailaccess platform-audit --show-demotions` to render it as a table with the
+override env-var hint for each entry.
+
+#### Per-platform override
+
+To force a specific platform to run in its native wave regardless of health
+stats, set its override env var:
+
+```bash
+MAIGRET_FORCE_NOISYSITECOM=true mailaccess investigate user@example.com
+```
+
+Mapping rule: take the platform name, strip non-alphanumeric characters,
+uppercase it, and prefix with `MAIGRET_FORCE_`. So `NoisySite.com` becomes
+`MAIGRET_FORCE_NOISYSITECOM`. Any truthy value (`true`, `1`, `yes`, `on`)
+disables the auto-action for that platform.
+
+#### Community health sharing (opt-in)
+
+Contribute anonymized platform stats back to the community:
+
+```bash
+mailaccess platform-health --share
+```
+
+This posts platform-level metadata only (hit / miss / inconclusive rates,
+average latency, total probes, last probed) to a public GitHub Gist. **No
+user data, no email addresses, no investigation targets, no finding content.**
+
+The `--share` flag is the only way this code path runs. There is no scheduled
+share, no background-job share, no investigation-completion share. Setting
+`MAILACCESS_SHARE_HEALTH=true` in `.env` does **not** enable sharing — it is
+documentation only.
+
+## Zombie Investigation Recovery
+
+On startup, MailAccess finds investigations left in `RUNNING` state for more
+than 10 minutes and marks them `FAILED` with reason `Recovered: server restart`.
+This prevents zombie investigations from accumulating across restarts.
 
 ### Rate Limiting
 

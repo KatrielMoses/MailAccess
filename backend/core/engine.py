@@ -1,140 +1,48 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import update
 
 from ..db.database import AsyncSessionLocal
 from ..db.models import Finding, Investigation, InvestigationStatus, ModuleRun
-from .email_credibility import normalize_email_address
+from ..modules.base import ModuleResult, ModuleStatus
 from .breach_normalizer import collapse_breach_findings
 from .credential_risk import assess_credential_risk_from_results
 from .defenders_brief import defenders_brief_to_dict, generate_defenders_brief
+from .email_credibility import normalize_email_address
 from .name_consensus import NameConsensusEngine, extract_name_candidates
+from .policy import _BREACH_MODULES as _BREACH_MODULES  # noqa: F401
+from .policy import (
+    _CONFIDENCE_MULTIPLIER,
+    _MODULE_CAP,
+    _OPT_IN_FLAG_BY_MODULE,
+    module_weight,
+)
 from .timeline import TimelineBuilder
-from ..modules.base import ModuleResult, ModuleStatus
 
-# Module categories for exposure scoring
-_INFOSTEALER_MODULES = frozenset({"hudson_rock"})
-_BREACH_MODULES = frozenset({"hibp", "breachdirectory", "breach_deep", "xposedornot"})
-_SOCIAL_MODULES = frozenset({
-    "gravatar",
-    "social_links",
-    "google_search",
-    "ghunt",
-    "whatsmyname",
-    "maigret_platforms",
-    "account_discovery",
-    "user_scanner",
-    "username_pivot",
-    "email_discovery",
-    "social",
-    "twitter_profile",
-    "linkedin_serp",
-    "marketplace_profile",
-})
-_POST_PRIMARY_ONLY = frozenset({
-    "username_pivot", "phone_intel", "email_discovery", "alternate_email",
-    "twitter_profile", "linkedin_serp", "marketplace_profile",
-})
-
-_WEIGHT_INFOSTEALER = 20  # critical: active malware compromise
-_WEIGHT_BREACH = 15       # high: credential exposure
-_MODULE_WEIGHT_OVERRIDES: dict[str, int] = {
-    "breach_deep": 18,
-}
-_WEIGHT_SOCIAL = 5        # medium: identity surface
-_WEIGHT_META = 2          # low: infrastructure / info
-
-# Confidence multipliers applied per finding before summing.
-# Low-confidence findings (search-result WMN hits, experimental hints) contribute
-# fractionally so volume alone can't inflate the score.
-_CONFIDENCE_MULTIPLIER: dict[str, float] = {
-    "high":   1.0,
-    "medium": 0.5,
-    "low":    0.2,
-    "none":   0.0,
-}
-
-# Per-module score caps prevent a single module with many hits (e.g. WMN matching
-# a common first-name username across 700 sites) from dominating the total.
-# Breach/infostealer modules have higher caps because each hit is genuinely alarming.
-_MODULE_CAP: dict[str, int] = {
-    "whatsmyname":      20,
-    "maigret_platforms": 25,
-    "account_discovery": 15,
-    "user_scanner":     15,
-    "username_pivot":   10,
-    "email_discovery":  10,
-    "social":           10,
-    "social_links":      5,
-    "hudson_rock":      40,
-    "breach_deep":      50,
-    "hibp":             45,
-    "breachdirectory":  40,
-    "xposedornot":      45,
-}
-
-_MODULE_DEFAULT_TIMEOUTS: dict[str, int] = {
-    "breach_deep": 90,
-    "github_commits": 90,
-}
-
-_MODULE_TIMEOUT_FLOORS: dict[str, int] = {
-    "account_discovery": 120,
-    "username_pivot": 120,
-    "user_scanner": 180,
-    "whatsmyname": 200,
-    "maigret_platforms": 180,
-}
-
-
-def _resolve_module_timeout(
-    module_name: str,
-    default_timeout: int,
-    overrides: dict[str, int],
-) -> int:
-    floor_timeout = _MODULE_TIMEOUT_FLOORS.get(module_name, 0)
-    resolved_timeout = max(default_timeout, floor_timeout)
-    override_timeout = overrides.get(module_name)
-    if override_timeout is None:
-        return resolved_timeout
-    return max(resolved_timeout, override_timeout)
-
-
-def _module_weight(module_name: str) -> int:
-    if module_name in _MODULE_WEIGHT_OVERRIDES:
-        return _MODULE_WEIGHT_OVERRIDES[module_name]
-    if module_name in _INFOSTEALER_MODULES:
-        return _WEIGHT_INFOSTEALER
-    if module_name in _BREACH_MODULES:
-        return _WEIGHT_BREACH
-    if module_name in _SOCIAL_MODULES:
-        return _WEIGHT_SOCIAL
-    return _WEIGHT_META
+logger = logging.getLogger(__name__)
+_ENRICHMENT_TIMEOUT_SECONDS = 30
 
 
 def _finding_sort_key(finding) -> tuple[str, str, str]:
     if not isinstance(finding, dict):
         return ("", "", str(finding))
-    platform = str(finding.get("platform", ""))
-    profile_url = str(finding.get("profile_url", ""))
-    source = str(finding.get("source", ""))
-    return (platform, profile_url, source)
+    return (
+        str(finding.get("platform", "")),
+        str(finding.get("profile_url", "")),
+        str(finding.get("source", "")),
+    )
 
 
 def _sort_collected(results: dict[str, ModuleResult]) -> dict[str, ModuleResult]:
-    """Return a new dict with module keys sorted and findings within each module sorted.
-
-    Determinism guard: async completion order varies between runs, which made the
-    insertion order of `results` (and finding lists inside each module) depend on
-    network race conditions. Sorting both gives identical inputs → identical score.
-    """
     ordered: dict[str, ModuleResult] = {}
-    for name in sorted(results.keys()):
+    for name in sorted(results):
         result = results[name]
         result.findings = sorted(result.findings, key=_finding_sort_key)
         ordered[name] = result
@@ -145,69 +53,146 @@ def _compute_exposure_score(
     results: dict[str, ModuleResult],
     name_confidence: str | None = None,
 ) -> int:
-    """
-    Confidence-weighted, per-module-capped exposure score, clamped to [0, 100].
-
-    Each finding contributes: base_weight × confidence_multiplier.
-    The sum per module is then capped to prevent high-volume enumeration modules
-    (WMN, account_discovery) from drowning out genuine breach/infostealer signals.
-    """
-    total: float = 0.0
-    base_weight = _module_weight  # local alias
-
-    for name in sorted(results.keys()):
+    total = 0.0
+    for name in sorted(results):
         result = results[name]
         if result.status not in (ModuleStatus.SUCCESS, ModuleStatus.PARTIAL):
             continue
-
-        weight = base_weight(name)
-        module_score: float = 0.0
-        for finding in result.findings:
-            confidence = "high"
-            if isinstance(finding, dict):
-                confidence = finding.get("confidence", "high")
-            multiplier = _CONFIDENCE_MULTIPLIER.get(confidence, 1.0)
-            module_score += weight * multiplier
-
+        weight = module_weight(name)
+        module_score = sum(
+            weight
+            * _CONFIDENCE_MULTIPLIER.get(
+                finding.get("confidence", "high")
+                if isinstance(finding, dict)
+                else "high",
+                1.0,
+            )
+            for finding in result.findings
+        )
         cap = _MODULE_CAP.get(name)
-        if cap is not None:
-            module_score = min(module_score, cap)
-
-        total += module_score
+        total += min(module_score, cap) if cap is not None else module_score
 
     name_bonus = {
         "confirmed": 10,
         "probable": 5,
         "possible": 2,
     }.get(str(name_confidence or "").lower(), 0)
-
     return min(int(total) + name_bonus, 100)
+
+
+def _build_graph(
+    canonical_email: str,
+    collected: dict[str, ModuleResult],
+    name_consensus: Any = None,
+) -> dict | None:
+    try:
+        from .identity_graph import IdentityGraph
+
+        findings = [
+            {"module_name": module_name, "data": finding}
+            for module_name, result in collected.items()
+            for finding in result.findings
+        ]
+        findings = collapse_breach_findings(findings)
+        graph = IdentityGraph.build(
+            {"email": canonical_email, "findings": findings},
+            name_consensus=name_consensus,
+        )
+        # Store the full to_dict() output so shadow_findings + clusters
+        # survive persistence.  The /graph endpoint extracts just
+        # nodes/links for D3 rendering.
+        return graph.to_dict()
+    except Exception:
+        return None
+
+
+async def _build_graph_with_timeout(
+    canonical_email: str,
+    collected: dict[str, ModuleResult],
+    name_consensus: Any = None,
+) -> dict | None:
+    """Run graph enrichment off-loop and cap the complete enrichment pass.
+
+    IdentityGraph.build performs avatar hashing/fetching plus bio, temporal,
+    infrastructure, and shadow-profile clustering.  Some of those libraries
+    expose synchronous APIs, so invoking the builder on the event-loop thread
+    can freeze both investigation progress and the health endpoint.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _build_graph,
+                canonical_email,
+                collected,
+                name_consensus,
+            ),
+            timeout=_ENRICHMENT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Graph enrichment timed out after %ss; continuing without graph data",
+            _ENRICHMENT_TIMEOUT_SECONDS,
+        )
+        return None
+    except Exception:
+        logger.exception("Graph enrichment failed; continuing without graph data")
+        return None
+
+
+def _prepare_results(collected: dict[str, ModuleResult]) -> dict[str, ModuleResult]:
+    final = {
+        name: ModuleResult(
+            status=result.status,
+            findings=list(result.findings),
+            metadata=deepcopy(result.metadata) if result.metadata else {},
+            errors=list(result.errors) if result.errors else [],
+        )
+        for name, result in collected.items()
+    }
+    from .platform_dedup import deduplicate_platform_findings
+
+    deduplicate_platform_findings(final)
+    flattened = [
+        {"module_name": module_name, "data": finding}
+        for module_name, result in final.items()
+        for finding in result.findings
+    ]
+    collapsed = collapse_breach_findings(flattened)
+    final = {
+        name: ModuleResult(
+            status=result.status,
+            findings=[],
+            metadata=deepcopy(result.metadata) if result.metadata else {},
+            errors=list(result.errors) if result.errors else [],
+        )
+        for name, result in final.items()
+    }
+    for finding in collapsed:
+        module_name = str(finding.get("module_name") or "").strip()
+        if not module_name:
+            continue
+        final.setdefault(
+            module_name,
+            ModuleResult(status=ModuleStatus.SUCCESS),
+        )
+        payload = (
+            finding.get("data")
+            if isinstance(finding.get("data"), dict)
+            else finding
+        )
+        if isinstance(payload, dict):
+            final[module_name].findings.append(payload)
+    return _sort_collected(final)
 
 
 @dataclass
 class QueueEvent:
-    type: str  # "module_start" | "module_result" | "module_error"
+    type: str
     module_name: str
     result: ModuleResult | None = None
 
 
 class InvestigationEngine:
-    """
-    Runs selected OSINT modules concurrently and streams results via asyncio.Queue.
-
-    Usage::
-
-        queue = await engine.investigate(email, investigation_id)
-        while True:
-            item = await queue.get()
-            if item is None:              # sentinel — all modules done, DB persisted
-                break
-            # item is a QueueEvent
-
-    The engine persists ModuleRun records, Finding records, the final exposure
-    score, and the COMPLETE status to the DB before sending the sentinel.
-    """
-
     def __init__(self, timeout: int = 30, max_concurrency: int = 10) -> None:
         self._timeout = timeout
         self._max_concurrency = max_concurrency
@@ -220,550 +205,144 @@ class InvestigationEngine:
         module_names: list[str] | None = None,
         enable_modules: list[str] | None = None,
     ) -> asyncio.Queue[QueueEvent | None]:
-        """
-        Start investigation and return the result queue immediately.
-
-        The background task writes a None sentinel to the queue after all modules
-        complete and DB persistence finishes. Pass module_names to run a subset;
-        None (default) runs all registered modules.
-        """
         normalized = normalize_email_address(email)
         canonical_email = normalized.canonical_email
-
-        from ..modules import get_all_modules
-
-        if module_names is not None:
-            classes = [c for c in get_all_modules() if c.name in module_names]
-        else:
-            classes = [
-                c
-                for c in get_all_modules()
-                if c.name not in _POST_PRIMARY_ONLY and c.name != "emailrep"
-            ]
-            enabled = set(enable_modules or [])
-            classes = [
-                c
-                for c in classes
-                if c.name != "press_intel" or c.name in enabled
-            ]
-        classes = [c for c in classes if c.name != "email_credibility"]
-        classes = sorted(classes, key=lambda c: (getattr(c, "priority", 100), c.name))
-
         queue: asyncio.Queue[QueueEvent | None] = asyncio.Queue()
         semaphore = asyncio.Semaphore(self._max_concurrency)
         collected: dict[str, ModuleResult] = {}
         started_at = datetime.now(timezone.utc)
-        credibility_result: ModuleResult | None = None
-
-        cred_cls = next((cls for cls in get_all_modules() if cls.name == "email_credibility"), None)
-        if cred_cls is not None:
-            cred_mod = cred_cls()
-            await queue.put(QueueEvent(type="module_start", module_name=cred_mod.name))
-            try:
-                from ..config import settings
-
-                cred_timeout = _resolve_module_timeout(
-                    cred_mod.name,
-                    settings.module_timeout_seconds,
-                    settings.module_timeout_overrides,
-                )
-                credibility_result = await asyncio.wait_for(
-                    cred_mod.run(email),
-                    timeout=cred_timeout,
-                )
-            except asyncio.TimeoutError:
-                credibility_result = ModuleResult(
-                    status=ModuleStatus.FAILED,
-                    errors=["timed out during email credibility preflight"],
-                )
-            except Exception as exc:
-                credibility_result = ModuleResult(
-                    status=ModuleStatus.FAILED,
-                    errors=[str(exc)],
-                )
-            collected[cred_mod.name] = credibility_result
-            await queue.put(
-                QueueEvent(
-                    type=(
-                        "module_error"
-                        if credibility_result.status == ModuleStatus.FAILED
-                        else "module_result"
-                    ),
-                    module_name=cred_mod.name,
-                    result=credibility_result,
-                )
-            )
-
-            cred_payload = credibility_result.metadata or {}
-            canonical_email = str(cred_payload.get("canonical_email") or canonical_email)
-            if bool(cred_payload.get("is_disposable")):
-                classes = [c for c in classes if c.name in _BREACH_MODULES]
-
-        async def _run_one(cls) -> None:
-            mod = cls()
-            from ..config import settings
-            default_timeout = _MODULE_DEFAULT_TIMEOUTS.get(
-                mod.name, settings.module_timeout_seconds
-            )
-            timeout = _resolve_module_timeout(
-                mod.name,
-                default_timeout,
-                settings.module_timeout_overrides,
-            )
-            explicit_module = module_names is not None and mod.name in module_names
-            async with semaphore:
-                await queue.put(QueueEvent(type="module_start", module_name=mod.name))
-                try:
-                    if mod.name == "breach_deep":
-                        coro = mod.run(canonical_email, force=explicit_module)
-                    elif mod.name == "maigret_platforms":
-                        coro = mod.run(canonical_email, force=explicit_module)
-                    elif mod.name in ("github_commits", "gravatar", "keybase", "npm_discovery", "pypi_discovery") and email != canonical_email:
-                        coro = mod.run(canonical_email, original_email=email)
-                    else:
-                        coro = mod.run(canonical_email)
-                    result = await asyncio.wait_for(coro, timeout=timeout)
-                except asyncio.TimeoutError:
-                    result = ModuleResult(
-                        status=ModuleStatus.FAILED,
-                        errors=[f"timed out after {timeout}s"],
-                    )
-                except Exception as exc:
-                    result = ModuleResult(
-                        status=ModuleStatus.FAILED,
-                        errors=[str(exc)],
-                    )
-            collected[mod.name] = result
-            event_type = (
-                "module_error" if result.status == ModuleStatus.FAILED else "module_result"
-            )
-            await queue.put(QueueEvent(type=event_type, module_name=mod.name, result=result))
 
         async def _run_and_persist() -> None:
-            self.status = InvestigationStatus.RUNNING
-            await self._set_status(investigation_id, InvestigationStatus.RUNNING)
+            current_email = canonical_email
+            try:
+                self.status = InvestigationStatus.RUNNING
+                await self._set_status(investigation_id, InvestigationStatus.RUNNING)
 
-            from ..config import settings as _cfg
+                from ..config import settings as config
+                from ._phase_runner import settings_override
+                from .phases import PHASE_DAG
 
-            _OPT_IN_MAP = {
-                "breach_deep": "enable_breach_deep",
-                "ghunt": "enable_ghunt",
-                "email_discovery": "enable_email_discovery",
-                "press_intel": "enable_press_intel",
-                "maigret_platforms": "enable_maigret_platforms",
-            }
-
-            override_flags = {
-                _OPT_IN_MAP[name]: True
-                for name in (enable_modules or [])
-                if name in _OPT_IN_MAP
-            }
-
-            from unittest.mock import patch
-            import contextlib
-            with contextlib.ExitStack() as stack:
-                if override_flags:
-                    stack.enter_context(patch.multiple(_cfg, **override_flags))
-                await asyncio.gather(
-                    *[_run_one(cls) for cls in classes],
-                    return_exceptions=True,
-                )
-
-                _primary_collected = dict(collected)
-
-                if _cfg.enable_username_pivot:
-                    from ..modules.username_pivot import UsernamePivotModule
-
-                    _pivot = UsernamePivotModule()
-                    _pivot_timeout = _resolve_module_timeout(
-                        _pivot.name,
-                        _cfg.module_timeout_seconds,
-                        _cfg.module_timeout_overrides,
-                    )
-                    await queue.put(QueueEvent(type="module_start", module_name=_pivot.name))
-                    try:
-                        _pivot_result = await asyncio.wait_for(
-                            _pivot.run(email, collected), timeout=_pivot_timeout
+                opt_in_overrides = {
+                    _OPT_IN_FLAG_BY_MODULE[name]: True
+                    for name in (enable_modules or [])
+                    if name in _OPT_IN_FLAG_BY_MODULE
+                }
+                with settings_override(config, **opt_in_overrides):
+                    for phase in PHASE_DAG:
+                        await phase.run(
+                            investigation_id=investigation_id,
+                            email=email,
+                            canonical_email=current_email,
+                            collected=collected,
+                            queue=queue,
+                            semaphore=semaphore,
+                            config=config,
+                            explicit_modules=(
+                                set(module_names) if module_names is not None else None
+                            ),
+                            enable_modules=(
+                                set(enable_modules) if enable_modules is not None else None
+                            ),
                         )
-                    except asyncio.TimeoutError:
-                        _pivot_result = ModuleResult(
-                            status=ModuleStatus.FAILED,
-                            errors=[f"timed out after {_pivot_timeout}s"],
-                        )
-                    except Exception as _exc:
-                        _pivot_result = ModuleResult(
-                            status=ModuleStatus.FAILED, errors=[str(_exc)]
-                        )
-                    collected[_pivot.name] = _pivot_result
-                    _pivot_evt = (
-                        "module_error"
-                        if _pivot_result.status == ModuleStatus.FAILED
-                        else "module_result"
-                    )
-                    await queue.put(
-                        QueueEvent(
-                            type=_pivot_evt, module_name=_pivot.name, result=_pivot_result
-                        )
-                    )
-
-                # Permutation discovery phase — runs after primary modules so it can
-                # read their findings to extract a real name.
-                if _cfg.enable_permutation_discovery:
-                    from ..modules.permutation_discovery import PermutationDiscovery
-                    _perm = PermutationDiscovery()
-                    await queue.put(QueueEvent(type="module_start", module_name=_perm.name))
-                    try:
-                        _perm_result = await _perm.run(email, collected)
-                    except Exception as _exc:
-                        _perm_result = ModuleResult(
-                            status=ModuleStatus.FAILED, errors=[str(_exc)]
-                        )
-                    collected[_perm.name] = _perm_result
-                    _evt = (
-                        "module_error"
-                        if _perm_result.status == ModuleStatus.FAILED
-                        else "module_result"
-                    )
-                    await queue.put(
-                        QueueEvent(type=_evt, module_name=_perm.name, result=_perm_result)
-                    )
-
-                if _cfg.enable_email_discovery:
-                    from ..modules.email_discovery import EmailDiscoveryModule
-
-                    _email_discovery = EmailDiscoveryModule()
-                    _email_timeout = _resolve_module_timeout(
-                        _email_discovery.name,
-                        _cfg.module_timeout_seconds,
-                        _cfg.module_timeout_overrides,
-                    )
-                    await queue.put(
-                        QueueEvent(
-                            type="module_start", module_name=_email_discovery.name
-                        )
-                    )
-                    try:
-                        _email_result = await asyncio.wait_for(
-                            _email_discovery.run(email, _primary_collected),
-                            timeout=_email_timeout,
-                        )
-                    except asyncio.TimeoutError:
-                        _email_result = ModuleResult(
-                            status=ModuleStatus.FAILED,
-                            errors=[f"timed out after {_email_timeout}s"],
-                        )
-                    except Exception as _exc:
-                        _email_result = ModuleResult(
-                            status=ModuleStatus.FAILED, errors=[str(_exc)]
-                        )
-                    collected[_email_discovery.name] = _email_result
-                    _email_evt = (
-                        "module_error"
-                        if _email_result.status == ModuleStatus.FAILED
-                        else "module_result"
-                    )
-                    await queue.put(
-                        QueueEvent(
-                            type=_email_evt,
-                            module_name=_email_discovery.name,
-                            result=_email_result,
-                        )
-                    )
-
-                from ..modules.alternate_email import AlternateEmailModule
-                
-                _alt_email = AlternateEmailModule()
-                _alt_timeout = _resolve_module_timeout(
-                    _alt_email.name,
-                    _cfg.module_timeout_seconds,
-                    _cfg.module_timeout_overrides,
-                )
-                await queue.put(QueueEvent(type="module_start", module_name=_alt_email.name))
-                try:
-                    _alt_result = await asyncio.wait_for(
-                        _alt_email.run(email, collected), timeout=_alt_timeout
-                    )
-                except asyncio.TimeoutError:
-                    _alt_result = ModuleResult(
-                        status=ModuleStatus.FAILED,
-                        errors=[f"timed out after {_alt_timeout}s"],
-                    )
-                except Exception as _exc:
-                    _alt_result = ModuleResult(
-                        status=ModuleStatus.FAILED, errors=[str(_exc)]
-                    )
-                collected[_alt_email.name] = _alt_result
-                _alt_evt = (
-                    "module_error"
-                    if _alt_result.status == ModuleStatus.FAILED
-                    else "module_result"
-                )
-                await queue.put(
-                    QueueEvent(
-                        type=_alt_evt, module_name=_alt_email.name, result=_alt_result
-                    )
-                )
-
-                # Profile intelligence: Twitter/X, LinkedIn SERP, Etsy/eBay
-                # Run all three concurrently — each skips itself if no relevant
-                # confirmed username/name is present in collected findings.
-                from ..modules.twitter_profile import TwitterProfileModule
-                from ..modules.linkedin_serp import LinkedInSerpModule
-                from ..modules.marketplace_profile import MarketplaceProfileModule
-
-                _profile_modules = [
-                    TwitterProfileModule(),
-                    LinkedInSerpModule(),
-                    MarketplaceProfileModule(),
-                ]
-
-                async def _run_profile_module(mod) -> tuple[str, ModuleResult]:
-                    _timeout = _resolve_module_timeout(
-                        mod.name,
-                        _cfg.module_timeout_seconds,
-                        _cfg.module_timeout_overrides,
-                    )
-                    await queue.put(
-                        QueueEvent(type="module_start", module_name=mod.name)
-                    )
-                    try:
-                        result = await asyncio.wait_for(
-                            mod.run(email, collected), timeout=_timeout
-                        )
-                    except asyncio.TimeoutError:
-                        result = ModuleResult(
-                            status=ModuleStatus.FAILED,
-                            errors=[f"timed out after {_timeout}s"],
-                        )
-                    except Exception as _exc:
-                        result = ModuleResult(
-                            status=ModuleStatus.FAILED, errors=[str(_exc)]
-                        )
-                    _evt = (
-                        "module_error"
-                        if result.status == ModuleStatus.FAILED
-                        else "module_result"
-                    )
-                    await queue.put(
-                        QueueEvent(
-                            type=_evt, module_name=mod.name, result=result
-                        )
-                    )
-                    return mod.name, result
-
-                _profile_results = await asyncio.gather(
-                    *[_run_profile_module(m) for m in _profile_modules],
-                    return_exceptions=True,
-                )
-                for _item in _profile_results:
-                    if isinstance(_item, BaseException):
-                        continue
-                    _pmod_name, _pmod_result = _item
-                    collected[_pmod_name] = _pmod_result
-
-                if _cfg.enable_phone_intel:
-                    from ..core.phone_extractor import extract_phones
-                    from ..modules.phone_intel import PhoneIntelModule
-
-                    _phone = PhoneIntelModule()
-                    _phone_timeout = _resolve_module_timeout(
-                        _phone.name,
-                        _cfg.module_timeout_seconds,
-                        _cfg.module_timeout_overrides,
-                    )
-                    await queue.put(QueueEvent(type="module_start", module_name=_phone.name))
-                    try:
-                        _phone_result = await asyncio.wait_for(
-                            _phone.run(email, collected), timeout=_phone_timeout
-                        )
-                    except asyncio.TimeoutError:
-                        _phone_result = ModuleResult(
-                            status=ModuleStatus.FAILED,
-                            errors=[f"timed out after {_phone_timeout}s"],
-                        )
-                    except Exception as _exc:
-                        _phone_result = ModuleResult(
-                            status=ModuleStatus.FAILED, errors=[str(_exc)]
-                        )
-                    collected[_phone.name] = _phone_result
-                    _phone_evt = (
-                        "module_error"
-                        if _phone_result.status == ModuleStatus.FAILED
-                        else "module_result"
-                    )
-                    await queue.put(
-                        QueueEvent(
-                            type=_phone_evt, module_name=_phone.name, result=_phone_result
-                        )
-                    )
-
-                    # Re-run messaging hints with recovered phones (WhatsApp path)
-                    if _cfg.enable_messaging_hints:
-                        from ..modules.messaging_hints import MessagingHintsModule
-
-                        _all_findings: list = []
-                        for _r in collected.values():
-                            if hasattr(_r, "findings"):
-                                _all_findings.extend(_r.findings)
-                        _phones = extract_phones(_all_findings)
-                        if _phones:
-                            _msg = MessagingHintsModule()
-                            try:
-                                _msg_extra = await asyncio.wait_for(
-                                    _msg.run(email, phone_hints=_phones, collected=collected),
-                                    timeout=_cfg.module_timeout_seconds,
+                        if phase.name == "email_credibility":
+                            credibility = collected.get("email_credibility")
+                            if credibility:
+                                current_email = str(
+                                    (credibility.metadata or {}).get("canonical_email")
+                                    or current_email
                                 )
-                                if _msg_extra.findings:
-                                    prev = collected.get(_msg.name)
-                                    if prev and hasattr(prev, "findings"):
-                                        existing_urls = {
-                                            f.get("profile_url") for f in prev.findings
-                                        }
-                                        new_only = [
-                                            f for f in _msg_extra.findings
-                                            if f.get("profile_url") not in existing_urls
-                                        ]
-                                        prev.findings = list(prev.findings) + new_only
-                                        if prev.metadata and _msg_extra.metadata:
-                                            prev.metadata["whatsapp_followup"] = True
-                                    else:
-                                        collected[_msg.name] = _msg_extra
-                            except Exception:
-                                pass
 
-                graph_data: dict | None = None
-                try:
-                    from .identity_graph import IdentityGraph
-
-                    _findings_flat = []
-                    for _mod, _res in collected.items():
-                        if hasattr(_res, "findings"):
-                            for _f in _res.findings:
-                                _findings_flat.append({"module_name": _mod, "data": _f})
-                    _findings_flat = collapse_breach_findings(_findings_flat)
-                    graph_data = IdentityGraph.build(
-                        {"email": canonical_email, "findings": _findings_flat}
-                    ).to_d3()
-                except Exception:
-                    graph_data = None
-
-                # Sort collected once, after every module has reported, so the
-                # exposure score and persisted finding order are independent of
-                # async completion order.
-                # NOTE: use a separate variable to avoid shadowing the closed-over
-                # `collected` in _run_and_persist — assigning to `collected` here
-                # would make Python treat it as a local throughout the function,
-                # causing UnboundLocalError on every earlier reference.
-                _final: dict[str, ModuleResult] = {
-                    name: ModuleResult(
-                        status=result.status,
-                        findings=list(result.findings),
-                        metadata=deepcopy(result.metadata) if result.metadata else {},
-                        errors=list(result.errors) if result.errors else [],
+                    # Compute name consensus before the graph build so
+                    # the Phase 6B.2 V2 shadow-profile detector can use
+                    # the resolved confirmed_name.
+                    name_result = NameConsensusEngine(email).resolve(
+                        extract_name_candidates(collected, email)
                     )
-                    for name, result in collected.items()
-                }
-                from .platform_dedup import deduplicate_platform_findings
-
-                deduplicate_platform_findings(_final)
-                _flat_findings: list[dict] = []
-                for _mod, _res in _final.items():
-                    if hasattr(_res, "findings"):
-                        for _f in _res.findings:
-                            _flat_findings.append({"module_name": _mod, "data": _f})
-
-                _collapsed = collapse_breach_findings(_flat_findings)
-                _final = {
-                    name: ModuleResult(
-                        status=result.status,
-                        findings=[],
-                        metadata=deepcopy(result.metadata) if result.metadata else {},
-                        errors=list(result.errors) if result.errors else [],
+                    name_consensus = {
+                        "confirmed_name": name_result.confirmed_name,
+                        "name_confidence": name_result.name_confidence,
+                    }
+                    graph_data = await _build_graph_with_timeout(
+                        current_email, collected, name_consensus=name_consensus
                     )
-                    for name, result in _final.items()
-                }
-                for _finding in _collapsed:
-                    _module = str(_finding.get("module_name") or "").strip()
-                    if not _module:
-                        continue
-                    if _module not in _final:
-                        _final[_module] = ModuleResult(
-                            status=ModuleStatus.SUCCESS,
-                            findings=[],
-                            metadata={},
-                            errors=[],
-                        )
-                    _payload = _finding.get("data") if isinstance(_finding.get("data"), dict) else _finding
-                    if isinstance(_payload, dict):
-                        _final[_module].findings.append(_payload)
-
-                _final = _sort_collected(_final)
-
-                # Persist before sentinel so consumers see the final score in the DB.
-                self.status = InvestigationStatus.COMPLETE
-                try:
+                    final = _prepare_results(collected)
+                    self.status = InvestigationStatus.COMPLETE
                     await self._persist(
                         investigation_id,
-                        _final,
+                        final,
                         started_at,
-                        canonical_email,
+                        current_email,
                         email,
                         graph_data,
                     )
-
-                    # Dispatch webhooks if configured
-                    try:
-                        from ..integrations.webhooks import WebhookDispatcher
-                        name_result = NameConsensusEngine(email).resolve(
-                            extract_name_candidates(_final, email)
-                        )
-                        score = _compute_exposure_score(_final, name_result.name_confidence)
-                        credential_risk = assess_credential_risk_from_results(_final)
-                        await WebhookDispatcher().dispatch(
-                            email,
-                            score,
-                            credential_risk.score,
-                            credential_risk.band,
-                            _final,
-                        )
-
-                        from ..config import settings
-                        if settings.integration_webhook_url:
-                            from ..core.service import InvestigationService, enrich_report
-                            from ..integrations.integration_webhook import IntegrationWebhookDispatcher
-                            
-                            async with AsyncSessionLocal() as session:
-                                svc = InvestigationService(session)
-                                data = await svc.get_investigation(investigation_id)
-                            
-                            if data:
-                                payload = enrich_report(data)
-                                await IntegrationWebhookDispatcher().dispatch(payload)
-                    except Exception as e:
-                        import logging
-                        logging.getLogger(__name__).error(f"Webhook dispatch failed: {e}")
+                    await self._dispatch_webhooks(investigation_id, email, final)
+            except Exception:
+                logger.exception("Investigation %s failed", investigation_id)
+                self.status = InvestigationStatus.FAILED
+                try:
+                    await self._set_status(
+                        investigation_id, InvestigationStatus.FAILED
+                    )
                 except Exception:
-                    self.status = InvestigationStatus.FAILED
-                    await self._set_status(investigation_id, InvestigationStatus.FAILED)
-                finally:
-                    await queue.put(None)
+                    logger.exception(
+                        "Failed to persist failed status for %s", investigation_id
+                    )
+            finally:
+                await queue.put(None)
 
         asyncio.create_task(_run_and_persist())
         return queue
 
-    # ------------------------------------------------------------------
-    # DB helpers (each opens its own session — runs outside request scope)
-    # ------------------------------------------------------------------
+    async def _dispatch_webhooks(
+        self,
+        investigation_id: str,
+        email: str,
+        final: dict[str, ModuleResult],
+    ) -> None:
+        try:
+            from ..integrations.webhooks import WebhookDispatcher
+
+            name_result = NameConsensusEngine(email).resolve(
+                extract_name_candidates(final, email)
+            )
+            score = _compute_exposure_score(final, name_result.name_confidence)
+            credential_risk = assess_credential_risk_from_results(final)
+            await WebhookDispatcher().dispatch(
+                email,
+                score,
+                credential_risk.score,
+                credential_risk.band,
+                final,
+            )
+
+            from ..config import settings
+
+            if settings.integration_webhook_url:
+                from ..core.service import InvestigationService, enrich_report
+                from ..integrations.integration_webhook import (
+                    IntegrationWebhookDispatcher,
+                )
+
+                async with AsyncSessionLocal() as session:
+                    service = InvestigationService(session)
+                    data = await service.get_investigation(investigation_id)
+                if data:
+                    await IntegrationWebhookDispatcher().dispatch(enrich_report(data))
+        except Exception:
+            logger.exception("Webhook dispatch failed")
 
     async def _set_status(
         self, investigation_id: str, status: InvestigationStatus
     ) -> None:
+        values: dict[str, Any] = {"status": status}
+        if status == InvestigationStatus.RUNNING:
+            values.update(started_at=datetime.now(timezone.utc), error=None)
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 await session.execute(
                     update(Investigation)
                     .where(Investigation.id == investigation_id)
-                    .values(status=status)
+                    .values(**values)
                 )
 
     async def _persist(
@@ -781,12 +360,12 @@ class InvestigationEngine:
         )
         score = _compute_exposure_score(collected, name_result.name_confidence)
         credential_risk = assess_credential_risk_from_results(collected, as_of=now)
-        timeline_rows: list[dict] = []
-        for module_name, result in collected.items():
-            for finding_data in result.findings:
-                timeline_rows.append({"module_name": module_name, "data": finding_data})
+        timeline_rows = [
+            {"module_name": module_name, "data": finding}
+            for module_name, result in collected.items()
+            for finding in result.findings
+        ]
         timeline = TimelineBuilder(as_of=now).build_timeline(timeline_rows)
-        timeline_json = asdict(timeline)
         credibility = {}
         credibility_result = collected.get("email_credibility")
         if credibility_result and isinstance(credibility_result.metadata, dict):
@@ -814,7 +393,7 @@ class InvestigationEngine:
                     "name_confidence": name_result.name_confidence,
                     "name_reasoning": name_result.name_reasoning,
                     "name_sources": name_result.name_sources,
-                    "timeline_json": timeline_json,
+                    "timeline_json": asdict(timeline),
                     "defenders_brief_json": defenders_brief,
                 }
                 if graph_data is not None:

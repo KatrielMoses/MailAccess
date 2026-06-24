@@ -1,0 +1,51 @@
+# Credential-risk service categories. Matching compares each token exactly
+# against the normalized platform name or an individual host label split on
+# dots and hyphens; add aliases here without changing Python code.
+finance:
+  - paypal
+  - venmo
+  - cashapp
+  - stripe
+  - chase
+  - bank
+  - coinbase
+  - binance
+  - kraken
+dev:
+  - github
+  - gitlab
+  - bitbucket
+  - docker
+  - npm
+  - stack
+  - jira
+gaming:
+  - steam
+  - epic
+  - riot
+  - xbox
+  - playstation
+  - ea
+  - ubisoft
+  - battle.net
+communication:
+  - discord
+  - skype
+  - zoom
+  - telegram
+  - slack
+  - whatsapp
+social:
+  - facebook
+  - instagram
+  - linkedin
+  - reddit
+  - snapchat
+  - spotify
+  - tiktok
+  - twitter
+  - patreon
+education:
+  - duolingo
+  - coursera
+  - udemy

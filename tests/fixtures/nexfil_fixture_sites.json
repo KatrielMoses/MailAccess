@@ -1,0 +1,50 @@
+{
+  "_meta": {"source": "test_fixture", "site_count": 6},
+  "sites": {
+    "StatusCodeSite": {
+      "url": "https://status.example.com/{}",
+      "url_main": "https://status.example.com",
+      "error_type": "status_code",
+      "error_code": [404],
+      "category": "dev"
+    },
+    "MessageSite": {
+      "url": "https://message.example.com/{}",
+      "url_main": "https://message.example.com",
+      "error_type": "message",
+      "error_msg": ["User does not exist"],
+      "category": "social"
+    },
+    "ResponseUrlSite": {
+      "url": "https://redirect.example.com/{}",
+      "url_main": "https://redirect.example.com",
+      "error_type": "response_url",
+      "category": "social"
+    },
+    "ApiSite": {
+      "url": "https://api.example.com/users/{}",
+      "url_probe": "https://api.example.com/v1/users?username={}",
+      "url_main": "https://api.example.com",
+      "error_type": "api",
+      "error_code": [404],
+      "api_keys": ["results", "users", "username"],
+      "category": "social"
+    },
+    "SubdomainSite": {
+      "url": "https://{}.subdomain.example.com/",
+      "url_main": "https://subdomain.example.com",
+      "error_type": "status_code",
+      "error_code": [404],
+      "strip_bad_char": ".",
+      "category": "blog"
+    },
+    "AltUrlSite": {
+      "url": "https://alt.example.com/profile/{}",
+      "url_probe": "https://alt.example.com/api/avatar?user={}",
+      "url_main": "https://alt.example.com",
+      "error_type": "status_code",
+      "error_code": [404],
+      "category": "social"
+    }
+  }
+}

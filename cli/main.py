@@ -181,6 +181,78 @@ def config_set_url(
 keys_app = typer.Typer(name="keys", help="Manage API keys stored in ~/.mailaccess/.env", invoke_without_command=True, no_args_is_help=True)
 app.add_typer(keys_app)
 
+from cli.platform_health import platform_health_app  # noqa: E402
+app.add_typer(platform_health_app)
+
+
+# TODO(0.10.0): when a `mailaccess doctor` command is added, migrate this to
+# `mailaccess doctor --platforms` and keep `mailaccess platform-audit` as an
+# alias. Tracked alongside the rest of the doctor surface (config validation,
+# key health, etc.). For now we ship it standalone.
+from cli.platform_audit import run_platform_audit  # noqa: E402
+
+
+# ── Platform Audit (Phase 6C) ─────────────────────────────────────────────────
+
+
+@app.command(name="platform-audit")
+def platform_audit_command(
+    min_probes: int = typer.Option(
+        20,
+        "--min-probes",
+        help="Filter to platforms with at least this many probes (default: 20).",
+    ),
+    recommend_skip: bool = typer.Option(
+        False,
+        "--recommend-skip",
+        help="Show only SKIP candidates (inconclusive > 70% AND probes > 50).",
+    ),
+    export: Optional[str] = typer.Option(
+        None,
+        "--export",
+        help="Export full platform stats to a JSON file (bare names go to ./results/).",
+    ),
+    top: int = typer.Option(
+        50,
+        "--top",
+        help="Maximum number of platforms to display (default: 50).",
+    ),
+    sort: str = typer.Option(
+        "noise",
+        "--sort",
+        help="Sort by: noise | hit-rate | latency | total-probes | name.",
+    ),
+    window: int = typer.Option(
+        30,
+        "--window",
+        "-w",
+        help="Rolling window in days (default: 30).",
+    ),
+    show_demotions: bool = typer.Option(
+        False,
+        "--show-demotions",
+        help="Show only platforms that were auto-demoted in the last investigation, "
+        "with stats and override instructions.",
+    ),
+) -> None:
+    """Audit probe health across all tracked platforms.
+
+    Surfaces which platforms are noisy (high inconclusive rate), reliable
+    (high hit/miss rate), and dead (sustained failure), with a skip / demote
+    / keep recommendation per platform. Read-only — does not modify the
+    health DB. Visibility layer for Phase 6D's auto-demotion automation.
+    """
+    run_platform_audit(
+        min_probes=min_probes,
+        recommend_skip=recommend_skip,
+        export=export,
+        top=top,
+        sort=sort,
+        window=window,
+        console=console,
+        show_demotions=show_demotions,
+    )
+
 
 @keys_app.callback(invoke_without_command=True)
 def keys_callback(ctx: typer.Context) -> None:
@@ -1588,7 +1660,15 @@ async def _investigate(
                 resp.raise_for_status()
                 data = resp.json()
                 clusters = data.get("clusters", [])
-                if not clusters and not discovered_emails and not show_name_consensus:
+                # Phase 6B.2 — both V1 and V2 shadow findings ride along on
+                # the clusters endpoint response.
+                shadow_findings = data.get("shadow_findings", [])
+                if (
+                    not clusters
+                    and not discovered_emails
+                    and not show_name_consensus
+                    and not shadow_findings
+                ):
                     return
             except httpx.TimeoutException:
                 out.print(
@@ -1597,7 +1677,7 @@ async def _investigate(
                 return
             except Exception:
                 return
-                
+
             out.print(Rule("IDENTITY ANALYSIS", style="bold blue"))
             out.print()
 
@@ -1628,42 +1708,86 @@ async def _investigate(
                     )
                     out.print(f"    {field:<10} {reasoning}")
                 out.print()
-            
+
             for i, cluster in enumerate(clusters or [], 1):
                 conf = cluster.get("confidence", 0.0)
                 label = cluster.get("label", "unknown")
                 reasoning = cluster.get("reasoning", [])
                 findings = cluster.get("findings", [])
                 is_col = cluster.get("is_collision", False)
-                
+
                 out.print(f"  [bold]IDENTITY {i}[/] — {label}  [dim][confidence: {conf:.2f}][/dim]")
                 for reason in reasoning:
                     out.print(f"    [dim]\"{reason}\"[/dim]")
                 out.print()
-                
+
                 if is_col and not show_collisions:
                     out.print(f"    [dim]~ {len(findings)} platforms with bare username match[/dim]")
                     out.print("      [dim](use --show-collisions to expand)[/dim]")
                     out.print()
                     continue
-                    
+
                 shown = 0
                 for finding in findings:
                     item = finding.get("data", finding)
                     mod_name = finding.get("module_name", "unknown")
                     platform, detail = _extract_finding_line(item, mod_name)
-                    
+
                     detail_text = detail
                     if mod_name in ("account_discovery", "user_scanner") or str(item.get("source", "")) in ("account_discovery", "user_scanner"):
                         platform = platform.title()
                         detail_text = "[email registration confirmed]"
-                        
+
                     p_label = f"{platform[:16]:<16}"
                     out.print(f"    [green]✓[/green] {p_label} [dim]{detail_text}[/dim]")
                     shown += 1
                     if not is_col and shown >= 5 and len(findings) > 5:
                         out.print(f"    [dim]+ {len(findings) - 5} more accounts[/dim]")
                         break
+                out.print()
+
+            # Phase 6B.2 — SHADOW PROFILES section.  Only printed when
+            # at least one shadow finding (V1 or V2) was produced.
+            if shadow_findings:
+                out.print(
+                    Rule(
+                        f"SHADOW PROFILES  ({len(shadow_findings)} found)",
+                        style="bold magenta",
+                    )
+                )
+                for sf in shadow_findings:
+                    sf_type = sf.get("type", "shadow_profile")
+                    primary = sf.get("primary_email") or ""
+                    shadow = (
+                        sf.get("shadow_email")
+                        or sf.get("primary_email")
+                        or ""
+                    )
+                    # V1 entries use display_name; V2 entries use shared_name.
+                    shared_name = sf.get("display_name") or sf.get("shared_name") or ""
+                    overlap = (
+                        sf.get("shared_platforms")
+                        or (
+                            [sf["primary_platform"], sf.get("shadow_platform")]
+                            if sf.get("primary_platform")
+                            and sf.get("shadow_platform")
+                            else []
+                        )
+                    )
+                    confidence = str(sf.get("confidence") or "MEDIUM").upper()
+                    out.print("  Possible alternate identity detected:")
+                    if sf_type == "shadow_profile_v2":
+                        out.print(
+                            f"    {shadow} shares name \"{shared_name}\""
+                            f" and {sf.get('platform_overlap_count', len(overlap))}"
+                            f" platforms with {primary}"
+                        )
+                    else:
+                        out.print(
+                            f"    {shadow} shares name \"{shared_name}\""
+                            f" and {len(overlap)} platforms with {primary}"
+                        )
+                    out.print(f"    Confidence: {confidence}")
                 out.print()
             alt_emails = _get_alternate_emails(report_data)
             all_other = list(discovered_emails)

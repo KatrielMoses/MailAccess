@@ -17,9 +17,18 @@ method: GET
 # body:
 #   email: "{email}"
 
+# Sequential requests; step fields fall back to the parent request fields (optional)
+# multi_step:
+#   - name: fetch profile identifier
+#     url: https://api.example.com/search?email={email}
+#     extract_fields:
+#       user_id: data.user.id
+#       token: regex:token=(\w+)
+
 # Extra request headers merged with default User-Agent (optional)
 # headers:
 #   Content-Type: application/json
+# User-Agent rotation is automatic; set User-Agent above only to override it.
 
 # How to decide the account exists (required)
 #   status            — response.status_code == success_status
@@ -28,14 +37,24 @@ method: GET
 #   json_field        — dot-path into JSON body (see json_success_* below)
 check_type: body_not_contains
 
+# Body substrings that override any successful check as NOT FOUND (optional)
+# absence_strings:
+#   - user not found
+
 # Expected HTTP status for check_type: status (default: 200)
 success_status: 200
 
 # Substrings that indicate success (body_contains) — use | for OR (optional)
 # success_string: account found|user exists
 
+# Fraction of success_string markers required for body_contains; 0.0 means any (default)
+# presence_threshold: 0.5
+
 # Substrings that indicate failure (body_not_contains) — use | for OR (optional)
 failure_string: not found|does not exist
+
+# Minimum final response-body length required for a finding (optional)
+# min_content_length: 500
 
 # Dot-notation path into JSON response (json_field) (optional)
 # json_success_path: data.user.id

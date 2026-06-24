@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.8.0&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.9.0&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -49,7 +49,7 @@ mailaccess serve                                # start backend server on :8000
 mailaccess keys list
 mailaccess keys set HIBP_API_KEY your-key-here
 mailaccess modules
-mailaccess doctor                               # coming soon
+mailaccess platform-health                      # inspect noisy/failing probes
 
 # Enable specific opt-in modules for one run
 mailaccess investigate email -m breach_deep
@@ -69,6 +69,13 @@ mailaccess investigate email -m all
 - **Native Maigret engine** — 2500+ platform coverage without a Maigret runtime dependency, including regional, niche, and international platforms not covered by WMN
 - **Catch-all detection** — excludes platforms that return false positives for arbitrary usernames before the sweep starts
 - **Platform deduplication** — merges WMN and Maigret results by profile URL domain so confirmed platforms are not double-counted
+- **Avatar perceptual hashing** — confirms the same person across platforms by image similarity
+- **False-positive reduction** — common-name filtering, content-length sanity checks, and multi-language failure signals reduce noisy hits
+- **Disposable email detection** — flags disposable domains and downweights affected enumeration findings
+- **Bio fuzzy similarity** — links profiles with materially similar free-form bios
+- **Platform health** — automatically demotes unreliable platforms and self-heals as reliability changes
+- **Platform audit CLI** — inspect platform reliability with `mailaccess platform-audit`
+- **Temporal clustering and shadow profiles** — surfaces coordinated signup windows and same-name accounts tied to alternate emails
 - **Deep breach mode** — checks top 100 highest-severity breached sites for account existence
 - **Historical intelligence** — Wayback Machine archive search + GitHub commit author search
 - **Recursive email discovery** — recovers other emails owned by the same person via name correlation
@@ -114,6 +121,9 @@ mailaccess investigate email -m all
 | user_scanner | 205+ platform vectors | No | Yes |
 | whatsmyname | 700+ platforms | No | Yes |
 | maigret_platforms | Native Maigret platform engine, 2500+ platforms | No | No (disable via `ENABLE_MAIGRET_PLATFORMS=false`) |
+| sherlock_platforms | Sherlock native engine, ~300 platforms | No | No |
+| nexfil_platforms | Nexfil native engine, ~300 platforms | No | No |
+| blackbird_platforms | Blackbird native engine, social focus | No | No |
 | breachdirectory | 2nd breach source | Yes | No |
 | username_pivot | WMN via recovered usernames | No | Yes |
 | permutation_discovery | 60 email variants | No | Yes |
@@ -121,8 +131,15 @@ mailaccess investigate email -m all
 | messaging_hints | Telegram/WhatsApp username check | No | No |
 | ghunt | Gmail deep intel | No (setup required) | Yes |
 | identity_graph | Cross-platform cluster analysis | No | No (automatic) |
+| platform_health | Persistent probe health, fragility, and skip decisions | No | No (automatic) |
+| temporal_cluster | Coordinated account-creation windows | No | No (automatic) |
+| shadow_profiles | Same-name accounts tied to alternate emails | No | No (automatic) |
+| avatar_clusters | Cross-platform perceptual-avatar clusters | No | No (automatic) |
+| breach_corpus | Cached and severity-ranked public HIBP breach catalog | No | No (used by `breach_deep`) |
+| common_names | Common-name and username false-positive controls | No | No (automatic) |
+| disposable_domains | Disposable-email confidence controls | No | No (automatic) |
 
-> 43 modules, 2500+ platforms by default.
+> 55 modules · 2500+ platforms by default
 
 ## Platform Coverage
 
@@ -134,6 +151,9 @@ MailAccess checks usernames derived from the target email across multiple platfo
 | Holehe | 120+ | On |
 | user-scanner | 205+ | On |
 | Maigret native engine | 2500+ | On |
+| Sherlock native | ~300 | On |
+| Nexfil native | ~300 | On |
+| Blackbird native | social focus | On |
 
 Total with Maigret enabled: 2500+ unique platforms after deduplication.
 
@@ -157,6 +177,9 @@ Findings from WMN and Maigret are deduplicated by URL domain. When both tools co
 |----------|--------|--------------|---------|-------------|
 | `ENABLE_MAIGRET_PLATFORMS` | `maigret_platforms` | None | `false` | Enable 2500+ platform sweep. Adds ~35-90s. |
 | `ENABLE_MAIGRET_WAVE2` | `maigret_platforms` (Wave 2) | None | `false` | Enable slow/fragile platform sweep. Requires `ENABLE_MAIGRET_PLATFORMS=true`. Adds ~90-150s. |
+| `MAIGRET_FORCE_{PLATFORM}` | `maigret_platforms` | None | _(unset)_ | Override auto-demotion for one platform. |
+| `MAILACCESS_SHARE_HEALTH` | `platform-health` | None | `false` | Opt in to anonymized health sharing; sharing still requires `--share`. |
+| `DOMAIN_CLUSTER_CAP` | `domain_cluster` | None | `20` | Maximum domains checked per infrastructure cluster pass. |
 
 ## Identity Graph
 
@@ -293,6 +316,88 @@ docker compose up         # backend :8000  ·  frontend :3000
 
 Open **http://localhost:3000** in your browser. Full setup guide: [docs/self-hosting.md](docs/self-hosting.md).
 
+## Platform Health & Self-Healing
+
+MailAccess tracks probe outcomes for every platform it touches in
+`~/.mailaccess/platform_health.db`. Phase 6C makes that data visible; Phase
+6D makes it actionable. After every investigation, the system:
+
+> **Note:** `mailaccess platform-audit` shows platforms that have been probed
+> in your local investigations. This number grows over time. The full platform
+> database (2500+) is checked during every investigation regardless of how many
+> appear in the health DB.
+
+- **Auto-skips** platforms with > 70% inconclusive probes over the last 30 days
+  (only when those probes were collected in the last 14 days — stale stats
+  never trigger a re-skip).
+- **Auto-demotes** Wave-1 platforms with > 40% inconclusive probes to Wave 2
+  for the current investigation.
+- **Auto-upgrades** Wave-2 platforms with < 10% inconclusive probes (and recent
+  activity) back into Wave 1.
+
+Every auto-action writes a JSONL entry to
+`~/.mailaccess/platform_demotion.log` with timestamp, platform, action,
+reason, stats, and the env-var override hint.
+
+Platforms are classified as:
+
+- `KEEP` — reliable; no action needed
+- `WATCH` — insufficient data
+- `DEMOTE` — noisy; moved to Wave 2
+- `SKIP` — sustained failure; excluded
+
+### Inspecting auto-actions
+
+```bash
+mailaccess platform-audit                 # show SKIP / DEMOTE / KEEP / WATCH per platform
+mailaccess platform-audit --recommend-skip   # only SKIP candidates, with override instructions
+mailaccess platform-audit --show-demotions   # only platforms that were auto-demoted, with stats + override env-var hints
+mailaccess platform-health                # browse raw per-platform stats
+```
+
+### Overriding auto-demotion
+
+Every auto-demotion is reversible via env var. The mapping rule: take the
+platform name, strip non-alphanumeric characters, uppercase it, and prefix
+with `MAIGRET_FORCE_`. So `NoisySite.com` becomes
+`MAIGRET_FORCE_NOISYSITECOM`.
+
+For example, override GitHub with `MAIGRET_FORCE_GITHUBCOM=true`.
+
+```bash
+# Run with NoisySite.com forced to its native wave, ignoring health stats:
+MAIGRET_FORCE_NOISYSITECOM=true mailaccess investigate user@example.com
+```
+
+### Community health sharing (opt-in)
+
+You can contribute anonymized platform health stats to a public GitHub Gist:
+
+```bash
+mailaccess platform-health --share
+```
+
+This is strictly opt-in. The flag is the only way this code path executes
+— no background jobs, no scheduled tasks, no automatic upload. The payload
+contains platform-level metadata only (hit / miss / inconclusive rates,
+average latency, total probes, last probed). No user data, no email
+addresses, no investigation targets. Set `MAILACCESS_SHARE_HEALTH=false`
+in `.env` (the default) — the env var is documentation only; the CLI
+requires the explicit `--share` flag.
+
+## False Positive Control
+
+MailAccess applies multiple layers before accepting platform-enumeration hits:
+
+- Absence strings are applied to every check type, including status-code checks.
+- A `200 OK` response under 500 bytes is treated as inconclusive.
+- HTML entities are decoded before pattern matching.
+- Usernames matching the top-1000 common-name corpus are downweighted without corroboration.
+- Failure signals cover English, German, French, Spanish, and Portuguese.
+- Catch-all platforms that return hits for non-existent users are excluded.
+
+See [docs/fp-control.md](docs/fp-control.md) for the full control model.
+
 ## CLI Reference
 
 | Command | Description |
@@ -307,7 +412,11 @@ Open **http://localhost:3000** in your browser. Full setup guide: [docs/self-hos
 | `mailaccess config set-url <url>` | Point the CLI at a MailAccess instance |
 | `mailaccess modules` | List all available modules |
 | `mailaccess commands` | List all CLI commands |
-| `mailaccess doctor` | Check configuration and module health _(coming soon)_ |
+| `mailaccess platform-health` | Inspect, export, or clear persistent platform probe health |
+| `mailaccess platform-health --share` | Opt-in: post anonymized platform health stats to a public Gist |
+| `mailaccess platform-audit` | Inspect platform reliability, ranked by noise rate |
+| `mailaccess platform-audit --show-demotions` | Show only platforms that were auto-demoted in the last 24h, with override env-var instructions |
+| `mailaccess platform-audit --recommend-skip` | Show only SKIP candidates, with `MAIGRET_FORCE_<PLATFORM>` override hints |
 | `mailaccess investigate <email> -m` / `--enable` | Enable opt-in modules for this run only. Comma-separated or `all`. Example: `-m breach_deep,ghunt` |
 | `mailaccess investigate <email> --no-brief` | Suppress Defender's Brief section |
 
@@ -330,6 +439,53 @@ When a bare filename is given (no directory component), the file is written to t
 | `DISCORD_WEBHOOK_URL` | Webhooks | Discord server settings | No |
 
 ## Changelog
+
+### 0.9.0
+
+**PHASE 1 — False Positive Killers**
+
+- Absence strings applied to `status_code` checks
+- Content-length sanity check on 200 responses
+- HTML entity decoding before pattern matching
+- Common-name filter (1000-entry corpus)
+- Multi-language reset signals (DE/FR/ES/PT)
+- Disposable-domain detection (15k+ domains)
+
+**PHASE 2 — Reasoning Layer**
+
+- Avatar perceptual hashing (imagehash, Hamming ≤ 5)
+- Bio fuzzy matching (RapidFuzz, 25 aggregators)
+- Persistent platform health (SQLite, rolling window)
+- Temporal clustering and shadow-profile detection
+- Name consensus: fuzzy merge, `token_set_ratio`, non-Western Unicode, temporal decay, and high-trust single-word names
+
+**PHASE 3 — Platform Expansion**
+
+- Sherlock native engine (~300 platforms)
+- Nexfil native engine (~300 platforms)
+- Blackbird native engine (social focus)
+- `SOURCE_PRIORITY` dedup hierarchy
+
+**PHASE 4 — Output Hardening**
+
+- Platform dedup strips 21 subdomain prefixes
+- Bio aggregator expanded from 7 to 25 domains
+- Credential risk uses YAML service categories
+- Breach normalizer polish
+
+**PHASE 6 — Feedback Loop**
+
+- Name consensus: fuzzy, temporal, and Unicode handling (6A)
+- Domain clustering and shadow profiles V2 (6B)
+- Platform audit CLI: `mailaccess platform-audit` (6C)
+- Self-healing platform DB: auto-demotion, auto-upgrade, demotion log, and opt-in community sharing (6D)
+
+**ENGINE**
+
+- Per-module asyncio timeout enforcement
+- Zombie investigation recovery on startup
+- Graph construction optimized for large datasets
+- All platform-health calls made async
 
 ### 0.8.1
 - maigret_platforms now default-on (2500+ platforms checked in every investigation)
@@ -435,6 +591,7 @@ When a bare filename is given (no directory component), the file is written to t
 |-|-|
 | [Self-hosting guide](docs/self-hosting.md) | Docker Compose, `.env` reference, PostgreSQL, proxy/Tor, Maltego setup |
 | [Module reference](docs/modules.md) | All modules, findings schema, adding new modules |
+| [False-positive controls](docs/fp-control.md) | Common-name, disposable-domain, clustering, health, and scoring controls |
 | [API reference](docs/api.md) | REST endpoints, WebSocket events, authentication |
 | [Export formats](docs/exports.md) | Supported formats, MIME types, filename conventions |
 | [Integrations](docs/integrations.md) | Maltego, Slack, Discord, generic webhooks |

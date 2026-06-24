@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import json
+import logging
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -10,6 +11,10 @@ from typing import Any
 
 _ALIAS_PATH = Path(__file__).resolve().parents[2] / "data" / "breach_aliases.json"
 _BREACH_MODULES = frozenset({"hibp", "breachdirectory", "breach_deep", "xposedornot"})
+logger = logging.getLogger(__name__)
+
+# Real breach names settle in 1-2 passes; 10 keeps adversarial inputs bounded.
+_MAX_STRIP_ITERATIONS = 10
 
 _TRANSPORT_KEYS = frozenset(
     {
@@ -55,6 +60,7 @@ def _extract_host(value: str) -> str | None:
     text = value.strip()
     if not text:
         return None
+    text = re.sub(r"\s+", "", text)
     if "://" in text:
         from urllib.parse import urlparse
 
@@ -78,7 +84,7 @@ def _strip_noise(value: str) -> str:
         return text
 
     current = text
-    while True:
+    for _ in range(_MAX_STRIP_ITERATIONS):
         next_value = _YEAR_SUFFIX_RE.sub("", current).strip(" ._-()[]{}")
         if next_value != current:
             current = next_value
@@ -198,6 +204,9 @@ def _breach_candidates(payload: dict[str, Any]) -> list[Any]:
 @lru_cache(maxsize=1)
 def _load_catalog() -> tuple[dict[str, str], dict[str, str]]:
     if not _ALIAS_PATH.exists():
+        logger.warning(
+            "breach alias catalog missing; normalization running in degraded mode: %s", _ALIAS_PATH
+        )
         return {}, {}
 
     raw = json.loads(_ALIAS_PATH.read_text(encoding="utf-8"))
@@ -224,7 +233,9 @@ def _load_catalog() -> tuple[dict[str, str], dict[str, str]]:
         if not canonical_id:
             continue
 
-        canonical_name = str(item.get("canonical_name") or item.get("title") or item.get("name") or "").strip()
+        canonical_name = str(
+            item.get("canonical_name") or item.get("title") or item.get("name") or ""
+        ).strip()
         if not canonical_name:
             canonical_name = canonical_id
         canonical_name_by_id[canonical_id] = canonical_name
@@ -249,10 +260,18 @@ def _load_catalog() -> tuple[dict[str, str], dict[str, str]]:
         for alias in aliases:
             alias_to_id[alias] = canonical_id
 
+    if not alias_to_id:
+        logger.warning(
+            "breach alias catalog is empty or invalid; normalization running in degraded mode: %s",
+            _ALIAS_PATH,
+        )
+
     return alias_to_id, canonical_name_by_id
 
 
-def resolve_breach_identity(payload: dict[str, Any], module_name: str | None = None) -> BreachIdentity | None:
+def resolve_breach_identity(
+    payload: dict[str, Any], module_name: str | None = None
+) -> BreachIdentity | None:
     """Return the canonical identity for a breach finding, or None if it is not breach-related."""
     if not isinstance(payload, dict):
         return None
@@ -263,13 +282,13 @@ def resolve_breach_identity(payload: dict[str, Any], module_name: str | None = N
         return None
 
     # Only process findings with at least one breach-specific indicator.
-    # Without this guard, profile findings (with "name" in metadata) get
-    # falsely collapsed as breaches by the fallback path below.
+    # "name" is included because modules like HIBP store breach names under
+    # the generic "name" field in metadata rather than "breach_name".
     meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     _has_breach_indicator = any(
         bool(src.get(k))
         for src in (payload, meta)
-        for k in ("breach_name", "breach_id", "breach_source")
+        for k in ("breach_name", "breach_id", "breach_source", "name")
     )
     if not _has_breach_indicator:
         return None
@@ -289,7 +308,9 @@ def resolve_breach_identity(payload: dict[str, Any], module_name: str | None = N
 
     # Fall back to a stable normalized key so unknown breaches still dedupe cleanly
     # across sources when they use the same breach name.
-    fallback_value = next((str(candidate).strip() for candidate in candidates if str(candidate).strip()), "")
+    fallback_value = next(
+        (str(candidate).strip() for candidate in candidates if str(candidate).strip()), ""
+    )
     if not fallback_value:
         return None
 
@@ -355,7 +376,9 @@ def _best_breach_name(payload: dict[str, Any], identity: BreachIdentity) -> str:
 
 
 def _merge_group(rows: list[dict[str, Any]], identity: BreachIdentity) -> dict[str, Any]:
-    ranked: list[tuple[tuple[int, int, int, int], dict[str, Any], dict[str, Any], str, str | None]] = []
+    ranked: list[
+        tuple[tuple[int, int, int, int], dict[str, Any], dict[str, Any], str, str | None]
+    ] = []
     ordered_sources: list[str] = []
     ordered_ids: list[str] = []
     source_breach_names: list[str] = []
@@ -368,8 +391,16 @@ def _merge_group(rows: list[dict[str, Any]], identity: BreachIdentity) -> dict[s
         source_breach_name = _best_breach_name(payload, identity)
         if source_breach_name and source_breach_name not in source_breach_names:
             source_breach_names.append(source_breach_name)
-        confidence = _confidence_rank(row.get("data", {}).get("confidence") if isinstance(row.get("data"), dict) else payload.get("confidence"))
-        severity = _severity_rank(row.get("data", {}).get("severity") if isinstance(row.get("data"), dict) else payload.get("severity"))
+        confidence = _confidence_rank(
+            row.get("data", {}).get("confidence")
+            if isinstance(row.get("data"), dict)
+            else payload.get("confidence")
+        )
+        severity = _severity_rank(
+            row.get("data", {}).get("severity")
+            if isinstance(row.get("data"), dict)
+            else payload.get("severity")
+        )
         score = (severity, confidence, _detail_score(detail), -index)
         ranked.append((score, row, payload, module_name, _best_url(payload)))
         if module_name and module_name not in ordered_sources:
@@ -395,10 +426,14 @@ def _merge_group(rows: list[dict[str, Any]], identity: BreachIdentity) -> dict[s
     best_confidence = "none"
     best_severity = "low"
 
-    for _score, row, payload, _module_name, url in sorted(ranked, key=lambda item: item[0], reverse=True):
+    for _score, row, payload, _module_name, url in sorted(
+        ranked, key=lambda item: item[0], reverse=True
+    ):
         detail = _top_level_detail(payload)
         merged_detail = _merge_dicts(merged_detail, detail)
-        confidence = str(payload.get("confidence") or row.get("confidence") or "none").strip().lower()
+        confidence = (
+            str(payload.get("confidence") or row.get("confidence") or "none").strip().lower()
+        )
         severity = str(payload.get("severity") or row.get("severity") or "low").strip().lower()
         if _confidence_rank(confidence) > _confidence_rank(best_confidence):
             best_confidence = confidence
@@ -427,9 +462,15 @@ def _merge_group(rows: list[dict[str, Any]], identity: BreachIdentity) -> dict[s
     target["platform"] = identity.canonical_name
     target["breach_name"] = identity.canonical_name
     target["breach_id"] = identity.canonical_id
-    target["source"] = representative_row.get("module_name") or representative_payload.get("source") or "breach"
-    target["confidence"] = best_confidence if best_confidence != "none" else target.get("confidence", "high")
-    target["severity"] = best_severity if best_severity != "low" else target.get("severity", "medium")
+    target["source"] = (
+        representative_row.get("module_name") or representative_payload.get("source") or "breach"
+    )
+    target["confidence"] = (
+        best_confidence if best_confidence != "none" else target.get("confidence", "high")
+    )
+    target["severity"] = (
+        best_severity if best_severity != "low" else target.get("severity", "medium")
+    )
     target["sources"] = ordered_sources
     target["metadata"] = merged_detail
 
@@ -473,8 +514,14 @@ def collapse_breach_findings(findings: list[dict[str, Any]]) -> list[dict[str, A
             continue
 
         payload = row.get("data") if isinstance(row.get("data"), dict) else row
-        module_name = str(row.get("module_name") or payload.get("source") or "").strip() if isinstance(payload, dict) else ""
-        identity = resolve_breach_identity(payload if isinstance(payload, dict) else {}, module_name)
+        module_name = (
+            str(row.get("module_name") or payload.get("source") or "").strip()
+            if isinstance(payload, dict)
+            else ""
+        )
+        identity = resolve_breach_identity(
+            payload if isinstance(payload, dict) else {}, module_name
+        )
         if identity is None:
             passthrough.append((index, row))
             continue
@@ -492,7 +539,9 @@ def collapse_breach_findings(findings: list[dict[str, Any]]) -> list[dict[str, A
 
     merged_rows: list[tuple[int, dict[str, Any]]] = passthrough[:]
     for bucket in grouped.values():
-        merged_rows.append((bucket["first_index"], _merge_group(bucket["rows"], bucket["identity"])))
+        merged_rows.append(
+            (bucket["first_index"], _merge_group(bucket["rows"], bucket["identity"]))
+        )
 
     merged_rows.sort(key=lambda item: item[0])
     return [row for _index, row in merged_rows]

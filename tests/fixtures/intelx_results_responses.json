@@ -1,0 +1,35 @@
+[
+  {"status": 3, "records": []},
+  {
+    "status": 0,
+    "records": [
+      {
+        "systemid": "s1",
+        "storageid": "x",
+        "name": "Paste 1",
+        "bucket": "pastes",
+        "media": 1,
+        "type": 1,
+        "date": "2023-01-01T00:00:00Z",
+        "xscore": 80,
+        "accesslevel": 0
+      }
+    ]
+  },
+  {
+    "status": 1,
+    "records": [
+      {
+        "systemid": "s2",
+        "storageid": "y",
+        "name": "Paste 2",
+        "bucket": "pastes",
+        "media": 1,
+        "type": 1,
+        "date": "2023-02-01T00:00:00Z",
+        "xscore": 75,
+        "accesslevel": 0
+      }
+    ]
+  }
+]
