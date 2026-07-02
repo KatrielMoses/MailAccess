@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><title>acme-corp.com at DuckDuckGo</title></head>
+<body class="body--html">
+  <div class="serp__results">
+    <div class="result">
+      <a class="result__a" href="https://acme-corp.com/about">About — Acme Corp</a>
+      <a class="result__snippet">Contact us at info@acme-corp.com for any questions about our product or services.</a>
+    </div>
+    <div class="result">
+      <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fteam.acme-corp.com&amp;rut=abc123">The Team at Acme</a>
+      <a class="result__snippet">Reach out to sales@acme-corp.com or hr@acme-corp.com — both departments monitor those inboxes.</a>
+    </div>
+    <div class="result">
+      <a class="result__a" href="https://linkedin.com/in/jane-doe">Jane Doe — LinkedIn</a>
+      <a class="result__snippet">Jane Doe — Software Engineer at Acme. Previously worked on product@acme-corp.com launch.</a>
+    </div>
+    <!-- a placeholder email that MUST be filtered by the W6 placeholder filter -->
+    <div class="result">
+      <a class="result__snippet">Some doc literal: contact billing@example.com — but our real contact is info@acme-corp.com.</a>
+    </div>
+  </div>
+  <!-- a redirect link that should NOT be returned as-is -->
+  <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fnews.acme-corp.com&amp;rut=xyz">Press</a>
+</body>
+</html>
