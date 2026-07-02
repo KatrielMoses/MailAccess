@@ -2305,7 +2305,7 @@ No standalone `ModuleResult` metadata is emitted. Normalized finding metadata:
 
 ---
 
-## Domain Email Harvesting Modules (0.10.0)
+## Domain Email Harvesting Modules (0.10.1)
 
 The eight modules below run **only** in `mailaccess harvest-emails` mode.
 They do not run during `mailaccess investigate` and have no effect on
