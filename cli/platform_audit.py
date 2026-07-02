@@ -17,6 +17,7 @@ from typing import Any
 from rich.console import Console
 from rich.table import Table
 
+from backend.config import APP_VERSION
 from backend.core.demotion_log import (
     demotion_log_path,
     env_var_key_for,
@@ -136,7 +137,7 @@ def _render(
 
     plural = "s" if total_tracked != 1 else ""
     header_lines = [
-        f"[bold cyan]PLATFORM AUDIT[/] — {total_tracked} platform{plural} tracked",
+        f"[bold cyan]PLATFORM AUDIT v{APP_VERSION}[/] — {total_tracked} platform{plural} tracked",
         "[dim](2500+ checked per investigation — tracked count grows as more investigations run)[/]",
         f"[dim]Data from:[/] {_db_path_str()}",
         f"[dim]Showing:[/] top {min(top, len(stats))} by {sort_label} (min {min_probes} probes)",
@@ -475,6 +476,11 @@ def run_platform_audit(
         return
 
     if not all_stats:
+        # Release criterion: version must be visible even when the DB
+        # is empty so operators know which MailAccess build produced
+        # this output. The version header here matches the style used
+        # in the populated view (PLATFORM AUDIT v{APP_VERSION}).
+        console.print(f"[bold cyan]mailaccess platform-audit v{APP_VERSION}[/]")
         console.print("[yellow]No platform health data found.[/yellow]")
         console.print(
             "[dim]Run an investigation first to populate "
