@@ -71,6 +71,16 @@ _MULTI_SOURCE_BONUS: dict[int, float] = {
     3: 0.25,
 }
 
+# FIX 1 — confidence multiplier for multi-token "names" extracted from
+# company pages.  Real person names are overwhelmingly 2 tokens (first
+# + last).  Three- and four-token candidates ("Mary Anne Johnson",
+# "Acme Io Smith") are rare in real data and disproportionately likely
+# to be page fragments that escaped the
+# :func:`is_plausible_person_name` filter.  We demote their confidence
+# so they contribute less to the pattern-generation pool.  2-token
+# candidates keep the full source confidence.
+_COMPANY_PAGE_MULTI_TOKEN_DEMOTION = 0.6  # applied when 3-4 tokens
+
 _LABEL_FOR_SCORE_BOUNDARIES = (0.8, 0.5)  # >=0.8 high, 0.5-0.8 medium, else low
 
 
@@ -299,16 +309,29 @@ class EmployeeNameDiscoveryModule(BaseModule):
             pages: list[CompanyPageName] = await discover_company_page_names(
                 domain, transport=shared, max_pages=max_pages
             )
-        return [
-            NameDiscovery(
-                name=p.name,
-                source="company_page",
-                source_url=p.source_url,
-                title_or_role=p.title_or_role,
-                confidence=p.confidence,
+
+        # FIX 1 — apply token-count-based confidence demotion for
+        # company-page names.  Real names are 2 tokens; multi-token
+        # candidates are disproportionately likely to be page
+        # fragments and should contribute less to pattern generation.
+        out: list[NameDiscovery] = []
+        for p in pages:
+            token_count = len(p.name.split())
+            confidence = p.confidence
+            if token_count >= 3:
+                confidence = round(
+                    confidence * _COMPANY_PAGE_MULTI_TOKEN_DEMOTION, 4
+                )
+            out.append(
+                NameDiscovery(
+                    name=p.name,
+                    source="company_page",
+                    source_url=p.source_url,
+                    title_or_role=p.title_or_role,
+                    confidence=confidence,
+                )
             )
-            for p in pages
-        ]
+        return out
 
 
 

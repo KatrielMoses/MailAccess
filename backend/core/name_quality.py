@@ -141,6 +141,80 @@ _ROLE_WORDS: frozenset[str] = frozenset(
     }
 )
 
+# Tech / marketing / product / certification terms that show up constantly
+# in site navigation, headings, and H1/H2 copy on training / vendor /
+# enterprise sites but are NEVER person-name components.  Reject any
+# candidate that contains ANY of these tokens, regardless of position
+# (defence against multi-token fragments like "Azure DevOps",
+# "Cert Prep Want", "Branch Network Control Network" that the regex
+# structural check happily accepts as 2-4 capitalised tokens).
+_NAVIGATION_TOKENS: frozenset[str] = frozenset(
+    {
+        # Product / vendor / brand names
+        "azure",
+        "aws",
+        "gcp",
+        "linux",
+        "kubernetes",
+        "docker",
+        "python",
+        "cisco",
+        "comptia",
+        "cissp",
+        "ceh",
+        "devops",
+        # Tech / infrastructure nouns
+        "network",
+        "cloud",
+        "portal",
+        "platform",
+        "solutions",
+        "services",
+        "technology",
+        "infrastructure",
+        "architecture",
+        "control",
+        "monitoring",
+        "insights",
+        "center",
+        "community",
+        "newsroom",
+        "media",
+        "analytics",
+        "enterprise",
+        "security",
+        # FIX 1 — generic UI / nav abbreviations that are virtually
+        # never person-name components.  The QA spec listed
+        # "App CloudPort" as a confirmed fragment; ``App`` is a 3-char
+        # UI label that doesn't pass the avg<4 check on its own but
+        # is a strong nav signal when paired with another token.
+        "app",
+        # Training / education / certification language
+        "learning",
+        "certification",
+        "prep",
+        "training",
+        "courses",
+        "labs",
+        "skills",
+        "path",
+        "paths",
+        # Business / org / marketing language
+        "management",
+        "action",
+        "built",
+        "branch",
+        "banking",
+        "financial",
+        "application",
+        "availability",
+        "career",
+        "news",
+        "event",
+        "events",
+    }
+)
+
 # Same idea — when the *entire input string* matches one of these words,
 # it cannot be a person name.
 _NON_NAME_WORDS: frozenset[str] = frozenset(
@@ -247,16 +321,52 @@ def is_plausible_person_name(text: str) -> bool:
     # path is the only way "王小明" without spaces can pass; mixed
     # strings ("John 王小明") correctly fall through both.
     if _LATIN_PERSON_RE.match(cleaned):
-        # Reject Latin candidates whose first token is a known
-        # job-title / nav word — these are typically title strings
-        # ("Chief Executive Officer"), category labels ("Home About
-        # Team"), or pure navigation text.  Real person names
-        # overwhelmingly start with a first name.
         tokens = [t for t in cleaned.split() if t]
         if tokens:
             first = tokens[0].lower().strip(".,;:'-")
             if first in _ROLE_WORDS or first in _NON_NAME_WORDS:
                 return False
+            # Reject candidates whose AVERAGE token length is below 4
+            # characters.  Real first / last names in Latin script
+            # average 5-6 chars; nav fragments like "Can Fix Here"
+            # (3 / 3 / 4 = 3.33 avg) and "Cert Prep Want" (4 / 4 / 4
+            # = 4.0 avg) typically have shorter tokens.  We use a
+            # STRICT less-than check so 4.0 averages ("Cert Prep
+            # Want") are still accepted by this rule alone — the
+            # token-level navigation-token check below then catches
+            # them.
+            total_chars = sum(len(t) for t in tokens)
+            avg_len = total_chars / len(tokens)
+            if avg_len < 4:
+                return False
+            # Reject candidates that contain an ALL-CAPS token of
+            # length > 3 (likely acronym / abbreviation such as
+            # "AWS", "GCP", "CISSP", "CEH", "Python" — wait, Python
+            # is title-cased so it doesn't trip this, but acronyms
+            # do).  A single fully-uppercase token in a multi-word
+            # candidate is a strong signal of a product / cert name
+            # mixed into the text, not a person name component.
+            for token in tokens:
+                cleaned_token = token.strip(".,;:'-")
+                if (
+                    len(cleaned_token) > 3
+                    and cleaned_token.isalpha()
+                    and cleaned_token.isupper()
+                ):
+                    return False
+            # Reject candidates that contain ANY token in the
+            # navigation-token list (case-insensitive).  Catches
+            # fragments like "Azure DevOps" (both tokens in list),
+            # "Cert Prep Want" (all three), "Branch Network Control
+            # Network" (all four), "App CloudPort" if CloudPort
+            # happens to appear elsewhere in the list.  We check ALL
+            # positions, not just the first, because nav labels can
+            # legitimately appear mid-candidate when the page parser
+            # merges multiple heading cells.
+            for token in tokens:
+                token_lower = token.lower().strip(".,;:'-")
+                if token_lower in _NAVIGATION_TOKENS:
+                    return False
         return True
     if _NONLATIN_PERSON_RE.match(cleaned):
         # Reject mixed scripts by checking there's at least one

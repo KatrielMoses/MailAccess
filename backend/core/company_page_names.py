@@ -60,6 +60,25 @@ _SCRIPT_RE = re.compile(
     flags=re.IGNORECASE | re.DOTALL,
 )
 
+# Page furniture extraction — title and meta description frequently
+# mirror nav / heading copy verbatim, so any candidate name that
+# appears as an exact substring of either is page furniture, not a
+# person.  The QA pass on ine.com / lavellenetworks.com surfaced
+# this as the primary source of garbage "name" extractions.
+_TITLE_RE = re.compile(
+    r"<title[^>]*>(.*?)</title>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_META_DESC_RE = re.compile(
+    r'<meta\s+[^>]*name\s*=\s*["\']description["\'][^>]*content\s*=\s*["\']([^"\']*)["\']',
+    flags=re.IGNORECASE | re.DOTALL,
+)
+# Some sites use the property attribute instead of name.
+_META_DESC_PROP_RE = re.compile(
+    r'<meta\s+[^>]*property\s*=\s*["\']og:description["\'][^>]*content\s*=\s*["\']([^"\']*)["\']',
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
 # Borrowed from name_consensus.PERSON_RE composition (Latin + non-Latin).
 _LATIN_TOKEN = r"[A-Z][a-zA-Z''\-]+"
 _NONLATIN_TOKEN = r"[Ѐ-ӿ؀-ۿ一-鿿ऀ-ॿ]+"
@@ -117,9 +136,59 @@ def _html_to_text(html: str) -> str:
     return text.strip()
 
 
+def _extract_page_metadata(html: str) -> tuple[str | None, str | None]:
+    """Return ``(title, meta_description)`` extracted from raw HTML.
+
+    Page furniture (titles, meta descriptions) frequently mirror nav /
+    heading copy verbatim — e.g. an H1 reading "Azure DevOps" almost
+    always shows up in the page title or meta description too.  The
+    candidate-name extractor uses this signal as a "skip if this name
+    appears verbatim in title/meta" check.
+
+    Returns ``(None, None)`` if neither element is present.
+    """
+    if not html:
+        return None, None
+    title_match = _TITLE_RE.search(html)
+    title = _html_to_text(title_match.group(1)) if title_match else None
+    meta_match = _META_DESC_RE.search(html) or _META_DESC_PROP_RE.search(html)
+    meta_desc = _html_to_text(meta_match.group(1)) if meta_match else None
+    return title, meta_desc
+
+
+def _candidate_in_page_furniture(name: str, page_furniture: tuple[str | None, str | None]) -> bool:
+    """Return True when *name* appears verbatim in the page title or meta description.
+
+    QA-found case: H1 / H2 / nav text like "Azure DevOps" appears in
+    ``<title>`` and ``<meta name="description">`` essentially verbatim.
+    A candidate matching one of those fields is page furniture, not a
+    person.  We compare case-insensitively on the exact normalised
+    string (whitespace collapsed).
+    """
+    if not name:
+        return False
+    needle = re.sub(r"\s+", " ", name.strip()).lower()
+    if not needle:
+        return False
+    for field in page_furniture:
+        if not field:
+            continue
+        haystack = re.sub(r"\s+", " ", field.strip()).lower()
+        if not haystack:
+            continue
+        # Exact substring match — "Azure DevOps" is contained in
+        # "Azure DevOps Certification - INE" but "Azure Devops" (typo)
+        # would NOT be, which is the desired conservative behaviour.
+        if needle in haystack:
+            return True
+    return False
+
+
 def _extract_names_from_text(
     text: str,
     domain: str | None = None,
+    *,
+    page_furniture: tuple[str | None, str | None] = (None, None),
 ) -> list[tuple[str, str | None]]:
     """Return ``[(name, role_or_None)]`` tuples extracted from page text.
 
@@ -132,6 +201,10 @@ def _extract_names_from_text(
     Pass ``domain`` to drop candidates that match the target company
     name itself ("Acme Welcome" → reject because "acme" == the
     registrable part of the target domain).
+
+    Pass ``page_furniture=(title, meta_description)`` to drop candidates
+    that appear verbatim in the page title or meta description
+    (FIX 1 item #5: nav / H1 / H2 text often mirrors title/meta).
     """
     from .name_quality import matches_domain as _matches_domain
 
@@ -158,6 +231,8 @@ def _extract_names_from_text(
         if _matches_company_token(cleaned_name):
             return
         if domain and _matches_domain(cleaned_name, domain):
+            return
+        if _candidate_in_page_furniture(cleaned_name, page_furniture):
             return
         key = cleaned_name.lower()
         if key in seen:
@@ -204,6 +279,8 @@ def _extract_names_from_text(
             if _matches_company_token(candidate):
                 continue
             if domain and _matches_domain(candidate, domain):
+                continue
+            if _candidate_in_page_furniture(candidate, page_furniture):
                 continue
             key = candidate.lower()
             if key in seen:
@@ -275,7 +352,15 @@ async def discover_company_page_names(
                 text = _html_to_text(html)
                 if not text:
                     continue
-                page_names = _extract_names_from_text(text, domain=cleaned)
+                # FIX 1: extract page furniture (title, meta description)
+                # so we can drop candidates that appear verbatim there.
+                # Nav / H1 / H2 text from training / vendor / enterprise
+                # sites is the primary source of garbage name candidates
+                # (Azure DevOps, Cert Prep Want, etc.).
+                page_furniture = _extract_page_metadata(html)
+                page_names = _extract_names_from_text(
+                    text, domain=cleaned, page_furniture=page_furniture
+                )
                 for name, role in page_names:
                     if not is_plausible_person_name(name):
                         continue
@@ -301,14 +386,27 @@ async def discover_company_page_names(
 def discover_for_tests(
     page_text_by_url: dict[str, str],
     domain: str | None = None,
+    *,
+    metadata_by_url: dict[str, tuple[str | None, str | None]] | None = None,
 ) -> list[CompanyPageName]:
     """Test-only helper to derive CompanyPageName records from
     already-rendered page text.  Pass ``domain`` to enable the
     company-name self-match filter.
+
+    Pass ``metadata_by_url`` (URL → (title, meta_description) tuples)
+    to enable the FIX-1 page-furniture verbatim filter — this is
+    how the ``test_*_title_verbatim_*`` tests opt in.
     """
     out: list[CompanyPageName] = []
     for url, text in page_text_by_url.items():
-        for name, role in _extract_names_from_text(text, domain=domain):
+        furniture = (
+            metadata_by_url.get(url, (None, None))
+            if metadata_by_url
+            else (None, None)
+        )
+        for name, role in _extract_names_from_text(
+            text, domain=domain, page_furniture=furniture
+        ):
             if not is_plausible_person_name(name):
                 continue
             out.append(

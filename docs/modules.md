@@ -1,6 +1,6 @@
 # Module Reference
 
-MailAccess ships 55 modules covering 2500+ platforms. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
+MailAccess ships 64 modules covering 2500+ platforms. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
 
 A module marked **key required** skips itself with `status: skipped` when its API key is absent — it does not cause the investigation to fail.
 
@@ -2302,6 +2302,163 @@ No standalone `ModuleResult` metadata is emitted. Normalized finding metadata:
   "source_modules": ["hibp", "xposedornot"]
 }
 ```
+
+---
+
+## Domain Email Harvesting Modules (0.10.0)
+
+The eight modules below run **only** in `mailaccess harvest-emails` mode.
+They do not run during `mailaccess investigate` and have no effect on
+single-email investigations. They are described in detail in
+[docs/harvest-emails.md](harvest-emails.md); this section is a quick
+reference for each module's role, key requirements, and source weight
+in the confidence-scoring model.
+
+### `commoncrawl_email`
+
+Queries the Common Crawl URL Index for pages mentioning the target
+domain, fetches the matching pages, and extracts every email found.
+This is typically the highest-yield source for medium/large orgs.
+
+| | |
+|--|--|
+| **Mode** | Domain harvest only |
+| **Requires key** | None |
+| **Default** | On |
+| **Source weight** | 0.7 (3+ distinct URLs) / 0.5 (single URL) |
+| **Cap** | `CC_MAX_RECORDS` (default 100) |
+| **Status** | Implemented |
+
+The module uses **WARC range fetch** (direct S3, no origin hit) as its
+primary strategy, with direct HTTP fetch as a fallback.
+
+### `code_and_cert_email`
+
+Three sub-sources:
+
+* **GitHub code search** — every public mention of `@<domain>` in code.
+* **GitHub commit authors** — for the repos surfaced by code search,
+  walks commit history and collects author emails using the `author:`
+  qualifier for direct commit-author discovery.
+* **crt.sh + certspotter** — Certificate Transparency logs often include
+  email addresses in the issuer / subject fields. Records are fetched
+  directly so the email-bearing fields are preserved.
+
+| | |
+|--|--|
+| **Mode** | Domain harvest only |
+| **Requires key** | None (`GITHUB_TOKEN` optional, raises rate limit) |
+| **Default** | On |
+| **Source weight** | 0.9 (commit author) / 0.6 (code mention) / 1.0 (CA-attested) |
+| **Status** | Implemented |
+
+### `email_search_dork`
+
+DuckDuckGo HTML + Bing HTML search engine dorking. 5 dork query
+patterns per engine (lite mode reduces to 2). Graceful CAPTCHA / block
+detection — a blocked engine stops cleanly while the other engine
+continues.
+
+| | |
+|--|--|
+| **Mode** | Domain harvest only |
+| **Requires key** | None |
+| **Default** | On |
+| **Source weight** | 0.5 (DDG) / 0.4 (Bing) |
+| **Lite mode** | `DORK_LITE_MODE=true` — 2 patterns per engine |
+| **Status** | Implemented |
+
+### `employee_name_discovery`
+
+Aggregates employee names from LinkedIn dorking (DDG + Bing), company
+about / team / leadership pages, press releases, SEC EDGAR filings
+(public companies), and OpenCorporates officer records.
+
+| | |
+|--|--|
+| **Mode** | Domain harvest only |
+| **Requires key** | None for core sources |
+| **Default** | On |
+| **Output** | Feeds `pattern_and_verify`; not direct email findings |
+| **Status** | Implemented |
+
+### `npm_email`
+
+Searches `registry.npmjs.org` for packages whose author or maintainer
+email matches the target domain. Two sub-sources:
+
+* **Search** — packages whose text mentions the domain string.
+* **Direct keyword lookup** — fetches `registry.npmjs.org/<domain-keyword>`
+  where the keyword is the domain's SLD (e.g. `stripe` for `stripe.com`).
+
+Strict domain filter is applied — emails whose domain doesn't
+*exactly* match the target are dropped.
+
+| | |
+|--|--|
+| **Mode** | Domain harvest only |
+| **Requires key** | None |
+| **Default** | On |
+| **Source weight** | 0.7 |
+| **Status** | Implemented |
+
+### `pypi_email`
+
+Same shape as `npm_email`, against `pypi.org`. Uses the deprecated but
+still-working XML-RPC search endpoint plus the JSON API direct-lookup
+fallback. Strict domain filter applied.
+
+| | |
+|--|--|
+| **Mode** | Domain harvest only |
+| **Requires key** | None |
+| **Default** | On |
+| **Source weight** | 0.7 |
+| **Status** | Implemented |
+
+### `pgp_domain_email`
+
+Searches `keys.openpgp.org` and `keyserver.ubuntu.com` for public PGP
+keys whose User ID strings (the `<Name <email>>` block on a key)
+contain the target domain. A PGP UID is a deliberate, user-verified
+assertion of identity — when this module surfaces a hit, it is
+treated as equivalent to a CA-attested email.
+
+**Honest yield expectation:** since `sks-keyservers.net` shut down in
+2021 and `keys.openpgp.org` now requires personal email verification
+to publish keys, ~99% of historical keys are filtered out by the
+upstream keyservers themselves. Realistic yield for tech-heavy domains
+is 1–5%. The hits that DO appear are extremely high-confidence.
+
+| | |
+|--|--|
+| **Mode** | Domain harvest only |
+| **Requires key** | None |
+| **Default** | On |
+| **Source weight** | 1.0 (highest — deliberate user-verified assertion) |
+| **Hit rate** | 1–5% for tech-heavy domains |
+| **Status** | Implemented |
+
+### `pattern_and_verify`
+
+Consumes the names from `employee_name_discovery`, generates up to 11
+standard email pattern candidates per name (`first.last@`, `flast@`,
+`firstl@`, etc.), and optionally probes the MX for each candidate via
+SMTP RCPT TO when `--verify-smtp` is passed.
+
+**Pattern propagation:** once ONE pattern is confirmed for the target
+domain (e.g. `first.last@`), that pattern is tried first for all
+remaining names. This saves probe budget dramatically — without
+propagation, every name would consume probes on every pattern.
+
+| | |
+|--|--|
+| **Mode** | Domain harvest only |
+| **Requires key** | None |
+| **Default** | On (SMTP verification opt-in separately via `--verify-smtp`) |
+| **Source weight** | 0.5 (SMTP verified) / 0.2 (catch-all) / 0.05 (unverified) |
+| **Safety** | Mandatory catch-all detection before any probe; hard cap 100 probes/domain |
+| **Status** | Implemented |
 
 ---
 

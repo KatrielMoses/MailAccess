@@ -103,6 +103,42 @@ Every setting is optional unless marked required.
 | `enable_domain_cluster` | `true` | Enable or disable domain infrastructure clustering. |
 | `GITHUB_TOKEN` | _(unset)_ | Optional. Required for GitHub commit author-email search. Without it, `github_commits` runs user profile search only. Get at: [github.com/settings/tokens](https://github.com/settings/tokens) |
 | `COMPANIES_HOUSE_API_KEY` | _(unset)_ | Optional. UK Companies House officer/address lookup. Free, no CC. Get at: [developer.company-information.service.gov.uk](https://developer.company-information.service.gov.uk) |
+| `ENABLE_COMMONCRAWL_EMAIL` | `true` | Master kill switch for the Common Crawl email module (domain harvest mode only). |
+| `CC_MAX_RECORDS` | `100` | Maximum Common Crawl URL Index records fetched per harvest run. |
+| `CC_FETCH_CONCURRENCY` | `10` | Concurrent page fetches (WARC range + direct GET). Keeps well under S3 and target-site limits. |
+| `ENABLE_EMAIL_SEARCH_DORK` | `true` | Master kill switch for the search-engine dork module (DuckDuckGo + Bing, domain harvest mode only). |
+| `DORK_MAX_QUERIES_PER_ENGINE` | `5` | Maximum dork queries per engine per harvest. 5 covers all core patterns while staying below CAPTCHA thresholds. |
+| `DORK_LITE_MODE` | `false` | Lite mode runs only the first two dork patterns per engine. Faster, lower yield. |
+| `ENABLE_CODE_AND_CERT_EMAIL` | `true` | Master kill switch for the GitHub + certificate-transparency module (domain harvest mode only). |
+| `GITHUB_EMAIL_MAX_RESULTS` | `30` | Maximum GitHub code-search results per harvest. 30 is the default per research. |
+| `ENABLE_EMPLOYEE_NAME_DISCOVERY` | `true` | Master kill switch for the multi-source employee name discovery module. Feeds pattern generation. |
+| `EMPLOYEE_NAME_MAX_COMPANY_PAGES` | `5` | Maximum company about / team / leadership pages probed per harvest. |
+| `ENABLE_SMTP_VERIFICATION` | `false` | **OPT-IN ONLY.** Documentation flag for SMTP RCPT TO probing. The only path that actually enables SMTP is the `--verify-smtp` CLI flag — this env var is never read as an enable switch. |
+| `SMTP_MAX_PROBES_PER_DOMAIN` | `100` | Hard cap on SMTP probes per domain per run. Cannot be raised higher than 100 in source. |
+| `SMTP_PROBE_DELAY_SECONDS` | `2.5` | Per-request delay between SMTP probes. 2.5s = ~24 probes/min, well under the 30/min ceiling. |
+| `ENABLE_NPM_EMAIL` | `true` | Master kill switch for the npm registry package-author module. |
+| `ENABLE_PYPI_EMAIL` | `true` | Master kill switch for the PyPI registry package-author module. |
+| `ENABLE_PGP_DOMAIN_EMAIL` | `true` | Master kill switch for the PGP keyserver UID module. Lowest yield (1–5%) but highest source weight when it hits. |
+
+### Domain Email Harvesting Runtime
+
+`mailaccess harvest-emails` is a separate, heavier pipeline than
+`mailaccess investigate`. Wall time scales with the target domain's
+size and whether SMTP verification is enabled:
+
+| Mode | Typical runtime |
+|---|---|
+| Default (no SMTP) | 30 seconds – 2 minutes |
+| With `--verify-smtp` | 2 – 5 minutes |
+| Large domains with `--verify-smtp` | 5 – 25 minutes |
+
+Results are emitted on completion (not streamed), although per-module
+progress is shown live as each source finishes. For large domains or
+batch harvesting across many targets, run with `--lite` to reduce the
+number of dork queries per engine and cut total runtime.
+
+See [docs/harvest-emails.md](harvest-emails.md) for the full flag list,
+the eight source modules, and confidence-scoring details.
 
 MailAccess fetches the HIBP breach corpus on startup and caches it at `data/cache/breach_corpus.json` for 24h. No API key required for this fetch.
 

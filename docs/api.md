@@ -4,6 +4,13 @@
 
 ## Base URL
 
+> **Note:** The `mailaccess harvest-emails` command is **CLI-only in 0.10.0**.
+> The underlying `run_domain_harvest()` orchestrator is designed to be
+> callable from an API layer in a future release, but no HTTP endpoint
+> exists for it yet. Run `mailaccess harvest-emails --help` for the full
+> flag list, and see [docs/harvest-emails.md](harvest-emails.md) for
+> usage.
+
 All REST endpoints are prefixed with `/api`. The WebSocket endpoint and Maltego transform server have no prefix.
 
 ## Authentication
@@ -29,8 +36,8 @@ Health check. Always unauthenticated.
 **Response `200`**
 ```json
 {
-  "status": "ok",
-  "version": "0.9.0",
+"status": "ok",
+  "version": "0.10.0",
   "uptime": 1842.7,
   "modules_loaded": ["hibp", "emailrep", "gravatar", "domain_intel", "social"],
   "db": "connected"

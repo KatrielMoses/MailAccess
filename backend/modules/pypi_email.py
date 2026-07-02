@@ -279,12 +279,55 @@ class PyPIEmailModule(BaseModule):
             for o in outcomes.values()
             if o.ok or o.packages_checked or o.emails
         )
-        if ok_count == 0:
-            status = ModuleStatus.FAILED
-        elif ok_count == 1:
-            status = ModuleStatus.PARTIAL
+        # FIX 3 — distinguish "API returned no data" (SUCCESS) from
+        # "complete network failure" (FAILED).
+        #
+        # Previously the module returned ``FAILED`` whenever both
+        # sub-sources ended up with zero findings — which mis-classifies
+        # the QA case of pypi.org returning 200 OK with empty search
+        # results as a failure.  Per the audit follow-up, zero results
+        # is a valid outcome: PyPI legitimately has no packages whose
+        # author / maintainer email matches the target domain for most
+        # non-Python-shop targets (e.g. lavellenetworks.com, ine.com).
+        #
+        # The outer ``try``/``except`` already returns ``FAILED`` for
+        # catastrophic errors (build_client failure, context-manager
+        # failure).  Reaching this block implies the network is up.
+        # The status decision is therefore:
+        #
+        #   * findings present + both subsources ok → SUCCESS
+        #   * findings present + one subsource ok → PARTIAL
+        #   * zero findings + at least one subsource raised a network
+        #     exception (timeout, connection refused, etc.) → PARTIAL
+        #     (the other subsource completed cleanly with no matches)
+        #   * zero findings + all subsources completed (even with 404 /
+        #     429 / 500 — those are HTTP responses, not network errors)
+        #     → SUCCESS (zero matches is a valid answer)
+        network_exception_count = sum(
+            1
+            for o in outcomes.values()
+            if o.error is not None
+            and (
+                "timeout" in o.error
+                or "request:" in o.error
+                or "invalid_json" in o.error
+            )
+        )
+        if findings:
+            if ok_count >= 2:
+                status = ModuleStatus.SUCCESS
+            else:
+                status = ModuleStatus.PARTIAL
         else:
-            status = ModuleStatus.SUCCESS
+            # No emails surfaced.  Per the audit follow-up, this is a
+            # valid outcome — do NOT escalate to FAILED.  Only escalate
+            # to PARTIAL when one of the subsources actually raised a
+            # network exception (otherwise the answer is just "no
+            # matches on PyPI", which is honest SUCCESS).
+            if network_exception_count > 0:
+                status = ModuleStatus.PARTIAL
+            else:
+                status = ModuleStatus.SUCCESS
 
         return ModuleResult(
             status=status,
