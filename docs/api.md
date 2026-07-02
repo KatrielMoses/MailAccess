@@ -37,7 +37,7 @@ Health check. Always unauthenticated.
 ```json
 {
 "status": "ok",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "uptime": 1842.7,
   "modules_loaded": ["hibp", "emailrep", "gravatar", "domain_intel", "social"],
   "db": "connected"
