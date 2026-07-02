@@ -83,11 +83,19 @@ PLACEHOLDER_FULL_DOMAINS = frozenset(
         "example.org",
         "example.net",
         "test.com",
+        "test.org",
         "yourdomain.com",
+        "yourcompany.com",
+        "yourwebsite.com",
         "your-email.com",
         "domain.com",
         "site.com",
         "email.com",
+        "demo.com",  # FIX 2: QA pass on lavellenetworks.com surfaced
+        "sample.com",  # contact@demo.com / contact@sample.com leaked
+        "placeholder.com",  # through the legacy filter.
+        "localhost",  # Common doc / dev-server placeholders.
+        "localhost.localdomain",  # RFC 6761 reserved + dev-default.
     }
 )
 

@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.9.0&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.10.0&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -89,6 +89,7 @@ mailaccess investigate email -m all
 - Webhook notifications — Slack, Discord, or any HTTP endpoint
 - Exposure score (0–100) with risk label: low / medium / high / critical
 - SQLite by default; PostgreSQL optional via Docker Compose profile
+- **Domain Email Harvesting** — given a company domain, discovers associated email addresses via 8 concurrent sources: Common Crawl index, GitHub code/commits, certificate transparency logs, npm/PyPI registries, PGP keyservers, search engine dorking, employee name discovery, and pattern generation with optional SMTP verification. Rivals theHarvester with better confidence scoring, catch-all protection, and Common Crawl exploitation. See [Domain Email Harvesting](#domain-email-harvesting) below.
 
 ## Modules
 
@@ -139,7 +140,7 @@ mailaccess investigate email -m all
 | common_names | Common-name and username false-positive controls | No | No (automatic) |
 | disposable_domains | Disposable-email confidence controls | No | No (automatic) |
 
-> 55 modules · 2500+ platforms by default
+> 64 modules · 2500+ platforms by default
 
 ## Platform Coverage
 
@@ -275,6 +276,68 @@ See [docs/integrations.md](docs/integrations.md#pipeline-integration) for GitHub
 
 ---
 
+## Domain Email Harvesting
+
+Given a company domain, MailAccess discovers associated email addresses across
+8 concurrent sources. This is a **separate** engine from `investigate` —
+domain-centric rather than email-centric, and built to rival or exceed
+theHarvester (the most widely used free OSINT email harvesting tool).
+
+Quick start:
+
+```bash
+mailaccess harvest-emails --domain example.com
+```
+
+With SMTP verification (opt-in):
+
+```bash
+mailaccess harvest-emails --domain example.com --verify-smtp
+```
+
+Export results:
+
+```bash
+mailaccess harvest-emails --domain example.com --export results/harvest.json
+mailaccess harvest-emails --domain example.com --export results/harvest.csv
+mailaccess harvest-emails --domain example.com --export results/harvest.ndjson
+```
+
+Key flags:
+
+| Flag | What it does |
+|---|---|
+| `--domain DOMAIN` | Target domain (required). Rejects free providers. |
+| `--verify-smtp` | SMTP RCPT TO verification (opt-in only — see safety notes). |
+| `--lite` | Faster, fewer dork queries per engine. |
+| `--export FILE` | Export to JSON, CSV, or NDJSON (inferred from extension). |
+| `--min-confidence {high,medium,low}` | Filter by confidence label. |
+| `--min-confidence-score FLOAT` | Filter by numeric score (0.0–1.5). |
+| `--on-domain-only` | Hide third-party mentions. |
+| `--exclude-domain DOMAIN` | Exclude a domain. Repeatable. |
+| `--max-cc-records N` | Override Common Crawl record cap (default 100). |
+
+**Sources:** Common Crawl (highest-yield free source, exploited for email
+extraction in a way no other tool currently does), GitHub code + commit
+authors, certificate transparency logs (CA-attested), npm + PyPI registries,
+PGP keyservers, DuckDuckGo + Bing search engine dorking, employee name
+discovery (LinkedIn, company pages, SEC EDGAR, press releases,
+OpenCorporates), and email pattern generation with optional SMTP
+verification.
+
+**Output:** domain-centric, confidence-grouped (HIGH / MEDIUM / LOW), with
+rationale chips explaining each score, role accounts listed separately,
+subaddress variants collapsed, and RFC 2606 placeholder domains filtered
+out.
+
+**Safety:** SMTP verification is opt-in only — never enabled by default,
+never enabled by env var alone. Mandatory catch-all detection runs before
+any SMTP probe. Hard cap of 100 probes per domain per run.
+
+Full documentation: [docs/harvest-emails.md](docs/harvest-emails.md).
+
+---
+
 ## Adding a Platform
 
 No Python required. Drop a YAML file in `backend/platforms/`:
@@ -404,6 +467,7 @@ See [docs/fp-control.md](docs/fp-control.md) for the full control model.
 |---------|-------------|
 | `mailaccess investigate <email>` | Run a full investigation against an email address |
 | `mailaccess investigate -` | Read target email from stdin |
+| `mailaccess harvest-emails --domain <domain>` | Domain email harvesting — 8 concurrent sources, see [Domain Email Harvesting](#domain-email-harvesting) |
 | `mailaccess serve` | Start the backend server on :8000 |
 | `mailaccess history` | List past investigations |
 | `mailaccess keys list` | Show all configured API keys |
@@ -442,23 +506,23 @@ When a bare filename is given (no directory component), the file is written to t
 
 ### 0.10.0
 
-**Domain Email Harvest** (Beta — final refinement pass pending)
-
-New top-level command:
-
-```bash
-mailaccess harvest-emails --domain example.com [--verify-smtp] [--lite] [--export FILE]
-```
-
-Discovers email addresses associated with a domain via Common Crawl,
-search engine dorking, code repository search, certificate
-transparency, and employee-name pattern generation.  Cross-module
-deduplication + multi-source confidence aggregation produces
-HIGH / MEDIUM / LOW buckets.  SMTP RCPT TO verification is opt-in
-(`--verify-smtp`); no env var or config default can enable it
-silently.
-
-Full documentation pending final refinement pass.
+- New command: `mailaccess harvest-emails --domain <domain>` — domain-centric email harvesting
+- Eight concurrent source modules for domain email discovery
+- Common Crawl Index exploitation for email extraction (highest-yield free source, not used this way by any other tool)
+- GitHub commit author discovery (`author:` qualifier)
+- Certificate transparency CA-attested email extraction
+- npm/PyPI registry package author emails
+- PGP keyserver UID extraction
+- Employee name discovery (LinkedIn, company pages, SEC EDGAR, press releases, OpenCorporates)
+- Email pattern generation (11 standard templates) with pattern propagation optimization
+- Optional SMTP RCPT TO verification with mandatory catch-all detection and 100-probe hard cap
+- Cross-module confidence scoring with rationale chips
+- Role account classification (~150 prefixes)
+- Subaddress collapsing (`jane+filter@` = `jane@`)
+- RFC 2606 placeholder domain filtering
+- CSV/NDJSON/JSON export formats
+- Filter flags: `--min-confidence`, `--on-domain-only`, `--exclude-domain`
+- Platform audit now shows version in all states
 
 ### 0.9.0
 

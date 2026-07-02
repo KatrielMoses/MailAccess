@@ -152,24 +152,65 @@ but flagged as unverified.
 
 ## Confidence scoring
 
-Every email gets a numeric `confidence_score` and a label
+Every email gets a numeric `confidence_score` (0.0–1.5) and a label
 (HIGH / MEDIUM / LOW). Scores stack from three signals:
 
-1. **Base weight** — how trustworthy the source type is on its own
-   (CA-attested = 1.0, npm/PyPI maintainer = 0.7, code mention = 0.6).
+1. **Base weight** — how trustworthy the source type is on its own.
 2. **Verification multiplier** — whether another source independently
-   confirmed the email (`multi_source` = 1.2, `smtp_verified` = 1.4,
-   `ca_attested` = 1.5).
-3. **Freshness** — how old the attestation is (recent = 1.0, stale =
-   0.3).
+   confirmed the email.
+3. **Freshness decay** — how old the attestation is.
 
-Final score is capped at **1.5**. Labels map:
+### Source weights
+
+| Source | Weight |
+|---|---|
+| PGP keyserver UID (deliberate user-verified assertion) | 1.0 |
+| CA-attested (crt.sh / certspotter cert subject email) | 1.0 |
+| SMTP RCPT TO verified | 1.0 |
+| GitHub commit author (`author:` qualifier) | 0.9 |
+| Press release or SEC filing | 0.8 |
+| Common Crawl hit on 3+ distinct URLs | 0.7 |
+| npm or PyPI package author/maintainer | 0.7 |
+| GitHub code mention | 0.6 |
+| Common Crawl hit on a single URL | 0.5 |
+| Permutation verified via SMTP | 0.5 |
+| DuckDuckGo search snippet | 0.5 |
+| Bing search snippet | 0.4 |
+| Permutation on a catch-all domain | 0.2 |
+| Permutation unverified | 0.05 |
+
+### Multipliers
+
+Multipliers stack multiplicatively (per-email, not per-source):
+
+| Condition | Multiplier |
+|---|---|
+| 3+ independent source types confirmed the email | ×1.2 |
+| SMTP verified | ×1.4 |
+| CA-attested or PGP UID | ×1.5 |
+
+### Freshness decay
+
+Applied to the **oldest** source timestamp:
+
+| Age of oldest attestation | Decay |
+|---|---|
+| ≤ 90 days | ×1.0 |
+| 90–365 days | ×0.85 |
+| 1–3 years | ×0.6 |
+| > 3 years | ×0.3 |
+
+### Display thresholds
 
 | Score | Label |
 |---|---|
 | `>= 0.8` | HIGH |
-| `>= 0.5` | MEDIUM |
-| `< 0.5`  | LOW |
+| `>= 0.5` and `< 0.8` | MEDIUM |
+| `< 0.5` | LOW |
+
+The final score is capped at **1.5**. Each email is rendered with a
+**rationale chip** summarising which weights, multipliers, and freshness
+decay contributed — so the score is never a black box.
 
 A typical HIGH-confidence candidate: Common Crawl multi-page hit
 (`cc*`) + npm maintainer (`npm`) + recent → score ≈ 0.7 × 1.2 × 1.0 =
@@ -182,10 +223,27 @@ servers. This is a **passive** OSINT technique — no email is ever
 sent — but it is **detectable** (target mail servers will see your IP
 attempting RCPT TO). Anti-spam systems can flag the source IP.
 
+**Opt-in only — never enabled by default, never enabled by env var
+alone.** The only path that turns it on is the explicit `--verify-smtp`
+flag on a per-invocation basis. The `ENABLE_SMTP_VERIFICATION` env var
+exists for documentation and is never read as an enable switch.
+
+**Mandatory catch-all detection.** Before any RCPT TO probing begins,
+the orchestrator probes a random UUID address at the target domain. If
+the MX returns `250` for that address, the domain is treated as
+catch-all and **all SMTP verification is aborted** for the run — every
+permutation candidate is tagged `permutation_catchall` instead. If the
+catch-all probe itself fails (network error, MX unreachable, hard
+reject), verification is also aborted for safety. Catch-all domains
+produce floods of false-positive "verified" addresses when probed
+naively, so this check is non-negotiable.
+
 Operational ceilings (hard-coded, not configurable):
 
 * Max 100 probes per harvest.
 * Max 30 probes per minute.
+* `SMTP_PROBE_DELAY_SECONDS` defaults to 2.5s (well under the 30/min
+  ceiling).
 
 The default sender address (`probe@mailaccess.invalid`) is a
 non-routable `.invalid` domain per RFC 6761 — it cannot be replied
