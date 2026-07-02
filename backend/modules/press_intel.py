@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..core.http_client import build_client
+from ..core.name_quality import is_plausible_person_name
 from ..core.phone_extractor import normalize_phone
 from .base import BaseModule, ModuleResult, ModuleStatus
 from .domain_intel import _FREE_PROVIDERS
@@ -27,6 +28,18 @@ _CONTACT_MARKER_RE = re.compile(
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 _LINK_RE = re.compile(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.I | re.S)
 _TAG_RE = re.compile(r"<[^>]+>")
+
+# Phase C1 — name extraction pattern (Latin + non-Latin tokens, 2-4 tokens
+# long).  Identical in spirit to ``name_consensus.PERSON_RE``; we keep a
+# private copy here so the press_intel hot path stays decoupled from
+# name_consensus's heavy lazy import of rapidfuzz / unidecode.
+_LATIN_NAME_TOKEN = r"[A-Z][a-zA-Z''\-]+"
+_NONLATIN_NAME_TOKEN = r"[Ѐ-ӿ؀-ۿ一-鿿ऀ-ॿ]+"
+_ANY_NAME_TOKEN = rf"(?:{_LATIN_NAME_TOKEN}|{_NONLATIN_NAME_TOKEN})"
+_PRESS_NAME_RE = re.compile(
+    rf"\b{_ANY_NAME_TOKEN}(?:\s+{_ANY_NAME_TOKEN}){{1,3}}\b",
+    re.UNICODE,
+)
 
 
 class PressIntelModule(BaseModule):
@@ -148,6 +161,35 @@ async def _fetch_release(
                     "contact_email": _extract_email(contact_block),
                     "source_url": url,
                     "press_release_title": title,
+                },
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # Phase C1 — additive name extraction.  Uses the same fetched page
+    # content as the phone pass; no extra HTTP request.  Names found here
+    # are appended as separate findings so the existing phone findings
+    # are completely unaffected.
+    # ------------------------------------------------------------------
+    seen_names: set[str] = set()
+    for match in _PRESS_NAME_RE.finditer(contact_block):
+        candidate = match.group(0).strip()
+        if not is_plausible_person_name(candidate):
+            continue
+        key = candidate.lower()
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+        findings.append(
+            {
+                "platform": "press_release",
+                "signal_type": "executive_name",
+                "confidence": "low",
+                "metadata": {
+                    "name": candidate,
+                    "source_url": url,
+                    "press_release_title": title,
+                    "press_source": "contact_block",
                 },
             }
         )

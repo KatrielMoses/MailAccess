@@ -1,0 +1,24 @@
+[
+  {
+    "id": 1,
+    "issuer_name": "C=US, O=Acme CA, CN=Acme Issuing CA, emailAddress=contact@acme-ca.example",
+    "common_name": "api.acme.com",
+    "name_value": "api.acme.com\nwww.acme.com",
+    "not_before": "2024-01-01T00:00:00Z",
+    "not_after": "2025-01-01T00:00:00Z"
+  },
+  {
+    "id": 2,
+    "issuer_name": "C=US, O=Other CA, CN=Other Issuing CA",
+    "common_name": "dev.acme.com",
+    "name_value": "dev.acme.com",
+    "not_before": "2024-02-01T00:00:00Z",
+    "not_after": "2025-02-01T00:00:00Z"
+  },
+  {
+    "id": 3,
+    "issuer_name": "C=US, O=Edge, CN=Edge CA",
+    "common_name": "edge.acme.com",
+    "name_value": "edge.acme.com"
+  }
+]

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from typing import Any
 
@@ -39,22 +38,10 @@ _COLLECTOR_MAP = {
     "threatminer": collect_threatminer,
 }
 
-_EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
-
 
 def _enabled_source_names() -> set[str]:
     sources = load_sources()
     return {s["name"] for s in sources if s.get("name")}
-
-
-def _extract_associate_emails(subdomains: set[str], domain: str) -> list[str]:
-    emails: set[str] = set()
-    for sub in subdomains:
-        for match in _EMAIL_RE.findall(sub):
-            candidate = match.lower()
-            if candidate.endswith(f"@{domain}") or f"@{domain}" in candidate:
-                emails.add(candidate)
-    return sorted(emails)
 
 
 def _subdomain_finding(
@@ -223,11 +210,17 @@ class DomainHarvesterModule(BaseModule):
         for sub in brute_hits:
             subdomain_sources.setdefault(sub, []).append("dns_brute")
 
-        # Determine wave per subdomain (wave 1 if any wave-1 source found it)
+        # Determine wave per subdomain. MUST-FIX S9: wave 1 (highest
+        # confidence) is reserved for subdomains found by a structured
+        # API source (``_WAVE1_SOURCES`` — crt.sh / certspotter /
+        # bufferoverun). The pre-fix code OR'd ``s == "dns_brute"``
+        # into the wave-1 check, which incorrectly promoted
+        # brute-force-only subdomains (the LOWEST confidence source)
+        # to wave 1.
         def _subdomain_wave(sub: str) -> int:
             srcs = subdomain_sources.get(sub, [])
             for s in srcs:
-                if s in _WAVE1_SOURCES or s == "dns_brute":
+                if s in _WAVE1_SOURCES:
                     return 1
             return 2
 
@@ -246,7 +239,16 @@ class DomainHarvesterModule(BaseModule):
             for ip in ips:
                 findings.append(_ip_finding(sub, ip))
 
-        associate_emails = _extract_associate_emails(all_subdomains, domain)
+        # MUST-FIX S7: removed the dead ``_extract_associate_emails`` call.
+        # The function always returned ``[]`` because subdomain hostname
+        # strings do not contain ``@`` characters — subdomains are
+        # hostnames, not email addresses. We keep the metadata key
+        # ``associate_emails`` so the public schema doesn't change, but
+        # the value is always an empty list. The correct way to find
+        # emails associated with discovered subdomains is to fetch
+        # the page content at those subdomains and run email extraction
+        # on it — tracked separately as future work.
+        associate_emails: list[str] = []
 
         subdomains_per_source = {
             name: len(found) for name, found in per_source.items()

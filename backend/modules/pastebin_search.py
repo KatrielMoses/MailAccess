@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from ..config import settings
+from ..config import APP_VERSION, settings
 from .base import BaseModule, ModuleResult, ModuleStatus
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,8 @@ _NOISE_EMAIL_LOCAL = frozenset({"noreply"})
 _NOISE_EMAIL_DOMAINS = frozenset({"pastebin.com", "paste.ee"})
 
 _ASSOCIATE_EMAIL_CAP = 10
-_USER_AGENT = "mailaccess/0.8.2"
+
+_USER_AGENT = f"mailaccess/{APP_VERSION}"
 
 
 def _is_noise_email(addr: str, target: str) -> bool:

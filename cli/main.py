@@ -192,6 +192,107 @@ app.add_typer(platform_health_app)
 from cli.platform_audit import run_platform_audit  # noqa: E402
 
 
+# ── Domain Email Harvest (Phase C3, 0.10.0) ─────────────────────────────────
+
+from cli.harvest_emails import run_harvest_emails  # noqa: E402
+
+
+@app.command(name="harvest-emails")
+def harvest_emails_command(
+    domain: str = typer.Option(
+        ...,
+        "--domain",
+        "-d",
+        help="Target domain (e.g. example.com). Free providers rejected.",
+    ),
+    verify_smtp: bool = typer.Option(
+        False,
+        "--verify-smtp",
+        help=(
+            "OPT-IN: enable SMTP RCPT TO verification. "
+            "The ONLY path that can enable probing — no env var "
+            "or config default can silently turn this on."
+        ),
+    ),
+    lite: bool = typer.Option(
+        False,
+        "--lite",
+        help="Reduce dork queries for faster (lower-yield) runs.",
+    ),
+    export: Optional[str] = typer.Option(
+        None,
+        "--export",
+        help="Export full harvest to JSON. Bare names route to ./results/.",
+    ),
+    max_cc_records: Optional[int] = typer.Option(
+        None,
+        "--max-cc-records",
+        help="Override cc_max_records for this run.",
+    ),
+    min_confidence: str = typer.Option(
+        "low",
+        "--min-confidence",
+        help=(
+            "SHOULD-FIX S8: only show emails at or above this confidence "
+            "label. One of: high, medium (default for filtered), low "
+            "(default, show all)."
+        ),
+    ),
+    min_confidence_score: float = typer.Option(
+        0.0,
+        "--min-confidence-score",
+        help=(
+            "W5: numeric companion to --min-confidence. Only show emails "
+            "whose confidence_score is at or above this value (0.0–1.5). "
+            "When both flags are set, the MORE restrictive filter wins. "
+            "Default 0.0 = no numeric filter (show everything)."
+        ),
+    ),
+    exclude_domain: list[str] = typer.Option(
+        [],
+        "--exclude-domain",
+        help=(
+            "SHOULD-FIX S8: hide emails from this domain. Repeat the "
+            "flag to exclude multiple domains. Example: "
+            "--exclude-domain gmail.com --exclude-domain yahoo.com"
+        ),
+    ),
+    on_domain_only: bool = typer.Option(
+        False,
+        "--on-domain-only",
+        help=(
+            "SHOULD-FIX S8: hide third-party mentions entirely. Only "
+            "show emails whose domain equals the target domain."
+        ),
+    ),
+) -> None:
+    """Harvest email addresses associated with a domain.
+
+    Runs the eight domain-mode modules in parallel:
+    commoncrawl_email, code_and_cert_email, email_search_dork,
+    employee_name_discovery, npm_email, pypi_email, pgp_domain_email
+    (all seven concurrently), then pattern_and_verify (depends on
+    the employee-name findings).
+
+    Use --verify-smtp to enable SMTP RCPT TO verification
+    (opt-in; passive OSINT, no emails sent).
+    """
+    exit_code = run_harvest_emails(
+        domain=domain,
+        verify_smtp=verify_smtp,
+        lite=lite,
+        export=export,
+        max_cc_records=max_cc_records,
+        console=console,
+        min_confidence=min_confidence,
+        min_confidence_score=min_confidence_score,
+        exclude_domains=tuple(exclude_domain),
+        on_domain_only=on_domain_only,
+    )
+    if exit_code != 0:
+        raise typer.Exit(exit_code)
+
+
 # ── Platform Audit (Phase 6C) ─────────────────────────────────────────────────
 
 

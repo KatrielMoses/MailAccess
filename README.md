@@ -440,6 +440,26 @@ When a bare filename is given (no directory component), the file is written to t
 
 ## Changelog
 
+### 0.10.0
+
+**Domain Email Harvest** (Beta — final refinement pass pending)
+
+New top-level command:
+
+```bash
+mailaccess harvest-emails --domain example.com [--verify-smtp] [--lite] [--export FILE]
+```
+
+Discovers email addresses associated with a domain via Common Crawl,
+search engine dorking, code repository search, certificate
+transparency, and employee-name pattern generation.  Cross-module
+deduplication + multi-source confidence aggregation produces
+HIGH / MEDIUM / LOW buckets.  SMTP RCPT TO verification is opt-in
+(`--verify-smtp`); no env var or config default can enable it
+silently.
+
+Full documentation pending final refinement pass.
+
 ### 0.9.0
 
 **PHASE 1 — False Positive Killers**

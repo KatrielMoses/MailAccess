@@ -1,0 +1,36 @@
+{
+  "total_count": 2,
+  "incomplete_results": false,
+  "items": [
+    {
+      "name": ".env",
+      "path": "config/.env",
+      "sha": "abc123",
+      "html_url": "https://github.com/acme/api/blob/main/config/.env",
+      "repository": {
+        "full_name": "acme/api"
+      },
+      "text_matches": [
+        {
+          "fragment": "ADMIN_EMAIL=admin@acme.com",
+          "property": "content"
+        }
+      ]
+    },
+    {
+      "name": "README.md",
+      "path": "README.md",
+      "sha": "def456",
+      "html_url": "https://github.com/partner/integration/blob/main/README.md",
+      "repository": {
+        "full_name": "partner/integration"
+      },
+      "text_matches": [
+        {
+          "fragment": "Contact: support@partner.com for the @acme.com integration",
+          "property": "content"
+        }
+      ]
+    }
+  ]
+}

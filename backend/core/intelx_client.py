@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from ..config import APP_VERSION
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -58,7 +60,9 @@ class IntelxClient:
         self,
         api_key: str,
         base_url: str = "https://2.intelx.io",
-        user_agent: str = ("mailaccess/0.8.3 (OSINT research; mailaccess@example.com)"),
+        user_agent: str = (
+            f"mailaccess/{APP_VERSION} (OSINT research; mailaccess@example.com)"
+        ),
         timeout: float = 30.0,
         *,
         transport: httpx.AsyncBaseTransport | None = None,

@@ -3,15 +3,88 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import socket
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 import httpx
 
+from ..config import APP_VERSION
+
 _LOG = logging.getLogger(__name__)
 
-_USER_AGENT = "mailaccess/0.8.3"
+# MUST-FIX S6: User-Agent version string is derived from APP_VERSION
+# at import time so it stays in sync with the package metadata. Pre-fix
+# code had a hardcoded ``mailaccess/0.8.3`` which lagged the actual
+# package version and made the tool look stale to target servers.
+_USER_AGENT = f"mailaccess/{APP_VERSION}"
 _HEADERS = {"User-Agent": _USER_AGENT}
+
+
+# MUST-FIX S10: shared retry-with-backoff helper for the five HTTP
+# collectors. HTTP 429 is a soft-cap from the upstream — they want us
+# to slow down, not stop entirely. Exponential backoff (2s/4s/8s)
+# usually clears the rate limit window without burning the harvest.
+#
+# ONLY 429 is retried (per the audit spec): 5xx, timeouts, network
+# errors, etc. continue to surface as before (graceful return empty set).
+# Retrying other error classes is out of scope — and risks amplifying a
+# real outage into a stalled harvest.
+_T = TypeVar("_T")
+
+
+async def _retry_with_backoff(
+    fn: Callable[[], Awaitable[_T]],
+    *,
+    max_retries: int = 3,
+    base_delay: float = 2.0,
+    label: str = "collector",
+) -> _T | None:
+    """Call ``fn()`` and retry ONLY on HTTP 429 with exponential backoff.
+
+    MUST-FIX S10: returns ``None`` on any non-429 error or when retries
+    are exhausted — the callers expect "empty result" semantics and
+    should never raise out of a retry loop. ``label`` is just for log
+    messages so we can see which collector gave up.
+
+    ``base_delay=2.0`` is the production default (2s, 4s, 8s); tests
+    can pass ``base_delay=0`` to skip the sleep entirely.
+    """
+    attempt = 0
+    while True:
+        try:
+            result = await fn()
+        except Exception as exc:  # noqa: BLE001
+            _LOG.debug("%s: request error (no retry): %s", label, exc)
+            return None
+
+        # Non-429 errors: return whatever the caller produced (which
+        # the collector functions treat as "no result"). We can't read
+        # ``.status_code`` here without coupling to httpx.Response, so
+        # the collectors wrap the retry themselves below.
+        if not isinstance(result, httpx.Response):
+            return result
+        if result.status_code != 429:
+            return result
+
+        # 429: back off.
+        attempt += 1
+        if attempt > max_retries:
+            _LOG.warning(
+                "%s: 429 still present after %d retries — giving up",
+                label,
+                max_retries,
+            )
+            return None
+        delay = base_delay * (2 ** (attempt - 1))
+        if delay > 0:
+            _LOG.info(
+                "%s: 429 rate-limited (attempt %d/%d) — sleeping %.1fs",
+                label,
+                attempt,
+                max_retries,
+                delay,
+            )
+            await asyncio.sleep(delay)
 
 
 def _strip_wildcard(name: str) -> str:
@@ -33,28 +106,64 @@ def _clean_subdomains(raw: list[str], domain: str) -> set[str]:
     return result
 
 
+# MUST-FIX S10: shared GET primitive that the five collectors call.
+# Performs ONE HTTP request through _retry_with_backoff so each
+# collector gets the 429-aware retry behaviour without duplicating the
+# exponential-backoff loop five times. Returns the httpx.Response on
+# success (any 2xx status), or None on a non-429 error / retry exhaustion.
+async def _get_with_429_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    sem: asyncio.Semaphore,
+    timeout: float,
+    label: str,
+    max_retries: int = 3,
+    base_delay: float = 2.0,
+) -> httpx.Response | None:
+    async def _do_get() -> httpx.Response | None:
+        async with sem:
+            try:
+                resp = await client.get(url, headers=_HEADERS, timeout=timeout)
+            except httpx.TimeoutException:
+                _LOG.debug("%s: timeout", label)
+                return None
+            except Exception as exc:  # noqa: BLE001
+                _LOG.debug("%s: request error: %s", label, exc)
+                return None
+            return resp
+
+    outcome = await _retry_with_backoff(
+        _do_get, label=label, max_retries=max_retries, base_delay=base_delay
+    )
+    if outcome is None or not isinstance(outcome, httpx.Response):
+        return None
+    if outcome.status_code == 429:
+        # retry helper already logged the giving-up message.
+        return None
+    if outcome.status_code != 200:
+        _LOG.debug("%s: HTTP %s", label, outcome.status_code)
+        return None
+    return outcome
+
+
 async def collect_crtsh(
     client: httpx.AsyncClient,
     domain: str,
     sem: asyncio.Semaphore,
     timeout: float = 15.0,
 ) -> set[str]:
-    url = f"https://crt.sh/?q=%25.{domain}&output=json"
-    async with sem:
-        try:
-            resp = await client.get(url, headers=_HEADERS, timeout=timeout)
-        except httpx.TimeoutException:
-            _LOG.debug("crtsh: timeout for %s", domain)
-            return set()
-        except Exception as exc:
-            _LOG.debug("crtsh: request error for %s: %s", domain, exc)
-            return set()
+    """Fetch subdomain list from crt.sh.
 
-    if resp.status_code == 429:
-        _LOG.warning("crtsh: rate limited (429) for %s — consider spacing requests", domain)
-        return set()
-    if resp.status_code != 200:
-        _LOG.debug("crtsh: HTTP %s for %s", resp.status_code, domain)
+    MUST-FIX S10: ``_get_with_429_retry`` handles 429 retries with
+    exponential backoff (2s/4s/8s) before giving up. Non-429 errors
+    still surface as empty set (graceful degradation).
+    """
+    url = f"https://crt.sh/?q=%25.{domain}&output=json"
+    resp = await _get_with_429_retry(
+        client, url, sem=sem, timeout=timeout, label="crtsh"
+    )
+    if resp is None:
         return set()
 
     try:
@@ -86,22 +195,15 @@ async def collect_rapiddns(
     sem: asyncio.Semaphore,
     timeout: float = 15.0,
 ) -> set[str]:
-    url = f"https://rapiddns.io/subdomain/{domain}?full=1"
-    async with sem:
-        try:
-            resp = await client.get(url, headers=_HEADERS, timeout=timeout)
-        except httpx.TimeoutException:
-            _LOG.debug("rapiddns: timeout for %s", domain)
-            return set()
-        except Exception as exc:
-            _LOG.debug("rapiddns: request error for %s: %s", domain, exc)
-            return set()
+    """Fetch subdomain list from rapiddns.io.
 
-    if resp.status_code == 429:
-        _LOG.warning("rapiddns: rate limited (429) for %s", domain)
-        return set()
-    if resp.status_code != 200:
-        _LOG.debug("rapiddns: HTTP %s for %s", resp.status_code, domain)
+    MUST-FIX S10: 429 → retry via _get_with_429_retry.
+    """
+    url = f"https://rapiddns.io/subdomain/{domain}?full=1"
+    resp = await _get_with_429_retry(
+        client, url, sem=sem, timeout=timeout, label="rapiddns"
+    )
+    if resp is None:
         return set()
 
     try:
@@ -126,25 +228,18 @@ async def collect_certspotter(
     sem: asyncio.Semaphore,
     timeout: float = 15.0,
 ) -> set[str]:
+    """Fetch subdomain list from certspotter.
+
+    MUST-FIX S10: 429 → retry via _get_with_429_retry.
+    """
     url = (
         f"https://api.certspotter.com/v1/issuances"
         f"?domain={domain}&include_subdomains=true&expand=dns_names"
     )
-    async with sem:
-        try:
-            resp = await client.get(url, headers=_HEADERS, timeout=timeout)
-        except httpx.TimeoutException:
-            _LOG.debug("certspotter: timeout for %s", domain)
-            return set()
-        except Exception as exc:
-            _LOG.debug("certspotter: request error for %s: %s", domain, exc)
-            return set()
-
-    if resp.status_code == 429:
-        _LOG.warning("certspotter: rate limited (429) for %s", domain)
-        return set()
-    if resp.status_code != 200:
-        _LOG.debug("certspotter: HTTP %s for %s", resp.status_code, domain)
+    resp = await _get_with_429_retry(
+        client, url, sem=sem, timeout=timeout, label="certspotter"
+    )
+    if resp is None:
         return set()
 
     try:
@@ -175,22 +270,15 @@ async def collect_bufferoverun(
     sem: asyncio.Semaphore,
     timeout: float = 15.0,
 ) -> set[str]:
-    url = f"https://tls.bufferover.run/dns?q={domain}"
-    async with sem:
-        try:
-            resp = await client.get(url, headers=_HEADERS, timeout=timeout)
-        except httpx.TimeoutException:
-            _LOG.debug("bufferoverun: timeout for %s", domain)
-            return set()
-        except Exception as exc:
-            _LOG.debug("bufferoverun: request error for %s: %s", domain, exc)
-            return set()
+    """Fetch subdomain list from bufferover.run.
 
-    if resp.status_code == 429:
-        _LOG.warning("bufferoverun: rate limited (429) for %s", domain)
-        return set()
-    if resp.status_code != 200:
-        _LOG.debug("bufferoverun: HTTP %s for %s", resp.status_code, domain)
+    MUST-FIX S10: 429 → retry via _get_with_429_retry.
+    """
+    url = f"https://tls.bufferover.run/dns?q={domain}"
+    resp = await _get_with_429_retry(
+        client, url, sem=sem, timeout=timeout, label="bufferoverun"
+    )
+    if resp is None:
         return set()
 
     try:
@@ -225,22 +313,15 @@ async def collect_threatminer(
     sem: asyncio.Semaphore,
     timeout: float = 15.0,
 ) -> set[str]:
-    url = f"https://api.threatminer.org/v2/domain.php?q={domain}&rt=5"
-    async with sem:
-        try:
-            resp = await client.get(url, headers=_HEADERS, timeout=timeout)
-        except httpx.TimeoutException:
-            _LOG.debug("threatminer: timeout for %s", domain)
-            return set()
-        except Exception as exc:
-            _LOG.debug("threatminer: request error for %s: %s", domain, exc)
-            return set()
+    """Fetch subdomain list from threatminer.
 
-    if resp.status_code == 429:
-        _LOG.warning("threatminer: rate limited (429) for %s", domain)
-        return set()
-    if resp.status_code != 200:
-        _LOG.debug("threatminer: HTTP %s for %s", resp.status_code, domain)
+    MUST-FIX S10: 429 → retry via _get_with_429_retry.
+    """
+    url = f"https://api.threatminer.org/v2/domain.php?q={domain}&rt=5"
+    resp = await _get_with_429_retry(
+        client, url, sem=sem, timeout=timeout, label="threatminer"
+    )
+    if resp is None:
         return set()
 
     try:
@@ -260,34 +341,78 @@ async def collect_threatminer(
     return _clean_subdomains(raw, domain)
 
 
+async def _resolve_a_record(hostname: str, timeout: float) -> list[str]:
+    """Resolve *hostname* to its A-record IPs via dnspython's async resolver.
+
+    MUST-FIX M7: the previous implementation used
+    ``socket.getaddrinfo(host, None, AF_INET, SOCK_STREAM)``, which
+    triggers a TCP SYN to port 0 of the target host on every call.
+    For a 200-prefix brute that meant 200 TCP SYNs to ports on
+    arbitrary hosts — a textbook IDS-alert pattern on the operator's
+    own network AND on the target nameserver.
+
+    dnspython's ``dns.asyncresolver.resolve`` issues proper UDP/53
+    DNS queries (falling back to TCP/53 only when the response is
+    truncated, which is rare for A records). No TCP SYN packets.
+    No port 0 noise.
+
+    Returns the list of IPv4 addresses as strings, or ``[]`` on any
+    failure (NXDOMAIN, timeout, no dnspython installed).
+    """
+    try:
+        import dns.asyncresolver  # type: ignore[import]
+        import dns.exception  # type: ignore[import]
+    except ImportError:
+        _LOG.debug("dns_brute: dnspython async resolver unavailable")
+        return []
+
+    try:
+        answers = await asyncio.wait_for(
+            dns.asyncresolver.resolve(hostname, "A"),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        return []
+    except dns.exception.DNSException:
+        return []
+    except Exception as exc:  # noqa: BLE001
+        # Any other resolver error (network unreachable, etc.) is
+        # treated as "host doesn't resolve" — same semantics as
+        # gaierror in the old code path.
+        _LOG.debug("dns_brute: resolver error for %s: %s", hostname, exc)
+        return []
+
+    out: list[str] = []
+    for rdata in answers:
+        try:
+            out.append(str(rdata.address))
+        except Exception:
+            continue
+    return out
+
+
 async def dns_brute_force(
     client: httpx.AsyncClient,  # noqa: ARG001 — kept for API consistency
     domain: str,
     prefixes: list[str],
     sem: asyncio.Semaphore,
-    timeout: float = 5.0,  # noqa: ARG001 — socket timeout applied via asyncio.wait_for
+    timeout: float = 5.0,
 ) -> set[str]:
+    """Brute-force candidate subdomains by querying their A records.
+
+    MUST-FIX M7: now uses dnspython's async resolver (proper DNS
+    query, no TCP SYN packets). The previous implementation called
+    ``socket.getaddrinfo(SOCK_STREAM)`` which attempted a TCP
+    connection per hostname — flagging as an attack pattern.
+    """
     capped = prefixes[:200]
     found: set[str] = set()
 
     async def _resolve_one(prefix: str) -> str | None:
         hostname = f"{prefix}.{domain}"
         async with sem:
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(
-                        socket.getaddrinfo, hostname, None, socket.AF_INET, socket.SOCK_STREAM
-                    ),
-                    timeout=5.0,
-                )
-                return hostname
-            except asyncio.TimeoutError:
-                return None
-            except socket.gaierror:
-                return None
-            except Exception as exc:
-                _LOG.debug("dns_brute: error resolving %s: %s", hostname, exc)
-                return None
+            ips = await _resolve_a_record(hostname, timeout=timeout)
+            return hostname if ips else None
 
     tasks = [_resolve_one(p) for p in capped]
     results = await asyncio.gather(*tasks)
@@ -301,28 +426,23 @@ async def resolve_ips(
     client: httpx.AsyncClient,  # noqa: ARG001 — kept for API consistency
     hosts: set[str],
     sem: asyncio.Semaphore,
-    timeout: float = 5.0,  # noqa: ARG001 — socket timeout applied via asyncio.wait_for
+    timeout: float = 5.0,
 ) -> dict[str, list[str]]:
+    """Resolve *hosts* to their A-record IPs via dnspython.
+
+    MUST-FIX M7: replaced ``socket.getaddrinfo(SOCK_STREAM)`` (which
+    triggered a TCP SYN per host) with proper DNS resolution via
+    dnspython. Same semantics, no port-0 noise.
+    """
     result: dict[str, list[str]] = {}
 
     async def _resolve_host(host: str) -> tuple[str, list[str]]:
         async with sem:
-            try:
-                infos: list[Any] = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        socket.getaddrinfo, host, None, socket.AF_INET, socket.SOCK_STREAM
-                    ),
-                    timeout=5.0,
-                )
-                ips = list(dict.fromkeys(info[4][0] for info in infos if info and info[4]))
-                return host, ips
-            except asyncio.TimeoutError:
-                return host, []
-            except socket.gaierror:
-                return host, []
-            except Exception as exc:
-                _LOG.debug("resolve_ips: error for %s: %s", host, exc)
-                return host, []
+            ips = await _resolve_a_record(host, timeout=timeout)
+            # MUST-FIX M7: dnspython can return duplicate A records for
+            # the same host (round-robin DNS). Dedup by preserving order.
+            unique = list(dict.fromkeys(ips))
+            return host, unique
 
     tasks = [_resolve_host(h) for h in hosts]
     pairs = await asyncio.gather(*tasks)

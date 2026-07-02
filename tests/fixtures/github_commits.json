@@ -1,0 +1,62 @@
+[
+  {
+    "sha": "abc1234567890",
+    "html_url": "https://github.com/acme/api/commit/abc1234",
+    "commit": {
+      "author": {
+        "name": "Alice Acme",
+        "email": "alice@acme.com",
+        "date": "2024-01-15T10:00:00Z"
+      },
+      "committer": {
+        "name": "Alice Acme",
+        "email": "alice@acme.com",
+        "date": "2024-01-15T10:00:00Z"
+      },
+      "message": "ship the thing"
+    },
+    "repository": {
+      "full_name": "acme/api"
+    }
+  },
+  {
+    "sha": "def4567890123",
+    "html_url": "https://github.com/acme/api/commit/def4567",
+    "commit": {
+      "author": {
+        "name": "Bob Acme",
+        "email": "bob@acme.com",
+        "date": "2024-02-10T12:00:00Z"
+      },
+      "committer": {
+        "name": "External Maintainer",
+        "email": "noreply@github.com",
+        "date": "2024-02-10T12:00:00Z"
+      },
+      "message": "fix: typo"
+    },
+    "repository": {
+      "full_name": "acme/api"
+    }
+  },
+  {
+    "sha": "ghi7890123456",
+    "html_url": "https://github.com/random/user/commit/ghi7890",
+    "commit": {
+      "author": {
+        "name": "Random",
+        "email": "user@example.org",
+        "date": "2024-03-01T00:00:00Z"
+      },
+      "committer": {
+        "name": "Random",
+        "email": "user@example.org",
+        "date": "2024-03-01T00:00:00Z"
+      },
+      "message": "fancy commit"
+    },
+    "repository": {
+      "full_name": "random/user"
+    }
+  }
+]

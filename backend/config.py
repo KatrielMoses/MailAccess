@@ -249,6 +249,74 @@ class Settings(BaseSettings):
     enable_investigation_cache: bool = True
     investigation_cache_window_minutes: int = 30
 
+    # Common Crawl email harvesting (domain harvest mode only — Phase A of 0.10.0).
+    # Master kill switch; the module itself is opt-in via domain harvest
+    # mode, this is the global enable flag for the underlying fetcher too.
+    enable_commoncrawl_email: bool = True
+    cc_max_records: int = 100
+    cc_fetch_concurrency: int = 10
+    cc_fetch_timeout_seconds: int = 8
+
+    # Search-engine dorking (domain harvest mode only — Phase B1 of 0.10.0).
+    # Master kill switch for the search-dork module.  The module is
+    # already opt-in via the domain harvest entry point.
+    enable_email_search_dork: bool = True
+    dork_max_queries_per_engine: int = 5
+    dork_lite_mode: bool = False
+    dork_ddg_delay_seconds: float = 5.0
+    dork_bing_delay_seconds: float = 4.0
+
+    # Code + certificate-transparency email harvest (Phase B2 of 0.10.0).
+    # Master kill switch for the GitHub + crt.sh + certspotter module.
+    enable_code_and_cert_email: bool = True
+    github_email_max_results: int = 30
+    github_email_max_repos_checked: int = 10
+    github_email_max_commits_per_repo: int = 20
+
+    # Employee / executive name discovery (Phase C1 of 0.10.0).
+    # Master kill switch for the multi-source name discovery module. The
+    # module is opt-in via domain harvest mode and feeds Phase C2's
+    # pattern generation, not the email-mode investigation pipeline.
+    enable_employee_name_discovery: bool = True
+    employee_name_max_company_pages: int = 5
+
+    # Email pattern generation + SMTP verification (Phase C2 of 0.10.0).
+    # Master kill switch for the pattern_and_verify module.  Lives in
+    # domain harvest mode; takes the names from Phase C1's output.
+    enable_email_pattern_and_verify: bool = True
+
+    # W5: Phase 0.10.0 final additions — three new structured-source
+    # modules that slot into Phase 1 of the harvest orchestrator
+    # (the parallel fast/cheap-sources phase). All three default on,
+    # no API key required, and run concurrently with commoncrawl_email
+    # and code_and_cert_email via asyncio.gather.
+    #
+    # npm_email: package maintainer emails on registry.npmjs.org.
+    # PyPI_email: package maintainer emails on pypi.org.
+    # pgp_domain_email: UID-bearing public PGP keys on keys.openpgp.org
+    #                   + keyserver.ubuntu.com, restricted to UIDs that
+    #                   contain the target domain string.
+    enable_npm_email: bool = True
+    enable_pypi_email: bool = True
+    enable_pgp_domain_email: bool = True
+    # ------------------------------------------------------------------
+    # SMTP verification — OPT-IN ONLY.  The default is False to keep
+    # "just run a domain harvest" safe.  Flipping ENABLE_SMTP_VERIFICATION
+    # to true is the only way to actually probe mail servers.  Even when
+    # true, all safety ceilings are HARD-CODED in smtp_verifier.py
+    # (max 100 probes per domain, max 30/minute pacing).
+    # ------------------------------------------------------------------
+    enable_smtp_verification: bool = False
+    # Configurable downward only — smtp_verifier clamps to
+    # MAX_PROBES_HARD_CAP (100) regardless of what's set here.
+    smtp_max_probes_per_domain: int = 100
+    smtp_probe_delay_seconds: float = 2.5
+    # Sender address used in MAIL FROM.  Spec requires this be a
+    # non-attributable, non-deliverable anonymous address; do not
+    # change it to anything that points back at the operator.
+    smtp_sender_address: str = "probe@mailaccess.invalid"
+    smtp_connect_timeout_seconds: int = 8
+
     # Webhooks
     slack_webhook_url: str | None = None
     discord_webhook_url: str | None = None

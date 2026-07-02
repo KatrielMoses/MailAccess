@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from ..config import APP_VERSION
+
 # ---------------------------------------------------------------------------
 # String interpolation helpers (mirror sherlock upstream exactly)
 # ---------------------------------------------------------------------------
@@ -60,7 +62,8 @@ class WAFDetector:
 
 
 _WAF = WAFDetector()
-_USER_AGENT = "mailaccess/0.8.3"
+
+_USER_AGENT = f"mailaccess/{APP_VERSION}"
 
 
 # ---------------------------------------------------------------------------

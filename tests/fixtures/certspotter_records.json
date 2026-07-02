@@ -1,0 +1,15 @@
+[
+  {
+    "id": "abc-123",
+    "dns_names": ["api.acme.com", "www.acme.com"],
+    "not_before": "2024-01-01T00:00:00Z",
+    "not_after": "2025-01-01T00:00:00Z",
+    "issuer_email_address": "issuer@acme-ca.example"
+  },
+  {
+    "id": "def-456",
+    "dns_names": ["dev.acme.com"],
+    "not_before": "2024-02-01T00:00:00Z",
+    "not_after": "2025-02-01T00:00:00Z"
+  }
+]

@@ -8,6 +8,7 @@ from urllib.parse import urljoin
 import httpx
 
 from ..core.http_client import build_client
+from ..core.name_quality import is_plausible_person_name
 from ..core.phone_extractor import normalize_phone
 from .base import BaseModule, ModuleResult, ModuleStatus
 from .domain_intel import _FREE_PROVIDERS
@@ -16,6 +17,20 @@ _SEC_SEARCH = "https://efts.sec.gov/LATEST/search-index"
 _PHONE_RE = re.compile(r"\+?[\d\s\-\(\)\.]{10,20}")
 _TAG_RE = re.compile(r"<[^>]+>")
 _DOC_LINK_RE = re.compile(r'href="([^"]+\.(?:htm|html|txt))"', re.I)
+
+# Phase C1 — name extraction pattern. Mirrors the LOCAL copy in
+# press_intel.py; we keep a private pattern instead of importing
+# name_consensus because sec_edgar is on the contact-extraction hot
+# path.  Executive signature blocks in SEC filings typically read as
+# a sequence of "FirstName LastName" tokens with optional middle
+# initial(s).
+_LATIN_NAME_TOKEN = r"[A-Z][a-zA-Z''\-]+"
+_NONLATIN_NAME_TOKEN = r"[Ѐ-ӿ؀-ۿ一-鿿ऀ-ॿ]+"
+_ANY_NAME_TOKEN = rf"(?:{_LATIN_NAME_TOKEN}|{_NONLATIN_NAME_TOKEN})"
+_SEC_NAME_RE = re.compile(
+    rf"\b{_ANY_NAME_TOKEN}(?:\s+{_ANY_NAME_TOKEN}){{1,3}}\b",
+    re.UNICODE,
+)
 
 
 class SecEdgarModule(BaseModule):
@@ -173,6 +188,36 @@ async def _fetch_filing(
                         "filing_type": _filing_type(text),
                         "filing_url": url,
                         "context": paragraph[start:end].strip(),
+                    },
+                }
+            )
+
+    # ------------------------------------------------------------------
+    # Phase C1 — additive name extraction.  Same parsed page text, no
+    # extra HTTP.  Names emitted as separate findings so callers that
+    # already filter on ``signal_type == "phone_number"`` see zero new
+    # entries.
+    # ------------------------------------------------------------------
+    seen_names: set[str] = set()
+    for paragraph in paragraphs:
+        for match in _SEC_NAME_RE.finditer(paragraph):
+            candidate = match.group(0).strip()
+            if not is_plausible_person_name(candidate):
+                continue
+            key = candidate.lower()
+            if key in seen_names:
+                continue
+            seen_names.add(key)
+            findings.append(
+                {
+                    "platform": "sec_edgar",
+                    "signal_type": "executive_name",
+                    "confidence": "low",
+                    "metadata": {
+                        "name": candidate,
+                        "filing_url": url,
+                        "filing_type": _filing_type(text),
+                        "company_name": _company_name(text),
                     },
                 }
             )
