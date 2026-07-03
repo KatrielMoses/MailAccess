@@ -34,7 +34,7 @@ mailaccess serve  # in one terminal
 mailaccess investigate you@example.com  # in another
 
 # Option C: full stack with Web UI
-git clone https://github.com/YOUR_USERNAME/mailaccess
+git clone https://github.com/KatrielMoses/MailAccess
 docker compose up -d
 ```
 
