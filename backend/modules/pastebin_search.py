@@ -5,9 +5,8 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-import httpx
-
 from ..config import APP_VERSION, settings
+from ..core.http_client import build_client
 from .base import BaseModule, ModuleResult, ModuleStatus
 
 logger = logging.getLogger(__name__)
@@ -60,13 +59,12 @@ class PastebinSearchModule(BaseModule):
         if not (settings.enable_pastebin_search or force):
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
-                errors=[
-                    "pastebin_search disabled — set ENABLE_PASTEBIN_SEARCH=true to enable"
-                ],
+                errors=["pastebin_search disabled — set ENABLE_PASTEBIN_SEARCH=true to enable"],
             )
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            # scrapingant: dropped in S5 audit (psbdmp API returns JSON)
+            async with build_client(timeout=10.0) as client:
                 resp = await client.get(
                     f"https://psbdmp.ws/api/v3/search/{email}",
                     headers={"User-Agent": _USER_AGENT},
@@ -146,20 +144,22 @@ class PastebinSearchModule(BaseModule):
 
             logger.debug("psbdmp hit: %s title=%r", url, title)
 
-            findings.append({
-                "platform": platform_key,
-                "profile_url": url,
-                "username": username,
-                "confidence": "medium",
-                "metadata": {
-                    "source": "psbdmp",
-                    "title": title,
-                    "tags": list(tags) if isinstance(tags, list | tuple) else [],
-                    "date": date,
-                    "content_snippet": content[:200],
-                    "source_site": source_site,
-                },
-            })
+            findings.append(
+                {
+                    "platform": platform_key,
+                    "profile_url": url,
+                    "username": username,
+                    "confidence": "medium",
+                    "metadata": {
+                        "source": "psbdmp",
+                        "title": title,
+                        "tags": list(tags) if isinstance(tags, list | tuple) else [],
+                        "date": date,
+                        "content_snippet": content[:200],
+                        "source_site": source_site,
+                    },
+                }
+            )
 
             for m in _EMAIL_RE.finditer(content):
                 addr = m.group(0).lower()

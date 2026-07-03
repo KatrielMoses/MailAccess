@@ -20,7 +20,9 @@ _NAME_PATTERNS = [
     re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s+here\b"),
     re.compile(r"^\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s*,\s+[A-Za-z]"),
 ]
-_SOCIAL_URL_RE = re.compile(r"https?://(?:www\.)?(?:linkedin\.com|github\.com|twitter\.com|x\.com)/[^\s<>\"]+")
+_SOCIAL_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:linkedin\.com|github\.com|twitter\.com|x\.com)/[^\s<>\"]+"
+)
 
 
 class HackerNewsModule(BaseModule):
@@ -38,6 +40,7 @@ class HackerNewsModule(BaseModule):
         errors: list[str] = []
         seen: set[str] = set()
 
+        # scrapingant: dropped in S5 audit (HN Firebase/Algolia endpoints return JSON)
         async with build_client(timeout=8.0, follow_redirects=True) as client:
             for username in candidates:
                 found, found_errors = await self._lookup_user(client, username)
@@ -49,7 +52,11 @@ class HackerNewsModule(BaseModule):
                         findings.append(finding)
 
         return ModuleResult(
-            status=ModuleStatus.PARTIAL if errors and not findings else ModuleStatus.SUCCESS if not errors else ModuleStatus.PARTIAL,
+            status=ModuleStatus.PARTIAL
+            if errors and not findings
+            else ModuleStatus.SUCCESS
+            if not errors
+            else ModuleStatus.PARTIAL,
             findings=findings,
             metadata={"usernames_checked": candidates, "profiles_found": len(findings)},
             errors=errors,
@@ -67,7 +74,9 @@ class HackerNewsModule(BaseModule):
                 if isinstance(payload, dict):
                     data = payload
             elif response.status_code != 404:
-                errors.append(f"HackerNews Firebase returned HTTP {response.status_code} for {username}")
+                errors.append(
+                    f"HackerNews Firebase returned HTTP {response.status_code} for {username}"
+                )
         except httpx.TimeoutException:
             errors.append(f"HackerNews Firebase timed out for {username}")
         except (httpx.ConnectError, httpx.NetworkError) as exc:
@@ -102,7 +111,9 @@ class HackerNewsModule(BaseModule):
                 "member_since": _member_since(created),
                 "extracted_name": _extract_name(about),
                 "linked_urls": linked_urls,
-                "submitted": (data.get("submitted") or [])[:5] if isinstance(data.get("submitted"), list) else [],
+                "submitted": (data.get("submitted") or [])[:5]
+                if isinstance(data.get("submitted"), list)
+                else [],
             },
         }
         return [finding], errors

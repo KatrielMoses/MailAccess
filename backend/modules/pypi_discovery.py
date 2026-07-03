@@ -11,9 +11,7 @@ from .base import BaseModule, ModuleResult, ModuleStatus
 
 _PYPI_JSON = "https://pypi.org/pypi/{}/json"
 _PYPI_SEARCH = "https://pypi.org/search/"
-_PACKAGE_NAME_RE = re.compile(
-    r'<span\s+class="package-snippet__name"[^>]*>\s*([^<]+)\s*</span>'
-)
+_PACKAGE_NAME_RE = re.compile(r'<span\s+class="package-snippet__name"[^>]*>\s*([^<]+)\s*</span>')
 _MAX_SEARCH_PACKAGES = 5
 
 
@@ -33,23 +31,35 @@ class PyPIDiscoveryModule(BaseModule):
     async def run(self, email: str, original_email: str | None = None) -> ModuleResult:
         target_emails: frozenset[str] = frozenset(
             e.strip().lower()
-            for e in ([original_email, email] if original_email and original_email.lower() != email.lower() else [email])
+            for e in (
+                [original_email, email]
+                if original_email and original_email.lower() != email.lower()
+                else [email]
+            )
             if e
         )
         findings: list[dict[str, Any]] = []
         errors: list[str] = []
         seen_packages: set[str] = set()
 
-        async with build_client(timeout=10.0, follow_redirects=True) as client:
+        # scrapingant: keep for PyPI HTML search anti-bot handling; package JSON shares client
+        async with build_client(
+            scrapingant_zone="platforms", timeout=10.0, follow_redirects=True
+        ) as client:
             # 1. Direct lookup: package named after each email's local part
-            local_parts = list(dict.fromkeys(e.split("@")[0] if "@" in e else e for e in target_emails))
+            local_parts = list(
+                dict.fromkeys(e.split("@")[0] if "@" in e else e for e in target_emails)
+            )
             for local_part in local_parts:
                 direct_finding, direct_err = await self._fetch_package(
                     client, local_part, target_emails
                 )
                 if direct_err:
                     errors.append(direct_err)
-                if direct_finding and direct_finding["metadata"]["package_name"] not in seen_packages:
+                if (
+                    direct_finding
+                    and direct_finding["metadata"]["package_name"] not in seen_packages
+                ):
                     seen_packages.add(direct_finding["metadata"]["package_name"])
                     findings.append(direct_finding)
 
@@ -65,7 +75,7 @@ class PyPIDiscoveryModule(BaseModule):
 
             fetch_tasks = [
                 self._fetch_package(client, name, target_emails)
-                for name in all_search_names[:_MAX_SEARCH_PACKAGES * len(target_emails)]
+                for name in all_search_names[: _MAX_SEARCH_PACKAGES * len(target_emails)]
                 if name not in seen_packages
             ]
             results = await asyncio.gather(*fetch_tasks, return_exceptions=True)

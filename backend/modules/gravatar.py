@@ -31,7 +31,9 @@ def _identify_platform(url: str) -> str:
 
 class GravatarModule(BaseModule):
     name = "gravatar"
-    description = "Deep Gravatar profile extraction: name, location, bio, verified accounts, linked URLs."
+    description = (
+        "Deep Gravatar profile extraction: name, location, bio, verified accounts, linked URLs."
+    )
     requires_key = False
 
     async def run(self, email: str, original_email: str | None = None) -> ModuleResult:
@@ -57,6 +59,7 @@ class GravatarModule(BaseModule):
         findings: list[dict[str, Any]] = []
         errors: list[str] = []
 
+        # scrapingant: dropped in S5 audit (Gravatar JSON and simple avatar fetches are direct)
         async with build_client(timeout=10.0, follow_redirects=True) as client:
             gravatar_url = f"https://www.gravatar.com/{md5_hash}.json"
             libravatar_url = f"https://www.libravatar.org/avatar/{md5_hash}?d=404"
@@ -125,9 +128,7 @@ class GravatarModule(BaseModule):
         # Extract structured name
         name_obj = entry.get("name") if isinstance(entry.get("name"), dict) else {}
         full_name = (
-            name_obj.get("formatted")
-            or entry.get("displayName")
-            or entry.get("preferredUsername")
+            name_obj.get("formatted") or entry.get("displayName") or entry.get("preferredUsername")
         )
         location = entry.get("currentLocation")
         about_me = entry.get("aboutMe")
@@ -199,7 +200,7 @@ class GravatarModule(BaseModule):
             verified_platforms.append(platform_label)
             findings.append(
                 {
-                    "platform": f"gravatar_account",
+                    "platform": "gravatar_account",
                     "url": acct_url or profile_url,
                     "confidence": "high",
                     "source": "gravatar",

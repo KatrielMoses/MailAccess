@@ -87,6 +87,7 @@ class WaybackModule(BaseModule):
         partial = False
 
         try:
+            # scrapingant: dropped in S5 audit (Wayback CDX endpoint returns JSON)
             async with build_client(follow_redirects=True) as client:
                 rows, cdx_errors, cdx_partial = await self._search_cdx(client, email)
                 errors.extend(cdx_errors)

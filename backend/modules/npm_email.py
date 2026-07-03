@@ -137,9 +137,7 @@ class NpmEmailModule(BaseModule):
         if not settings.enable_npm_email:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
-                errors=[
-                    "npm_email disabled — set ENABLE_NPM_EMAIL=true to enable"
-                ],
+                errors=["npm_email disabled — set ENABLE_NPM_EMAIL=true to enable"],
             )
 
         domain = (target or "").strip().lower()
@@ -162,37 +160,28 @@ class NpmEmailModule(BaseModule):
         aggregated: dict[str, dict[str, Any]] = {}
 
         try:
+            # scrapingant: dropped in S5 audit (npm registry endpoints return JSON)
             async with build_client(timeout=_REQUEST_TIMEOUT) as client:
                 # --- Step 1: search the registry for packages whose
                 # text mentions the target domain. -------------------
-                search_outcome = await self._search_registry(
-                    client, domain
-                )
+                search_outcome = await self._search_registry(client, domain)
                 outcomes["search"] = search_outcome
                 for email, evidence in search_outcome.emails.items():
-                    bucket = aggregated.setdefault(
-                        email, {"types": set(), "evidence": []}
-                    )
+                    bucket = aggregated.setdefault(email, {"types": set(), "evidence": []})
                     bucket["types"].add(_TYPE)
                     bucket["evidence"].extend(evidence)
 
                 # --- Step 2: direct package lookup by domain keyword. ---
                 keyword = _domain_keyword(domain)
                 if keyword:
-                    direct_outcome = await self._direct_package_lookup(
-                        client, keyword, domain
-                    )
+                    direct_outcome = await self._direct_package_lookup(client, keyword, domain)
                     outcomes["direct_keyword"] = direct_outcome
                     for email, evidence in direct_outcome.emails.items():
-                        bucket = aggregated.setdefault(
-                            email, {"types": set(), "evidence": []}
-                        )
+                        bucket = aggregated.setdefault(email, {"types": set(), "evidence": []})
                         bucket["types"].add(_TYPE)
                         bucket["evidence"].extend(evidence)
                 else:
-                    outcomes["direct_keyword"].error = (
-                        "no_keyword_from_domain"
-                    )
+                    outcomes["direct_keyword"].error = "no_keyword_from_domain"
         except Exception as exc:
             _LOG.error("npm_email: catastrophic error: %s", exc)
             return ModuleResult(
@@ -227,9 +216,7 @@ class NpmEmailModule(BaseModule):
             findings.append(
                 {
                     "platform": "npm_email",
-                    "profile_url": f"https://www.npmjs.com/~{local_part}"
-                    if on_domain
-                    else "",
+                    "profile_url": f"https://www.npmjs.com/~{local_part}" if on_domain else "",
                     "username": local_part,
                     "confidence": label_for_score(confidence_info.score).lower(),
                     "metadata": {
@@ -255,11 +242,7 @@ class NpmEmailModule(BaseModule):
         # ------------------------------------------------------------------
         # Module status
         # ------------------------------------------------------------------
-        ok_count = sum(
-            1
-            for o in outcomes.values()
-            if o.ok or o.packages_checked or o.emails
-        )
+        ok_count = sum(1 for o in outcomes.values() if o.ok or o.packages_checked or o.emails)
         if ok_count == 0:
             status = ModuleStatus.FAILED
         elif ok_count == 1:
@@ -292,9 +275,7 @@ class NpmEmailModule(BaseModule):
         """Polite 1 req / 2s pacing for the npm registry."""
         await asyncio.sleep(_RATE_LIMIT_SECONDS)
 
-    async def _search_registry(
-        self, client: httpx.AsyncClient, domain: str
-    ) -> _SubSourceOutcome:
+    async def _search_registry(self, client: httpx.AsyncClient, domain: str) -> _SubSourceOutcome:
         outcome = _SubSourceOutcome(source_id="search")
         try:
             await self._throttle()
@@ -323,33 +304,25 @@ class NpmEmailModule(BaseModule):
             outcome.error = f"search_invalid_json:{exc}"
             return outcome
 
-        objects = (
-            data.get("objects") if isinstance(data.get("objects"), list) else []
-        )
+        objects = data.get("objects") if isinstance(data.get("objects"), list) else []
         outcome.packages_checked = len(objects)
         outcome.ok = True
 
         for obj in objects:
             if not isinstance(obj, dict):
                 continue
-            pkg = (
-                obj.get("package") if isinstance(obj.get("package"), dict) else {}
-            )
+            pkg = obj.get("package") if isinstance(obj.get("package"), dict) else {}
             pkg_name = str(pkg.get("name") or "")
             # Top-level publisher / maintainer from search index entry.
             publisher = pkg.get("publisher") if isinstance(pkg.get("publisher"), dict) else {}
             publisher_email = _extract_email_from_maintainer(publisher)
-            self._record_email(
-                outcome, publisher_email, domain, pkg_name, "search_publisher"
-            )
+            self._record_email(outcome, publisher_email, domain, pkg_name, "search_publisher")
             # Author from package.latest fields (search entries don't carry
             # author but some packages surface it via ``maintainers``).
             for maintainer in pkg.get("maintainers") or []:
                 if isinstance(maintainer, dict):
                     m_email = _extract_email_from_maintainer(maintainer)
-                    self._record_email(
-                        outcome, m_email, domain, pkg_name, "search_maintainer"
-                    )
+                    self._record_email(outcome, m_email, domain, pkg_name, "search_maintainer")
 
         return outcome
 
@@ -397,18 +370,12 @@ class NpmEmailModule(BaseModule):
         # Maintainers (top-level).
         for maintainer in data.get("maintainers") or []:
             m_email = _extract_email_from_maintainer(maintainer)
-            self._record_email(
-                outcome, m_email, domain, pkg_name, "maintainer"
-            )
+            self._record_email(outcome, m_email, domain, pkg_name, "maintainer")
 
         # Author — pick the latest version's author for the freshest signal.
-        dist_tags = (
-            data.get("dist-tags") if isinstance(data.get("dist-tags"), dict) else {}
-        )
+        dist_tags = data.get("dist-tags") if isinstance(data.get("dist-tags"), dict) else {}
         latest_version = str(dist_tags.get("latest") or "")
-        versions = (
-            data.get("versions") if isinstance(data.get("versions"), dict) else {}
-        )
+        versions = data.get("versions") if isinstance(data.get("versions"), dict) else {}
         latest_data = versions.get(latest_version) or {}
         author = latest_data.get("author") or data.get("author")
         author_email = _extract_email_from_maintainer(author)

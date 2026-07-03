@@ -29,6 +29,7 @@ class KeybaseModule(BaseModule):
         errors: list[str] = []
         seen_usernames: set[str] = set()
 
+        # scrapingant: dropped in S5 audit (Keybase lookup API returns JSON)
         async with build_client(timeout=10.0, follow_redirects=True) as client:
             # Keybase public API: look up by username (email local part).
             # Email-based lookup requires Keybase authentication; skip it.
@@ -98,7 +99,9 @@ class KeybaseModule(BaseModule):
 
             basics = them.get("basics") if isinstance(them.get("basics"), dict) else {}
             profile = them.get("profile") if isinstance(them.get("profile"), dict) else {}
-            proofs = them.get("proofs_summary") if isinstance(them.get("proofs_summary"), dict) else {}
+            proofs = (
+                them.get("proofs_summary") if isinstance(them.get("proofs_summary"), dict) else {}
+            )
             all_proofs = proofs.get("all") if isinstance(proofs.get("all"), list) else []
 
             kb_username = str(basics.get("username") or "")

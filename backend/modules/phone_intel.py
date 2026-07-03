@@ -103,9 +103,7 @@ class PhoneIntelModule(BaseModule):
     )
     requires_key = False
 
-    async def run(
-        self, email: str, collected: dict[str, Any] | None = None
-    ) -> ModuleResult:
+    async def run(self, email: str, collected: dict[str, Any] | None = None) -> ModuleResult:
         if collected is None:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
@@ -133,6 +131,7 @@ class PhoneIntelModule(BaseModule):
         findings: list[dict[str, Any]] = []
         sem = asyncio.Semaphore(3)
 
+        # scrapingant: dropped in S5 audit (phone validation JSON and static landing pages)
         async with build_client(timeout=12.0, follow_redirects=True) as client:
 
             async def _process(phone: str) -> list[dict[str, Any]]:

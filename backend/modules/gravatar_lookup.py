@@ -4,9 +4,8 @@ import hashlib
 import logging
 from typing import Any
 
-import httpx
-
 from ..config import settings
+from ..core.http_client import build_client
 from .base import BaseModule, ModuleResult, ModuleStatus
 
 logger = logging.getLogger(__name__)
@@ -28,15 +27,14 @@ class GravatarLookupModule(BaseModule):
         if not (settings.enable_gravatar_lookup or force):
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
-                errors=[
-                    "gravatar_lookup disabled — set ENABLE_GRAVATAR_LOOKUP=true to enable"
-                ],
+                errors=["gravatar_lookup disabled — set ENABLE_GRAVATAR_LOOKUP=true to enable"],
             )
 
         email_hash = hashlib.md5(email.strip().lower().encode("utf-8")).hexdigest()
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            # scrapingant: dropped in S5 audit (Gravatar profile endpoint returns JSON)
+            async with build_client(timeout=10.0) as client:
                 resp = await client.get(
                     f"https://www.gravatar.com/{email_hash}.json",
                     headers={"Accept": "application/json"},
@@ -151,44 +149,48 @@ class GravatarLookupModule(BaseModule):
 
         findings: list[dict[str, Any]] = []
 
-        findings.append({
-            "platform": "gravatar",
-            "profile_url": entry.get("profileUrl"),
-            "username": entry.get("preferredUsername") or display_name,
-            "confidence": "high",
-            "metadata": {
-                "source": "gravatar",
-                "type": "primary_profile",
-                "display_name": display_name,
-                "about_me": about_me,
-                "location": entry.get("currentLocation"),
-                "avatar_url": entry.get("thumbnailUrl"),
-                "email_hash": email_hash,
-                "linked_accounts": [
-                    {
-                        "shortname": acct.get("shortname"),
-                        "url": acct.get("url"),
-                        "username": acct.get("username"),
-                    }
-                    for acct in accounts
-                ],
-            },
-        })
+        findings.append(
+            {
+                "platform": "gravatar",
+                "profile_url": entry.get("profileUrl"),
+                "username": entry.get("preferredUsername") or display_name,
+                "confidence": "high",
+                "metadata": {
+                    "source": "gravatar",
+                    "type": "primary_profile",
+                    "display_name": display_name,
+                    "about_me": about_me,
+                    "location": entry.get("currentLocation"),
+                    "avatar_url": entry.get("thumbnailUrl"),
+                    "email_hash": email_hash,
+                    "linked_accounts": [
+                        {
+                            "shortname": acct.get("shortname"),
+                            "url": acct.get("url"),
+                            "username": acct.get("username"),
+                        }
+                        for acct in accounts
+                    ],
+                },
+            }
+        )
 
         for acct in accounts:
             shortname = acct.get("shortname") or ""
-            findings.append({
-                "platform": f"gravatar:{shortname}",
-                "profile_url": acct.get("url"),
-                "username": acct.get("username"),
-                "confidence": "medium",
-                "metadata": {
-                    "source": "gravatar",
-                    "type": "linked_account",
-                    "shortname": shortname,
-                    "verified": acct.get("verified") == "true",
-                },
-            })
+            findings.append(
+                {
+                    "platform": f"gravatar:{shortname}",
+                    "profile_url": acct.get("url"),
+                    "username": acct.get("username"),
+                    "confidence": "medium",
+                    "metadata": {
+                        "source": "gravatar",
+                        "type": "linked_account",
+                        "shortname": shortname,
+                        "verified": acct.get("verified") == "true",
+                    },
+                }
+            )
 
         logger.debug("gravatar_lookup: found profile with %d linked accounts", len(accounts))
 

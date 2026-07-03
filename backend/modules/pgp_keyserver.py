@@ -33,6 +33,7 @@ class PGPKeyserverModule(BaseModule):
         findings: list[dict[str, Any]] = []
         errors: list[str] = []
 
+        # scrapingant: dropped in S5 audit (OpenPGP/HKP responses are key text/HTML)
         async with build_client(timeout=10.0, follow_redirects=True) as client:
             armor, source, fetch_errors = await self._fetch_key(client, email)
             errors.extend(fetch_errors)
@@ -120,7 +121,11 @@ class PGPKeyserverModule(BaseModule):
         if fallback.status_code in (404, 400):
             return None, "ubuntu_keyserver", []
         if fallback.status_code != 200:
-            return None, "ubuntu_keyserver", [f"Ubuntu keyserver returned HTTP {fallback.status_code}"]
+            return (
+                None,
+                "ubuntu_keyserver",
+                [f"Ubuntu keyserver returned HTTP {fallback.status_code}"],
+            )
         match = _ARMOR_RE.search(fallback.text)
         return (match.group(0) if match else fallback.text), "ubuntu_keyserver", []
 
@@ -133,7 +138,10 @@ class PGPKeyserverModule(BaseModule):
         if parsed:
             return parsed
 
-        uids = [{"name": m.group(1).strip(), "email": m.group(2).strip()} for m in _UID_RE.finditer(armor)]
+        uids = [
+            {"name": m.group(1).strip(), "email": m.group(2).strip()}
+            for m in _UID_RE.finditer(armor)
+        ]
         return {"uids": uids, "all_uids": [f"{u['name']} <{u['email']}>" for u in uids]}
 
     def _parse_with_pgpy(self, armor: str) -> dict[str, Any] | None:
@@ -145,7 +153,11 @@ class PGPKeyserverModule(BaseModule):
         key, _ = pgpy.PGPKey.from_blob(armor)
         fingerprint = str(getattr(key, "fingerprint", "") or "")
         created = getattr(key, "created", None)
-        algorithm = str(getattr(getattr(key, "key_algorithm", None), "name", "") or getattr(key, "key_algorithm", "") or "")
+        algorithm = str(
+            getattr(getattr(key, "key_algorithm", None), "name", "")
+            or getattr(key, "key_algorithm", "")
+            or ""
+        )
         uids: list[dict[str, str]] = []
         all_uids: list[str] = []
         for user_id in getattr(key, "userids", []) or []:

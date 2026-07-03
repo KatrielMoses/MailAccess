@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # Dynamically read the installed package version so health / OpenAPI stay in sync.
 try:
     from importlib.metadata import version as _pkg_version
+
     APP_VERSION: str = _pkg_version("mailaccess")
 except Exception:
     APP_VERSION = "0.0.0"
@@ -50,7 +51,7 @@ def _coerce_cors_origins(value: Any) -> list[str]:
                     "CORS_ORIGINS JSON value is not a list; falling back to comma parsing"
                 )
         items = raw.split(",")
-    elif isinstance(value, (list, tuple, set)):
+    elif isinstance(value, list | tuple | set):
         items = list(value)
     else:
         logger.warning(
@@ -212,11 +213,27 @@ class Settings(BaseSettings):
     # Domain harvester — theHarvester-style subdomain enumeration for the target email's domain
     enable_domain_harvester: bool = True
     personal_email_providers: list[str] = [
-        "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
-        "protonmail.com", "icloud.com", "aol.com", "live.com",
-        "msn.com", "me.com", "mail.com", "proton.me", "pm.me",
-        "gmx.com", "gmx.net", "yandex.com", "yandex.ru", "mail.ru",
-        "zoho.com", "fastmail.com", "tutanota.com",
+        "gmail.com",
+        "yahoo.com",
+        "hotmail.com",
+        "outlook.com",
+        "protonmail.com",
+        "icloud.com",
+        "aol.com",
+        "live.com",
+        "msn.com",
+        "me.com",
+        "mail.com",
+        "proton.me",
+        "pm.me",
+        "gmx.com",
+        "gmx.net",
+        "yandex.com",
+        "yandex.ru",
+        "mail.ru",
+        "zoho.com",
+        "fastmail.com",
+        "tutanota.com",
     ]
 
     # GHunt (opt-in — requires ghunt>=2.3 installed and a valid creds file from `ghunt login`)
@@ -338,6 +355,17 @@ class Settings(BaseSettings):
     # Proxy
     proxy_url: str | None = None
     proxy_enabled: bool = False
+
+    # ScrapingAnt - optional off-by-default clearnet proxy (referral partnership)
+    scrapingant_api_key: str | None = None
+    scrapingant_enabled_dorking: bool = False
+    scrapingant_enabled_platforms: bool = False
+    scrapingant_proxy_type: str = "residential"
+    scrapingant_transport: str = "rest_api"
+    scrapingant_proxy_residential_username: str | None = None
+    scrapingant_proxy_residential_password: str | None = None
+    scrapingant_proxy_datacenter_username: str | None = None
+    scrapingant_proxy_datacenter_password: str | None = None
 
     # Rate limiting
     rate_limit_enabled: bool = True

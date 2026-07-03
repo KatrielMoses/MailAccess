@@ -34,11 +34,7 @@ def _find_marketplace_usernames(
                 continue
             platform = str(finding.get("platform") or "").lower().strip()
             meta = finding.get("metadata") or {}
-            username = str(
-                finding.get("username")
-                or meta.get("matched_username")
-                or ""
-            ).strip()
+            username = str(finding.get("username") or meta.get("matched_username") or "").strip()
             if not username:
                 continue
             if platform in _ETSY_PLATFORM_NAMES and etsy_user is None:
@@ -57,9 +53,7 @@ class MarketplaceProfileModule(BaseModule):
     description = "Extract Etsy shop and eBay profile data for confirmed usernames."
     requires_key = False
 
-    async def run(
-        self, email: str, collected: dict[str, Any] | None = None
-    ) -> ModuleResult:
+    async def run(self, email: str, collected: dict[str, Any] | None = None) -> ModuleResult:
         if collected is None:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
@@ -81,17 +75,16 @@ class MarketplaceProfileModule(BaseModule):
         findings: list[dict[str, Any]] = []
         errors: list[str] = []
 
-        async with build_client(timeout=12.0, follow_redirects=True) as client:
+        # scrapingant: keep for marketplace profile HTML where browser-like access helps
+        async with build_client(
+            scrapingant_zone="platforms", timeout=12.0, follow_redirects=True
+        ) as client:
             if etsy_user:
-                e_findings, e_errs = await _fetch_etsy(
-                    client, etsy_user, headers, domain
-                )
+                e_findings, e_errs = await _fetch_etsy(client, etsy_user, headers, domain)
                 findings.extend(e_findings)
                 errors.extend(e_errs)
             if ebay_user:
-                b_findings, b_errs = await _fetch_ebay(
-                    client, ebay_user, headers
-                )
+                b_findings, b_errs = await _fetch_ebay(client, ebay_user, headers)
                 findings.extend(b_findings)
                 errors.extend(b_errs)
 
@@ -142,29 +135,33 @@ async def _fetch_etsy(
     if bio_text:
         analysis = analyze_bio(bio_text, exclude_domain=email_domain)
         for phone in analysis.phones:
-            extra.append({
-                "platform": "etsy_shop",
-                "signal_type": "phone_in_bio",
-                "confidence": "medium",
-                "source": "marketplace_profile",
-                "metadata": {
-                    "phone": phone,
-                    "source_field": "bio",
-                    "source_platform": "etsy_shop",
-                },
-            })
+            extra.append(
+                {
+                    "platform": "etsy_shop",
+                    "signal_type": "phone_in_bio",
+                    "confidence": "medium",
+                    "source": "marketplace_profile",
+                    "metadata": {
+                        "phone": phone,
+                        "source_field": "bio",
+                        "source_platform": "etsy_shop",
+                    },
+                }
+            )
         for addr in analysis.emails:
-            extra.append({
-                "platform": "etsy_shop",
-                "signal_type": "email_in_bio",
-                "confidence": "medium",
-                "source": "marketplace_profile",
-                "metadata": {
-                    "email": addr,
-                    "source_field": "bio",
-                    "source_platform": "etsy_shop",
-                },
-            })
+            extra.append(
+                {
+                    "platform": "etsy_shop",
+                    "signal_type": "email_in_bio",
+                    "confidence": "medium",
+                    "source": "marketplace_profile",
+                    "metadata": {
+                        "email": addr,
+                        "source_field": "bio",
+                        "source_platform": "etsy_shop",
+                    },
+                }
+            )
 
     return [finding] + extra, []
 
@@ -209,9 +206,7 @@ def _parse_etsy_html(html: str, username: str) -> dict[str, Any]:
     data: dict[str, Any] = {}
 
     # Shop name
-    m = re.search(
-        r'"shopName"\s*:\s*"([^"]{2,80})"', html
-    )
+    m = re.search(r'"shopName"\s*:\s*"([^"]{2,80})"', html)
     if not m:
         m = re.search(
             r'<h1[^>]*class="[^"]*shop-name[^"]*"[^>]*>(.*?)</h1>',
@@ -224,9 +219,7 @@ def _parse_etsy_html(html: str, username: str) -> dict[str, Any]:
             data["shop_name"] = raw
     else:
         # Fall back to <title>
-        tm = re.search(
-            r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL
-        )
+        tm = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
         if tm:
             t = re.sub(r"<[^>]+>", "", tm.group(1)).strip()
             part = re.split(r"\s*[-|]\s*(?:Etsy|etsy)", t)[0].strip()
@@ -234,12 +227,10 @@ def _parse_etsy_html(html: str, username: str) -> dict[str, Any]:
                 data["shop_name"] = part
 
     # Owner name
-    om = re.search(
-        r'"ownerName"\s*:\s*"([^"]{2,60})"', html
-    )
+    om = re.search(r'"ownerName"\s*:\s*"([^"]{2,60})"', html)
     if not om:
         om = re.search(
-            r'(?:shop\s+owner|seller)[^<]*<[^>]+>([A-Z][a-zA-Z ]{1,30})</[^>]+>',
+            r"(?:shop\s+owner|seller)[^<]*<[^>]+>([A-Z][a-zA-Z ]{1,30})</[^>]+>",
             html,
             re.IGNORECASE,
         )
@@ -260,7 +251,7 @@ def _parse_etsy_html(html: str, username: str) -> dict[str, Any]:
     # Sales count
     sm = re.search(r'"salesCount"\s*:\s*(\d+)', html)
     if not sm:
-        sm = re.search(r'([\d,]+)\s+sales', html, re.IGNORECASE)
+        sm = re.search(r"([\d,]+)\s+sales", html, re.IGNORECASE)
     if sm:
         try:
             data["sales_count"] = int(re.sub(r"[,\s]", "", sm.group(1)))
@@ -269,7 +260,7 @@ def _parse_etsy_html(html: str, username: str) -> dict[str, Any]:
 
     # Member since
     mm = re.search(
-        r'(?:member|joined)\s+(?:since\s+)?([A-Z][a-z]+\s+\d{4}|\d{4})',
+        r"(?:member|joined)\s+(?:since\s+)?([A-Z][a-z]+\s+\d{4}|\d{4})",
         html,
         re.IGNORECASE,
     )
@@ -304,7 +295,7 @@ def _parse_ebay_html(html: str, username: str) -> dict[str, Any]:
     # Feedback score
     fm = re.search(r'"feedbackScore"\s*:\s*(\d+)', html)
     if not fm:
-        fm = re.search(r'Feedback\s+Score[^:]*:\s*(\d+)', html, re.IGNORECASE)
+        fm = re.search(r"Feedback\s+Score[^:]*:\s*(\d+)", html, re.IGNORECASE)
     if not fm:
         fm = re.search(
             r'<span[^>]*class="[^"]*feedback[^"]*"[^>]*>(\d+)</span>',
@@ -319,7 +310,7 @@ def _parse_ebay_html(html: str, username: str) -> dict[str, Any]:
 
     # Member since
     mm = re.search(
-        r'Member\s+since[^:]*:\s*([A-Za-z]+[\s\-]\d{2,4}(?:[,\s]+\d{4})?)',
+        r"Member\s+since[^:]*:\s*([A-Za-z]+[\s\-]\d{2,4}(?:[,\s]+\d{4})?)",
         html,
         re.IGNORECASE,
     )
@@ -337,8 +328,6 @@ def _parse_ebay_html(html: str, username: str) -> dict[str, Any]:
     if lm:
         data["location"] = lm.group(1).strip()
 
-    data["top_rated_seller"] = bool(
-        re.search(r"top.rated.seller", html, re.IGNORECASE)
-    )
+    data["top_rated_seller"] = bool(re.search(r"top.rated.seller", html, re.IGNORECASE))
 
     return data

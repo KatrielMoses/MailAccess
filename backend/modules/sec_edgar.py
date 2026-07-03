@@ -51,13 +51,16 @@ class SecEdgarModule(BaseModule):
         errors: list[str] = []
         headers = {"User-Agent": "MailAccess/0.7.0 contact@example.com"}
 
+        # scrapingant: dropped in S5 audit (SEC submissions endpoint returns JSON)
         async with build_client(timeout=10.0, follow_redirects=True, headers=headers) as client:
             filing_urls, search_error = await _search_filings(client, f'"{domain}"')
             if search_error:
                 errors.append(search_error)
 
             keyword = domain.rsplit(".", 1)[0]
-            company_urls, company_error = await _search_filings(client, f'"{keyword}"', forms="10-K")
+            company_urls, company_error = await _search_filings(
+                client, f'"{keyword}"', forms="10-K"
+            )
             if company_error:
                 errors.append(company_error)
 
@@ -123,7 +126,6 @@ async def _search_filings(
             if not isinstance(hit, dict):
                 continue
             source = hit.get("_source") if isinstance(hit.get("_source"), dict) else {}
-            root = source.get("root_form") or source.get("form")
             url = source.get("url") or source.get("filename")
             if url:
                 url_text = str(url)
@@ -131,7 +133,8 @@ async def _search_filings(
                     url_text = urljoin("https://www.sec.gov", url_text)
                 urls.append(url_text)
             elif source.get("adsh"):
-                urls.append(f"https://www.sec.gov/Archives/edgar/data/{source.get('ciks', [''])[0]}/{source.get('adsh')}")
+                cik = source.get("ciks", [""])[0]
+                urls.append(f"https://www.sec.gov/Archives/edgar/data/{cik}/{source.get('adsh')}")
     return urls[:3], None
 
 

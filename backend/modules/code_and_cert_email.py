@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -101,8 +102,7 @@ class CodeAndCertEmailModule(BaseModule):
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
                 errors=[
-                    "code_and_cert_email disabled — "
-                    "set ENABLE_CODE_AND_CERT_EMAIL=true to enable"
+                    "code_and_cert_email disabled — set ENABLE_CODE_AND_CERT_EMAIL=true to enable"
                 ],
             )
 
@@ -137,9 +137,26 @@ class CodeAndCertEmailModule(BaseModule):
         repos_from_code_search: list[str] = []
 
         try:
-            async with build_client(timeout=10.0) as shared_client:
+            client_contexts = [
+                build_client(timeout=10.0),
+                # scrapingant: dropped in S5 audit (crt.sh JSON records are direct)
+                build_client(timeout=10.0),
+                # scrapingant: dropped in S5 audit (CertSpotter JSON records are direct)
+                build_client(timeout=10.0),
+            ]
+            entered_clients: dict[int, httpx.AsyncClient] = {}
+
+            async with AsyncExitStack() as stack:
+                clients = []
+                for client_context in client_contexts:
+                    client_id = id(client_context)
+                    if client_id not in entered_clients:
+                        entered_clients[client_id] = await stack.enter_async_context(client_context)
+                    clients.append(entered_clients[client_id])
+                github_client, crtsh_client, certspotter_client = clients
+
                 github = GitHubEmailSearcher(
-                    transport=shared_client,
+                    transport=github_client,
                     min_interval=0.0,
                     # Caller-level throttle handled by orchestrator;
                     # per-instance interval disabled here.
@@ -190,9 +207,7 @@ class CodeAndCertEmailModule(BaseModule):
                     outcomes["github_commits"].error = commits_result.error
                     outcomes["github_commits"].ok = bool(commits_result.matches)
                     outcomes["github_commits"].count = len(commits_result.matches)
-                    outcomes["github_commits"].records_checked = (
-                        commits_result.commits_inspected
-                    )
+                    outcomes["github_commits"].records_checked = commits_result.commits_inspected
                     if commits_result.rate_limited:
                         rate_limited = True
 
@@ -213,20 +228,16 @@ class CodeAndCertEmailModule(BaseModule):
                             "html_url": match.html_url,
                         }
                         bucket["evidence"].append(ev)
-                        outcomes["github_commits"].emails.setdefault(
-                            match.email, []
-                        ).append(ev)
+                        outcomes["github_commits"].emails.setdefault(match.email, []).append(ev)
                 else:
                     outcomes["github_commits"].error = (
                         outcomes["github_commits"].error or "no_repos_from_code_search"
                     )
 
                 # --- Steps 3 & 4: crt.sh + certspotter (concurrent) --------
-                crtsh_task = asyncio.create_task(
-                    self._fetch_crtsh_emails(shared_client, domain)
-                )
+                crtsh_task = asyncio.create_task(self._fetch_crtsh_emails(crtsh_client, domain))
                 certspotter_task = asyncio.create_task(
-                    self._fetch_certspotter_emails(shared_client, domain)
+                    self._fetch_certspotter_emails(certspotter_client, domain)
                 )
                 crtsh_outcome = await crtsh_task
                 certspotter_outcome = await certspotter_task
@@ -236,9 +247,7 @@ class CodeAndCertEmailModule(BaseModule):
 
                 for outcome in (crtsh_outcome, certspotter_outcome):
                     for email, evidence in outcome.emails.items():
-                        bucket = aggregated.setdefault(
-                            email, {"types": set(), "evidence": []}
-                        )
+                        bucket = aggregated.setdefault(email, {"types": set(), "evidence": []})
                         bucket["types"].add(_TYPE_CA)
                         bucket["evidence"].extend(evidence)
         except Exception as exc:

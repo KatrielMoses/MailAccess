@@ -65,9 +65,7 @@ class CommonCrawlEmailModule(BaseModule):
         if not settings.enable_commoncrawl_email:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
-                errors=[
-                    "commoncrawl_email disabled — set ENABLE_COMMONCRAWL_EMAIL=true to enable"
-                ],
+                errors=["commoncrawl_email disabled — set ENABLE_COMMONCRAWL_EMAIL=true to enable"],
             )
 
         domain = (target or "").strip().lower()
@@ -93,6 +91,7 @@ class CommonCrawlEmailModule(BaseModule):
         index_unreachable = False
 
         try:
+            # scrapingant: dropped in S5 audit (CC index JSON and static fetches are direct)
             async with build_client(timeout=10.0) as shared_client:
                 client = CommonCrawlClient(transport=shared_client)
                 fetcher = CCPageFetcher(
@@ -103,9 +102,7 @@ class CommonCrawlEmailModule(BaseModule):
                 )
 
                 try:
-                    records = await client.query_url_index(
-                        domain=domain, limit=max_records_value
-                    )
+                    records = await client.query_url_index(domain=domain, limit=max_records_value)
                 except Exception as exc:
                     _LOG.warning("commoncrawl_email: index query failed: %s", exc)
                     index_unreachable = True
@@ -115,16 +112,13 @@ class CommonCrawlEmailModule(BaseModule):
                     # - Index returned empty → SUCCESS (some domains
                     #   genuinely have no CC coverage).
                     # - Index call threw → FAILED (network / upstream).
-                    status = (
-                        ModuleStatus.FAILED if index_unreachable
-                        else ModuleStatus.SUCCESS
-                    )
+                    status = ModuleStatus.FAILED if index_unreachable else ModuleStatus.SUCCESS
                     return ModuleResult(
                         status=status,
                         findings=[],
-                        errors=[
-                            "commoncrawl_email: index query failed"
-                        ] if index_unreachable else [],
+                        errors=["commoncrawl_email: index query failed"]
+                        if index_unreachable
+                        else [],
                         metadata={
                             "domain": domain,
                             "records_queried": 0,
@@ -187,7 +181,8 @@ class CommonCrawlEmailModule(BaseModule):
             url_count = len(urls)
 
             source_type = (
-                "common_crawl_high_density" if url_count >= _DENSITY_THRESHOLD
+                "common_crawl_high_density"
+                if url_count >= _DENSITY_THRESHOLD
                 else "common_crawl_single"
             )
 
@@ -208,9 +203,7 @@ class CommonCrawlEmailModule(BaseModule):
 
             finding = {
                 "platform": "commoncrawl_email",
-                "profile_url": (
-                    f"https://{domain}" if on_domain else next(iter(urls))
-                ),
+                "profile_url": (f"https://{domain}" if on_domain else next(iter(urls))),
                 "username": local_part,
                 "confidence": label_for_score(confidence_info.score).lower(),
                 "metadata": {
@@ -225,12 +218,8 @@ class CommonCrawlEmailModule(BaseModule):
                     "source_type": source_type,
                     "confidence_score": round(confidence_info.score, 4),
                     "confidence_breakdown": confidence_info.breakdown,
-                    "oldest_timestamp": (
-                        min(timestamps) if timestamps else None
-                    ),
-                    "newest_timestamp": (
-                        max(timestamps) if timestamps else None
-                    ),
+                    "oldest_timestamp": (min(timestamps) if timestamps else None),
+                    "newest_timestamp": (max(timestamps) if timestamps else None),
                     "local_part": local_part,
                 },
             }
@@ -254,9 +243,7 @@ class CommonCrawlEmailModule(BaseModule):
             metadata={
                 "domain": domain,
                 "records_queried": len(records),
-                "records_fetched": sum(1 for b in bodies if b is not None)
-                if records
-                else 0,
+                "records_fetched": sum(1 for b in bodies if b is not None) if records else 0,
                 "fetch_failures": fetch_failures,
                 "total_emails_found": len(email_hits),
                 "on_domain_emails": on_domain_count,
