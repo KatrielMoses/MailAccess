@@ -27,10 +27,7 @@ from ..core.http_client import build_client
 _LOG = logging.getLogger(__name__)
 
 _BING_URL = "https://www.bing.com/search"
-_DEFAULT_UA = (
-    f"MailAccess/{APP_VERSION} "
-    "(+https://github.com/KatrielMoses/MailAccess)"
-)
+_DEFAULT_UA = f"MailAccess/{APP_VERSION} (+https://github.com/KatrielMoses/MailAccess)"
 _UA_POOL: tuple[str, ...] = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -137,11 +134,15 @@ class BingDorker:
         min_interval: float = 3.0,
         timeout: float = 10.0,
         follow_redirects: bool = True,
+        *,
+        scrapingant_zone: str | None = None,
     ) -> None:
         self._owns_transport = transport is None
         if transport is None:
             self._client: httpx.AsyncClient = build_client(
-                timeout=timeout, follow_redirects=follow_redirects
+                scrapingant_zone=scrapingant_zone,
+                timeout=timeout,
+                follow_redirects=follow_redirects,
             )
         else:
             self._client = transport
@@ -200,9 +201,7 @@ class BingDorker:
 
             body = response.text or ""
             if _looks_like_block(body):
-                _LOG.warning(
-                    "Bing block-marker detected in body for query=%r", query
-                )
+                _LOG.warning("Bing block-marker detected in body for query=%r", query)
                 return [], True
 
             return _parse_bing_html(body, query, max_results=max_results), False

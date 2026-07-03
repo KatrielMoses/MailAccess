@@ -77,6 +77,7 @@ class OpenCorporatesModule(BaseModule):
         findings: list[dict[str, Any]] = []
         errors: list[str] = []
 
+        # scrapingant: dropped in S5 audit (OpenCorporates API returns JSON)
         async with build_client(timeout=12.0, follow_redirects=True) as client:
             companies, search_err = await self._search_companies(client, domain_keyword)
             if search_err:

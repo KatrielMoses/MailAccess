@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from ..config import settings
+from ..core.http_client import build_client
 from .base import BaseModule, ModuleResult, ModuleStatus
 
 logger = logging.getLogger(__name__)
@@ -55,9 +56,7 @@ async def _probe_instance(
 
     if resp.status_code != 200:
         logger.debug("fediverse probe %s: HTTP %s", instance, resp.status_code)
-        raise httpx.HTTPStatusError(
-            f"HTTP {resp.status_code}", request=resp.request, response=resp
-        )
+        raise httpx.HTTPStatusError(f"HTTP {resp.status_code}", request=resp.request, response=resp)
 
     try:
         data = resp.json()
@@ -138,15 +137,14 @@ class FediverseDiscoveryModule(BaseModule):
         sem = asyncio.Semaphore(_CONCURRENCY)
         instances_probed = 0
 
-        async def _bounded_probe(
-            client: httpx.AsyncClient, instance: str
-        ) -> dict[str, Any] | None:
+        async def _bounded_probe(client: httpx.AsyncClient, instance: str) -> dict[str, Any] | None:
             nonlocal instances_probed
             async with sem:
                 instances_probed += 1
                 return await _probe_instance(client, instance, localpart)
 
-        async with httpx.AsyncClient(timeout=_PER_INSTANCE_TIMEOUT) as client:
+        # scrapingant: dropped in S5 audit (WebFinger/nodeinfo APIs are JSON)
+        async with build_client(timeout=_PER_INSTANCE_TIMEOUT) as client:
             tasks = [_bounded_probe(client, inst) for inst in instances]
             raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 

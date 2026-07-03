@@ -32,10 +32,7 @@ from ..core.http_client import build_client
 _LOG = logging.getLogger(__name__)
 
 _DDG_HTML_URL = "https://html.duckduckgo.com/html/"
-_DEFAULT_UA = (
-    f"MailAccess/{APP_VERSION} "
-    "(+https://github.com/KatrielMoses/MailAccess)"
-)
+_DEFAULT_UA = f"MailAccess/{APP_VERSION} (+https://github.com/KatrielMoses/MailAccess)"
 # Rotated realistic-browser pool — matches the spirit of
 # ``proxy._UA_POOL`` but self-contained to avoid a hard import.
 _UA_POOL: tuple[str, ...] = (
@@ -164,11 +161,15 @@ class DuckDuckGoDorker:
         min_interval: float = 4.0,
         timeout: float = 10.0,
         follow_redirects: bool = True,
+        *,
+        scrapingant_zone: str | None = None,
     ) -> None:
         self._owns_transport = transport is None
         if transport is None:
             self._client: httpx.AsyncClient = build_client(
-                timeout=timeout, follow_redirects=follow_redirects
+                scrapingant_zone=scrapingant_zone,
+                timeout=timeout,
+                follow_redirects=follow_redirects,
             )
         else:
             self._client = transport

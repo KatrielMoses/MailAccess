@@ -20,12 +20,16 @@ class AlternateEmailModule(BaseModule):
         errors: list[str] = []
         anchor_email = email.strip().lower()
 
-        async with build_client(timeout=15.0) as client:
+        async with (
+            build_client(timeout=15.0) as github_client,
+            # scrapingant: dropped in S5 audit (Gravatar permutation HEAD/JSON is direct)
+            build_client(timeout=15.0) as permutation_client,
+        ):
             tasks = [
-                self._source_github(client, anchor_email, collected),
+                self._source_github(github_client, anchor_email, collected),
                 self._source_gravatar(anchor_email, collected),
                 self._source_breach(anchor_email, collected),
-                self._source_permutation(client, anchor_email, collected),
+                self._source_permutation(permutation_client, anchor_email, collected),
             ]
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -57,8 +61,7 @@ class AlternateEmailModule(BaseModule):
 
             if disc_email not in unique_emails:
                 unique_emails[disc_email] = f
-                # ensure 'sources' list exists if we want to merge them, but prompt asks to keep one entry, merge sources list
-                # actually, prompt says: "keep one entry, merge sources list"
+                # Ensure 'sources' exists for the one-entry, merged-sources shape.
                 unique_emails[disc_email]["metadata"]["sources"] = [meta.get("source")]
             else:
                 existing_sources = unique_emails[disc_email]["metadata"].get("sources", [])
@@ -68,7 +71,7 @@ class AlternateEmailModule(BaseModule):
                 unique_emails[disc_email]["metadata"]["sources"] = existing_sources
 
         final_findings = list(unique_emails.values())
-        
+
         status = ModuleStatus.SUCCESS
         if errors and not final_findings:
             status = ModuleStatus.PARTIAL
@@ -108,16 +111,22 @@ class AlternateEmailModule(BaseModule):
                             match = re.search(r"<([^>]+)>", line)
                             if match:
                                 ext_email = match.group(1).lower().strip()
-                                if ext_email and ext_email != anchor_email and "noreply" not in ext_email:
-                                    findings.append(self._make_finding(
-                                        ext_email,
-                                        "high",
-                                        "github_commits",
-                                        "Commit Message Trailer",
-                                        "git_commit_trailer",
-                                        "Found in commit message trailer",
-                                        anchor_email
-                                    ))
+                                if (
+                                    ext_email
+                                    and ext_email != anchor_email
+                                    and "noreply" not in ext_email
+                                ):
+                                    findings.append(
+                                        self._make_finding(
+                                            ext_email,
+                                            "high",
+                                            "github_commits",
+                                            "Commit Message Trailer",
+                                            "git_commit_trailer",
+                                            "Found in commit message trailer",
+                                            anchor_email,
+                                        )
+                                    )
 
         headers = {
             "Accept": "application/vnd.github+json",
@@ -129,7 +138,9 @@ class AlternateEmailModule(BaseModule):
 
         for username in usernames:
             try:
-                resp = await client.get(f"https://api.github.com/users/{username}/events/public", headers=headers)
+                resp = await client.get(
+                    f"https://api.github.com/users/{username}/events/public", headers=headers
+                )
                 if resp.status_code == 200:
                     events = resp.json()
                     for event in events:
@@ -139,16 +150,22 @@ class AlternateEmailModule(BaseModule):
                             for commit in commits:
                                 author = commit.get("author", {})
                                 email = author.get("email", "").lower().strip()
-                                if email and email != anchor_email and "noreply@users.github.com" not in email:
-                                    findings.append(self._make_finding(
-                                        email,
-                                        "high",
-                                        "github_commits",
-                                        f"github.com/{username}",
-                                        "git_commit_author",
-                                        "Same git author with different email",
-                                        anchor_email
-                                    ))
+                                if (
+                                    email
+                                    and email != anchor_email
+                                    and "noreply@users.github.com" not in email
+                                ):
+                                    findings.append(
+                                        self._make_finding(
+                                            email,
+                                            "high",
+                                            "github_commits",
+                                            f"github.com/{username}",
+                                            "git_commit_author",
+                                            "Same git author with different email",
+                                            anchor_email,
+                                        )
+                                    )
             except Exception as e:
                 errors.append(f"GitHub event fetch failed for {username}: {e}")
 
@@ -161,28 +178,33 @@ class AlternateEmailModule(BaseModule):
         errors = []
 
         grav_result = collected.get("gravatar")
-        if not grav_result or grav_result.status not in (ModuleStatus.SUCCESS, ModuleStatus.PARTIAL):
+        if not grav_result or grav_result.status not in (
+            ModuleStatus.SUCCESS,
+            ModuleStatus.PARTIAL,
+        ):
             return [], []
 
         for finding in grav_result.findings:
             if finding.get("platform") == "Gravatar":
                 meta = finding.get("metadata", {})
-                
+
                 # Check bio/aboutMe
                 about_me = meta.get("about_me") or ""
                 emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", about_me)
                 for email in emails:
                     email_clean = email.lower().strip()
                     if email_clean != anchor_email:
-                        findings.append(self._make_finding(
-                            email_clean,
-                            "medium",
-                            "gravatar_profile",
-                            "Gravatar Bio",
-                            "gravatar_bio_regex",
-                            "Found email in Gravatar aboutMe text",
-                            anchor_email
-                        ))
+                        findings.append(
+                            self._make_finding(
+                                email_clean,
+                                "medium",
+                                "gravatar_profile",
+                                "Gravatar Bio",
+                                "gravatar_bio_regex",
+                                "Found email in Gravatar aboutMe text",
+                                anchor_email,
+                            )
+                        )
 
                 # Check accounts
                 accounts = meta.get("accounts", [])
@@ -199,17 +221,22 @@ class AlternateEmailModule(BaseModule):
         errors = []
 
         breach_modules = ("hibp", "breachdirectory", "breach_deep", "xposedornot", "leakcheck")
-        
+
         target_fields = (
-            "backup_email", "recovery_email", "secondary_email",
-            "alternate_email", "contact_email", "related_emails", "linked_accounts"
+            "backup_email",
+            "recovery_email",
+            "secondary_email",
+            "alternate_email",
+            "contact_email",
+            "related_emails",
+            "linked_accounts",
         )
 
         for mod_name in breach_modules:
             mod_res = collected.get(mod_name)
             if not mod_res or mod_res.status not in (ModuleStatus.SUCCESS, ModuleStatus.PARTIAL):
                 continue
-            
+
             for finding in mod_res.findings:
                 meta = finding.get("metadata", {})
                 for field in target_fields:
@@ -220,31 +247,37 @@ class AlternateEmailModule(BaseModule):
                         for email in emails:
                             email_clean = email.lower().strip()
                             if email_clean != anchor_email:
-                                findings.append(self._make_finding(
-                                    email_clean,
-                                    "high",
-                                    "breach_record",
-                                    f"Breach record field ({field})",
-                                    "breach_backup_field",
-                                    "Backup or recovery email found in breach",
-                                    anchor_email
-                                ))
+                                findings.append(
+                                    self._make_finding(
+                                        email_clean,
+                                        "high",
+                                        "breach_record",
+                                        f"Breach record field ({field})",
+                                        "breach_backup_field",
+                                        "Backup or recovery email found in breach",
+                                        anchor_email,
+                                    )
+                                )
                     elif isinstance(val, list):
                         for item in val:
                             if isinstance(item, str):
-                                emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", item)
+                                emails = re.findall(
+                                    r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", item
+                                )
                                 for email in emails:
                                     email_clean = email.lower().strip()
                                     if email_clean != anchor_email:
-                                        findings.append(self._make_finding(
-                                            email_clean,
-                                            "high",
-                                            "breach_record",
-                                            f"Breach record field ({field})",
-                                            "breach_backup_field",
-                                            "Backup or recovery email found in breach",
-                                            anchor_email
-                                        ))
+                                        findings.append(
+                                            self._make_finding(
+                                                email_clean,
+                                                "high",
+                                                "breach_record",
+                                                f"Breach record field ({field})",
+                                                "breach_backup_field",
+                                                "Backup or recovery email found in breach",
+                                                anchor_email,
+                                            )
+                                        )
 
         return findings, errors
 
@@ -256,12 +289,14 @@ class AlternateEmailModule(BaseModule):
 
         # Find real name from github_commits or gravatar
         real_names = []
-        gh_meta = collected.get("github_commits", ModuleResult(status=ModuleStatus.SKIPPED)).metadata or {}
+        gh_meta = (
+            collected.get("github_commits", ModuleResult(status=ModuleStatus.SKIPPED)).metadata
+            or {}
+        )
         gh_name = gh_meta.get("real_name_from_git")
         if gh_name:
             real_names.append(gh_name)
 
-        grav_meta = {}
         grav_res = collected.get("gravatar")
         if grav_res and grav_res.findings:
             for f in grav_res.findings:
@@ -276,12 +311,13 @@ class AlternateEmailModule(BaseModule):
         # Assuming high confidence if name found in multiple sources or explicitly
         # We will use the most common name
         from collections import Counter
+
         most_common_name = Counter(real_names).most_common(1)[0][0]
-        
+
         parts = most_common_name.lower().split()
         if len(parts) < 2:
             return [], []
-            
+
         first = parts[0]
         last = parts[-1]
         fi = first[0]
@@ -299,15 +335,22 @@ class AlternateEmailModule(BaseModule):
             f"{last}{fi}",
         ]
 
-        providers = ["gmail.com", "outlook.com", "protonmail.com", "yahoo.com", "icloud.com", "hotmail.com"]
-        
+        providers = [
+            "gmail.com",
+            "outlook.com",
+            "protonmail.com",
+            "yahoo.com",
+            "icloud.com",
+            "hotmail.com",
+        ]
+
         permutations = []
         for lp in local_parts:
             for prov in providers:
                 perm = f"{lp}@{prov}"
                 if perm != anchor_email:
                     permutations.append(perm)
-                    
+
         # Limit to 20
         permutations = permutations[:20]
 
@@ -325,15 +368,17 @@ class AlternateEmailModule(BaseModule):
         results = await asyncio.gather(*[check_gravatar(cand) for cand in permutations])
         for res in results:
             if res:
-                findings.append(self._make_finding(
-                    res,
-                    "medium",
-                    "permutation_gravatar",
-                    "Gravatar permutation check",
-                    "permutation_gravatar_hit",
-                    "Gravatar profile found for this address",
-                    anchor_email
-                ))
+                findings.append(
+                    self._make_finding(
+                        res,
+                        "medium",
+                        "permutation_gravatar",
+                        "Gravatar permutation check",
+                        "permutation_gravatar_hit",
+                        "Gravatar profile found for this address",
+                        anchor_email,
+                    )
+                )
 
         return findings, errors
 
@@ -345,7 +390,7 @@ class AlternateEmailModule(BaseModule):
         source_detail: str,
         discovery_method: str,
         reason: str,
-        anchor_email: str
+        anchor_email: str,
     ) -> dict[str, Any]:
         return {
             "platform": "alternate_email",

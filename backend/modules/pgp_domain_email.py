@@ -115,10 +115,7 @@ class PgpDomainEmailModule(BaseModule):
         if not settings.enable_pgp_domain_email:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
-                errors=[
-                    "pgp_domain_email disabled — "
-                    "set ENABLE_PGP_DOMAIN_EMAIL=true to enable"
-                ],
+                errors=["pgp_domain_email disabled — set ENABLE_PGP_DOMAIN_EMAIL=true to enable"],
             )
 
         domain = (target or "").strip().lower()
@@ -137,22 +134,17 @@ class PgpDomainEmailModule(BaseModule):
         aggregated: dict[str, dict[str, Any]] = {}
 
         try:
+            # scrapingant: dropped in S5 audit (PGP domain sources are JSON/static text)
             async with build_client(timeout=_REQUEST_TIMEOUT) as client:
-                openpgp_task = asyncio.create_task(
-                    self._openpgp_search(client, domain)
-                )
-                ubuntu_task = asyncio.create_task(
-                    self._ubuntu_hkp(client, domain)
-                )
+                openpgp_task = asyncio.create_task(self._openpgp_search(client, domain))
+                ubuntu_task = asyncio.create_task(self._ubuntu_hkp(client, domain))
                 openpgp_outcome = await openpgp_task
                 ubuntu_outcome = await ubuntu_task
                 outcomes["openpgp_search"] = openpgp_outcome
                 outcomes["ubuntu_hkp"] = ubuntu_outcome
                 for outcome in (openpgp_outcome, ubuntu_outcome):
                     for email, evidence in outcome.emails.items():
-                        bucket = aggregated.setdefault(
-                            email, {"types": set(), "evidence": []}
-                        )
+                        bucket = aggregated.setdefault(email, {"types": set(), "evidence": []})
                         bucket["types"].add(_TYPE)
                         bucket["evidence"].extend(evidence)
         except Exception as exc:
@@ -189,9 +181,7 @@ class PgpDomainEmailModule(BaseModule):
             findings.append(
                 {
                     "platform": "pgp_domain_email",
-                    "profile_url": (
-                        f"https://keys.openpgp.org/search?q={email}"
-                    ),
+                    "profile_url": (f"https://keys.openpgp.org/search?q={email}"),
                     "username": local_part,
                     "confidence": label_for_score(confidence_info.score).lower(),
                     "metadata": {
@@ -214,11 +204,7 @@ class PgpDomainEmailModule(BaseModule):
             else:
                 personal_count += 1
 
-        ok_count = sum(
-            1
-            for o in outcomes.values()
-            if o.ok or o.keys_checked or o.emails
-        )
+        ok_count = sum(1 for o in outcomes.values() if o.ok or o.keys_checked or o.emails)
         if ok_count == 0:
             status = ModuleStatus.FAILED
         elif ok_count == 1:
@@ -252,9 +238,7 @@ class PgpDomainEmailModule(BaseModule):
     async def _throttle(self) -> None:
         await asyncio.sleep(_RATE_LIMIT_SECONDS)
 
-    async def _openpgp_search(
-        self, client: httpx.AsyncClient, domain: str
-    ) -> _SubSourceOutcome:
+    async def _openpgp_search(self, client: httpx.AsyncClient, domain: str) -> _SubSourceOutcome:
         """Query ``keys.openpgp.org/search?q={domain}``.
 
         Returns a JSON list of key objects with embedded UID strings
@@ -307,9 +291,7 @@ class PgpDomainEmailModule(BaseModule):
 
         return outcome
 
-    async def _ubuntu_hkp(
-        self, client: httpx.AsyncClient, domain: str
-    ) -> _SubSourceOutcome:
+    async def _ubuntu_hkp(self, client: httpx.AsyncClient, domain: str) -> _SubSourceOutcome:
         """Query the Ubuntu keyserver HKP ``vindex`` endpoint.
 
         Returns an HTML index page listing keys matching the search
@@ -348,9 +330,7 @@ class PgpDomainEmailModule(BaseModule):
         # — it covers every email-shaped token in the page, including
         # ones outside the obvious UID lines.  Then we re-filter on
         # the strict domain match.
-        outcome.keys_checked = response.text.count("<br>") or len(
-            response.text.splitlines()
-        )
+        outcome.keys_checked = response.text.count("<br>") or len(response.text.splitlines())
         outcome.ok = True
 
         for extracted in extract_emails(response.text, target_domain=domain):

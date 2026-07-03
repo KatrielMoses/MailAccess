@@ -17,6 +17,7 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
 
 import logging
+
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("uvicorn").setLevel(logging.WARNING)
@@ -40,6 +41,7 @@ if _ENV_FILE.exists():
     load_dotenv(_ENV_FILE, override=False)
 
 from importlib.metadata import version as pkg_version
+
 try:
     _VERSION = pkg_version("mailaccess")
 except Exception:
@@ -65,21 +67,22 @@ CONFIG_FILE = Path.home() / ".mailaccess" / "config.json"
 ENV_FILE = Path.home() / ".mailaccess" / ".env"
 
 _API_KEYS: list[tuple[str, str, str]] = [
-    ("HIBP_API_KEY",        "hibp",          "haveibeenpwned.com/API"),
-    ("SERPAPI_KEY",         "google_dork,email_discovery", "serpapi.com"),
-    ("GITHUB_TOKEN",        "github_commits", "github.com API (optional)"),
-    ("SHODAN_API_KEY",      "domain_intel",  "shodan.io"),
-    ("EMAILREP_API_KEY",    "emailrep",      "emailrep.io"),
-    ("HUNTER_IO_API_KEY",   "hunter_io",     "hunter.io"),
+    ("HIBP_API_KEY", "hibp", "haveibeenpwned.com/API"),
+    ("SERPAPI_KEY", "google_dork,email_discovery", "serpapi.com"),
+    ("GITHUB_TOKEN", "github_commits", "github.com API (optional)"),
+    ("SHODAN_API_KEY", "domain_intel", "shodan.io"),
+    ("EMAILREP_API_KEY", "emailrep", "emailrep.io"),
+    ("HUNTER_IO_API_KEY", "hunter_io", "hunter.io"),
     ("COMPANIES_HOUSE_API_KEY", "companies_house", "developer.company-information.service.gov.uk"),
-    ("SLACK_WEBHOOK_URL",   "notifications", "Slack app webhooks"),
+    ("SLACK_WEBHOOK_URL", "notifications", "Slack app webhooks"),
     ("DISCORD_WEBHOOK_URL", "notifications", "Discord server webhooks"),
 ]
 
 _EXPORT_FORMATS = {".json", ".csv", ".md", ".pdf", ".stix", ".mtgx"}
+_SCRAPINGANT_PROXY_TYPES = {"residential", "datacenter"}
 
 _HARDCODED_MODULES = [
-    ("haveibeenpwned", "HIBP",      "HIBP_API_KEY",      "No", "Check email against known breach databases"),
+    ("haveibeenpwned", "HIBP", "HIBP_API_KEY", "No", "Check email against known breach databases"),
     (
         "breach_deep",
         "HIBP top 100",
@@ -87,40 +90,56 @@ _HARDCODED_MODULES = [
         "Yes",
         "Probe accounts on high-severity breached domains",
     ),
-    ("hunter_io",      "Hunter.io", "HUNTER_IO_API_KEY", "No", "Find associated domain email patterns"),
-    ("emailrep",       "EmailRep",  "EMAILREP_API_KEY",  "No", "Email reputation and metadata lookup"),
-    ("gravatar",       "Gravatar",  "—",                 "No", "Retrieve profile photo via Gravatar"),
-    ("google_dork",    "Google",    "SERPAPI_KEY",        "No", "Run targeted dork queries via SerpAPI"),
-    ("email_discovery", "Google",   "SERPAPI_KEY",        "No", "Find other emails tied to recovered real names"),
-    ("wayback",        "Wayback",   "—",                 "No", "Find historical archived pages mentioning the email"),
-    ("github_commits", "GitHub",    "GITHUB_TOKEN",       "No", "Search commit authorship history by email"),
-    ("google_search",  "Google",    "—",                 "No", "General Google search for email mentions"),
-    ("shodan",         "Shodan",    "SHODAN_API_KEY",    "No", "IP/domain intelligence via Shodan"),
-    ("dns_lookup",     "DNS",       "—",                 "No", "DNS record enumeration for email domain"),
-    ("whois_lookup",   "WHOIS",     "—",                 "No", "WHOIS registration data for email domain"),
-    ("social_links",   "Multi",     "—",                 "No", "Check email on social platforms"),
-    ("maigret_platforms", "Maigret", "—",                 "Yes", "Username sweep across 2500+ Maigret platforms"),
-    ("domain_intel",   "Multi",     "SHODAN_API_KEY",    "No", "Domain intelligence and infrastructure recon"),
-    ("ransomware_intel", "Ransomware", "—",              "No", "Check if domain is a ransomware victim"),
+    ("hunter_io", "Hunter.io", "HUNTER_IO_API_KEY", "No", "Find associated domain email patterns"),
+    ("emailrep", "EmailRep", "EMAILREP_API_KEY", "No", "Email reputation and metadata lookup"),
+    ("gravatar", "Gravatar", "—", "No", "Retrieve profile photo via Gravatar"),
+    ("google_dork", "Google", "SERPAPI_KEY", "No", "Run targeted dork queries via SerpAPI"),
+    (
+        "email_discovery",
+        "Google",
+        "SERPAPI_KEY",
+        "No",
+        "Find other emails tied to recovered real names",
+    ),
+    ("wayback", "Wayback", "—", "No", "Find historical archived pages mentioning the email"),
+    ("github_commits", "GitHub", "GITHUB_TOKEN", "No", "Search commit authorship history by email"),
+    ("google_search", "Google", "—", "No", "General Google search for email mentions"),
+    ("shodan", "Shodan", "SHODAN_API_KEY", "No", "IP/domain intelligence via Shodan"),
+    ("dns_lookup", "DNS", "—", "No", "DNS record enumeration for email domain"),
+    ("whois_lookup", "WHOIS", "—", "No", "WHOIS registration data for email domain"),
+    ("social_links", "Multi", "—", "No", "Check email on social platforms"),
+    ("maigret_platforms", "Maigret", "—", "Yes", "Username sweep across 2500+ Maigret platforms"),
+    (
+        "domain_intel",
+        "Multi",
+        "SHODAN_API_KEY",
+        "No",
+        "Domain intelligence and infrastructure recon",
+    ),
+    ("ransomware_intel", "Ransomware", "—", "No", "Check if domain is a ransomware victim"),
 ]
 
 OPT_IN_MODULES = {
-    "breach_deep":       "enable_breach_deep",
-    "ghunt":             "enable_ghunt",
-    "email_discovery":   "enable_email_discovery",
-    "press_intel":       "enable_press_intel",
-    "maigret_platforms":  "enable_maigret_platforms",
+    "breach_deep": "enable_breach_deep",
+    "ghunt": "enable_ghunt",
+    "email_discovery": "enable_email_discovery",
+    "press_intel": "enable_press_intel",
+    "maigret_platforms": "enable_maigret_platforms",
 }
 
 
 # ── Global callback (banner) ──────────────────────────────────────────────────
 
+
 @app.callback(invoke_without_command=True)
 def main_callback(
     ctx: typer.Context,
-    no_banner: bool = typer.Option(False, "--no-banner", help="Skip the ASCII banner (for CI/scripting)"),
+    no_banner: bool = typer.Option(
+        False, "--no-banner", help="Skip the ASCII banner (for CI/scripting)"
+    ),
 ) -> None:
     import sys
+
     if sys.stderr.isatty() and not no_banner:
         err_console.print(BANNER)
     if ctx.invoked_subcommand is None:
@@ -129,6 +148,7 @@ def main_callback(
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
+
 
 def get_backend_url() -> str:
     url = os.environ.get("MAILACCESS_URL")
@@ -156,7 +176,36 @@ def set_backend_url(url: str) -> None:
         json.dump(data, f, indent=2)
 
 
-config_app = typer.Typer(name="config", help="Manage configuration", invoke_without_command=True, no_args_is_help=True)
+def _apply_scrapingant_transport_override(transport: str | None) -> None:
+    if transport is None:
+        return
+    os.environ["SCRAPINGANT_TRANSPORT"] = transport
+    from backend.config import settings
+
+    settings.scrapingant_transport = transport
+    with contextlib.suppress(Exception):
+        from backend.core import scrapingant as scrapingant_mod
+        from backend.core import http_client as http_client_mod
+        from backend.core.scrapingant import ScrapingAntConfig
+
+        updated = ScrapingAntConfig(
+            api_key=settings.scrapingant_api_key,
+            enabled_dorking=settings.scrapingant_enabled_dorking,
+            enabled_platforms=settings.scrapingant_enabled_platforms,
+            proxy_type=settings.scrapingant_proxy_type,
+            transport=settings.scrapingant_transport,
+            proxy_residential_username=settings.scrapingant_proxy_residential_username,
+            proxy_residential_password=settings.scrapingant_proxy_residential_password,
+            proxy_datacenter_username=settings.scrapingant_proxy_datacenter_username,
+            proxy_datacenter_password=settings.scrapingant_proxy_datacenter_password,
+        )
+        scrapingant_mod.scrapingant_config = updated
+        http_client_mod.scrapingant_config = updated
+
+
+config_app = typer.Typer(
+    name="config", help="Manage configuration", invoke_without_command=True, no_args_is_help=True
+)
 app.add_typer(config_app)
 
 
@@ -178,10 +227,16 @@ def config_set_url(
 
 # ── Keys ──────────────────────────────────────────────────────────────────────
 
-keys_app = typer.Typer(name="keys", help="Manage API keys stored in ~/.mailaccess/.env", invoke_without_command=True, no_args_is_help=True)
+keys_app = typer.Typer(
+    name="keys",
+    help="Manage API keys stored in ~/.mailaccess/.env",
+    invoke_without_command=True,
+    no_args_is_help=True,
+)
 app.add_typer(keys_app)
 
 from cli.platform_health import platform_health_app  # noqa: E402
+
 app.add_typer(platform_health_app)
 
 
@@ -410,6 +465,7 @@ def keys_unset(
 
 # ── Commands overview ─────────────────────────────────────────────────────────
 
+
 @app.command(name="commands")
 def commands_overview() -> None:
     """Show all available commands with descriptions."""
@@ -444,15 +500,11 @@ def serve_command(
     err_console.print(f"[dim]Listening on http://{host}:{port}[/dim]")
     err_console.print("[dim]Press Ctrl+C to stop[/dim]")
 
-    uvicorn.run(
-        "backend.main:app",
-        host=host,
-        port=port,
-        reload=reload
-    )
+    uvicorn.run("backend.main:app", host=host, port=port, reload=reload)
 
 
 # ── Modules ───────────────────────────────────────────────────────────────────
+
 
 @app.command(name="modules")
 def modules_list(
@@ -484,6 +536,7 @@ def modules_list(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def get_risk_color(risk_level: str) -> str:
     risk_level = risk_level.lower()
@@ -572,7 +625,7 @@ def _platform_display_name(raw: str) -> str:
         return raw if mapped is None else mapped
     for prefix in ("keybase_proof_",):
         if raw.startswith(prefix):
-            proof_type = raw[len(prefix):].replace("_", " ").title()
+            proof_type = raw[len(prefix) :].replace("_", " ").title()
             return f"Keybase Proof: {proof_type}"
     return raw
 
@@ -600,7 +653,11 @@ def _extract_finding_line(finding: dict[str, Any], default_name: str) -> tuple[s
         breach_name = finding.get("breach_name")
         severity = finding.get("severity")
         extra = next(
-            (v for v in (display_name, username, breach_name, severity) if isinstance(v, str) and v.strip()),
+            (
+                v
+                for v in (display_name, username, breach_name, severity)
+                if isinstance(v, str) and v.strip()
+            ),
             "",
         )
         url_like = extra
@@ -625,6 +682,7 @@ def _format_duration(run: dict[str, Any]) -> str:
 
 # ── Investigate ───────────────────────────────────────────────────────────────
 
+
 async def _investigate(
     email: str,
     output_format: str,
@@ -635,7 +693,9 @@ async def _investigate(
     show_collisions: bool = False,
     enable: str | None = None,
     no_brief: bool = False,
+    scrapingant_transport_override: str | None = None,
 ) -> int:
+    _apply_scrapingant_transport_override(scrapingant_transport_override)
     base_url = get_backend_url()
     out = err_console if output_format in ("json", "jsonl") else console
 
@@ -651,7 +711,9 @@ async def _investigate(
                 if m_strip in OPT_IN_MODULES:
                     enable_modules_list.append(m_strip)
                 else:
-                    err_console.print(f"[yellow]Unknown opt-in module: {m_strip}. Valid: {', '.join(OPT_IN_MODULES.keys())}[/yellow]")
+                    err_console.print(
+                        f"[yellow]Unknown opt-in module: {m_strip}. Valid: {', '.join(OPT_IN_MODULES.keys())}[/yellow]"
+                    )
 
     payload: dict[str, Any] = {"email": email}
     if modules:
@@ -668,20 +730,21 @@ async def _investigate(
     except Exception:
         err_console.print(f"[yellow]No backend found at {base_url}[/yellow]")
         err_console.print("[dim]Starting embedded server...[/dim]")
-        
+
         import threading
         import uvicorn
         from backend.db.database import init_db
+
         await init_db()
 
         server_thread = threading.Thread(
             target=uvicorn.run,
             args=("backend.main:app",),
             kwargs={"host": "127.0.0.1", "port": 8000, "log_level": "error"},
-            daemon=True
+            daemon=True,
         )
         server_thread.start()
-        
+
         server_ready = False
         for _ in range(30):
             await asyncio.sleep(0.5)
@@ -741,9 +804,7 @@ async def _investigate(
                 created_dt = datetime.fromisoformat(data["created_at"])
                 if created_dt.tzinfo is None:
                     created_dt = created_dt.replace(tzinfo=timezone.utc)
-                age_min = int(
-                    (datetime.now(timezone.utc) - created_dt).total_seconds() // 60
-                )
+                age_min = int((datetime.now(timezone.utc) - created_dt).total_seconds() // 60)
                 out.print(
                     f"[dim]Using recent result from {age_min} minute{'s' if age_min != 1 else ''} ago "
                     f"(pass --force to re-run)[/dim]\n"
@@ -789,10 +850,7 @@ async def _investigate(
         def _cred_provider(rep: dict[str, Any]) -> str:
             cred = _cred_meta(rep)
             canonical = str(
-                cred.get("canonical_email")
-                or rep.get("canonical_email")
-                or rep.get("email")
-                or ""
+                cred.get("canonical_email") or rep.get("canonical_email") or rep.get("email") or ""
             ).strip()
             if "@" in canonical:
                 return canonical.rsplit("@", 1)[-1]
@@ -801,14 +859,15 @@ async def _investigate(
         def render_credibility_banner(rep: dict[str, Any]) -> None:
             cred = _cred_meta(rep)
             canonical = str(
-                cred.get("canonical_email")
-                or rep.get("canonical_email")
-                or rep.get("email")
-                or ""
+                cred.get("canonical_email") or rep.get("canonical_email") or rep.get("email") or ""
             ).strip()
             original = str(rep.get("email") or "").strip()
             provider = _cred_provider(rep)
-            aliases = cred.get("aliases_detected") if isinstance(cred.get("aliases_detected"), list) else []
+            aliases = (
+                cred.get("aliases_detected")
+                if isinstance(cred.get("aliases_detected"), list)
+                else []
+            )
             verdict = str(cred.get("reputation_verdict") or "clean").lower()
             flags = [str(flag) for flag in cred.get("reputation_flags", []) if str(flag).strip()]
             is_disposable = bool(cred.get("is_disposable"))
@@ -817,18 +876,24 @@ async def _investigate(
             if is_disposable:
                 out.print("[yellow]⚠ DISPOSABLE EMAIL DETECTED[/yellow]")
                 out.print(f"Provider: {provider or 'unknown'}")
-                out.print("[yellow]This address is unlikely to represent a persistent identity.[/yellow]")
+                out.print(
+                    "[yellow]This address is unlikely to represent a persistent identity.[/yellow]"
+                )
             elif verdict == "malicious" or is_malicious:
                 out.print("[yellow]⚠ SUSPICIOUS EMAIL ADDRESS[/yellow]")
                 if flags:
                     out.print(f"Flags: {', '.join(flags)}")
-                out.print("[yellow]Context: this may be a threat actor address, not a victim address.[/yellow]")
+                out.print(
+                    "[yellow]Context: this may be a threat actor address, not a victim address.[/yellow]"
+                )
             else:
                 out.print(f"[green]✓ {provider or 'other'} — established provider[/green]")
 
             if canonical and original and canonical != original:
                 if aliases:
-                    out.print(f"[dim]Aliases: {' = '.join(str(a) for a in aliases if str(a).strip())}[/dim]")
+                    out.print(
+                        f"[dim]Aliases: {' = '.join(str(a) for a in aliases if str(a).strip())}[/dim]"
+                    )
                 else:
                     out.print(f"[dim]Alias detected: {original}[/dim]")
                 out.print(f"[dim]Investigating canonical: {canonical}[/dim]")
@@ -891,17 +956,19 @@ async def _investigate(
             credential_band = _get_credential_band(rep)
             cred = _cred_meta(rep)
             findings_count = len(rep.get("findings", []))
-            
+
             module_runs = rep.get("module_runs", [])
             total_modules = len(module_runs)
-            skipped_count = sum(1 for r in module_runs if str(r.get("status", "")).lower() == "skipped")
+            skipped_count = sum(
+                1 for r in module_runs if str(r.get("status", "")).lower() == "skipped"
+            )
             ran_modules = total_modules - skipped_count
-            
+
             score_val = str(score) if score is not None else "N/A"
             if score is not None:
                 score_val = f"{score}/100"
             score_str = f"{score_val} ({ran_modules}/{total_modules} modules)"
-            
+
             risk_color = get_risk_color(risk)
             score_color = _score_color(score if isinstance(score, int) else None)
             credential_color = _score_color(
@@ -915,6 +982,7 @@ async def _investigate(
             provider = _cred_provider(rep)
             disposable = bool(cred.get("is_disposable"))
             malicious = bool(cred.get("is_malicious"))
+
             def _finding_payload(finding: dict[str, Any]) -> dict[str, Any]:
                 data = finding.get("data")
                 return data if isinstance(data, dict) else finding
@@ -930,16 +998,28 @@ async def _investigate(
                 src = str(payload.get("source", "")).lower()
                 plat = str(payload.get("platform", "")).lower()
                 sig = str(payload.get("signal_type", "")).lower()
-                
+
                 if sig == "stealer_signal" or mod == "hudson_rock" or src == "hudson_rock":
                     stealer_count += 1
                 elif sig == "paste_exposure" or src == "xposedornot_pastes":
                     paste_count += 1
-                elif any(m in (src, plat, mod) for m in ("hibp", "breachdirectory", "hudson_rock", "haveibeenpwned", "breach_deep", "xposedornot")):
+                elif any(
+                    m in (src, plat, mod)
+                    for m in (
+                        "hibp",
+                        "breachdirectory",
+                        "hudson_rock",
+                        "haveibeenpwned",
+                        "breach_deep",
+                        "xposedornot",
+                    )
+                ):
                     if mod != "hudson_rock" and src != "hudson_rock":
                         breach_count += 1
 
-            provider_segment = f"[bold]{provider}[/]" if provider and not disposable else "[bold]⚠ DISPOSABLE[/]"
+            provider_segment = (
+                f"[bold]{provider}[/]" if provider and not disposable else "[bold]⚠ DISPOSABLE[/]"
+            )
             summary = (
                 f" [bold]Exposure:[/] [{score_color}]{score_str}[/]  |  "
                 f"[bold]Cred Risk:[/] [{credential_color}]{credential_summary}[/]  |  "
@@ -962,21 +1042,21 @@ async def _investigate(
                 active_risk_count = int(timeline.get("active_risk_count") or 0)
             except (TypeError, ValueError):
                 active_risk_count = 0
-            active_risk_text = (
-                "[red]YES[/red]" if active_risk_count > 0 else "[green]NO[/green]"
-            )
+            active_risk_text = "[red]YES[/red]" if active_risk_count > 0 else "[green]NO[/green]"
             summary += (
                 f" | [bold]First seen:[/] {first_seen_year} "
                 f"| [bold]Active risk:[/] {active_risk_text}"
             )
-            
+
             alt_emails = _get_alternate_emails(rep)
             if alt_emails:
                 summary += f" | [bold]Alt emails:[/] {len(alt_emails)}"
-                
+
             out.print(Panel(summary, border_style=score_color))
             if skipped_count > 3:
-                out.print(f"[dim]{skipped_count} modules skipped — set API keys to improve coverage. Run: mailaccess keys list[/dim]")
+                out.print(
+                    f"[dim]{skipped_count} modules skipped — set API keys to improve coverage. Run: mailaccess keys list[/dim]"
+                )
             out.print()
 
         def render_defenders_brief(rep: dict[str, Any]) -> None:
@@ -986,13 +1066,10 @@ async def _investigate(
             risk_level = str(brief.get("risk_level") or "UNKNOWN").upper()
             summary = str(brief.get("risk_summary") or "").strip()
             findings = [
-                finding
-                for finding in brief.get("top_findings", [])
-                if isinstance(finding, dict)
+                finding for finding in brief.get("top_findings", []) if isinstance(finding, dict)
             ][:3]
             has_medium_or_above = any(
-                str(finding.get("severity") or "").lower()
-                in {"medium", "high", "critical"}
+                str(finding.get("severity") or "").lower() in {"medium", "high", "critical"}
                 for finding in findings
             )
 
@@ -1100,9 +1177,7 @@ async def _investigate(
             out.print(
                 f"  [bold]First seen:[/]   {first_seen or '-'} ({age_label}) - {first_source}"
             )
-            out.print(
-                f"  [bold]Most recent:[/]  {most_recent or '-'} - {most_recent_event}"
-            )
+            out.print(f"  [bold]Most recent:[/]  {most_recent or '-'} - {most_recent_event}")
             out.print()
 
             commit_events = [
@@ -1125,10 +1200,7 @@ async def _investigate(
                 title = str(event.get("title") or "")
                 detail = str(event.get("detail") or "")
                 suffix = " (active risk)" if event.get("is_active_risk") else ""
-                line = (
-                    f"  {event.get('date', ''):<10}  {event_type:<16} "
-                    f"{marker}{title}{suffix}"
-                )
+                line = f"  {event.get('date', ''):<10}  {event_type:<16} {marker}{title}{suffix}"
                 out.print(f"[{style}]{line}[/{style}]")
                 if detail:
                     out.print(f"    [dim]{detail}[/dim]")
@@ -1158,23 +1230,18 @@ async def _investigate(
                     f"{latest_active.get('title', 'exposure')} detected "
                     f"{latest_active.get('date', '-')}"
                 )
-                out.print(
-                    f"    [dim]Most recent exposure: {_age_text(most_recent)}[/dim]"
-                )
+                out.print(f"    [dim]Most recent exposure: {_age_text(most_recent)}[/dim]")
 
             if timeline.get("established_identity"):
-                out.print(
-                    f"  [dim]Established identity - first seen {age_label}[/dim]"
-                )
+                out.print(f"  [dim]Established identity - first seen {age_label}[/dim]")
             else:
-                out.print(
-                    "  [yellow]New or throwaway - first seen less than 3 years ago[/yellow]"
-                )
+                out.print("  [yellow]New or throwaway - first seen less than 3 years ago[/yellow]")
             out.print()
 
         def render_findings(rep: dict[str, Any]) -> None:
             findings_by_module = rep.get("findings_by_module", {})
             if findings_by_module:
+
                 def _format_records(value: Any) -> str:
                     try:
                         count = int(value or 0)
@@ -1241,7 +1308,7 @@ async def _investigate(
                         if source_url:
                             out.print(f"    [dim]found at:[/dim] {_display_url(source_url)}")
                         if snippet:
-                            out.print(f"    [dim]context:[/dim] \"{snippet}\"")
+                            out.print(f'    [dim]context:[/dim] "{snippet}"')
                         out.print()
                     if source_names:
                         names_text = ", ".join(f'"{name}"' for name in source_names)
@@ -1255,7 +1322,9 @@ async def _investigate(
                     for run in rep.get("module_runs", []):
                         if not isinstance(run, dict):
                             continue
-                        if run.get("module_name") == module_name and isinstance(run.get("run_metadata"), dict):
+                        if run.get("module_name") == module_name and isinstance(
+                            run.get("run_metadata"), dict
+                        ):
                             return run["run_metadata"]
                     return {}
 
@@ -1283,7 +1352,7 @@ async def _investigate(
                         label = f"{domain} (archived {archive_year})" if archive_year else domain
                         out.print(f"  [green]✓[/green] {label}")
                         if snippet:
-                            out.print(f"    \"{snippet}\"")
+                            out.print(f'    "{snippet}"')
                         elif title:
                             out.print(f"    [dim]{title}[/dim]")
                         if archive:
@@ -1292,7 +1361,9 @@ async def _investigate(
                     first_seen = _date_year(meta.get("earliest_mention"))
                     last_seen = _date_year(meta.get("latest_mention"))
                     if first_seen or last_seen:
-                        out.print(f"  [dim]First seen: {first_seen or '?'} · Last seen: {last_seen or '?'}[/dim]")
+                        out.print(
+                            f"  [dim]First seen: {first_seen or '?'} · Last seen: {last_seen or '?'}[/dim]"
+                        )
                         out.print()
 
                 def _render_github_commits(findings: list[Any]) -> None:
@@ -1312,10 +1383,14 @@ async def _investigate(
                         language = str(f_meta.get("repo_language") or "Unknown")
                         stars = f_meta.get("repo_stars")
                         out.print(f"  [green]✓[/green] {repo}")
-                        details = " · ".join(part for part in (sha, f'"{message}"' if message else "", date) if part)
+                        details = " · ".join(
+                            part for part in (sha, f'"{message}"' if message else "", date) if part
+                        )
                         if details:
                             out.print(f"    {details}")
-                        out.print(f"    [dim]Language: {language} · ★ {stars if stars is not None else 0}[/dim]")
+                        out.print(
+                            f"    [dim]Language: {language} · ★ {stars if stars is not None else 0}[/dim]"
+                        )
                         out.print()
                     for finding in users:
                         f_meta = finding.get("metadata", {})
@@ -1350,7 +1425,9 @@ async def _investigate(
                         date = str(f_meta.get("attack_date") or "Unknown Date")
                         note = str(f_meta.get("note") or "")
                         domain = str(f_meta.get("domain") or "")
-                        out.print(f"  [red]⚠[/red] {group} [dim]Date: {date} · Domain: {domain}[/dim]")
+                        out.print(
+                            f"  [red]⚠[/red] {group} [dim]Date: {date} · Domain: {domain}[/dim]"
+                        )
                         if note:
                             out.print(f"    [dim][yellow]{note}[/yellow][/dim]")
                     out.print()
@@ -1360,23 +1437,37 @@ async def _investigate(
                     out.print(Rule(f"PASTE EXPOSURE  ({len(usable)} hits)", style="cyan"))
                     for finding in usable:
                         f_meta = finding.get("metadata", {})
-                        source = str(f_meta.get("paste_source") or finding.get("platform") or "Paste")
+                        source = str(
+                            f_meta.get("paste_source") or finding.get("platform") or "Paste"
+                        )
                         date = f_meta.get("date")
                         emails = f_meta.get("email_count") or f_meta.get("emails_count")
                         date_str = f"Date: {_date_year(date) if date else 'Unknown'}"
                         email_str = f" · Emails: {emails}" if emails else ""
-                        out.print(f"  [yellow]⚠[/yellow] {source[:30]:<30} [dim]{date_str}{email_str}[/dim]")
+                        out.print(
+                            f"  [yellow]⚠[/yellow] {source[:30]:<30} [dim]{date_str}{email_str}[/dim]"
+                        )
                     out.print()
 
                 paste_findings = []
                 for module_name, findings in findings_by_module.items():
-                    paste_findings.extend([f for f in findings if isinstance(f, dict) and f.get("signal_type") == "paste_exposure"])
-                
+                    paste_findings.extend(
+                        [
+                            f
+                            for f in findings
+                            if isinstance(f, dict) and f.get("signal_type") == "paste_exposure"
+                        ]
+                    )
+
                 if paste_findings:
                     _render_paste_exposure(paste_findings)
 
                 for module_name, findings in findings_by_module.items():
-                    non_paste_findings = [f for f in findings if not (isinstance(f, dict) and f.get("signal_type") == "paste_exposure")]
+                    non_paste_findings = [
+                        f
+                        for f in findings
+                        if not (isinstance(f, dict) and f.get("signal_type") == "paste_exposure")
+                    ]
                     if not non_paste_findings:
                         continue
 
@@ -1395,7 +1486,12 @@ async def _investigate(
                     if module_name == "ransomware_intel":
                         _render_ransomware_intel(non_paste_findings)
                         continue
-                    out.print(Rule(f"{_normalize_module_name(module_name)}  ({len(non_paste_findings)} hits)", style="cyan"))
+                    out.print(
+                        Rule(
+                            f"{_normalize_module_name(module_name)}  ({len(non_paste_findings)} hits)",
+                            style="cyan",
+                        )
+                    )
                     for finding in non_paste_findings:
                         if not isinstance(finding, dict):
                             continue
@@ -1414,7 +1510,9 @@ async def _investigate(
                         if "common_variations" in meta:
                             detail = "→ " + ", ".join(meta["common_variations"])
 
-                        if module_name in ("account_discovery", "user_scanner") or str(finding.get("source", "")) in ("account_discovery", "user_scanner"):
+                        if module_name in ("account_discovery", "user_scanner") or str(
+                            finding.get("source", "")
+                        ) in ("account_discovery", "user_scanner"):
                             platform = platform.title()
                             detail_text = "[dim][email registration confirmed][/dim]"
                         elif module_name == "dns_lookup":
@@ -1437,7 +1535,7 @@ async def _investigate(
                                 detail_text = "record found"
                         else:
                             detail_text = detail if detail else "account found"
-                        
+
                         platform_label = f"{platform[:20]:<20}"
                         out.print(f"  [{style}]{symbol}[/{style}] {platform_label} {detail_text}")
                         metadata = []
@@ -1459,7 +1557,7 @@ async def _investigate(
         def render_skipped(rep: dict[str, Any]) -> None:
             module_runs = rep.get("module_runs", [])
             skipped_runs = [r for r in module_runs if str(r.get("status", "")).lower() == "skipped"]
-            
+
             groups = {
                 "BREACH SOURCES": [
                     "hibp",
@@ -1469,10 +1567,29 @@ async def _investigate(
                     "breach_deep",
                     "ransomware_intel",
                 ],
-                "RECON MODULES": ["dns_lookup", "whois_lookup", "domain_intel", "google_dork", "email_discovery", "wayback", "github_commits", "shodan", "hunter_io"],
-                "OPTIONAL MODULES": ["ghunt", "user_scanner", "account_discovery", "whatsmyname", "maigret_platforms", "username_pivot", "permutation_discovery", "phone_intel"]
+                "RECON MODULES": [
+                    "dns_lookup",
+                    "whois_lookup",
+                    "domain_intel",
+                    "google_dork",
+                    "email_discovery",
+                    "wayback",
+                    "github_commits",
+                    "shodan",
+                    "hunter_io",
+                ],
+                "OPTIONAL MODULES": [
+                    "ghunt",
+                    "user_scanner",
+                    "account_discovery",
+                    "whatsmyname",
+                    "maigret_platforms",
+                    "username_pivot",
+                    "permutation_discovery",
+                    "phone_intel",
+                ],
             }
-            
+
             key_hints = {
                 "hibp": "set HIBP_API_KEY",
                 "haveibeenpwned": "set HIBP_API_KEY",
@@ -1485,7 +1602,7 @@ async def _investigate(
                 "hunter_io": "set HUNTER_IO_API_KEY",
                 "emailrep": "set EMAILREP_API_KEY",
                 "ghunt": "run mailaccess keys set GHUNT_CREDS_PATH /path/to/creds",
-                "maigret_platforms": "set ENABLE_MAIGRET_PLATFORMS=true or use --modules maigret_platforms"
+                "maigret_platforms": "set ENABLE_MAIGRET_PLATFORMS=true or use --modules maigret_platforms",
             }
 
             for group_name, mods in groups.items():
@@ -1496,16 +1613,25 @@ async def _investigate(
                         m_name = run.get("module_name", "unknown")
                         errors = run.get("errors") or []
                         hint = str(errors[0]) if errors else key_hints.get(m_name, "see docs")
-                        if "api key" in str(run.get("error", "")).lower() or "api key" in hint.lower():
+                        if (
+                            "api key" in str(run.get("error", "")).lower()
+                            or "api key" in hint.lower()
+                        ):
                             hint = key_hints.get(m_name, "missing api key")
                         if m_name == "whois_lookup" and "free provider" in hint.lower():
                             hint = "free email provider"
                         if len(hint) > 50:
                             hint = hint[:47] + "..."
-                        out.print(f"  [dim]— {_normalize_module_name(m_name)}: skipped ({hint})[/dim]")
+                        out.print(
+                            f"  [dim]— {_normalize_module_name(m_name)}: skipped ({hint})[/dim]"
+                        )
                     out.print()
 
-            other_skipped = [r for r in skipped_runs if not any(r.get("module_name", "unknown") in g for g in groups.values())]
+            other_skipped = [
+                r
+                for r in skipped_runs
+                if not any(r.get("module_name", "unknown") in g for g in groups.values())
+            ]
             if other_skipped:
                 out.print(Rule("OTHER MODULES", style="dim"))
                 for run in other_skipped:
@@ -1553,30 +1679,44 @@ async def _investigate(
                         while True:
                             remaining = _deadline - asyncio.get_running_loop().time()
                             if remaining <= 0:
-                                err_console.print("[yellow]WS deadline reached (360 s), falling back to polling[/yellow]")
+                                err_console.print(
+                                    "[yellow]WS deadline reached (360 s), falling back to polling[/yellow]"
+                                )
                                 break
                             try:
                                 raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 150))
                             except asyncio.TimeoutError:
-                                err_console.print("[yellow]WS receive timed out (150 s), falling back to polling[/yellow]")
+                                err_console.print(
+                                    "[yellow]WS receive timed out (150 s), falling back to polling[/yellow]"
+                                )
                                 break
                             event = json.loads(raw)
                             ev_type = event.get("type")
                             if ev_type == "module_start":
                                 mod = event.get("module", "unknown")
-                                _ws_modules[mod] = {"module_name": mod, "status": "running", "started_at": event.get("timestamp")}
+                                _ws_modules[mod] = {
+                                    "module_name": mod,
+                                    "status": "running",
+                                    "started_at": event.get("timestamp"),
+                                }
                             elif ev_type in ("module_result", "module_error"):
                                 mod = event.get("module", "unknown")
                                 if mod not in _ws_modules:
                                     _ws_modules[mod] = {"module_name": mod}
                                 _ws_modules[mod]["status"] = event.get("status", "complete")
-                                _ws_modules[mod]["completed_at"] = datetime.now(timezone.utc).isoformat()
+                                _ws_modules[mod]["completed_at"] = datetime.now(
+                                    timezone.utc
+                                ).isoformat()
                                 # JSONL is emitted from the final merged report below so
                                 # breach findings only appear once, with the richest metadata.
                             elif ev_type == "investigation_complete":
                                 status = "complete"
                             if _ws_modules and _live:
-                                _live.update(update_progress_table({"module_runs": list(_ws_modules.values())}))
+                                _live.update(
+                                    update_progress_table(
+                                        {"module_runs": list(_ws_modules.values())}
+                                    )
+                                )
                             if status == "complete":
                                 with contextlib.suppress(Exception):
                                     resp = await client.get(f"/api/report/{inv_id}", timeout=30)
@@ -1584,14 +1724,18 @@ async def _investigate(
                                     report_data = resp.json()
                                 break
                 except Exception as _ws_exc:
-                    err_console.print(f"[yellow]WS unavailable, falling back to polling ({_ws_exc})[/yellow]")
+                    err_console.print(
+                        f"[yellow]WS unavailable, falling back to polling ({_ws_exc})[/yellow]"
+                    )
                     err_console.print(f"[dim]Tried: {ws_url}[/dim]")
                     err_console.print("[dim]Is the backend running?[/dim]")
                 if status not in ("complete", "failed"):
                     _attempts = 0
                     while status not in ("complete", "failed"):
                         if _attempts >= _MAX_POLL_ATTEMPTS:
-                            err_console.print("[red]Timed out waiting for investigation to complete (120 s)[/red]")
+                            err_console.print(
+                                "[red]Timed out waiting for investigation to complete (120 s)[/red]"
+                            )
                             return 3
                         await asyncio.sleep(2)
                         _attempts += 1
@@ -1609,7 +1753,9 @@ async def _investigate(
             _attempts = 0
             while status not in ("complete", "failed"):
                 if _attempts >= _MAX_POLL_ATTEMPTS:
-                    err_console.print("[red]Timed out waiting for investigation to complete (120 s)[/red]")
+                    err_console.print(
+                        "[red]Timed out waiting for investigation to complete (120 s)[/red]"
+                    )
                     return 3
                 await asyncio.sleep(2)
                 _attempts += 1
@@ -1643,7 +1789,9 @@ async def _investigate(
         if output_file:
             ext = Path(output_file).suffix.lower()
             if ext not in _EXPORT_FORMATS:
-                out.print(f"[red]Unsupported extension:[/] {ext}. Supported: {', '.join(sorted(_EXPORT_FORMATS))}")
+                out.print(
+                    f"[red]Unsupported extension:[/] {ext}. Supported: {', '.join(sorted(_EXPORT_FORMATS))}"
+                )
             else:
                 fmt = ext.lstrip(".")
                 try:
@@ -1675,7 +1823,7 @@ async def _investigate(
                 if any(marker in (src, plat, mod) for marker in breach_markers):
                     breaches_found = True
                     break
-        
+
         exit_code = 0
         if breaches_found:
             exit_code = 2
@@ -1727,16 +1875,21 @@ async def _investigate(
             risk = _get_risk(report_data)
             credential_score = _get_credential_score(report_data)
             credential_band = _get_credential_band(report_data)
-            sys.stdout.write(json.dumps({
-                "type": "complete",
-                "email": email,
-                "canonical_email": report_data.get("canonical_email"),
-                "score": score,
-                "risk": risk,
-                "credential_risk_score": credential_score,
-                "credential_risk_band": credential_band,
-                "total_findings": findings_count
-            }) + "\n")
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "type": "complete",
+                        "email": email,
+                        "canonical_email": report_data.get("canonical_email"),
+                        "score": score,
+                        "risk": risk,
+                        "credential_risk_score": credential_score,
+                        "credential_risk_band": credential_band,
+                        "total_findings": findings_count,
+                    }
+                )
+                + "\n"
+            )
             sys.stdout.flush()
             return exit_code
 
@@ -1750,9 +1903,7 @@ async def _investigate(
             confirmed_name = str(consensus.get("confirmed_name") or "").strip()
             name_confidence = str(consensus.get("name_confidence") or "unknown").lower()
             reasoning = str(consensus.get("name_reasoning") or "").strip()
-            inference_skipped = (
-                reasoning == "Role/system email address — name inference skipped"
-            )
+            inference_skipped = reasoning == "Role/system email address — name inference skipped"
             show_name_consensus = bool(
                 (confirmed_name and name_confidence != "unknown") or inference_skipped
             )
@@ -1791,8 +1942,7 @@ async def _investigate(
                 title = (
                     "NAME INFERENCE SKIPPED"
                     if inference_skipped
-                    else
-                    "CONFIRMED IDENTITY"
+                    else "CONFIRMED IDENTITY"
                     if name_confidence in ("confirmed", "probable")
                     else "POSSIBLE IDENTITY"
                 )
@@ -1803,9 +1953,7 @@ async def _investigate(
                     out.print(f"    {'Sources:':<10} {sources}")
                 if reasoning:
                     field = (
-                        "Reasoning:"
-                        if name_confidence in ("confirmed", "probable")
-                        else "Note:"
+                        "Reasoning:" if name_confidence in ("confirmed", "probable") else "Note:"
                     )
                     out.print(f"    {field:<10} {reasoning}")
                 out.print()
@@ -1819,11 +1967,13 @@ async def _investigate(
 
                 out.print(f"  [bold]IDENTITY {i}[/] — {label}  [dim][confidence: {conf:.2f}][/dim]")
                 for reason in reasoning:
-                    out.print(f"    [dim]\"{reason}\"[/dim]")
+                    out.print(f'    [dim]"{reason}"[/dim]')
                 out.print()
 
                 if is_col and not show_collisions:
-                    out.print(f"    [dim]~ {len(findings)} platforms with bare username match[/dim]")
+                    out.print(
+                        f"    [dim]~ {len(findings)} platforms with bare username match[/dim]"
+                    )
                     out.print("      [dim](use --show-collisions to expand)[/dim]")
                     out.print()
                     continue
@@ -1835,7 +1985,9 @@ async def _investigate(
                     platform, detail = _extract_finding_line(item, mod_name)
 
                     detail_text = detail
-                    if mod_name in ("account_discovery", "user_scanner") or str(item.get("source", "")) in ("account_discovery", "user_scanner"):
+                    if mod_name in ("account_discovery", "user_scanner") or str(
+                        item.get("source", "")
+                    ) in ("account_discovery", "user_scanner"):
                         platform = platform.title()
                         detail_text = "[email registration confirmed]"
 
@@ -1859,33 +2011,25 @@ async def _investigate(
                 for sf in shadow_findings:
                     sf_type = sf.get("type", "shadow_profile")
                     primary = sf.get("primary_email") or ""
-                    shadow = (
-                        sf.get("shadow_email")
-                        or sf.get("primary_email")
-                        or ""
-                    )
+                    shadow = sf.get("shadow_email") or sf.get("primary_email") or ""
                     # V1 entries use display_name; V2 entries use shared_name.
                     shared_name = sf.get("display_name") or sf.get("shared_name") or ""
-                    overlap = (
-                        sf.get("shared_platforms")
-                        or (
-                            [sf["primary_platform"], sf.get("shadow_platform")]
-                            if sf.get("primary_platform")
-                            and sf.get("shadow_platform")
-                            else []
-                        )
+                    overlap = sf.get("shared_platforms") or (
+                        [sf["primary_platform"], sf.get("shadow_platform")]
+                        if sf.get("primary_platform") and sf.get("shadow_platform")
+                        else []
                     )
                     confidence = str(sf.get("confidence") or "MEDIUM").upper()
                     out.print("  Possible alternate identity detected:")
                     if sf_type == "shadow_profile_v2":
                         out.print(
-                            f"    {shadow} shares name \"{shared_name}\""
+                            f'    {shadow} shares name "{shared_name}"'
                             f" and {sf.get('platform_overlap_count', len(overlap))}"
                             f" platforms with {primary}"
                         )
                     else:
                         out.print(
-                            f"    {shadow} shares name \"{shared_name}\""
+                            f'    {shadow} shares name "{shared_name}"'
                             f" and {len(overlap)} platforms with {primary}"
                         )
                     out.print(f"    Confidence: {confidence}")
@@ -1896,7 +2040,7 @@ async def _investigate(
                 e = f.get("metadata", {}).get("discovered_email")
                 if e and e not in all_other:
                     all_other.append(e)
-            
+
             if all_other:
                 out.print("  [cyan]→ Other emails found:[/cyan]")
                 for discovered in all_other:
@@ -1906,7 +2050,7 @@ async def _investigate(
                     "to continue investigation[/dim]"
                 )
                 out.print()
-                
+
             if alt_emails:
                 out.print(Rule(f"ALTERNATE EMAILS  ({len(alt_emails)} found)", style="bold cyan"))
                 for f in alt_emails:
@@ -1916,22 +2060,22 @@ async def _investigate(
                     source = meta.get("source", "unknown")
                     source_detail = meta.get("source_detail", "")
                     reason = meta.get("reason", "")
-                    
+
                     symbol = "✓" if conf == "HIGH" else "~"
                     style = "green" if conf == "HIGH" else "yellow"
-                    
+
                     out.print(f"  [{style}]{symbol}[/{style}] {disc_email:<29} {conf}")
                     source_text = f"Source: {_normalize_module_name(source)}"
                     if source_detail:
                         source_text += f" ({source_detail})"
                     out.print(f"    [dim]{source_text}[/dim]")
                     if reason:
-                        out.print(f"    [dim]\"{reason}\"[/dim]")
+                        out.print(f'    [dim]"{reason}"[/dim]')
                     out.print()
                 out.print("  [dim]These emails belong to the same person.")
                 out.print("  Run mailaccess investigate <email> on each.[/dim]")
                 out.print()
-            
+
             if not all_other and not alt_emails:
                 out.print()
 
@@ -1940,7 +2084,8 @@ async def _investigate(
 
             # --- GitHub profile ---
             gh_findings = [
-                f for f in fbm.get("github_commits", [])
+                f
+                for f in fbm.get("github_commits", [])
                 if isinstance(f, dict) and f.get("platform") == "github_user"
             ]
             gh_profile: dict[str, Any] = {}
@@ -1949,7 +2094,8 @@ async def _investigate(
 
             # --- Gravatar profile ---
             grav_findings = [
-                f for f in fbm.get("gravatar", [])
+                f
+                for f in fbm.get("gravatar", [])
                 if isinstance(f, dict) and f.get("platform") == "gravatar_profile"
             ]
             grav_profile: dict[str, Any] = {}
@@ -1958,7 +2104,8 @@ async def _investigate(
 
             # --- Keybase profile ---
             kb_findings = [
-                f for f in fbm.get("keybase", [])
+                f
+                for f in fbm.get("keybase", [])
                 if isinstance(f, dict) and f.get("platform") == "keybase_profile"
             ]
             kb_profile: dict[str, Any] = {}
@@ -1967,19 +2114,22 @@ async def _investigate(
 
             # --- PyPI packages ---
             pypi_findings = [
-                f for f in fbm.get("pypi_discovery", [])
+                f
+                for f in fbm.get("pypi_discovery", [])
                 if isinstance(f, dict) and f.get("signal_type") == "package_authorship"
             ]
 
             # --- npm packages ---
             npm_findings = [
-                f for f in fbm.get("npm_discovery", [])
+                f
+                for f in fbm.get("npm_discovery", [])
                 if isinstance(f, dict) and f.get("signal_type") == "package_authorship"
             ]
 
             # --- Twitter/X profile ---
             tw_findings = [
-                f for f in fbm.get("twitter_profile", [])
+                f
+                for f in fbm.get("twitter_profile", [])
                 if isinstance(f, dict) and f.get("platform") == "twitter_profile"
             ]
             tw_profile: dict[str, Any] = {}
@@ -1988,7 +2138,8 @@ async def _investigate(
 
             # --- LinkedIn SERP snippet ---
             li_findings = [
-                f for f in fbm.get("linkedin_serp", [])
+                f
+                for f in fbm.get("linkedin_serp", [])
                 if isinstance(f, dict) and f.get("platform") == "linkedin_snippet"
             ]
             li_profile: dict[str, Any] = {}
@@ -1997,7 +2148,8 @@ async def _investigate(
 
             # --- Marketplace profiles ---
             etsy_findings = [
-                f for f in fbm.get("marketplace_profile", [])
+                f
+                for f in fbm.get("marketplace_profile", [])
                 if isinstance(f, dict) and f.get("platform") == "etsy_shop"
             ]
             etsy_profile: dict[str, Any] = {}
@@ -2005,18 +2157,27 @@ async def _investigate(
                 etsy_profile = etsy_findings[0].get("metadata", {}) or {}
 
             ebay_findings = [
-                f for f in fbm.get("marketplace_profile", [])
+                f
+                for f in fbm.get("marketplace_profile", [])
                 if isinstance(f, dict) and f.get("platform") == "ebay_profile"
             ]
             ebay_profile: dict[str, Any] = {}
             if ebay_findings:
                 ebay_profile = ebay_findings[0].get("metadata", {}) or {}
 
-            has_content = any([
-                gh_profile, grav_profile, kb_profile,
-                pypi_findings, npm_findings,
-                tw_profile, li_profile, etsy_profile, ebay_profile,
-            ])
+            has_content = any(
+                [
+                    gh_profile,
+                    grav_profile,
+                    kb_profile,
+                    pypi_findings,
+                    npm_findings,
+                    tw_profile,
+                    li_profile,
+                    etsy_profile,
+                    ebay_profile,
+                ]
+            )
             if not has_content:
                 return
 
@@ -2081,9 +2242,7 @@ async def _investigate(
                         out.print(f"    {field_label:<10} {val}")
                 proofs = kb_profile.get("verified_proofs")
                 if isinstance(proofs, list) and proofs:
-                    proof_str = ", ".join(
-                        f"{p} [green]✓[/green]" for p in dict.fromkeys(proofs)
-                    )
+                    proof_str = ", ".join(f"{p} [green]✓[/green]" for p in dict.fromkeys(proofs))
                     out.print(f"    Verified:  {proof_str}")
                 out.print()
 
@@ -2124,7 +2283,9 @@ async def _investigate(
                 label = f"Twitter/X (@{tw_user})" if tw_user else "Twitter/X"
                 out.print(f"  [bold cyan]{label}[/bold cyan]")
                 if blocked:
-                    out.print(f"    [dim]{note or 'Profile data unavailable without authentication'}[/dim]")
+                    out.print(
+                        f"    [dim]{note or 'Profile data unavailable without authentication'}[/dim]"
+                    )
                 else:
                     for field_key, field_label in (
                         ("display_name", "Name"),
@@ -2162,9 +2323,7 @@ async def _investigate(
                         out.print(f"    {field_label:<10} {val}")
                 if li_url:
                     out.print(f"    [dim]{_display_url(li_url)}[/dim]")
-                out.print(
-                    "    [dim yellow][medium confidence — from search snippet][/dim yellow]"
-                )
+                out.print("    [dim yellow][medium confidence — from search snippet][/dim yellow]")
                 out.print()
 
             if etsy_profile:
@@ -2202,7 +2361,9 @@ async def _investigate(
                 out.print()
 
         def render_pii_findings(rep: dict[str, Any]) -> None:
-            pii_items: list[tuple[str, str, str, str]] = []  # (type, value, confidence, source_label)
+            pii_items: list[
+                tuple[str, str, str, str]
+            ] = []  # (type, value, confidence, source_label)
 
             # Scan all findings for PII signal types
             for module_name, findings in rep.get("findings_by_module", {}).items():
@@ -2230,7 +2391,9 @@ async def _investigate(
                                 "sec_edgar": "SEC EDGAR",
                             }
                             platform = str(f.get("platform") or "").strip().lower()
-                            label = label_map.get(platform) or label_map.get(module_name, source_label)
+                            label = label_map.get(platform) or label_map.get(
+                                module_name, source_label
+                            )
                             pii_items.append(("phone", phone, conf, label))
                     elif sig == "email_in_bio":
                         discovered = str(meta.get("email") or "").strip()
@@ -2294,12 +2457,8 @@ def investigate(
     output_format: str = typer.Option(
         "table", "--format", "-f", help="Output format: table|json|jsonl"
     ),
-    modules: str = typer.Option(
-        None, "--modules", help="Comma-separated list of modules to run."
-    ),
-    timeout: int = typer.Option(
-        30, "--timeout", "-t", help="Timeout in seconds for API calls."
-    ),
+    modules: str = typer.Option(None, "--modules", help="Comma-separated list of modules to run."),
+    timeout: int = typer.Option(30, "--timeout", "-t", help="Timeout in seconds for API calls."),
     output_file: Optional[str] = typer.Option(
         None, "--output", "-o", help="Save report to file (.json .csv .md .pdf .stix .mtgx)"
     ),
@@ -2310,15 +2469,47 @@ def investigate(
         False, "--show-collisions", help="Expands collision clusters in output."
     ),
     enable: str = typer.Option(
-        None, "-m", "--enable",
-        help="Enable opt-in modules for this run. Comma-separated or 'all'. Example: -m breach_deep,whatsmyname"
+        None,
+        "-m",
+        "--enable",
+        help="Enable opt-in modules for this run. Comma-separated or 'all'. Example: -m breach_deep,whatsmyname",
     ),
     no_brief: bool = typer.Option(
         False, "--no-brief", help="Suppress the Defender's Brief section."
     ),
+    use_scraping_api: bool = typer.Option(
+        False,
+        "--use-scraping-api",
+        help="Use ScrapingAnt Web Scraping API transport for routed traffic.",
+    ),
+    use_proxies: bool = typer.Option(
+        False,
+        "--use-proxies",
+        help="Use ScrapingAnt proxy transport for routed traffic.",
+    ),
+    proxy_type: str | None = typer.Option(
+        None,
+        "--proxy-type",
+        help="ScrapingAnt proxy transport: residential or datacenter.",
+    ),
 ) -> None:
     """Run a full OSINT investigation against an email address.
     Exit codes: 0=clean 1=findings 2=breaches 3=error"""
+    if use_scraping_api and use_proxies:
+        raise typer.BadParameter("--use-scraping-api and --use-proxies are mutually exclusive")
+    if proxy_type is not None and not use_proxies:
+        raise typer.BadParameter("--proxy-type is only valid with --use-proxies")
+    if proxy_type is not None and proxy_type not in _SCRAPINGANT_PROXY_TYPES:
+        raise typer.BadParameter("--proxy-type must be one of: residential, datacenter")
+
+    scrapingant_transport_override = None
+    if use_scraping_api:
+        scrapingant_transport_override = "rest_api"
+    elif use_proxies:
+        scrapingant_transport_override = (
+            "datacenter_proxy" if proxy_type == "datacenter" else "residential_proxy"
+        )
+
     if email == "-":
         emails = [l.strip() for l in sys.stdin if l.strip() and not l.startswith("#")]
     else:
@@ -2334,7 +2525,20 @@ def investigate(
     for i, target_email in enumerate(emails):
         if i > 0 and output_format not in ("json", "jsonl"):
             err_console.print("━" * 80)
-        code = asyncio.run(_investigate(target_email, output_format, modules, timeout, output_file, force, show_collisions, enable, no_brief))
+        code = asyncio.run(
+            _investigate(
+                target_email,
+                output_format,
+                modules,
+                timeout,
+                output_file,
+                force,
+                show_collisions,
+                enable,
+                no_brief,
+                scrapingant_transport_override,
+            )
+        )
         if code > max_code:
             max_code = code
 
@@ -2342,6 +2546,7 @@ def investigate(
 
 
 # ── History ───────────────────────────────────────────────────────────────────
+
 
 @app.command()
 def history(

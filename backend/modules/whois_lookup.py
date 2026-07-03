@@ -3,15 +3,18 @@ from __future__ import annotations
 import asyncio
 import re
 import socket
-import whois
-from typing import Any
 from datetime import datetime
+from typing import Any
+
+import whois
+
 from ..core.http_client import build_client
 from ..core.phone_extractor import normalize_phone
 from .base import BaseModule, ModuleResult, ModuleStatus
 from .domain_intel import _FREE_PROVIDERS
 
 _WHOIS_PHONE_RE = re.compile(r"(?:Phone|Tel|Telephone):\s*(\+?[\d\s\-\(\)\.]{7,20})", re.I)
+
 
 class WhoisLookupModule(BaseModule):
     name = "whois_lookup"
@@ -23,9 +26,7 @@ class WhoisLookupModule(BaseModule):
 
         if domain in _FREE_PROVIDERS:
             return ModuleResult(
-                status=ModuleStatus.SKIPPED,
-                metadata={"domain": domain},
-                errors=["free provider"]
+                status=ModuleStatus.SKIPPED, metadata={"domain": domain}, errors=["free provider"]
             )
 
         def do_whois():
@@ -67,9 +68,7 @@ class WhoisLookupModule(BaseModule):
                 return raw.decode(errors="replace")
 
             try:
-                raw_text = await asyncio.wait_for(
-                    asyncio.to_thread(do_raw_whois), timeout=12.0
-                )
+                raw_text = await asyncio.wait_for(asyncio.to_thread(do_raw_whois), timeout=12.0)
                 raw_whois_text = raw_text
 
                 class DummyWhois:
@@ -90,7 +89,6 @@ class WhoisLookupModule(BaseModule):
                     stripped = line.strip()
                     if not stripped or stripped.startswith("%"):
                         continue
-                    lower = stripped.lower()
                     if ":" not in stripped:
                         continue
                     key, _, val = stripped.partition(":")
@@ -117,8 +115,13 @@ class WhoisLookupModule(BaseModule):
                         w.country = w.country or val
                 is_partial = True
 
-            except (OSError, ConnectionError, socket.gaierror, TimeoutError,
-                    asyncio.TimeoutError) as e2:
+            except (
+                OSError,
+                ConnectionError,
+                socket.gaierror,
+                TimeoutError,
+                asyncio.TimeoutError,
+            ) as e2:
                 # Both primary AND fallback had network failures — truly unreachable
                 return ModuleResult(
                     status=ModuleStatus.FAILED,
@@ -171,14 +174,16 @@ class WhoisLookupModule(BaseModule):
 
         if isinstance(registrant_email, list):
             registrant_email = registrant_email[0]
-        
+
         is_privacy_protected = False
         privacy_keywords = ["privacy", "redacted", "protected", "whoisguard"]
         check_fields = [
-            str(registrant_name).lower(), str(registrant_org).lower(), 
-            str(registrant_email).lower(), str(registrar).lower()
+            str(registrant_name).lower(),
+            str(registrant_org).lower(),
+            str(registrant_email).lower(),
+            str(registrar).lower(),
         ]
-        
+
         for field in check_fields:
             if any(kw in field for kw in privacy_keywords):
                 is_privacy_protected = True
@@ -208,11 +213,7 @@ class WhoisLookupModule(BaseModule):
         metadata_clean = {k: v for k, v in metadata_raw.items() if v is not None}
         confidence = "medium" if is_privacy_protected else "high"
 
-        finding = {
-            "platform": "whois",
-            "metadata": metadata_clean,
-            "confidence": confidence
-        }
+        finding = {"platform": "whois", "metadata": metadata_clean, "confidence": confidence}
 
         phone_findings = await self._phone_findings(domain, registrar, raw_whois_text)
 
@@ -221,14 +222,14 @@ class WhoisLookupModule(BaseModule):
             "is_privacy_protected": is_privacy_protected,
             "registrar": registrar,
             "domain_age_days": domain_age_days,
-            "is_expired": is_expired
+            "is_expired": is_expired,
         }
         module_metadata = {k: v for k, v in module_metadata.items() if v is not None}
 
         return ModuleResult(
             status=ModuleStatus.PARTIAL if is_partial else ModuleStatus.SUCCESS,
             metadata=module_metadata,
-            findings=[finding, *phone_findings]
+            findings=[finding, *phone_findings],
         )
 
     async def _phone_findings(
@@ -293,6 +294,7 @@ def _extract_whois_phones(raw_text: str) -> list[str]:
 
 async def _fetch_rdap(domain: str) -> dict[str, Any] | None:
     try:
+        # scrapingant: dropped in S5 audit (RDAP endpoint returns JSON)
         async with build_client(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(f"https://rdap.org/domain/{domain}")
         if resp.status_code != 200:
@@ -311,11 +313,7 @@ def _extract_rdap_phones(value: Any) -> list[str]:
         for nested in value.values():
             phones.extend(_extract_rdap_phones(nested))
     elif isinstance(value, list):
-        if (
-            len(value) >= 4
-            and value[0] == "tel"
-            and isinstance(value[3], str)
-        ):
+        if len(value) >= 4 and value[0] == "tel" and isinstance(value[3], str):
             phones.append(value[3].strip())
         for nested in value:
             phones.extend(_extract_rdap_phones(nested))

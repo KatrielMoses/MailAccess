@@ -39,9 +39,7 @@ _MAX_QUERIES_HARD_CAP = 50  # safety valve — never query more than this
 
 class EmailSearchDorkModule(BaseModule):
     name = "email_search_dork"
-    description = (
-        "Email discovery via search engine dorking — DuckDuckGo and Bing HTML."
-    )
+    description = "Email discovery via search engine dorking — DuckDuckGo and Bing HTML."
     requires_key = False
     default_enabled = False  # Opt-in: domain harvest mode only
 
@@ -68,9 +66,7 @@ class EmailSearchDorkModule(BaseModule):
         if not settings.enable_email_search_dork:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
-                errors=[
-                    "email_search_dork disabled — set ENABLE_EMAIL_SEARCH_DORK=true to enable"
-                ],
+                errors=["email_search_dork disabled — set ENABLE_EMAIL_SEARCH_DORK=true to enable"],
             )
 
         domain = (target or "").strip().lower()
@@ -84,13 +80,9 @@ class EmailSearchDorkModule(BaseModule):
         # MUST-FIX M3: explicit parameter wins; settings is a fallback
         # for standalone callers that don't pass it.
         effective_lite_mode = (
-            bool(lite_mode)
-            if lite_mode is not None
-            else bool(settings.dork_lite_mode)
+            bool(lite_mode) if lite_mode is not None else bool(settings.dork_lite_mode)
         )
-        queries = build_dork_queries(
-            domain, lite_mode=effective_lite_mode
-        )
+        queries = build_dork_queries(domain, lite_mode=effective_lite_mode)
         if not queries:
             return ModuleResult(
                 status=ModuleStatus.FAILED,
@@ -116,21 +108,27 @@ class EmailSearchDorkModule(BaseModule):
         bing_failed = False
 
         try:
-            async with build_client(timeout=10.0, follow_redirects=True) as shared_client:
+            async with build_client(
+                scrapingant_zone="dorking",
+                timeout=10.0,
+                follow_redirects=True,
+            ) as shared_client:
                 ddg = DuckDuckGoDorker(
-                    transport=shared_client, min_interval=ddg_delay
+                    transport=shared_client,
+                    min_interval=ddg_delay,
+                    scrapingant_zone="dorking",
                 )
                 bing = BingDorker(
-                    transport=shared_client, min_interval=bing_delay
+                    transport=shared_client,
+                    min_interval=bing_delay,
+                    scrapingant_zone="dorking",
                 )
 
                 async def run_ddg() -> None:
                     nonlocal ddg_blocked
                     for q in queries_for_run:
                         results, captcha = await ddg.search(q.query)
-                        ddg_findings.append(
-                            DorkRunSummary(query=q, results=results)
-                        )
+                        ddg_findings.append(DorkRunSummary(query=q, results=results))
                         if captcha:
                             ddg_blocked = True
                             return
@@ -139,9 +137,7 @@ class EmailSearchDorkModule(BaseModule):
                     nonlocal bing_blocked
                     for q in queries_for_run:
                         results, blocked = await bing.search(q.query)
-                        bing_findings.append(
-                            DorkRunSummary(query=q, results=results)
-                        )
+                        bing_findings.append(DorkRunSummary(query=q, results=results))
                         if blocked:
                             bing_blocked = True
                             return
@@ -150,9 +146,7 @@ class EmailSearchDorkModule(BaseModule):
                 # pools, so the per-engine rate limiters don't collide.
                 ddg_task = asyncio.create_task(run_ddg())
                 bing_task = asyncio.create_task(run_bing())
-                outcomes = await asyncio.gather(
-                    ddg_task, bing_task, return_exceptions=True
-                )
+                outcomes = await asyncio.gather(ddg_task, bing_task, return_exceptions=True)
         except Exception as exc:
             _LOG.error("email_search_dork: shared client crashed: %s", exc)
             return ModuleResult(
@@ -286,12 +280,8 @@ class EmailSearchDorkModule(BaseModule):
                 "domain": domain,
                 "ddg_queries_run": len(ddg_findings),
                 "bing_queries_run": len(bing_findings),
-                "ddg_results_collected": sum(
-                    len(s.results) for s in ddg_findings
-                ),
-                "bing_results_collected": sum(
-                    len(s.results) for s in bing_findings
-                ),
+                "ddg_results_collected": sum(len(s.results) for s in ddg_findings),
+                "bing_results_collected": sum(len(s.results) for s in bing_findings),
                 "ddg_blocked": ddg_blocked,
                 "bing_blocked": bing_blocked,
                 "ddg_failed": ddg_failed,

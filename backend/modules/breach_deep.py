@@ -59,9 +59,7 @@ def _finding(site: BreachSite, method: str) -> dict[str, Any]:
 
 class BreachDeepModule(BaseModule):
     name = "breach_deep"
-    description = (
-        "Probe account existence on the highest-severity breached websites from HIBP."
-    )
+    description = "Probe account existence on the highest-severity breached websites from HIBP."
     requires_key = False
 
     async def run(self, email: str, *, force: bool = False) -> ModuleResult:
@@ -76,9 +74,7 @@ class BreachDeepModule(BaseModule):
             if settings.breach_deep_full:
                 sites = await asyncio.to_thread(corpus.get_all)
             else:
-                sites = await asyncio.to_thread(
-                    corpus.get_top, max(settings.breach_deep_limit, 0)
-                )
+                sites = await asyncio.to_thread(corpus.get_top, max(settings.breach_deep_limit, 0))
         except Exception as exc:
             return ModuleResult(
                 status=ModuleStatus.FAILED,
@@ -89,9 +85,7 @@ class BreachDeepModule(BaseModule):
         if not settings.breach_deep_full:
             sites = sites[: max(settings.breach_deep_limit, 0)]
 
-        platforms_by_slug = {
-            platform.slug: platform for platform in PlatformLoader().load_all()
-        }
+        platforms_by_slug = {platform.slug: platform for platform in PlatformLoader().load_all()}
         executor = PlatformExecutor()
         semaphore = asyncio.Semaphore(_CONCURRENCY)
 
@@ -101,7 +95,11 @@ class BreachDeepModule(BaseModule):
         inconclusive = 0
         not_found = 0
 
-        async with build_client(timeout=10.0, follow_redirects=True) as client:
+        # scrapingant: keep for mixed profile/account-existence probes with anti-bot variance
+        async with build_client(
+            scrapingant_zone="platforms", timeout=10.0, follow_redirects=True
+        ) as client:
+
             async def check_site(site: BreachSite) -> tuple[str, dict[str, Any] | None, str | None]:
                 nonlocal checked
                 async with semaphore:
@@ -167,12 +165,8 @@ class BreachDeepModule(BaseModule):
 
         critical_hits = sum(1 for f in findings if f.get("severity") == "critical")
         high_hits = sum(1 for f in findings if f.get("severity") == "high")
-        total_records = sum(
-            int(f.get("metadata", {}).get("pwn_count") or 0) for f in findings
-        )
-        top_breach = (
-            findings[0].get("metadata", {}).get("breach_name") if findings else None
-        )
+        total_records = sum(int(f.get("metadata", {}).get("pwn_count") or 0) for f in findings)
+        top_breach = findings[0].get("metadata", {}).get("breach_name") if findings else None
 
         status = ModuleStatus.SUCCESS
         if errors:

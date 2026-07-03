@@ -3,8 +3,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import httpx
-
 from ..core.http_client import build_client
 from .base import BaseModule, ModuleResult, ModuleStatus
 from .domain_intel import _FREE_PROVIDERS
@@ -29,11 +27,11 @@ class RansomwareIntelModule(BaseModule):
 
         findings: list[dict[str, Any]] = []
         errors: list[str] = []
-        
+
         # We will attempt multiple possible endpoints to find if the domain is a victim
         # 1. Ransomware.live search endpoint
         # 2. Ransomlook API search endpoint
-        
+
         metadata = {
             "domain_checked": domain,
             "victim_found": False,
@@ -44,6 +42,7 @@ class RansomwareIntelModule(BaseModule):
         found_group = None
         found_date = None
 
+        # scrapingant: dropped in S5 audit (ransomware feed endpoint returns JSON)
         async with build_client(timeout=10.0) as client:
             # Check Ransomware.live
             try:
@@ -81,31 +80,33 @@ class RansomwareIntelModule(BaseModule):
             metadata["ransomware_group"] = found_group
             metadata["attack_date"] = found_date
 
-            findings.append({
-                "platform": "RansomwareIntel",
-                "signal_type": "ransomware_victim_domain",
-                "confidence": "medium",
-                "severity": "high",
-                "metadata": {
-                    "domain": domain,
-                    "group_name": found_group,
-                    "attack_date": found_date,
-                    "note": "[domain-level signal — all @domain.com addresses inherit this exposure context]"
+            findings.append(
+                {
+                    "platform": "RansomwareIntel",
+                    "signal_type": "ransomware_victim_domain",
+                    "confidence": "medium",
+                    "severity": "high",
+                    "metadata": {
+                        "domain": domain,
+                        "group_name": found_group,
+                        "attack_date": found_date,
+                        "note": (
+                            "[domain-level signal — all @domain.com addresses inherit "
+                            "this exposure context]"
+                        ),
+                    },
                 }
-            })
-            
+            )
+
             return ModuleResult(
                 status=ModuleStatus.SUCCESS,
                 findings=findings,
                 metadata=metadata,
-                errors=errors if errors else None
+                errors=errors if errors else None,
             )
-        
+
         status = ModuleStatus.PARTIAL if errors else ModuleStatus.SUCCESS
 
         return ModuleResult(
-            status=status,
-            findings=findings,
-            metadata=metadata,
-            errors=errors if errors else None
+            status=status, findings=findings, metadata=metadata, errors=errors if errors else None
         )

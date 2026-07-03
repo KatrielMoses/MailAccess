@@ -11,10 +11,13 @@ _HEADERS = {"User-Agent": "MailAccess OSINT Tool"}
 
 class HudsonRockModule(BaseModule):
     name = "hudson_rock"
-    description = "Check if the email appears in infostealer credential logs via Hudson Rock Cavalier."
+    description = (
+        "Check if the email appears in infostealer credential logs via Hudson Rock Cavalier."
+    )
     requires_key = False
 
     async def run(self, email: str) -> ModuleResult:
+        # scrapingant: dropped in S5 audit (Hudson Rock OSINT endpoint returns JSON)
         async with build_client(timeout=15.0, follow_redirects=True) as client:
             try:
                 res = await client.get(
@@ -147,6 +150,7 @@ class HudsonRockModule(BaseModule):
     # ------------------------------------------------------------------
 
     async def search_by_domain(self, domain: str) -> dict:
+        # scrapingant: dropped in S5 audit (Hudson Rock domain endpoint returns JSON)
         async with build_client(timeout=15.0, follow_redirects=True) as client:
             try:
                 res = await client.get(
@@ -161,6 +165,7 @@ class HudsonRockModule(BaseModule):
         return {}
 
     async def search_by_username(self, username: str) -> dict:
+        # scrapingant: dropped in S5 audit (Hudson Rock username endpoint returns JSON)
         async with build_client(timeout=15.0, follow_redirects=True) as client:
             try:
                 res = await client.get(

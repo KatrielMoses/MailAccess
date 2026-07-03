@@ -165,19 +165,13 @@ class EmployeeNameDiscoveryModule(BaseModule):
         press_findings: list[NameDiscovery] = self._unwrap(
             outcomes[2], default=[], label="press_release"
         )
-        sec_findings: list[NameDiscovery] = self._unwrap(
-            outcomes[3], default=[], label="sec_edgar"
-        )
+        sec_findings: list[NameDiscovery] = self._unwrap(outcomes[3], default=[], label="sec_edgar")
         oc_findings: list[NameDiscovery] = self._unwrap(
             outcomes[4], default=[], label="opencorporates"
         )
 
         all_names: list[NameDiscovery] = (
-            linkedin_findings
-            + company_findings
-            + press_findings
-            + sec_findings
-            + oc_findings
+            linkedin_findings + company_findings + press_findings + sec_findings + oc_findings
         )
 
         # Source-OK mask: True if that source finished without raising
@@ -286,16 +280,15 @@ class EmployeeNameDiscoveryModule(BaseModule):
     # Source 1 — LinkedIn via search-engine dorking
     # ----------------------------------------------------------------------
     async def _linkedin(self, domain: str) -> list[NameDiscovery]:
-        async with build_client(timeout=10.0, follow_redirects=True) as shared:
+        # scrapingant: keep for LinkedIn/search HTML where proxy/fingerprint helps
+        async with build_client(
+            scrapingant_zone="platforms", timeout=10.0, follow_redirects=True
+        ) as shared:
             ddg = DuckDuckGoDorker(transport=shared, min_interval=0.0)
             bing = BingDorker(transport=shared, min_interval=0.0)
             # Exceptions propagate to ``_unwrap`` via ``asyncio.gather`` so
             # the source-failure mask reflects reality.
-            return await discover_linkedin_names(
-                domain=domain, ddg=ddg, bing=bing
-            )
-
-
+            return await discover_linkedin_names(domain=domain, ddg=ddg, bing=bing)
 
     # ----------------------------------------------------------------------
     # Source 2 — Company pages (direct fetch)
@@ -305,7 +298,10 @@ class EmployeeNameDiscoveryModule(BaseModule):
             1,
             int(getattr(settings, "employee_name_max_company_pages", 5) or 5),
         )
-        async with build_client(timeout=5.0, follow_redirects=True) as shared:
+        # scrapingant: keep for public company-page HTML with anti-bot variance
+        async with build_client(
+            scrapingant_zone="platforms", timeout=5.0, follow_redirects=True
+        ) as shared:
             pages: list[CompanyPageName] = await discover_company_page_names(
                 domain, transport=shared, max_pages=max_pages
             )
@@ -319,9 +315,7 @@ class EmployeeNameDiscoveryModule(BaseModule):
             token_count = len(p.name.split())
             confidence = p.confidence
             if token_count >= 3:
-                confidence = round(
-                    confidence * _COMPANY_PAGE_MULTI_TOKEN_DEMOTION, 4
-                )
+                confidence = round(confidence * _COMPANY_PAGE_MULTI_TOKEN_DEMOTION, 4)
             out.append(
                 NameDiscovery(
                     name=p.name,
@@ -333,8 +327,6 @@ class EmployeeNameDiscoveryModule(BaseModule):
             )
         return out
 
-
-
     # ----------------------------------------------------------------------
     # Sources 3 / 4 / 5 — Wrap the existing email-mode modules so we get
     # their domain-derived behavior without modifying them.
@@ -342,8 +334,6 @@ class EmployeeNameDiscoveryModule(BaseModule):
     async def _press_intel_names(self, domain: str) -> list[NameDiscovery]:
         synthetic = f"any@{domain}"
         result = await PressIntelModule().run(synthetic)
-
-
 
         names: list[NameDiscovery] = []
         for finding in result.findings:
@@ -370,8 +360,6 @@ class EmployeeNameDiscoveryModule(BaseModule):
         synthetic = f"any@{domain}"
         result = await SecEdgarModule().run(synthetic)
 
-
-
         names: list[NameDiscovery] = []
         for finding in result.findings:
             if not isinstance(finding, dict):
@@ -396,8 +384,6 @@ class EmployeeNameDiscoveryModule(BaseModule):
     async def _opencorporates_names(self, domain: str) -> list[NameDiscovery]:
         synthetic = f"any@{domain}"
         result = await OpenCorporatesModule().run(synthetic)
-
-
 
         names: list[NameDiscovery] = []
         for finding in result.findings:
@@ -426,9 +412,7 @@ class EmployeeNameDiscoveryModule(BaseModule):
         return names
 
     @staticmethod
-    def _unwrap(
-        outcome: Any, default: list[NameDiscovery], label: str
-    ) -> list[NameDiscovery]:
+    def _unwrap(outcome: Any, default: list[NameDiscovery], label: str) -> list[NameDiscovery]:
         if isinstance(outcome, BaseException):
             _LOG.warning(
                 "employee_name_discovery: %s task raised %s",
@@ -461,11 +445,22 @@ def discover_names_for_tests(
     logic as :meth:`EmployeeNameDiscoveryModule.run`, but synchronous
     and only over the inputs you pass in.
     """
-    all_names = linkedin + [
-        NameDiscovery(name=p.name, source="company_page", source_url=p.source_url,
-                      title_or_role=p.title_or_role, confidence=p.confidence)
-        for p in pages
-    ] + press + sec + oc
+    all_names = (
+        linkedin
+        + [
+            NameDiscovery(
+                name=p.name,
+                source="company_page",
+                source_url=p.source_url,
+                title_or_role=p.title_or_role,
+                confidence=p.confidence,
+            )
+            for p in pages
+        ]
+        + press
+        + sec
+        + oc
+    )
     aggregated: dict[str, EmployeeNameResult] = {}
     for nd in all_names:
         cleaned = nd.name.strip()

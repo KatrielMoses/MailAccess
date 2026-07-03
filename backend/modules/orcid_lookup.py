@@ -24,9 +24,12 @@ class ORCIDLookupModule(BaseModule):
         errors: list[str] = []
 
         try:
+            # scrapingant: dropped in S5 audit (ORCID public API returns JSON)
             async with build_client(base_url=_ORCID_API, timeout=10.0) as client:
                 headers = {"Accept": "application/json"}
-                search = await client.get("/search/", params={"q": f"email:{email}"}, headers=headers)
+                search = await client.get(
+                    "/search/", params={"q": f"email:{email}"}, headers=headers
+                )
                 if search.status_code != 200:
                     return ModuleResult(
                         status=ModuleStatus.PARTIAL,
@@ -39,7 +42,9 @@ class ORCIDLookupModule(BaseModule):
                     orcid_id = str(identifier.get("path") or "").strip()
                     if not orcid_id:
                         continue
-                    profile_findings, profile_errors = await self._fetch_person(client, headers, orcid_id)
+                    profile_findings, profile_errors = await self._fetch_person(
+                        client, headers, orcid_id
+                    )
                     findings.extend(profile_findings)
                     errors.extend(profile_errors)
         except httpx.TimeoutException:
@@ -52,7 +57,9 @@ class ORCIDLookupModule(BaseModule):
         return ModuleResult(
             status=ModuleStatus.PARTIAL if errors else ModuleStatus.SUCCESS,
             findings=findings,
-            metadata={"profiles_found": len([f for f in findings if f.get("platform") == "orcid_profile"])},
+            metadata={
+                "profiles_found": len([f for f in findings if f.get("platform") == "orcid_profile"])
+            },
             errors=errors,
         )
 
@@ -77,7 +84,11 @@ class ORCIDLookupModule(BaseModule):
 
         biography_obj = person.get("biography") if isinstance(person.get("biography"), dict) else {}
         biography = str(biography_obj.get("content") or "").strip() or None
-        email_objs = (person.get("emails") or {}).get("email") if isinstance(person.get("emails"), dict) else []
+        email_objs = (
+            (person.get("emails") or {}).get("email")
+            if isinstance(person.get("emails"), dict)
+            else []
+        )
         additional_emails = [_value(item) for item in email_objs or [] if _value(item)]
         researcher_url_objs = (
             (person.get("researcher-urls") or {}).get("researcher-url")
@@ -113,7 +124,11 @@ class ORCIDLookupModule(BaseModule):
                         "platform": "orcid_bio",
                         "confidence": "medium",
                         "signal_type": "phone_in_bio",
-                        "metadata": {"phone": phone, "orcid_id": orcid_id, "source_field": "biography"},
+                        "metadata": {
+                            "phone": phone,
+                            "orcid_id": orcid_id,
+                            "source_field": "biography",
+                        },
                     }
                 )
             for found_email in bio.emails:

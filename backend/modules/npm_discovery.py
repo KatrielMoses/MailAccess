@@ -34,16 +34,23 @@ class NpmDiscoveryModule(BaseModule):
     async def run(self, email: str, original_email: str | None = None) -> ModuleResult:
         target_emails: frozenset[str] = frozenset(
             e.strip().lower()
-            for e in ([original_email, email] if original_email and original_email.lower() != email.lower() else [email])
+            for e in (
+                [original_email, email]
+                if original_email and original_email.lower() != email.lower()
+                else [email]
+            )
             if e
         )
         findings: list[dict[str, Any]] = []
         errors: list[str] = []
         seen_packages: set[str] = set()
 
+        # scrapingant: dropped in S5 audit (npm registry endpoints return JSON)
         async with build_client(timeout=10.0, follow_redirects=True) as client:
             # 1. Direct lookup: package named after each email's local part
-            local_parts = list(dict.fromkeys(e.split("@")[0] if "@" in e else e for e in target_emails))
+            local_parts = list(
+                dict.fromkeys(e.split("@")[0] if "@" in e else e for e in target_emails)
+            )
             for local_part in local_parts:
                 direct_finding, direct_err = await self._fetch_package(
                     client, local_part, target_emails
@@ -162,7 +169,9 @@ class NpmDiscoveryModule(BaseModule):
         dist_tags = data.get("dist-tags") if isinstance(data.get("dist-tags"), dict) else {}
         latest_version = str(dist_tags.get("latest") or "")
         versions = data.get("versions") if isinstance(data.get("versions"), dict) else {}
-        latest_data = versions.get(latest_version) if isinstance(versions.get(latest_version), dict) else {}
+        latest_data = (
+            versions.get(latest_version) if isinstance(versions.get(latest_version), dict) else {}
+        )
 
         author_obj = latest_data.get("author") or data.get("author")
         author_name = ""
@@ -195,11 +204,7 @@ class NpmDiscoveryModule(BaseModule):
         if role is None:
             return None, None
 
-        maintainer_emails = [
-            _extract_email(m)
-            for m in maintainers
-            if _extract_email(m)
-        ]
+        maintainer_emails = [_extract_email(m) for m in maintainers if _extract_email(m)]
 
         return (
             {

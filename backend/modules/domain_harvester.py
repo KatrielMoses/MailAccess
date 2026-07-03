@@ -139,6 +139,7 @@ class DomainHarvesterModule(BaseModule):
         brute_hits: set[str] = set()
         ip_map: dict[str, list[str]] = {}
 
+        # scrapingant: dropped in S5 audit (subdomain collectors use structured APIs)
         async with build_client(timeout=18.0) as client:
             # Wave 1: fast JSON APIs
             w1_sem = asyncio.Semaphore(_WAVE1_CONCURRENCY)
@@ -186,9 +187,7 @@ class DomainHarvesterModule(BaseModule):
             wordlist = load_wordlist()
             brute_sem = asyncio.Semaphore(20)
             try:
-                brute_hits = await dns_brute_force(
-                    client, domain, list(wordlist), brute_sem
-                )
+                brute_hits = await dns_brute_force(client, domain, list(wordlist), brute_sem)
                 all_subdomains.update(brute_hits)
             except Exception as exc:
                 _LOG.debug("domain_harvester: dns_brute error for %s: %s", domain, exc)
@@ -250,9 +249,7 @@ class DomainHarvesterModule(BaseModule):
         # on it — tracked separately as future work.
         associate_emails: list[str] = []
 
-        subdomains_per_source = {
-            name: len(found) for name, found in per_source.items()
-        }
+        subdomains_per_source = {name: len(found) for name, found in per_source.items()}
 
         all_sources_probed = wave1_sources + wave2_sources
         all_errored = len(sources_failed) == len(all_sources_probed) and len(all_sources_probed) > 0

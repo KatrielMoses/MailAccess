@@ -166,9 +166,7 @@ class PyPIEmailModule(BaseModule):
         if not settings.enable_pypi_email:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
-                errors=[
-                    "pypi_email disabled — set ENABLE_PYPI_EMAIL=true to enable"
-                ],
+                errors=["pypi_email disabled — set ENABLE_PYPI_EMAIL=true to enable"],
             )
 
         domain = (target or "").strip().lower()
@@ -187,15 +185,14 @@ class PyPIEmailModule(BaseModule):
         aggregated: dict[str, dict[str, Any]] = {}
 
         try:
+            # scrapingant: dropped in S5 audit (PyPI XML-RPC/JSON endpoints are structured)
             async with build_client(timeout=_REQUEST_TIMEOUT) as client:
                 # --- Step 1: XML-RPC search for packages mentioning
                 # the target domain. -----------------------------
                 xmlrpc_outcome = await self._xmlrpc_search(client, domain)
                 outcomes["xmlrpc_search"] = xmlrpc_outcome
                 for email, evidence in xmlrpc_outcome.emails.items():
-                    bucket = aggregated.setdefault(
-                        email, {"types": set(), "evidence": []}
-                    )
+                    bucket = aggregated.setdefault(email, {"types": set(), "evidence": []})
                     bucket["types"].add(_TYPE)
                     bucket["evidence"].extend(evidence)
 
@@ -203,14 +200,10 @@ class PyPIEmailModule(BaseModule):
                 # keyword. ----------------------------------------
                 keyword = _domain_keyword(domain)
                 if keyword:
-                    direct_outcome = await self._direct_package_lookup(
-                        client, keyword, domain
-                    )
+                    direct_outcome = await self._direct_package_lookup(client, keyword, domain)
                     outcomes["direct_keyword"] = direct_outcome
                     for email, evidence in direct_outcome.emails.items():
-                        bucket = aggregated.setdefault(
-                            email, {"types": set(), "evidence": []}
-                        )
+                        bucket = aggregated.setdefault(email, {"types": set(), "evidence": []})
                         bucket["types"].add(_TYPE)
                         bucket["evidence"].extend(evidence)
                 else:
@@ -249,9 +242,7 @@ class PyPIEmailModule(BaseModule):
             findings.append(
                 {
                     "platform": "pypi_email",
-                    "profile_url": f"https://pypi.org/user/{local_part}/"
-                    if on_domain
-                    else "",
+                    "profile_url": f"https://pypi.org/user/{local_part}/" if on_domain else "",
                     "username": local_part,
                     "confidence": label_for_score(confidence_info.score).lower(),
                     "metadata": {
@@ -274,11 +265,7 @@ class PyPIEmailModule(BaseModule):
             else:
                 personal_count += 1
 
-        ok_count = sum(
-            1
-            for o in outcomes.values()
-            if o.ok or o.packages_checked or o.emails
-        )
+        ok_count = sum(1 for o in outcomes.values() if o.ok or o.packages_checked or o.emails)
         # FIX 3 — distinguish "API returned no data" (SUCCESS) from
         # "complete network failure" (FAILED).
         #
@@ -307,11 +294,7 @@ class PyPIEmailModule(BaseModule):
             1
             for o in outcomes.values()
             if o.error is not None
-            and (
-                "timeout" in o.error
-                or "request:" in o.error
-                or "invalid_json" in o.error
-            )
+            and ("timeout" in o.error or "request:" in o.error or "invalid_json" in o.error)
         )
         if findings:
             if ok_count >= 2:
@@ -334,12 +317,8 @@ class PyPIEmailModule(BaseModule):
             findings=findings,
             metadata={
                 "domain": domain,
-                "packages_checked_xmlrpc": outcomes[
-                    "xmlrpc_search"
-                ].packages_checked,
-                "packages_checked_direct": outcomes[
-                    "direct_keyword"
-                ].packages_checked,
+                "packages_checked_xmlrpc": outcomes["xmlrpc_search"].packages_checked,
+                "packages_checked_direct": outcomes["direct_keyword"].packages_checked,
                 "total_unique_emails": len(aggregated),
                 "on_domain_emails": on_domain_count,
                 "role_accounts": role_count,
@@ -357,9 +336,7 @@ class PyPIEmailModule(BaseModule):
     async def _throttle(self) -> None:
         await asyncio.sleep(_RATE_LIMIT_SECONDS)
 
-    async def _xmlrpc_search(
-        self, client: httpx.AsyncClient, domain: str
-    ) -> _SubSourceOutcome:
+    async def _xmlrpc_search(self, client: httpx.AsyncClient, domain: str) -> _SubSourceOutcome:
         """PyPI XML-RPC ``search_packages``-style search.
 
         The XML-RPC endpoint accepts ``GET`` requests of the shape
@@ -400,9 +377,7 @@ class PyPIEmailModule(BaseModule):
 
             async def _bounded(name: str) -> None:
                 async with semaphore:
-                    pkg_outcome = await self._direct_package_lookup(
-                        client, name, domain
-                    )
+                    pkg_outcome = await self._direct_package_lookup(client, name, domain)
                     # Merge findings into our outcome.
                     for email, evidence in pkg_outcome.emails.items():
                         outcome.emails.setdefault(email, []).extend(evidence)

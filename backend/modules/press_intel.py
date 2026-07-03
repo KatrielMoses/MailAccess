@@ -22,9 +22,7 @@ _PRESS_QUERIES = (
 )
 _PHONE_RE = re.compile(r"\+?[\d\s\-\(\)\.]{10,20}")
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
-_CONTACT_MARKER_RE = re.compile(
-    r"(contact:|media contact:|for more information:)", re.I
-)
+_CONTACT_MARKER_RE = re.compile(r"(contact:|media contact:|for more information:)", re.I)
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 _LINK_RE = re.compile(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.I | re.S)
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -61,7 +59,10 @@ class PressIntelModule(BaseModule):
         errors: list[str] = []
         seen_urls: set[str] = set()
 
-        async with build_client(timeout=10.0, follow_redirects=True) as client:
+        # scrapingant: keep for DuckDuckGo HTML and press-site anti-bot/rate-limit handling
+        async with build_client(
+            scrapingant_zone="platforms", timeout=10.0, follow_redirects=True
+        ) as client:
             for query_template in _PRESS_QUERIES:
                 if len(seen_urls) >= 3:
                     break
@@ -99,9 +100,7 @@ class PressIntelModule(BaseModule):
         )
 
 
-async def _duckduckgo_urls(
-    client: httpx.AsyncClient, query: str
-) -> tuple[list[str], str | None]:
+async def _duckduckgo_urls(client: httpx.AsyncClient, query: str) -> tuple[list[str], str | None]:
     try:
         resp = await client.get(_DDG_HTML, params={"q": query})
     except httpx.TimeoutException:
@@ -119,7 +118,10 @@ async def _duckduckgo_urls(
         if "duckduckgo.com/l/?" in href:
             continue
         host = urlparse(href).netloc.lower()
-        if any(host.endswith(site) for site in ("prnewswire.com", "businesswire.com", "globenewswire.com")):
+        if any(
+            host.endswith(site)
+            for site in ("prnewswire.com", "businesswire.com", "globenewswire.com")
+        ):
             urls.append(href)
         if len(urls) >= 3:
             break

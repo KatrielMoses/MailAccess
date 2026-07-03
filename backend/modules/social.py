@@ -11,9 +11,7 @@ from .base import BaseModule, ModuleResult, ModuleStatus
 
 class SocialModule(BaseModule):
     name = "social"
-    description = (
-        "Check social platform account existence via YAML-defined probes."
-    )
+    description = "Check social platform account existence via YAML-defined probes."
     requires_key = False
 
     async def run(self, email: str, **kwargs) -> ModuleResult:
@@ -25,7 +23,10 @@ class SocialModule(BaseModule):
         platforms = loader.load_category("social") + loader.load_category("communication")
         executor = PlatformExecutor()
 
-        async with build_client(timeout=10.0, follow_redirects=True) as client:
+        # scrapingant: keep for social profile HTML where rendered/anti-bot access matters
+        async with build_client(
+            scrapingant_zone="platforms", timeout=10.0, follow_redirects=True
+        ) as client:
             tasks = [
                 executor.check(
                     platform,

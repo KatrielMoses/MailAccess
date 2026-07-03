@@ -15,16 +15,18 @@ _USERNAME_KEYS = frozenset({"username", "login", "user", "handle"})
 
 # Generic Telegram landing-page titles that come back when {username} doesn't
 # resolve to a real channel/user. Lowercased for case-insensitive comparison.
-_TELEGRAM_GENERIC_TITLES = frozenset({
-    "telegram",
-    "telegram messenger",
-    "a new era of messaging",
-    "telegram – a new era of messaging",
-    "telegram - a new era of messaging",
-    "join group chat on telegram",
-    "telegram group",
-    "telegram channel",
-})
+_TELEGRAM_GENERIC_TITLES = frozenset(
+    {
+        "telegram",
+        "telegram messenger",
+        "a new era of messaging",
+        "telegram – a new era of messaging",
+        "telegram - a new era of messaging",
+        "join group chat on telegram",
+        "telegram group",
+        "telegram channel",
+    }
+)
 
 
 def _slug_variants(display_name: str) -> list[str]:
@@ -64,9 +66,7 @@ def _collect_usernames(email: str, phone_hints: list[str] | None = None) -> list
     return candidates[:_MAX_TELEGRAM_CHECKS]
 
 
-async def _check_telegram_username(
-    client: Any, username: str
-) -> dict[str, Any] | None:
+async def _check_telegram_username(client: Any, username: str) -> dict[str, Any] | None:
     url = f"https://t.me/{username}"
     try:
         resp = await client.get(url, follow_redirects=True)
@@ -101,16 +101,16 @@ async def _check_telegram_username(
         u_lower = username.lower()
         title_lower = display_name.lower().strip()
         page_lower = page_title.lower()
-        
+
         if title_lower in _TELEGRAM_GENERIC_TITLES or page_lower in _TELEGRAM_GENERIC_TITLES:
             return None
-            
+
         if "join" in title_lower or "group chat" in title_lower:
             return None
-            
+
         if og_url and og_url != url:
             return None
-            
+
         if u_lower not in title_lower:
             return None
 
@@ -197,7 +197,11 @@ class MessagingHintsModule(BaseModule):
                             val = payload.get(key)
                             if isinstance(val, str):
                                 u = val.strip().lower().lstrip("@")
-                                if u and u not in usernames and len(usernames) < _MAX_TELEGRAM_CHECKS:
+                                if (
+                                    u
+                                    and u not in usernames
+                                    and len(usernames) < _MAX_TELEGRAM_CHECKS
+                                ):
                                     usernames.append(u)
                         for key in _DISPLAY_KEYS:
                             val = payload.get(key)
@@ -213,6 +217,7 @@ class MessagingHintsModule(BaseModule):
         findings: list[dict[str, Any]] = []
         errors: list[str] = []
 
+        # scrapingant: dropped in S5 audit (Telegram/WhatsApp landing HTML is static)
         async with build_client(timeout=12.0, follow_redirects=True) as client:
             tg_tasks = [_check_telegram_username(client, u) for u in usernames]
             tg_results = await asyncio.gather(*tg_tasks)
