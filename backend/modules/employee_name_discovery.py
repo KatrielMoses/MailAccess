@@ -43,6 +43,7 @@ from ..core.company_page_names import (
 )
 from ..core.duckduckgo_dorker import DuckDuckGoDorker
 from ..core.http_client import build_client
+from ..core.scrapingant import get_active_transport
 from ..core.linkedin_name_discovery import discover_linkedin_names
 from ..core.name_quality import is_plausible_person_name
 from .base import BaseModule, ModuleResult, ModuleStatus
@@ -112,7 +113,13 @@ class EmployeeNameDiscoveryModule(BaseModule):
     requires_key = False
     default_enabled = False  # domain harvest mode only
 
-    async def run(self, target: str) -> ModuleResult:  # type: ignore[override]
+    async def run(
+        self,
+        target: str,
+        *,
+        use_proxies: bool = False,
+    ) -> ModuleResult:  # type: ignore[override]
+        self._use_proxies = use_proxies
         if not settings.enable_employee_name_discovery:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
@@ -273,6 +280,10 @@ class EmployeeNameDiscoveryModule(BaseModule):
                 "opencorporates_names_found": len(oc_findings),
                 "total_unique_names": len(aggregated),
                 "multi_source_confirmed_names": multi_source_count,
+                "use_proxies": use_proxies,
+                "active_scrapingant_transport": get_active_transport()
+                if use_proxies
+                else None,
             },
         )
 
@@ -281,9 +292,10 @@ class EmployeeNameDiscoveryModule(BaseModule):
     # ----------------------------------------------------------------------
     async def _linkedin(self, domain: str) -> list[NameDiscovery]:
         # scrapingant: keep for LinkedIn/search HTML where proxy/fingerprint helps
-        async with build_client(
-            scrapingant_zone="platforms", timeout=10.0, follow_redirects=True
-        ) as shared:
+        client_kwargs: dict[str, Any] = {"timeout": 10.0, "follow_redirects": True}
+        if getattr(self, "_use_proxies", False):
+            client_kwargs["scrapingant_zone"] = "platforms"
+        async with build_client(**client_kwargs) as shared:
             ddg = DuckDuckGoDorker(transport=shared, min_interval=0.0)
             bing = BingDorker(transport=shared, min_interval=0.0)
             # Exceptions propagate to ``_unwrap`` via ``asyncio.gather`` so
@@ -299,9 +311,10 @@ class EmployeeNameDiscoveryModule(BaseModule):
             int(getattr(settings, "employee_name_max_company_pages", 5) or 5),
         )
         # scrapingant: keep for public company-page HTML with anti-bot variance
-        async with build_client(
-            scrapingant_zone="platforms", timeout=5.0, follow_redirects=True
-        ) as shared:
+        client_kwargs: dict[str, Any] = {"timeout": 5.0, "follow_redirects": True}
+        if getattr(self, "_use_proxies", False):
+            client_kwargs["scrapingant_zone"] = "platforms"
+        async with build_client(**client_kwargs) as shared:
             pages: list[CompanyPageName] = await discover_company_page_names(
                 domain, transport=shared, max_pages=max_pages
             )

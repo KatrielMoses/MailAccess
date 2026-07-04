@@ -29,6 +29,7 @@ from ..core.duckduckgo_dorker import DuckDuckGoDorker
 from ..core.email_confidence import compute_confidence_breakdown, label_for_score
 from ..core.email_extraction import extract_emails
 from ..core.http_client import build_client
+from ..core.scrapingant import get_active_transport
 from ..core.role_classifier import classify_email
 from .base import BaseModule, ModuleResult, ModuleStatus
 
@@ -48,6 +49,7 @@ class EmailSearchDorkModule(BaseModule):
         target: str,
         *,
         lite_mode: bool | None = None,
+        use_proxies: bool = False,
     ) -> ModuleResult:  # type: ignore[override]
         """Run dorking for email discovery.
 
@@ -107,12 +109,12 @@ class EmailSearchDorkModule(BaseModule):
         ddg_failed = False
         bing_failed = False
 
+        client_factory = build_client
+        client_kwargs: dict[str, Any] = {"timeout": 10.0, "follow_redirects": True}
+        if use_proxies:
+            client_kwargs["scrapingant_zone"] = "dorking"
         try:
-            async with build_client(
-                scrapingant_zone="dorking",
-                timeout=10.0,
-                follow_redirects=True,
-            ) as shared_client:
+            async with client_factory(**client_kwargs) as shared_client:
                 ddg = DuckDuckGoDorker(
                     transport=shared_client,
                     min_interval=ddg_delay,
@@ -292,6 +294,10 @@ class EmailSearchDorkModule(BaseModule):
                 "personal_emails": personal_count,
                 "dual_engine_confirmed": dual_engine_confirmed,
                 "lite_mode": effective_lite_mode,
+                "use_proxies": use_proxies,
+                "active_scrapingant_transport": get_active_transport()
+                if use_proxies
+                else None,
             },
         )
 

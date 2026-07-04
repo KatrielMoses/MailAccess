@@ -15,6 +15,7 @@ from pydantic_settings import (
 )
 
 _DEFAULT_DB = Path.home() / ".mailaccess" / "mailaccess.db"
+_PROFILE_ENV_FILE = Path.home() / ".mailaccess" / ".env"
 _DEFAULT_CORS_ORIGINS = ["http://localhost:5173", "http://localhost:3000"]
 
 logger = logging.getLogger(__name__)
@@ -433,9 +434,14 @@ class Settings(BaseSettings):
                 dotenv_settings, "env_file_encoding", config.get("env_file_encoding")
             ),
         }
+        profile_dotenv_kwargs = {
+            **dotenv_kwargs,
+            "env_file": _PROFILE_ENV_FILE,
+        }
         return (
             init_settings,
             _MailAccessEnvSettingsSource(settings_cls, **source_kwargs),
+            _MailAccessDotEnvSettingsSource(settings_cls, **profile_dotenv_kwargs),
             _MailAccessDotEnvSettingsSource(settings_cls, **dotenv_kwargs),
             file_secret_settings,
         )

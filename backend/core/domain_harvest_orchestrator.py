@@ -69,6 +69,10 @@ MODULE_NPM_EMAIL = "npm_email"
 MODULE_PYPI_EMAIL = "pypi_email"
 MODULE_PGP_DOMAIN_EMAIL = "pgp_domain_email"
 MODULE_PATTERN_VERIFY = "pattern_and_verify"
+_PROXY_AWARE_MODULES = {
+    MODULE_EMAIL_DORK,
+    MODULE_EMPLOYEE_NAMES,
+}
 
 #: Domain validation regex — a basic sanity check.  We reuse the same
 #: shape other modules in MailAccess use (whois_lookup, domain_intel).
@@ -595,6 +599,7 @@ async def _safe_phase12_run(
     *,
     cc_max_records: int | None = None,
     dork_lite_mode: bool | None = None,
+    use_proxies: bool = False,
 ) -> tuple[str, ModuleResult]:
     """Run a Phase 1+2 module with its optional kwargs.
 
@@ -613,6 +618,8 @@ async def _safe_phase12_run(
         kwargs["max_records"] = cc_max_records
     elif name == MODULE_EMAIL_DORK and dork_lite_mode is not None:
         kwargs["lite_mode"] = dork_lite_mode
+    if use_proxies and name in _PROXY_AWARE_MODULES:
+        kwargs["use_proxies"] = True
     accepted = _kwargs_accepted(module)
     try:
         if accepted is None:
@@ -676,6 +683,7 @@ async def run_domain_harvest(
     pattern_module: Any | None = None,
     dork_lite_mode: bool | None = None,
     cc_max_records: int | None = None,
+    use_proxies: bool = False,
     on_module_complete: Any | None = None,
 ) -> DomainHarvestResult:
     """Run all eight harvest modules in the recommended sequence.
@@ -703,6 +711,9 @@ async def run_domain_harvest(
         MUST-FIX M3: explicit override for the Common Crawl module's
         record limit. Threaded down to ``commoncrawl_email.run``.
         The orchestrator does NOT mutate ``settings.cc_max_records``.
+    use_proxies:
+        When True, proxy-aware harvest modules route eligible HTML
+        requests through the configured ScrapingAnt transport.
     *_module:
         Injection points used by tests — pass a mock module instance
         to bypass real network calls.  Each mock must expose
@@ -741,6 +752,7 @@ async def run_domain_harvest(
         enable_smtp=enable_smtp,
         dork_lite_mode=dork_lite_mode,
         cc_max_records=cc_max_records,
+        use_proxies=use_proxies,
         on_module_complete=on_module_complete,
     )
 
@@ -759,6 +771,7 @@ async def _orchestrate(
     enable_smtp: bool = False,
     dork_lite_mode: bool | None = None,
     cc_max_records: int | None = None,
+    use_proxies: bool = False,
     on_module_complete: Any | None = None,
 ) -> DomainHarvestResult:
     """Inner orchestration — runs the 8 modules in sequence.
@@ -823,9 +836,18 @@ async def _orchestrate(
         ),
         _safe_phase12_run(MODULE_CODE_CERT, cc_cert, domain),
         _safe_phase12_run(
-            MODULE_EMAIL_DORK, dork, domain, dork_lite_mode=dork_lite_mode
+            MODULE_EMAIL_DORK,
+            dork,
+            domain,
+            dork_lite_mode=dork_lite_mode,
+            use_proxies=use_proxies,
         ),
-        _safe_phase12_run(MODULE_EMPLOYEE_NAMES, emp, domain),
+        _safe_phase12_run(
+            MODULE_EMPLOYEE_NAMES,
+            emp,
+            domain,
+            use_proxies=use_proxies,
+        ),
         _safe_phase12_run(MODULE_NPM_EMAIL, npm, domain),
         _safe_phase12_run(MODULE_PYPI_EMAIL, pypi, domain),
         _safe_phase12_run(MODULE_PGP_DOMAIN_EMAIL, pgp, domain),

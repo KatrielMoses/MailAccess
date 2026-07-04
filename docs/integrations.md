@@ -5,9 +5,16 @@
 The fastest integration — install the CLI and point it at any MailAccess instance:
 
 ```bash
-mailaccess config set-url http://your-instance:8000
+mailaccess configure set-url http://your-instance:8000
+mailaccess configure proxy show
 mailaccess investigate target@example.com -o report.stix
+mailaccess harvest-emails --domain example.com --use-proxies
 ```
+
+The deprecated `mailaccess config` alias still works during the transition,
+but `configure` is the canonical form. ScrapingAnt proxy routing is managed
+separately with `mailaccess configure proxy enable residential|datacenter`
+and `mailaccess configure proxy disable`.
 
 ---
 
