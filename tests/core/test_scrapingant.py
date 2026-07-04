@@ -9,6 +9,7 @@ from backend.core.scrapingant import ScrapingAntConfig, ScrapingAntMode
 
 def _config(
     *,
+    scrapingant_enabled: bool = True,
     api_key: str | None = "secret-key",
     enabled_dorking: bool = True,
     enabled_platforms: bool = False,
@@ -20,6 +21,7 @@ def _config(
     proxy_datacenter_password: str | None = "dc-pass",
 ) -> ScrapingAntConfig:
     return ScrapingAntConfig(
+        scrapingant_enabled=scrapingant_enabled,
         api_key=api_key,
         enabled_dorking=enabled_dorking,
         enabled_platforms=enabled_platforms,
@@ -34,6 +36,95 @@ def _config(
 
 def test_mode_disabled_without_api_key() -> None:
     assert _config(api_key=None).mode_for("dorking") is ScrapingAntMode.DISABLED
+
+
+def test_mode_disabled_when_master_kill_switch_off() -> None:
+    """scrapingant_enabled=False must block routing regardless of all other settings."""
+    assert ScrapingAntConfig(
+        scrapingant_enabled=False,
+        api_key="live-key",
+        enabled_dorking=True,
+        enabled_platforms=True,
+        transport="residential_proxy",
+        proxy_residential_username="res-user",
+        proxy_residential_password="res-pass",
+    ).mode_for("dorking") is ScrapingAntMode.DISABLED
+
+
+def test_dorking_disabled_routes_direct_for_dorking_zone() -> None:
+    """H3: enabled_dorking=False must block routing for dorking zone, even if master switch is on."""
+    config = ScrapingAntConfig(
+        scrapingant_enabled=True,
+        enabled_dorking=False,
+        enabled_platforms=True,
+        transport="rest_api",
+        api_key="live-key",
+    )
+    # dorking zone should be disabled
+    assert config.mode_for("dorking") is ScrapingAntMode.DISABLED
+    # platforms zone should still work (different toggle)
+    assert config.mode_for("platforms") is ScrapingAntMode.REST_API
+
+
+def test_dorking_disabled_does_not_affect_platform_zone() -> None:
+    """H3: disabling dorking must not affect platforms routing."""
+    config = ScrapingAntConfig(
+        scrapingant_enabled=True,
+        enabled_dorking=False,
+        enabled_platforms=True,
+        transport="rest_api",
+        api_key="live-key",
+    )
+    # Platforms zone unaffected by dorking toggle
+    assert config.mode_for("platforms") is ScrapingAntMode.REST_API
+
+
+def test_platforms_disabled_routes_direct_for_platforms_zone() -> None:
+    """H3: enabled_platforms=False must block routing for platforms zone."""
+    config = ScrapingAntConfig(
+        scrapingant_enabled=True,
+        enabled_dorking=True,
+        enabled_platforms=False,
+        transport="residential_proxy",
+        proxy_residential_username="res-user",
+        proxy_residential_password="res-pass",
+    )
+    assert config.mode_for("platforms") is ScrapingAntMode.DISABLED
+    # dorking zone still works
+    assert config.mode_for("dorking") is ScrapingAntMode.RESIDENTIAL_PROXY
+
+
+def test_category_flags_respected_independently() -> None:
+    """H3: dorking and platforms toggles must be fully independent."""
+    config_all_off = ScrapingAntConfig(
+        scrapingant_enabled=True,
+        enabled_dorking=False,
+        enabled_platforms=False,
+        transport="rest_api",
+        api_key="live-key",
+    )
+    assert config_all_off.mode_for("dorking") is ScrapingAntMode.DISABLED
+    assert config_all_off.mode_for("platforms") is ScrapingAntMode.DISABLED
+
+    config_dorking_only = ScrapingAntConfig(
+        scrapingant_enabled=True,
+        enabled_dorking=True,
+        enabled_platforms=False,
+        transport="rest_api",
+        api_key="live-key",
+    )
+    assert config_dorking_only.mode_for("dorking") is ScrapingAntMode.REST_API
+    assert config_dorking_only.mode_for("platforms") is ScrapingAntMode.DISABLED
+
+    config_platforms_only = ScrapingAntConfig(
+        scrapingant_enabled=True,
+        enabled_dorking=False,
+        enabled_platforms=True,
+        transport="rest_api",
+        api_key="live-key",
+    )
+    assert config_platforms_only.mode_for("dorking") is ScrapingAntMode.DISABLED
+    assert config_platforms_only.mode_for("platforms") is ScrapingAntMode.REST_API
 
 
 def test_mode_disabled_when_zone_toggle_off() -> None:
@@ -171,6 +262,7 @@ async def test_rest_api_failure_falls_back_to_direct_response(
         _scrapingant_config=_config(transport="rest_api"),
         _scrapingant_rest_transport=httpx.MockTransport(scrapingant_handler),
         transport=httpx.MockTransport(direct_handler),
+        strict_proxy=False,
     ) as client:
         response = await client.get("https://example.com/profile")
 
@@ -198,6 +290,7 @@ async def test_rest_api_timeout_falls_back_to_direct_response(
         _scrapingant_config=_config(transport="rest_api"),
         _scrapingant_rest_transport=httpx.MockTransport(scrapingant_handler),
         transport=httpx.MockTransport(direct_handler),
+        strict_proxy=False,
     ) as client:
         response = await client.get("https://example.com/profile")
 
@@ -294,3 +387,128 @@ async def test_disabled_zone_never_calls_scrapingant() -> None:
 
     assert response.text == "direct-ok"
     assert scrapingant_calls == []
+
+
+# ── M1: debug logging for routing decisions ───────────────────────────────────────
+
+
+def test_mode_for_emits_debug_log_with_routing_decision(caplog: pytest.LogCaptureFixture) -> None:
+    """M1: mode_for() must emit a debug log with the routing decision fields."""
+    import logging
+
+    config = _config(
+        scrapingant_enabled=True,
+        api_key="live-key",
+        enabled_dorking=True,
+        enabled_platforms=False,
+        transport="rest_api",
+    )
+    with caplog.at_level(logging.DEBUG, logger="backend.core.scrapingant"):
+        result = config.mode_for("dorking")
+
+    assert result is ScrapingAntMode.REST_API
+    assert any(
+        "scrapingant routing:" in record.message
+        and "module=dorking" in record.message
+        and "rest_api" in record.message
+        and "reason=ok" in record.message
+        for record in caplog.records
+    ), f"Expected debug log with routing decision. Records: {[r.message for r in caplog.records]}"
+
+
+def test_mode_for_debug_log_includes_reason_on_disabled(caplog: pytest.LogCaptureFixture) -> None:
+    """M1: even when returning DISABLED, mode_for() must log the reason."""
+    import logging
+
+    config = _config(
+        scrapingant_enabled=True,
+        api_key=None,  # no API key → rest_api falls back to DISABLED
+        enabled_dorking=True,
+        transport="rest_api",
+    )
+    with caplog.at_level(logging.DEBUG, logger="backend.core.scrapingant"):
+        result = config.mode_for("dorking")
+
+    assert result is ScrapingAntMode.DISABLED
+    assert any(
+        "scrapingant routing:" in record.message
+        and "module=dorking" in record.message
+        and "reason=api_key_missing" in record.message
+        for record in caplog.records
+    ), f"Expected debug log with reason. Records: {[r.message for r in caplog.records]}"
+
+
+# ── M4: startup warnings for missing credentials ──────────────────────────────────
+
+
+def test_mode_for_warns_once_when_api_key_missing(caplog: pytest.LogCaptureFixture) -> None:
+    """M4: mode_for() must log a WARNING once when rest_api transport has no API key."""
+    import logging
+    from backend.core import scrapingant
+
+    # Reset the warning-issued set so the test is deterministic
+    scrapingant._warning_issued.clear()
+
+    config = _config(
+        scrapingant_enabled=True,
+        api_key=None,
+        enabled_dorking=True,
+        transport="rest_api",
+    )
+    with caplog.at_level(logging.WARNING, logger="backend.core.scrapingant"):
+        # Call twice — the warning should only fire once
+        result1 = config.mode_for("dorking")
+        result2 = config.mode_for("dorking")
+
+    assert result1 is ScrapingAntMode.DISABLED
+    assert result2 is ScrapingAntMode.DISABLED
+    warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("SCRAPINGANT_API_KEY" in msg for msg in warning_messages)
+    assert len(warning_messages) == 1, f"Expected exactly 1 warning. Got: {warning_messages}"
+
+
+def test_mode_for_warns_once_when_residential_creds_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """M4: mode_for() must log a WARNING once when residential transport has no creds."""
+    import logging
+    from backend.core import scrapingant
+
+    scrapingant._warning_issued.clear()
+
+    config = _config(
+        scrapingant_enabled=True,
+        enabled_dorking=True,
+        transport="residential_proxy",
+        proxy_residential_username=None,
+        proxy_residential_password=None,
+    )
+    with caplog.at_level(logging.WARNING, logger="backend.core.scrapingant"):
+        result1 = config.mode_for("dorking")
+        result2 = config.mode_for("dorking")
+
+    assert result1 is ScrapingAntMode.DISABLED
+    warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("SCRAPINGANT_PROXY_RESIDENTIAL" in msg for msg in warning_messages)
+    assert len(warning_messages) == 1, f"Expected exactly 1 warning. Got: {warning_messages}"
+
+
+def test_no_warning_when_creds_present(caplog: pytest.LogCaptureFixture) -> None:
+    """M4: no WARNING should fire when all required credentials are present."""
+    import logging
+    from backend.core import scrapingant
+
+    scrapingant._warning_issued.clear()
+
+    config = _config(
+        scrapingant_enabled=True,
+        api_key="live-key",
+        enabled_dorking=True,
+        transport="rest_api",
+    )
+    with caplog.at_level(logging.WARNING, logger="backend.core.scrapingant"):
+        result = config.mode_for("dorking")
+
+    assert result is ScrapingAntMode.REST_API
+    warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_messages) == 0, f"Expected no warnings. Got: {warning_messages}"

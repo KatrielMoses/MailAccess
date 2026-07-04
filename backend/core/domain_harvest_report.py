@@ -272,6 +272,17 @@ def _format_emails_block(
     return text
 
 
+def _is_proxy_fail(status: str, errors: list[str]) -> bool:
+    """Return True if status is PARTIAL and any error mentions proxy failure."""
+    return (
+        status == "partial"
+        and any(
+            "proxy" in e.lower() or "ProxyConnectionError" in e
+            for e in errors
+        )
+    )
+
+
 def _build_sources_table(result: DomainHarvestResult) -> Table:
     """Per-module status table — the 'Sources run' section."""
     table = Table(title="Sources run", box=None, header_style="bold cyan")
@@ -286,7 +297,13 @@ def _build_sources_table(result: DomainHarvestResult) -> Table:
             if hasattr(mod_result.status, "value")
             else str(mod_result.status)
         )
-        color = _STATUS_COLORS.get(status.lower(), "white")
+        errors = list(mod_result.errors or [])
+        # M2: render PARTIAL proxy failures as distinct PROXY FAIL
+        if _is_proxy_fail(status, errors):
+            display = "[red]PROXY FAIL[/red]"
+        else:
+            color = _STATUS_COLORS.get(status.lower(), "white")
+            display = f"[{color}]{status.upper()}[/]"
         n_emails = sum(
             1
             for f in (mod_result.findings or [])
@@ -318,7 +335,7 @@ def _build_sources_table(result: DomainHarvestResult) -> Table:
 
         table.add_row(
             _module_display_name(name),
-            f"[{color}]{status.upper()}[/]",
+            display,
             str(n_emails),
             notes,
         )

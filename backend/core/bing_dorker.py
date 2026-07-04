@@ -149,6 +149,7 @@ class BingDorker:
         self._min_interval = max(float(min_interval), 0.0)
         self._last_request_at: float = 0.0
         self._lock = asyncio.Lock()
+        self._last_error: str | None = None  # set by search() on exception
 
     async def aclose(self) -> None:
         if self._owns_transport:
@@ -170,6 +171,7 @@ class BingDorker:
 
         async with self._lock:
             await self._throttle()
+            self._last_error = None  # clear before attempt; set only on exception
 
             try:
                 response = await self._client.get(
@@ -182,6 +184,7 @@ class BingDorker:
                 return [], False
             except Exception as exc:
                 _LOG.warning("Bing dork network error: %s", exc)
+                self._last_error = str(exc)
                 return [], False
 
             if response.status_code in (403, 429):

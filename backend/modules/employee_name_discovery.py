@@ -292,14 +292,22 @@ class EmployeeNameDiscoveryModule(BaseModule):
     # ----------------------------------------------------------------------
     async def _linkedin(self, domain: str) -> list[NameDiscovery]:
         # scrapingant: keep for LinkedIn/search HTML where proxy/fingerprint helps
-        client_kwargs: dict[str, Any] = {"timeout": 10.0, "follow_redirects": True}
         if getattr(self, "_use_proxies", False):
-            client_kwargs["scrapingant_zone"] = "platforms"
-        async with build_client(**client_kwargs) as shared:
+            async with build_client(
+                scrapingant_zone="platforms",
+                strict_proxy=True,
+                timeout=10.0,
+                follow_redirects=True,
+            ) as shared:
+                ddg = DuckDuckGoDorker(transport=shared, min_interval=0.0)
+                bing = BingDorker(transport=shared, min_interval=0.0)
+                # Exceptions propagate to ``_unwrap`` via ``asyncio.gather`` so
+                # the source-failure mask reflects reality.
+                return await discover_linkedin_names(domain=domain, ddg=ddg, bing=bing)
+        # No proxy: plain direct client
+        async with build_client(timeout=10.0, follow_redirects=True) as shared:
             ddg = DuckDuckGoDorker(transport=shared, min_interval=0.0)
             bing = BingDorker(transport=shared, min_interval=0.0)
-            # Exceptions propagate to ``_unwrap`` via ``asyncio.gather`` so
-            # the source-failure mask reflects reality.
             return await discover_linkedin_names(domain=domain, ddg=ddg, bing=bing)
 
     # ----------------------------------------------------------------------
@@ -311,13 +319,22 @@ class EmployeeNameDiscoveryModule(BaseModule):
             int(getattr(settings, "employee_name_max_company_pages", 5) or 5),
         )
         # scrapingant: keep for public company-page HTML with anti-bot variance
-        client_kwargs: dict[str, Any] = {"timeout": 5.0, "follow_redirects": True}
-        if getattr(self, "_use_proxies", False):
-            client_kwargs["scrapingant_zone"] = "platforms"
-        async with build_client(**client_kwargs) as shared:
-            pages: list[CompanyPageName] = await discover_company_page_names(
-                domain, transport=shared, max_pages=max_pages
-            )
+        use_proxies = getattr(self, "_use_proxies", False)
+        if use_proxies:
+            async with build_client(
+                scrapingant_zone="platforms",
+                strict_proxy=True,
+                timeout=5.0,
+                follow_redirects=True,
+            ) as shared:
+                pages: list[CompanyPageName] = await discover_company_page_names(
+                    domain, transport=shared, max_pages=max_pages
+                )
+        else:
+            async with build_client(timeout=5.0, follow_redirects=True) as shared:
+                pages: list[CompanyPageName] = await discover_company_page_names(
+                    domain, transport=shared, max_pages=max_pages
+                )
 
         # FIX 1 — apply token-count-based confidence demotion for
         # company-page names.  Real names are 2 tokens; multi-token

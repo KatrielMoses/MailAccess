@@ -29,8 +29,8 @@ from ..core.duckduckgo_dorker import DuckDuckGoDorker
 from ..core.email_confidence import compute_confidence_breakdown, label_for_score
 from ..core.email_extraction import extract_emails
 from ..core.http_client import build_client
-from ..core.scrapingant import get_active_transport
 from ..core.role_classifier import classify_email
+from ..core.scrapingant import get_active_transport
 from .base import BaseModule, ModuleResult, ModuleStatus
 
 _LOG = logging.getLogger(__name__)
@@ -113,6 +113,7 @@ class EmailSearchDorkModule(BaseModule):
         client_kwargs: dict[str, Any] = {"timeout": 10.0, "follow_redirects": True}
         if use_proxies:
             client_kwargs["scrapingant_zone"] = "dorking"
+            client_kwargs["strict_proxy"] = True
         try:
             async with client_factory(**client_kwargs) as shared_client:
                 ddg = DuckDuckGoDorker(
@@ -130,7 +131,10 @@ class EmailSearchDorkModule(BaseModule):
                     nonlocal ddg_blocked
                     for q in queries_for_run:
                         results, captcha = await ddg.search(q.query)
-                        ddg_findings.append(DorkRunSummary(query=q, results=results))
+                        error = getattr(ddg, "_last_error", None)
+                        ddg_findings.append(DorkRunSummary(query=q, results=results, error=error))
+                        if error:
+                            continue  # stop further queries on network/proxy error
                         if captcha:
                             ddg_blocked = True
                             return
@@ -139,7 +143,10 @@ class EmailSearchDorkModule(BaseModule):
                     nonlocal bing_blocked
                     for q in queries_for_run:
                         results, blocked = await bing.search(q.query)
-                        bing_findings.append(DorkRunSummary(query=q, results=results))
+                        error = getattr(bing, "_last_error", None)
+                        bing_findings.append(DorkRunSummary(query=q, results=results, error=error))
+                        if error:
+                            continue  # stop further queries on network/proxy error
                         if blocked:
                             bing_blocked = True
                             return
@@ -266,18 +273,38 @@ class EmailSearchDorkModule(BaseModule):
         # ------------------------------------------------------------------
         # Module status
         # ------------------------------------------------------------------
-        if (ddg_failed and bing_failed) or (not ddg_findings and not bing_findings):
+        ddg_has_error = any(s.error for s in ddg_findings)
+        bing_has_error = any(s.error for s in bing_findings)
+        ddg_all_empty = ddg_findings and all(not s.results for s in ddg_findings)
+        bing_all_empty = bing_findings and all(not s.results for s in bing_findings)
+
+        if (ddg_failed and bing_failed) or (ddg_blocked and bing_blocked):
             status = ModuleStatus.FAILED
-        elif (ddg_blocked or ddg_failed) and (bing_blocked or bing_failed):
-            status = ModuleStatus.FAILED
-        elif ddg_blocked or ddg_failed or bing_blocked or bing_failed:
+        elif (
+            ddg_failed
+            or bing_failed
+            or ddg_blocked
+            or bing_blocked
+            or (ddg_all_empty and ddg_has_error)
+            or (bing_all_empty and bing_has_error)
+        ):
             status = ModuleStatus.PARTIAL
         else:
             status = ModuleStatus.SUCCESS
 
+        # Collect error strings for the harvest report
+        errors: list[str] = []
+        for s in ddg_findings:
+            if s.error:
+                errors.append(f"[DuckDuckGo] {s.error}")
+        for s in bing_findings:
+            if s.error:
+                errors.append(f"[Bing] {s.error}")
+
         return ModuleResult(
             status=status,
             findings=findings,
+            errors=errors,
             metadata={
                 "domain": domain,
                 "ddg_queries_run": len(ddg_findings),
@@ -305,8 +332,11 @@ class EmailSearchDorkModule(BaseModule):
 class DorkRunSummary:
     """Internal: one query's worth of results, kept for debugging/extension."""
 
-    __slots__ = ("query", "results")
+    __slots__ = ("query", "results", "error")
 
-    def __init__(self, query: Any, results: list[Any]) -> None:
+    def __init__(
+        self, query: Any, results: list[Any], error: str | None = None
+    ) -> None:
         self.query = query
         self.results = results
+        self.error = error

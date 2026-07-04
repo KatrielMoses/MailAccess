@@ -52,6 +52,30 @@ Transport is selected at runtime. `investigate` can choose per run with
 `mailaccess configure proxy show` to confirm the active transport and
 `mailaccess configure proxy disable` to return to the REST API transport.
 
+## Harvest Mode Routing
+
+Harvest mode (`harvest-emails --use-proxies`) applies ScrapingAnt routing to
+eligible modules while intentionally excluding sources that don't benefit from
+proxy diversity:
+
+**KEEP (routed through ScrapingAnt):**
+
+| Module | Target | Reason |
+| --- | --- | --- |
+| `email_search_dork` | DuckDuckGo/Bing search engine HTML | Prevents IP blocking on high-volume dorking queries |
+| `employee_name_discovery` | LinkedIn, company pages, SEC EDGAR | Browser-like access to JavaScript-rendered profiles |
+
+**EXCLUDED from proxy routing (by design):**
+
+| Module | Target | Reason |
+| --- | --- | --- |
+| `commoncrawl_email` | S3 range API | CC doesn't block; proxy adds latency |
+| `code_and_cert_email` | crt.sh, CertSpotter JSON APIs | Structured responses, no proxy benefit |
+| `npm_email` | npm registry JSON APIs | Structured responses, no proxy benefit |
+| `pypi_email` | PyPI XML-RPC/JSON APIs | Structured responses, no proxy benefit |
+| `pgp_domain_email` | keys.openpgp.org, keyserver.ubuntu.com | Static HKP HTML and JSON; no anti-bot variance |
+| `pattern_and_verify` | SMTP (non-HTTP protocol) | Proxy doesn't apply to SMTP |
+
 ## Zone 2 Audited Call Sites
 
 | Module | Function | Call | Target URL pattern | Decision | Reason |

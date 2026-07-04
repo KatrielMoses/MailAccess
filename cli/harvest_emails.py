@@ -66,24 +66,46 @@ def _resolve_export_path(export: str) -> Path:
     return p
 
 
-def _format_progress_table(states: dict[str, str], started_at: float) -> Table:
-    """Live progress table for the 5 harvest modules."""
+def _is_proxy_fail(status: str, errors: list[str]) -> bool:
+    """Return True if status is PARTIAL and any error mentions proxy failure."""
+    return (
+        status == "partial"
+        and any(
+            "proxy" in e.lower() or "ProxyConnectionError" in e
+            for e in errors
+        )
+    )
+
+
+def _format_progress_table(
+    states: dict[str, tuple[str, list[str]]], started_at: float
+) -> Table:
+    """Live progress table for the 8 harvest modules.
+
+    M2: when a module is PARTIAL and its errors indicate a proxy failure,
+    show ``PROXY FAIL`` in red instead of ``PARTIAL`` in yellow so analysts
+    know whether to re-run with ``--proxy-fallback-ok``.
+    """
     table = Table(title="Module Progress", box=None, header_style="bold cyan")
     table.add_column("Module", style="cyan")
     table.add_column("Status", justify="right")
     table.add_column("Time", justify="right", style="dim")
     elapsed = time.time() - started_at
     table.add_row("wall clock", "—", f"{elapsed:.1f}s")
-    for name, status in states.items():
-        color = {
-            "queued": "dim",
-            "running": "cyan",
-            "success": "green",
-            "failed": "red",
-            "skipped": "dim",
-            "partial": "yellow",
-        }.get(status, "white")
-        table.add_row(name, f"[{color}]{status.upper()}[/]", "—")
+    for name, (status, errors) in states.items():
+        if _is_proxy_fail(status, errors):
+            display = "[red]PROXY FAIL[/red]"
+        else:
+            color = {
+                "queued": "dim",
+                "running": "cyan",
+                "success": "green",
+                "failed": "red",
+                "skipped": "dim",
+                "partial": "yellow",
+            }.get(status, "white")
+            display = f"[{color}]{status.upper()}[/]"
+        table.add_row(name, display, "—")
     return table
 
 
@@ -227,6 +249,7 @@ def run_harvest_emails(
     domain: str,
     verify_smtp: bool = False,
     use_proxies: bool = False,
+    proxy_fallback_ok: bool = False,
     lite: bool = False,
     export: str | None = None,
     max_cc_records: int | None = None,
@@ -294,33 +317,36 @@ def run_harvest_emails(
     # (npm_email, pypi_email, pgp_domain_email) sit alongside the
     # existing Phase 1 sources and run concurrently.
     # ------------------------------------------------------------------
-    module_states: dict[str, str] = {
-        "commoncrawl_email": "queued",
-        "code_and_cert_email": "queued",
-        "email_search_dork": "queued",
-        "employee_name_discovery": "queued",
-        "npm_email": "queued",
-        "pypi_email": "queued",
-        "pgp_domain_email": "queued",
-        "pattern_and_verify": "queued",
+    module_states: dict[str, tuple[str, list[str]]] = {
+        "commoncrawl_email": ("queued", []),
+        "code_and_cert_email": ("queued", []),
+        "email_search_dork": ("queued", []),
+        "employee_name_discovery": ("queued", []),
+        "npm_email": ("queued", []),
+        "pypi_email": ("queued", []),
+        "pgp_domain_email": ("queued", []),
+        "pattern_and_verify": ("queued", []),
     }
 
     started = time.time()
 
-    def _on_module_complete(name: str, status: str) -> None:
+    def _on_module_complete(
+        name: str, status: str, errors: list[str] | None = None
+    ) -> None:
         """Update the module_states dict in-place when a module finishes.
 
         MUST-FIX S5: this is the callback that fixes the cosmetic-only
         progress display. It's intentionally *synchronous* —
         ``rich.live.Live`` re-renders its renderable on every refresh
         tick, so all the Live display needs is for the underlying
-        ``module_states`` dict to mutate under it. The 2 Hz refresh on
-        the Live context picks up the new value on the next tick.
+        ``module_states`` dict to mutate under it.
+
+        M2: errors are stored alongside status so the live table can
+        render ``PROXY FAIL`` for modules whose PARTIAL was caused by a
+        proxy connection failure.
         """
-        # Normalise status to lowercase string — the report layer uses
-        # ``status.value`` which is already lowercase, but we don't
-        # want to assume that for tests that mock a plain string.
-        module_states[name] = str(status).lower() if status else "failed"
+        normalized = str(status).lower() if status else "failed"
+        module_states[name] = (normalized, list(errors or []))
 
     async def _drive() -> Any:
         # Mark all as running first so the first Live tick shows motion
@@ -331,6 +357,7 @@ def run_harvest_emails(
             cleaned_domain,
             enable_smtp=verify_smtp,
             use_proxies=use_proxies,
+            proxy_fallback_ok=proxy_fallback_ok,
             dork_lite_mode=cli_dork_lite_mode,
             cc_max_records=cli_cc_max_records,
             on_module_complete=_on_module_complete,
@@ -380,6 +407,17 @@ def run_harvest_emails(
     # 6. Render CLI output.
     # ------------------------------------------------------------------
     console.print(format_harvest_cli_output(result))
+
+    # M2: if any module had a proxy failure, show a hint.
+    proxy_failed = any(
+        _is_proxy_fail(status, errors)
+        for status, errors in module_states.values()
+    )
+    if proxy_failed:
+        console.print(
+            "[dim]One or more modules failed to connect via ScrapingAnt proxy. "
+            "Run with --proxy-fallback-ok to allow direct fallback.[/dim]"
+        )
 
     # ------------------------------------------------------------------
     # 7. Export (if --export). Format inferred from extension (S11).

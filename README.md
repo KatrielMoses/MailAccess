@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.10.2&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.10.3&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -310,6 +310,7 @@ Key flags:
 | `--domain DOMAIN` | Target domain (required). Rejects free providers. |
 | `--verify-smtp` | SMTP RCPT TO verification (opt-in only — see safety notes). |
 | `--use-proxies` | Route the proxy-aware harvest modules through the configured ScrapingAnt transport. |
+| `--proxy-fallback-ok` | Allow direct fallback if ScrapingAnt proxy fails. Without this flag, proxy failures raise an error instead of falling back silently. |
 | `--lite` | Faster, fewer dork queries per engine. |
 | `--export FILE` | Export to JSON, CSV, or NDJSON (inferred from extension). |
 | `--min-confidence {high,medium,low}` | Filter by confidence label. |
@@ -324,6 +325,11 @@ transport. The other harvest modules stay direct, and SMTP verification is
 never proxied. Use `mailaccess configure proxy show` to confirm the active
 transport. The deprecated `mailaccess config` alias still works during the
 transition, but `configure` is the canonical form.
+
+By default `--use-proxies` uses strict mode: if the proxy fails,
+the request is not sent rather than falling back to direct. To allow
+direct fallback:
+  mailaccess harvest-emails --domain example.com --use-proxies --proxy-fallback-ok
 
 **Sources:** Common Crawl (highest-yield free source, exploited for email
 extraction in a way no other tool currently does), GitHub code + commit
