@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import getpass
 import json
 import os
 import sys
@@ -49,14 +50,14 @@ except Exception:
     _VERSION = "dev"
 
 BANNER = f"""\
-[bold red]
-███╗   ███╗ █████╗ ██╗██╗      █████╗  ██████╗ ██████╗███████╗███████╗███████╗
+[#8B0000]
+████╗   ███╗ █████╗ ██╗██╗      █████╗  ██████╗ ██████╗███████╗███████╗███████╗
 ███╗ ████║██╔══██╗██║██║     ██╔══██╗██╔════╝██╔════╝██╔════╝██╔════╝██╔════╝
 ██╔████╔██║███████║██║██║     ███████║██║     ██║     █████╗  ███████╗███████╗
 ██║╚██╔╝██║██╔══██║██║██║     ██╔══██║██║     ██║     ██╔══╝  ╚════██║╚════██║
 ██║ ╚═╝ ██║██║  ██║██║███████╗██║  ██║╚██████╗╚██████╗███████╗███████║███████║
 ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚══════╝╚══════╝╚══════╝
-[/bold red]
+[/#8B0000]
 [dim]Open-source OSINT email intelligence tool[/dim]
 [dim]v{_VERSION} · pypi.org/project/mailaccess[/dim]
 [dim cyan]━━━ Partnered with ScrapingAnt ━━━[/dim cyan]
@@ -304,6 +305,177 @@ def config_callback(ctx: typer.Context) -> None:
         raise typer.Exit()
 
 
+# ── ScrapingAnt proxy interactive wizard ───────────────────────────────────────
+
+
+def _run_proxy_wizard() -> None:
+    """Interactive wizard for configuring ScrapingAnt proxy credentials."""
+
+    def _prompt_for_password(prompt_text: str) -> str | None:
+        """Get a password without echoing. Returns None on non-interactive failure."""
+        try:
+            return getpass.getpass(prompt_text)
+        except (EOFError, OSError):
+            return None
+
+    console.print()
+    console.print("[bold]Clearnet proxy (ScrapingAnt) — optional[/bold]")
+    console.print()
+    console.print(
+        "  Routes clearnet HTTP scraping through ScrapingAnt\n"
+        "  to improve reliability and reduce IP blocking.\n"
+        "  Affects: platform checks, search engine dorking,\n"
+        "  LinkedIn scraping, press release fetching.\n"
+    )
+    console.print(
+        "  [dim]Never touches Tor traffic. Dark web and .onion\n"
+        "  fetches are unaffected regardless of this setting.[/dim]"
+    )
+    console.print()
+    console.print(
+        "  [link=https://scrapingant.com/?ref=mzliyzh]"
+        "Sign up at https://scrapingant.com/?ref=mzliyzh[/link]"
+    )
+    console.print(
+        "  (referral bonus on first paid plan, also unlocks\n"
+        "  free tier for low-volume use.)"
+    )
+    console.print()
+    console.print("[dim]Press Enter to skip any field.[/dim]")
+    console.print()
+
+    # Track what was saved
+    saved: dict[str, str] = {}
+
+    # STEP 1 — REST API key
+    current_api = os.environ.get("SCRAPINGANT_API_KEY", "")
+    hint_api = " (currently set — press Enter to keep)" if current_api else ""
+    api_key = typer.prompt(
+        "SCRAPINGANT_API_KEY" + hint_api,
+        default="",
+        show_default=False,
+    )
+    if api_key:
+        _wizard_set_key("SCRAPINGANT_API_KEY", api_key)
+        saved["api_key"] = api_key
+    console.print()
+
+    # STEP 2 — Residential proxy credentials
+    console.print(
+        "[dim]Residential proxies use a separate\n"
+        "username/password from the ScrapingAnt\n"
+        "dashboard (Residential Proxies panel).[/dim]"
+    )
+    console.print()
+    current_res_user = os.environ.get("SCRAPINGANT_PROXY_RESIDENTIAL_USERNAME", "")
+    hint_res_user = " (currently set — press Enter to keep)" if current_res_user else ""
+    res_user = typer.prompt(
+        "SCRAPINGANT_PROXY_RESIDENTIAL_USERNAME" + hint_res_user,
+        default="",
+        show_default=False,
+    )
+    if res_user:
+        res_pass = _prompt_for_password("SCRAPINGANT_PROXY_RESIDENTIAL_PASSWORD: ")
+        if res_pass:
+            _wizard_set_key("SCRAPINGANT_PROXY_RESIDENTIAL_USERNAME", res_user)
+            _wizard_set_key("SCRAPINGANT_PROXY_RESIDENTIAL_PASSWORD", res_pass)
+            saved["residential"] = res_user
+    console.print()
+
+    # STEP 3 — Datacenter proxy credentials
+    console.print(
+        "[dim]Datacenter proxies are faster but easier\n"
+        "to fingerprint. Skip if using residential only.[/dim]"
+    )
+    console.print()
+    current_dc_user = os.environ.get("SCRAPINGANT_PROXY_DATACENTER_USERNAME", "")
+    hint_dc_user = " (currently set — press Enter to keep)" if current_dc_user else ""
+    dc_user = typer.prompt(
+        "SCRAPINGANT_PROXY_DATACENTER_USERNAME" + hint_dc_user,
+        default="",
+        show_default=False,
+    )
+    if dc_user:
+        dc_pass = _prompt_for_password("SCRAPINGANT_PROXY_DATACENTER_PASSWORD: ")
+        if dc_pass:
+            _wizard_set_key("SCRAPINGANT_PROXY_DATACENTER_USERNAME", dc_user)
+            _wizard_set_key("SCRAPINGANT_PROXY_DATACENTER_PASSWORD", dc_pass)
+            saved["datacenter"] = dc_user
+    console.print()
+
+    # STEP 4 — Transport selection
+    console.print("[bold]Which transport to enable?[/bold]")
+    console.print(
+        "  none        — ScrapingAnt disabled (direct only)\n"
+        "  api         — REST API (credit-billed)\n"
+        "  residential — Residential proxy (GB-billed)\n"
+        "  datacenter  — Datacenter proxy (GB-billed)"
+    )
+    transport_choice = typer.prompt(
+        "Transport",
+        default="none",
+        show_default=True,
+    )
+    transport_choice = transport_choice.strip().lower()
+    valid_choices = {"none", "api", "residential", "datacenter"}
+    if transport_choice not in valid_choices:
+        console.print("[yellow]Invalid choice — defaulting to none.[/yellow]")
+        transport_choice = "none"
+
+    # Map display name to transport value
+    transport_map = {
+        "none": "none",
+        "api": "rest_api",
+        "residential": "residential_proxy",
+        "datacenter": "datacenter_proxy",
+    }
+    transport_value = transport_map.get(transport_choice, "none")
+    saved["transport"] = transport_value
+
+    # Persist transport setting if not "none"
+    if transport_value != "none":
+        _wizard_set_key("SCRAPINGANT_ENABLED", "true")
+        _wizard_set_key("SCRAPINGANT_TRANSPORT", transport_value)
+        from datetime import datetime, timezone
+
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        _wizard_set_key("SCRAPINGANT_LAST_CONFIGURED", timestamp)
+
+    console.print()
+
+    # STEP 5 — Summary
+    console.print("[bold]Saved:[/bold]")
+    api_display = (
+        f"[dim]{saved.get('api_key', current_api)[:4]}{'*' * 10}[/dim]"
+        if saved.get("api_key") or current_api
+        else "[yellow]not set[/yellow]"
+    )
+    res_display = (
+        "[green]configured[/green]" if saved.get("residential") else "[yellow]not set[/yellow]"
+    )
+    dc_display = (
+        "[green]configured[/green]" if saved.get("datacenter") else "[yellow]not set[/yellow]"
+    )
+    console.print(f"  API key:      {api_display}")
+    console.print(f"  Residential:  {res_display}")
+    console.print(f"  Datacenter:   {dc_display}")
+    console.print(f"  Transport:    [cyan]{transport_value}[/cyan]")
+    console.print()
+    console.print(
+        "Run [cyan]mailaccess configure proxy show[/cyan] to verify at any time."
+    )
+
+
+def _wizard_set_key(key_name: str, value: str) -> None:
+    """Persist a key to .env and sync runtime state (used by the wizard)."""
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if not ENV_FILE.exists():
+        ENV_FILE.touch()
+    set_key(str(ENV_FILE), key_name, value)
+    if key_name in _SCRAPINGANT_KEY_NAMES:
+        _sync_scrapingant_runtime_value(key_name, value)
+
+
 # ── ScrapingAnt proxy sub-command ───────────────────────────────────────────────
 
 
@@ -311,10 +483,15 @@ proxy_app = typer.Typer(
     name="proxy",
     help="Manage ScrapingAnt proxy transport",
     invoke_without_command=True,
-    no_args_is_help=True,
 )
 configure_app.add_typer(proxy_app)
 config_app.add_typer(proxy_app)
+
+
+@proxy_app.callback(invoke_without_command=True)
+def proxy_callback(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _run_proxy_wizard()
 
 
 def _mask_key(value: str | None) -> str:
