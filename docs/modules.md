@@ -2305,7 +2305,7 @@ No standalone `ModuleResult` metadata is emitted. Normalized finding metadata:
 
 ---
 
-## Domain Email Harvesting Modules (0.10.1)
+## Domain Email Harvesting Modules (0.10.2)
 
 The eight modules below run **only** in `mailaccess harvest-emails` mode.
 They do not run during `mailaccess investigate` and have no effect on
@@ -2313,6 +2313,11 @@ single-email investigations. They are described in detail in
 [docs/harvest-emails.md](harvest-emails.md); this section is a quick
 reference for each module's role, key requirements, and source weight
 in the confidence-scoring model.
+
+Proxy routing note: when `mailaccess harvest-emails --use-proxies` is set,
+only `email_search_dork` and `employee_name_discovery` are routed through the
+configured ScrapingAnt transport. The other six harvest modules stay direct,
+and SMTP verification is never proxied.
 
 ### `commoncrawl_email`
 

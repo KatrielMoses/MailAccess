@@ -245,3 +245,8 @@ scrapingant_config = ScrapingAntConfig(
     proxy_datacenter_username=settings.scrapingant_proxy_datacenter_username,
     proxy_datacenter_password=settings.scrapingant_proxy_datacenter_password,
 )
+
+
+def get_active_transport() -> str:
+    """Return the configured ScrapingAnt transport selector."""
+    return settings.scrapingant_transport

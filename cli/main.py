@@ -17,6 +17,7 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
 
 import logging
+import re
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -50,14 +51,19 @@ except Exception:
 BANNER = f"""\
 [bold red]
 ███╗   ███╗ █████╗ ██╗██╗      █████╗  ██████╗ ██████╗███████╗███████╗███████╗
-████╗ ████║██╔══██╗██║██║     ██╔══██╗██╔════╝██╔════╝██╔════╝██╔════╝██╔════╝
+███╗ ████║██╔══██╗██║██║     ██╔══██╗██╔════╝██╔════╝██╔════╝██╔════╝██╔════╝
 ██╔████╔██║███████║██║██║     ███████║██║     ██║     █████╗  ███████╗███████╗
 ██║╚██╔╝██║██╔══██║██║██║     ██╔══██║██║     ██║     ██╔══╝  ╚════██║╚════██║
 ██║ ╚═╝ ██║██║  ██║██║███████╗██║  ██║╚██████╗╚██████╗███████╗███████║███████║
 ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚══════╝╚══════╝╚══════╝
 [/bold red]
 [dim]Open-source OSINT email intelligence tool[/dim]
-[dim]v{_VERSION} · pypi.org/project/mailaccess[/dim]"""
+[dim]v{_VERSION} · pypi.org/project/mailaccess[/dim]
+[dim cyan]━━━ Partnered with ScrapingAnt ━━━[/dim cyan]
+[bright_cyan]Web Scraping with Rotating Proxies[/bright_cyan]
+[link=https://scrapingant.com/?ref=mzliyzh][dim italic]↗ scrapingant.com[/dim italic][/link]"""
+
+_RICH_LINK_RE = re.compile(r"\[/?link(?:=[^\]]*)?\]")
 
 app = typer.Typer(name="mailaccess", help="MailAccess OSINT email intelligence CLI.")
 console = Console()
@@ -77,6 +83,15 @@ _API_KEYS: list[tuple[str, str, str]] = [
     ("SLACK_WEBHOOK_URL", "notifications", "Slack app webhooks"),
     ("DISCORD_WEBHOOK_URL", "notifications", "Discord server webhooks"),
 ]
+
+_SCRAPINGANT_KEYS: list[tuple[str, str, str]] = [
+    ("SCRAPINGANT_API_KEY", "scrapingant_rest_api", "scrapingant.com — REST API, credit-billed"),
+    ("SCRAPINGANT_PROXY_RESIDENTIAL_USERNAME", "scrapingant_residential_proxy", "scrapingant.com — Residential Proxy, GB-billed"),
+    ("SCRAPINGANT_PROXY_RESIDENTIAL_PASSWORD", "scrapingant_residential_proxy", "scrapingant.com — Residential Proxy, GB-billed"),
+    ("SCRAPINGANT_PROXY_DATACENTER_USERNAME", "scrapingant_datacenter_proxy", "scrapingant.com — Datacenter Proxy, GB-billed"),
+    ("SCRAPINGANT_PROXY_DATACENTER_PASSWORD", "scrapingant_datacenter_proxy", "scrapingant.com — Datacenter Proxy, GB-billed"),
+]
+_SCRAPINGANT_KEY_NAMES = {key_name for key_name, _, _ in _SCRAPINGANT_KEYS}
 
 _EXPORT_FORMATS = {".json", ".csv", ".md", ".pdf", ".stix", ".mtgx"}
 _SCRAPINGANT_PROXY_TYPES = {"residential", "datacenter"}
@@ -203,17 +218,191 @@ def _apply_scrapingant_transport_override(transport: str | None) -> None:
         http_client_mod.scrapingant_config = updated
 
 
+def _sync_scrapingant_runtime_value(key_name: str, value: str | None) -> None:
+    """Keep the current process in sync after mutating ~/.mailaccess/.env."""
+    from backend.config import settings
+
+    field_name = key_name.lower()
+    if value is None:
+        os.environ.pop(key_name, None)
+    else:
+        os.environ[key_name] = value
+    if hasattr(settings, field_name):
+        setattr(settings, field_name, value)
+
+
+def _strip_rich_link_markup(text: str) -> str:
+    return _RICH_LINK_RE.sub("", text)
+
+
+def _banner_line_visible_width(line: str) -> int:
+    return Text.from_markup(_strip_rich_link_markup(line)).cell_len
+
+
+configure_app = typer.Typer(
+    name="configure",
+    help="Manage configuration",
+    invoke_without_command=True,
+    no_args_is_help=True,
+)
+app.add_typer(configure_app)
+
 config_app = typer.Typer(
-    name="config", help="Manage configuration", invoke_without_command=True, no_args_is_help=True
+    name="config",
+    help="Manage configuration (deprecated alias for configure)",
+    invoke_without_command=True,
+    no_args_is_help=False,
 )
 app.add_typer(config_app)
+
+
+@configure_app.callback(invoke_without_command=True)
+def configure_callback(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit()
 
 
 @config_app.callback(invoke_without_command=True)
 def config_callback(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is None:
+        console.print(
+            "[yellow]⚠ `mailaccess config` is deprecated; use `mailaccess configure` instead.[/yellow]"
+        )
         typer.echo(ctx.get_help())
         raise typer.Exit()
+
+
+# ── ScrapingAnt proxy sub-command ───────────────────────────────────────────────
+
+
+proxy_app = typer.Typer(
+    name="proxy",
+    help="Manage ScrapingAnt proxy transport",
+    invoke_without_command=True,
+    no_args_is_help=True,
+)
+configure_app.add_typer(proxy_app)
+config_app.add_typer(proxy_app)
+
+
+def _mask_key(value: str | None) -> str:
+    if not value:
+        return "[red]not set[/red]"
+    if len(value) <= 4:
+        return f"[dim]{value[0]}{'*' * (len(value) - 1)}[/dim]"
+    return f"[dim]{value[:4]}{'*' * (len(value) - 4)}[/dim]"
+
+
+def _proxy_transport_display(transport: str) -> str:
+    if transport == "residential_proxy":
+        return "[cyan]residential_proxy[/cyan]"
+    if transport == "datacenter_proxy":
+        return "[cyan]datacenter_proxy[/cyan]"
+    return "[dim]rest_api[/dim]"
+
+
+def _proxy_credential_status(username: str | None, password: str | None) -> str:
+    if username and password:
+        masked_user = _mask_key(username).replace("[dim]", "").replace("[/dim]", "")
+        return f"[green]configured[/green] ({masked_user})"
+    return "[yellow]not configured[/yellow]"
+
+
+@proxy_app.command(name="show")
+def proxy_show() -> None:
+    """Print current ScrapingAnt proxy state."""
+    from backend.config import settings
+
+    api_key_val = settings.scrapingant_api_key
+    transport = settings.scrapingant_transport
+    res_user = settings.scrapingant_proxy_residential_username
+    res_pass = settings.scrapingant_proxy_residential_password
+    dc_user = settings.scrapingant_proxy_datacenter_username
+    dc_pass = settings.scrapingant_proxy_datacenter_password
+
+    table = Table(title="ScrapingAnt Proxy State", box=None, show_header=False)
+    table.add_column("Key", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("API key", _mask_key(api_key_val))
+    table.add_row("Transport", _proxy_transport_display(transport))
+    table.add_row("Residential proxy", _proxy_credential_status(res_user, res_pass))
+    table.add_row("Datacenter proxy", _proxy_credential_status(dc_user, dc_pass))
+    table.add_row(
+        "Scope",
+        "[dim]platforms + dorking, never Tor[/dim]",
+    )
+
+    console.print(table)
+
+
+@proxy_app.command(name="enable")
+def proxy_enable(
+    target: str = typer.Argument(
+        ...,
+        help="Transport to enable: api | residential | datacenter",
+        case_sensitive=False,
+    ),
+) -> None:
+    """Enable a ScrapingAnt transport."""
+    from backend.config import settings
+
+    target = target.lower()
+    if target == "api":
+        transport_value = "rest_api"
+    elif target == "residential":
+        transport_value = "residential_proxy"
+    elif target == "datacenter":
+        transport_value = "datacenter_proxy"
+    else:
+        raise typer.BadParameter("Must be one of: api, residential, datacenter")
+
+    # Validate credentials before enabling proxy transports
+    if transport_value != "rest_api":
+        user_key = (
+            "SCRAPINGANT_PROXY_RESIDENTIAL_USERNAME"
+            if transport_value == "residential_proxy"
+            else "SCRAPINGANT_PROXY_DATACENTER_USERNAME"
+        )
+        pass_key = (
+            "SCRAPINGANT_PROXY_RESIDENTIAL_PASSWORD"
+            if transport_value == "residential_proxy"
+            else "SCRAPINGANT_PROXY_DATACENTER_PASSWORD"
+        )
+        user_val = getattr(settings, user_key.lower(), None)
+        pass_val = getattr(settings, pass_key.lower(), None)
+        if not user_val or not pass_val:
+            console.print(
+                f"[yellow]⚠ Credentials not configured for {target} proxy.[/yellow]\n"
+                f"  Set them first:\n"
+                f"    mailaccess keys set {user_key} <username>\n"
+                f"    mailaccess keys set {pass_key} <password>\n"
+                f"  Sign up: https://scrapingant.com/?ref=mzliyzh"
+            )
+            raise typer.Exit(1)
+
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if not ENV_FILE.exists():
+        ENV_FILE.touch()
+    set_key(str(ENV_FILE), "SCRAPINGANT_TRANSPORT", transport_value)
+    _sync_scrapingant_runtime_value("SCRAPINGANT_TRANSPORT", transport_value)
+    console.print(f"[green]✓ ScrapingAnt transport set to:[/] {transport_value}")
+    console.print("[dim]Restart MailAccess server for changes to take effect.[/dim]")
+    proxy_show()
+
+
+@proxy_app.command(name="disable")
+def proxy_disable() -> None:
+    """Disable ScrapingAnt proxy transport (revert to REST API)."""
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if not ENV_FILE.exists():
+        ENV_FILE.touch()
+    set_key(str(ENV_FILE), "SCRAPINGANT_TRANSPORT", "rest_api")
+    _sync_scrapingant_runtime_value("SCRAPINGANT_TRANSPORT", "rest_api")
+    console.print("[green]✓ ScrapingAnt transport reverted to rest_api[/green]")
+    console.print("[dim]Restart MailAccess server for changes to take effect.[/dim]")
+    proxy_show()
 
 
 @config_app.command(name="set-url")
@@ -268,6 +457,11 @@ def harvest_emails_command(
             "The ONLY path that can enable probing — no env var "
             "or config default can silently turn this on."
         ),
+    ),
+    use_proxies: bool = typer.Option(
+        False,
+        "--use-proxies",
+        help="Route eligible harvest modules through the configured ScrapingAnt proxy transport.",
     ),
     lite: bool = typer.Option(
         False,
@@ -335,6 +529,7 @@ def harvest_emails_command(
     exit_code = run_harvest_emails(
         domain=domain,
         verify_smtp=verify_smtp,
+        use_proxies=use_proxies,
         lite=lite,
         export=export,
         max_cc_records=max_cc_records,
@@ -431,7 +626,19 @@ def keys_list() -> None:
         status = "[green]SET[/green]" if value else "[red]NOT SET[/red]"
         table.add_row(key_name, module, service, status)
 
-    console.print(table)
+    console.print()
+    table2 = Table(title="ScrapingAnt Keys (Optional Partnership)")
+    table2.add_column("Key Name", style="cyan")
+    table2.add_column("Required For")
+    table2.add_column("Service")
+    table2.add_column("Status", justify="center")
+
+    for key_name, module, service in _SCRAPINGANT_KEYS:
+        value = os.environ.get(key_name)
+        status = "[green]SET[/green]" if value else "[red]NOT SET[/red]"
+        table2.add_row(key_name, module, service, status)
+
+    console.print(table2)
 
 
 @keys_app.command(name="set")
@@ -444,6 +651,8 @@ def keys_set(
     if not ENV_FILE.exists():
         ENV_FILE.touch()
     set_key(str(ENV_FILE), key_name, value)
+    if key_name in _SCRAPINGANT_KEY_NAMES:
+        _sync_scrapingant_runtime_value(key_name, value)
     console.print(f"[green]✓ {key_name} saved to ~/.mailaccess/.env[/green]")
     console.print("[dim]Restart MailAccess server for changes to take effect[/dim]")
 
@@ -458,6 +667,8 @@ def keys_unset(
         return
     removed, _ = unset_key(str(ENV_FILE), key_name)
     if removed:
+        if key_name in _SCRAPINGANT_KEY_NAMES:
+            _sync_scrapingant_runtime_value(key_name, None)
         console.print(f"[green]✓ {key_name} removed from ~/.mailaccess/.env[/green]")
     else:
         console.print(f"[yellow]{key_name} was not found in ~/.mailaccess/.env[/yellow]")
@@ -476,7 +687,7 @@ def commands_overview() -> None:
         "  [cyan]keys list[/cyan]             Show API key status\n"
         "  [cyan]keys set <k> <v>[/cyan]      Save an API key to ~/.mailaccess/.env\n"
         "  [cyan]keys unset <k>[/cyan]        Remove an API key\n"
-        "  [cyan]config set-url <url>[/cyan]  Set backend server URL\n"
+        "  [cyan]configure set-url <url>[/cyan] Set backend server URL\n"
         "  [cyan]modules[/cyan]               List available investigation modules\n"
         "  [cyan]commands[/cyan]              Show this help panel"
     )

@@ -1,5 +1,12 @@
 # ScrapingAnt Routing Policy
 
+> **Scope — what ScrapingAnt is not.**
+> ScrapingAnt is not used as a Tor substitute and is never used to obscure
+> investigator identity. Tor routing (when configured) is completely separate
+> and unaffected by ScrapingAnt settings. ScrapingAnt is reserved for clearnet
+> HTTP calls that benefit from IP diversity or browser-like fingerprints. All
+> .onion and Tor-routed traffic bypasses ScrapingAnt entirely.
+
 ScrapingAnt is reserved for call sites where the proxy or browser-like request
 path materially improves the result. Use call-site granularity: a module can
 mix direct and routed traffic when different clients hit different targets.
@@ -37,10 +44,13 @@ Edge cases:
 | residential_proxy | residential.scrapingant.com:8080 | HTTP Basic (dashboard user/pass) | scrapingant_proxy_residential_username, scrapingant_proxy_residential_password | GB (Micro) | Anti-bot bypass on residential-IP-blocked targets |
 | datacenter_proxy | datacenter.scrapingant.com:8080 | HTTP Basic (dashboard user/pass) | scrapingant_proxy_datacenter_username, scrapingant_proxy_datacenter_password | GB | High-throughput, lower cost than residential |
 
-Transport is selected at runtime. KEEP call sites keep their zone setting and
-default to `rest_api`; use `--use-proxies --proxy-type residential` or
-`--use-proxies --proxy-type datacenter` when proxy transport is required for
-that run.
+Transport is selected at runtime. `investigate` can choose per run with
+`--use-scraping-api`, `--use-proxies --proxy-type residential`, or
+`--use-proxies --proxy-type datacenter`. `harvest-emails` uses
+`--use-proxies` and follows the ScrapingAnt transport configured by
+`mailaccess configure proxy enable residential|datacenter`; use
+`mailaccess configure proxy show` to confirm the active transport and
+`mailaccess configure proxy disable` to return to the REST API transport.
 
 ## Zone 2 Audited Call Sites
 

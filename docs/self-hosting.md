@@ -253,6 +253,16 @@ This prevents zombie investigations from accumulating across restarts.
 | `PROXY_URL` | _(unset)_ | Proxy URL for all outbound requests. Examples: `socks5://127.0.0.1:9050` (Tor), `http://user:pass@proxy:8080` |
 | `PROXY_ENABLED` | `false` | Set `true` to activate the proxy. The URL is ignored when this is `false`. |
 
+ScrapingAnt proxy routing is configured separately from the generic
+`PROXY_URL` setting. The REST API key is used for `rest_api` transport, while
+the residential and datacenter proxy transports use the ScrapingAnt proxy
+username/password pairs. Select the active transport with
+`mailaccess configure proxy enable residential|datacenter`, inspect it with
+`mailaccess configure proxy show`, and revert with
+`mailaccess configure proxy disable`. When you run
+`mailaccess harvest-emails --use-proxies`, only the proxy-aware harvest
+modules use that transport; the rest stay direct.
+
 ### Webhooks
 
 | Variable | Description |

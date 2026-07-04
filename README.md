@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.10.1&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.10.2&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -309,6 +309,7 @@ Key flags:
 |---|---|
 | `--domain DOMAIN` | Target domain (required). Rejects free providers. |
 | `--verify-smtp` | SMTP RCPT TO verification (opt-in only — see safety notes). |
+| `--use-proxies` | Route the proxy-aware harvest modules through the configured ScrapingAnt transport. |
 | `--lite` | Faster, fewer dork queries per engine. |
 | `--export FILE` | Export to JSON, CSV, or NDJSON (inferred from extension). |
 | `--min-confidence {high,medium,low}` | Filter by confidence label. |
@@ -316,6 +317,13 @@ Key flags:
 | `--on-domain-only` | Hide third-party mentions. |
 | `--exclude-domain DOMAIN` | Exclude a domain. Repeatable. |
 | `--max-cc-records N` | Override Common Crawl record cap (default 100). |
+
+When `--use-proxies` is set, only `email_search_dork` and
+`employee_name_discovery` are routed through the configured ScrapingAnt
+transport. The other harvest modules stay direct, and SMTP verification is
+never proxied. Use `mailaccess configure proxy show` to confirm the active
+transport. The deprecated `mailaccess config` alias still works during the
+transition, but `configure` is the canonical form.
 
 **Sources:** Common Crawl (highest-yield free source, exploited for email
 extraction in a way no other tool currently does), GitHub code + commit
@@ -473,7 +481,10 @@ See [docs/fp-control.md](docs/fp-control.md) for the full control model.
 | `mailaccess keys list` | Show all configured API keys |
 | `mailaccess keys set <KEY> <value>` | Set an API key |
 | `mailaccess keys unset <KEY>` | Remove an API key |
-| `mailaccess config set-url <url>` | Point the CLI at a MailAccess instance |
+| `mailaccess configure set-url <url>` | Point the CLI at a MailAccess instance |
+| `mailaccess configure proxy show` | Show the active ScrapingAnt proxy transport |
+| `mailaccess configure proxy enable residential|datacenter` | Select the ScrapingAnt proxy transport for routed traffic |
+| `mailaccess configure proxy disable` | Revert ScrapingAnt proxy routing to the REST API transport |
 | `mailaccess modules` | List all available modules |
 | `mailaccess commands` | List all CLI commands |
 | `mailaccess platform-health` | Inspect, export, or clear persistent platform probe health |
@@ -501,10 +512,20 @@ When a bare filename is given (no directory component), the file is written to t
 | `COMPANIES_HOUSE_API_KEY` | `companies_house` | https://developer.company-information.service.gov.uk | No (free forever, no CC) |
 | `SLACK_WEBHOOK_URL` | Webhooks | https://api.slack.com/messaging/webhooks | No |
 | `DISCORD_WEBHOOK_URL` | Webhooks | Discord server settings | No |
+| `SCRAPINGANT_API_KEY` | ScrapingAnt (REST API) | https://scrapingant.com/?ref=mzliyzh | No (optional partnership) |
+| `SCRAPINGANT_PROXY_RESIDENTIAL_USERNAME` | ScrapingAnt (Residential Proxy) | https://scrapingant.com/?ref=mzliyzh | No |
+| `SCRAPINGANT_PROXY_RESIDENTIAL_PASSWORD` | ScrapingAnt (Residential Proxy) | https://scrapingant.com/?ref=mzliyzh | No |
+| `SCRAPINGANT_PROXY_DATACENTER_USERNAME` | ScrapingAnt (Datacenter Proxy) | https://scrapingant.com/?ref=mzliyzh | No |
+| `SCRAPINGANT_PROXY_DATACENTER_PASSWORD` | ScrapingAnt (Datacenter Proxy) | https://scrapingant.com/?ref=mzliyzh | No |
+
+**ScrapingAnt** (optional, partnership) — Improves reliability of platform checks
+and search engine dorking by routing traffic through rotating residential or
+datacenter proxies. Off by default.
+Sign up: https://scrapingant.com/?ref=mzliyzh
 
 ## Changelog
 
-### 0.10.1
+### 0.10.2
 
 - New command: `mailaccess harvest-emails --domain <domain>` — domain-centric email harvesting
 - Eight concurrent source modules for domain email discovery

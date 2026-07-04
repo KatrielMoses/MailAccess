@@ -32,6 +32,14 @@ confidence tiers, a list of role accounts, a list of discovered employee
 names (used as pattern-generation seeds), and the per-module status
 table.
 
+If you want the proxy-aware modules to use ScrapingAnt, select a transport
+first and then add `--use-proxies`:
+
+```bash
+mailaccess configure proxy enable residential
+mailaccess harvest-emails --domain example.com --use-proxies
+```
+
 For a machine-readable export:
 
 ```bash
@@ -49,6 +57,7 @@ routed to `./results/`.
 |---|---|---|
 | `--domain`, `-d` | (required) | Target domain, e.g. `example.com`. Free providers (gmail.com etc.) are rejected. |
 | `--verify-smtp` | `false` | **OPT-IN.** Enables SMTP RCPT TO probing for the discovered pattern candidates. Off by default — the only path that turns it on. |
+| `--use-proxies` | `false` | Route the proxy-aware harvest modules through the configured ScrapingAnt transport. |
 | `--lite` | `false` | Reduces the search-dork module's query count for a faster (lower-yield) run. |
 | `--max-cc-records N` | `100` | Overrides the Common Crawl module's per-harvest record cap. |
 | `--min-confidence {low,medium,high}` | `low` | Label filter. Show only emails at or above this confidence label. |
@@ -56,6 +65,15 @@ routed to `./results/`.
 | `--exclude-domain DOMAIN` | (none) | Hide emails from this domain. Repeatable. Example: `--exclude-domain gmail.com --exclude-domain yahoo.com`. |
 | `--on-domain-only` | `false` | Hide third-party mentions. Show only emails whose domain equals the target. |
 | `--export FILE` | (none) | Export to JSON / CSV / NDJSON (inferred from extension). |
+
+When `--use-proxies` is set, only `email_search_dork` and
+`employee_name_discovery` are routed through the configured ScrapingAnt
+transport. `commoncrawl_email`, `code_and_cert_email`, `npm_email`,
+`pypi_email`, `pgp_domain_email`, and `pattern_and_verify` stay direct.
+SMTP verification is never proxied. Configure the transport with
+`mailaccess configure proxy enable residential|datacenter`, inspect it with
+`mailaccess configure proxy show`, and revert to the REST API transport with
+`mailaccess configure proxy disable`.
 
 ### Filter combination example
 

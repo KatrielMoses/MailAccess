@@ -226,6 +226,7 @@ def _apply_filters(
 def run_harvest_emails(
     domain: str,
     verify_smtp: bool = False,
+    use_proxies: bool = False,
     lite: bool = False,
     export: str | None = None,
     max_cc_records: int | None = None,
@@ -329,6 +330,7 @@ def run_harvest_emails(
         return await run_domain_harvest(
             cleaned_domain,
             enable_smtp=verify_smtp,
+            use_proxies=use_proxies,
             dork_lite_mode=cli_dork_lite_mode,
             cc_max_records=cli_cc_max_records,
             on_module_complete=_on_module_complete,
