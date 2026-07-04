@@ -358,6 +358,7 @@ class Settings(BaseSettings):
     proxy_enabled: bool = False
 
     # ScrapingAnt - optional off-by-default clearnet proxy (referral partnership)
+    scrapingant_enabled: bool = True
     scrapingant_api_key: str | None = None
     scrapingant_enabled_dorking: bool = False
     scrapingant_enabled_platforms: bool = False

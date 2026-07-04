@@ -194,7 +194,6 @@ def set_backend_url(url: str) -> None:
 def _apply_scrapingant_transport_override(transport: str | None) -> None:
     if transport is None:
         return
-    os.environ["SCRAPINGANT_TRANSPORT"] = transport
     from backend.config import settings
 
     settings.scrapingant_transport = transport
@@ -204,6 +203,7 @@ def _apply_scrapingant_transport_override(transport: str | None) -> None:
         from backend.core.scrapingant import ScrapingAntConfig
 
         updated = ScrapingAntConfig(
+            scrapingant_enabled=settings.scrapingant_enabled,
             api_key=settings.scrapingant_api_key,
             enabled_dorking=settings.scrapingant_enabled_dorking,
             enabled_platforms=settings.scrapingant_enabled_platforms,
@@ -219,16 +219,47 @@ def _apply_scrapingant_transport_override(transport: str | None) -> None:
 
 
 def _sync_scrapingant_runtime_value(key_name: str, value: str | None) -> None:
-    """Keep the current process in sync after mutating ~/.mailaccess/.env."""
+    """Keep the current process in sync after mutating ~/.mailaccess/.env.
+
+    Updates os.environ AND the pydantic settings object so CLI commands
+    (investigate, harvest-emails, proxy show) all see the same values in
+    the same session without requiring a restart.
+
+    pydantic-settings v2 does NOT coerce on __dict__ read: writing the string
+    "false" to __dict__ makes the field return "false" (truthy), not False.
+    We store the correct Python type by reading the current field's type and
+    coercing before writing __dict__.
+
+    Subprocess credential exposure risk is unaffected — os.environ is only
+    visible to the current Python process.
+    """
     from backend.config import settings
 
+    # 1. Sync os.environ for all ScrapingAnt-related keys so downstream
+    #    code that reads from os.environ (e.g. proxy_show) sees the change.
+    if key_name in _SCRAPINGANT_KEY_NAMES:
+        if value is None:
+            os.environ.pop(key_name, None)
+        else:
+            os.environ[key_name] = value
+
+    # 2. pydantic v2 bypasses env source when reading __dict__ directly.
+    #    Store the correct Python type so field reads return the right value.
     field_name = key_name.lower()
-    if value is None:
-        os.environ.pop(key_name, None)
-    else:
-        os.environ[key_name] = value
     if hasattr(settings, field_name):
-        setattr(settings, field_name, value)
+        _type = type(getattr(settings, field_name))
+        if _type is bool and value is not None:
+            # bool("false") == True (non-empty string), so handle bool specially.
+            coerced = str(value).lower() in ("true", "1", "yes")
+        elif _type is type(None):  # current value is None — use str for string fields
+            coerced = value  # value is already a str (from env) or None
+        else:
+            coerced = _type(value) if value is not None else None
+        settings.__dict__[field_name] = coerced
+
+    # 3. Rebuild the frozen dataclass so current-process routing picks up
+    #    the change (proxy routing decisions, investigate, harvest).
+    _apply_scrapingant_transport_override(settings.scrapingant_transport)
 
 
 def _strip_rich_link_markup(text: str) -> str:
@@ -299,6 +330,8 @@ def _proxy_transport_display(transport: str) -> str:
         return "[cyan]residential_proxy[/cyan]"
     if transport == "datacenter_proxy":
         return "[cyan]datacenter_proxy[/cyan]"
+    if transport == "none":
+        return "[dim]—[/dim]"
     return "[dim]rest_api[/dim]"
 
 
@@ -320,21 +353,74 @@ def proxy_show() -> None:
     res_pass = settings.scrapingant_proxy_residential_password
     dc_user = settings.scrapingant_proxy_datacenter_username
     dc_pass = settings.scrapingant_proxy_datacenter_password
+    enabled = settings.scrapingant_enabled
+    last_configured = os.environ.get("SCRAPINGANT_LAST_CONFIGURED")
 
     table = Table(title="ScrapingAnt Proxy State", box=None, show_header=False)
     table.add_column("Key", style="cyan")
     table.add_column("Value")
 
+    if enabled:
+        table.add_row("Status", "[green]ENABLED[/green]")
+        table.add_row("Transport", _proxy_transport_display(transport))
+    else:
+        table.add_row("Status", "[red]DISABLED[/red] (direct traffic only)")
+        table.add_row("Transport", "[dim]—[/dim]")
+    # L3: last configured timestamp
+    table.add_row(
+        "Last configured",
+        f"[dim]{last_configured or 'never'}[/dim]",
+    )
     table.add_row("API key", _mask_key(api_key_val))
-    table.add_row("Transport", _proxy_transport_display(transport))
     table.add_row("Residential proxy", _proxy_credential_status(res_user, res_pass))
     table.add_row("Datacenter proxy", _proxy_credential_status(dc_user, dc_pass))
-    table.add_row(
-        "Scope",
-        "[dim]platforms + dorking, never Tor[/dim]",
-    )
 
     console.print(table)
+
+    # M3: routing scope section
+    console.print()
+    scope_table = Table(
+        title="Routing scope",
+        box=None,
+        show_header=False,
+    )
+    scope_table.add_column("Category", style="cyan")
+    scope_table.add_column("State", style="dim")
+
+    if not enabled:
+        scope_table.add_row("Platform checks", "[red]disabled[/red] (all direct)")
+        scope_table.add_row("Search dorking", "[red]disabled[/red] (all direct)")
+        scope_table.add_row("Harvest modules", "[dim]no proxy routing[/dim]")
+    else:
+        platforms_enabled = settings.scrapingant_enabled_platforms
+        dorking_enabled = settings.scrapingant_enabled_dorking
+
+        if platforms_enabled:
+            scope_table.add_row(
+                "Platform checks",
+                f"[green]enabled[/green] (11 modules)",
+            )
+        else:
+            scope_table.add_row(
+                "Platform checks",
+                "[yellow]disabled[/yellow] (direct only)",
+            )
+        if dorking_enabled:
+            scope_table.add_row(
+                "Search dorking",
+                f"[green]enabled[/green] (4 modules)",
+            )
+        else:
+            scope_table.add_row(
+                "Search dorking",
+                "[yellow]disabled[/yellow] (direct only)",
+            )
+        scope_table.add_row(
+            "Harvest modules",
+            "[dim]email_search_dork, employee_name_discovery[/dim]",
+        )
+
+    console.print(scope_table)
 
 
 @proxy_app.command(name="enable")
@@ -358,8 +444,18 @@ def proxy_enable(
     else:
         raise typer.BadParameter("Must be one of: api, residential, datacenter")
 
-    # Validate credentials before enabling proxy transports
-    if transport_value != "rest_api":
+    # M4: validate credentials before enabling any transport
+    if transport_value == "rest_api":
+        api_key = getattr(settings, "scrapingant_api_key", None)
+        if not api_key:
+            console.print(
+                "[yellow]⚠ REST API enabled but SCRAPINGANT_API_KEY is not set.[/yellow]\n"
+                "  Set it first:\n"
+                "    mailaccess keys set SCRAPINGANT_API_KEY <your-key>\n"
+                "  Sign up: https://scrapingant.com/?ref=mzliyzh"
+            )
+            raise typer.Exit(1)
+    else:
         user_key = (
             "SCRAPINGANT_PROXY_RESIDENTIAL_USERNAME"
             if transport_value == "residential_proxy"
@@ -374,7 +470,7 @@ def proxy_enable(
         pass_val = getattr(settings, pass_key.lower(), None)
         if not user_val or not pass_val:
             console.print(
-                f"[yellow]⚠ Credentials not configured for {target} proxy.[/yellow]\n"
+                f"[yellow]⚠ {target.title()} proxy enabled but credentials not found.[/yellow]\n"
                 f"  Set them first:\n"
                 f"    mailaccess keys set {user_key} <username>\n"
                 f"    mailaccess keys set {pass_key} <password>\n"
@@ -382,26 +478,41 @@ def proxy_enable(
             )
             raise typer.Exit(1)
 
+    from datetime import datetime, timezone
+
     ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not ENV_FILE.exists():
         ENV_FILE.touch()
+    set_key(str(ENV_FILE), "SCRAPINGANT_ENABLED", "true")
+    _sync_scrapingant_runtime_value("SCRAPINGANT_ENABLED", "true")
     set_key(str(ENV_FILE), "SCRAPINGANT_TRANSPORT", transport_value)
     _sync_scrapingant_runtime_value("SCRAPINGANT_TRANSPORT", transport_value)
-    console.print(f"[green]✓ ScrapingAnt transport set to:[/] {transport_value}")
-    console.print("[dim]Restart MailAccess server for changes to take effect.[/dim]")
+    # L3: write last-configured timestamp to .env and sync to runtime
+    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    set_key(str(ENV_FILE), "SCRAPINGANT_LAST_CONFIGURED", timestamp)
+    os.environ["SCRAPINGANT_LAST_CONFIGURED"] = timestamp
+    console.print(f"[green]✓ ScrapingAnt enabled (transport: {transport_value})[/]")
     proxy_show()
 
 
 @proxy_app.command(name="disable")
 def proxy_disable() -> None:
-    """Disable ScrapingAnt proxy transport (revert to REST API)."""
+    """Disable ScrapingAnt completely — all routing goes direct."""
+    from datetime import datetime, timezone
+
     ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not ENV_FILE.exists():
         ENV_FILE.touch()
-    set_key(str(ENV_FILE), "SCRAPINGANT_TRANSPORT", "rest_api")
-    _sync_scrapingant_runtime_value("SCRAPINGANT_TRANSPORT", "rest_api")
-    console.print("[green]✓ ScrapingAnt transport reverted to rest_api[/green]")
-    console.print("[dim]Restart MailAccess server for changes to take effect.[/dim]")
+    set_key(str(ENV_FILE), "SCRAPINGANT_ENABLED", "false")
+    _sync_scrapingant_runtime_value("SCRAPINGANT_ENABLED", "false")
+    set_key(str(ENV_FILE), "SCRAPINGANT_TRANSPORT", "none")
+    _sync_scrapingant_runtime_value("SCRAPINGANT_TRANSPORT", "none")
+    # L3: write last-configured timestamp to .env and sync to runtime
+    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    set_key(str(ENV_FILE), "SCRAPINGANT_LAST_CONFIGURED", timestamp)
+    os.environ["SCRAPINGANT_LAST_CONFIGURED"] = timestamp
+    console.print("[green]✓ ScrapingAnt disabled[/green]")
+    console.print("[dim]All traffic routes direct. Run `mailaccess configure proxy enable` to re-enable.[/dim]")
     proxy_show()
 
 
@@ -462,6 +573,11 @@ def harvest_emails_command(
         False,
         "--use-proxies",
         help="Route eligible harvest modules through the configured ScrapingAnt proxy transport.",
+    ),
+    proxy_fallback_ok: bool = typer.Option(
+        False,
+        "--proxy-fallback-ok",
+        help="Allow direct fallback if ScrapingAnt proxy fails. Without this flag, proxy failures raise an error instead of falling back silently.",
     ),
     lite: bool = typer.Option(
         False,
@@ -530,6 +646,7 @@ def harvest_emails_command(
         domain=domain,
         verify_smtp=verify_smtp,
         use_proxies=use_proxies,
+        proxy_fallback_ok=proxy_fallback_ok,
         lite=lite,
         export=export,
         max_cc_records=max_cc_records,
@@ -654,7 +771,8 @@ def keys_set(
     if key_name in _SCRAPINGANT_KEY_NAMES:
         _sync_scrapingant_runtime_value(key_name, value)
     console.print(f"[green]✓ {key_name} saved to ~/.mailaccess/.env[/green]")
-    console.print("[dim]Restart MailAccess server for changes to take effect[/dim]")
+    if key_name in _SCRAPINGANT_KEY_NAMES:
+        console.print("[dim]Key is active in this session.[/dim]")
 
 
 @keys_app.command(name="unset")
@@ -670,6 +788,8 @@ def keys_unset(
         if key_name in _SCRAPINGANT_KEY_NAMES:
             _sync_scrapingant_runtime_value(key_name, None)
         console.print(f"[green]✓ {key_name} removed from ~/.mailaccess/.env[/green]")
+        if key_name in _SCRAPINGANT_KEY_NAMES:
+            console.print("[dim]Key is no longer active in this session.[/dim]")
     else:
         console.print(f"[yellow]{key_name} was not found in ~/.mailaccess/.env[/yellow]")
 
@@ -905,6 +1025,7 @@ async def _investigate(
     enable: str | None = None,
     no_brief: bool = False,
     scrapingant_transport_override: str | None = None,
+    proxy_fallback_ok: bool = False,
 ) -> int:
     _apply_scrapingant_transport_override(scrapingant_transport_override)
     base_url = get_backend_url()
@@ -2698,6 +2819,11 @@ def investigate(
         "--use-proxies",
         help="Use ScrapingAnt proxy transport for routed traffic.",
     ),
+    proxy_fallback_ok: bool = typer.Option(
+        False,
+        "--proxy-fallback-ok",
+        help="Allow direct fallback if ScrapingAnt proxy fails. Without this flag, proxy failures raise an error instead of falling back silently.",
+    ),
     proxy_type: str | None = typer.Option(
         None,
         "--proxy-type",
@@ -2712,6 +2838,8 @@ def investigate(
         raise typer.BadParameter("--proxy-type is only valid with --use-proxies")
     if proxy_type is not None and proxy_type not in _SCRAPINGANT_PROXY_TYPES:
         raise typer.BadParameter("--proxy-type must be one of: residential, datacenter")
+    if proxy_fallback_ok and not use_proxies:
+        raise typer.BadParameter("--proxy-fallback-ok is only valid with --use-proxies")
 
     scrapingant_transport_override = None
     if use_scraping_api:
@@ -2748,6 +2876,7 @@ def investigate(
                 enable,
                 no_brief,
                 scrapingant_transport_override,
+                proxy_fallback_ok,
             )
         )
         if code > max_code:

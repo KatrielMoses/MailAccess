@@ -12,6 +12,9 @@ from ..config import settings
 
 logger = logging.getLogger(__name__)
 
+# M4: suppress duplicate startup warnings across many requests.
+_warning_issued: set[str] = set()
+
 _REST_API_URL = "https://api.scrapingant.com/v2/extended"
 _RESIDENTIAL_PROXY_HOST = "residential.scrapingant.com"
 _DATACENTER_PROXY_HOST = "datacenter.scrapingant.com"
@@ -20,6 +23,29 @@ _ZONE_TOGGLES = {
     "dorking": "enabled_dorking",
     "platforms": "enabled_platforms",
 }
+
+# Module-category routing: controls which zone's toggle a module uses.
+# When a module's zone has its toggle disabled, routing goes direct.
+# H3: enables granular control — e.g. disable ScrapingAnt for dorking
+# (to use real IP for geo-targeting) while keeping it for platforms.
+_DORK_MODULES = frozenset({
+    "email_search_dork",
+    "google_dork",
+    "linkedin_serp",
+    "press_intel",
+})
+_PLATFORM_MODULES = frozenset({
+    "whatsmyname",
+    "user_scanner",
+    "account_discovery",
+    "social",
+    "maigret_platforms",
+    "sherlock_platforms",
+    "nexfil_platforms",
+    "blackbird_platforms",
+    "breach_deep",
+    "employee_name_discovery",
+})
 
 
 class ScrapingAntMode(Enum):
@@ -40,10 +66,11 @@ class ScrapingAntAuthError(ScrapingAntError):
 
 @dataclass(frozen=True)
 class ScrapingAntConfig:
-    api_key: str | None
-    enabled_dorking: bool
-    enabled_platforms: bool
-    proxy_type: str
+    scrapingant_enabled: bool = True
+    api_key: str | None = None
+    enabled_dorking: bool = False
+    enabled_platforms: bool = False
+    proxy_type: str = "residential"
     transport: str = "rest_api"
     proxy_residential_username: str | None = None
     proxy_residential_password: str | None = None
@@ -61,11 +88,34 @@ class ScrapingAntConfig:
         return "residential"
 
     def mode_for(self, zone: str) -> ScrapingAntMode:
-        """Resolve the active ScrapingAnt mode for a zone."""
+        """Resolve the active ScrapingAnt mode for a zone.
+
+        Checks the master kill switch FIRST — if ScrapingAnt is globally
+        disabled, returns DISABLED regardless of all other settings.
+        """
+        enabled = self.scrapingant_enabled
         toggle_name = _ZONE_TOGGLES.get(zone)
-        if not toggle_name:
+        toggle_val = getattr(self, toggle_name, False) if toggle_name else False
+
+        if not enabled:
+            logger.debug(
+                "scrapingant routing: module=%s enabled=%s category=%s transport=%s reason=%s",
+                zone, enabled, "n/a", "n/a", "scrapingant_enabled=false",
+            )
             return ScrapingAntMode.DISABLED
-        if not getattr(self, toggle_name):
+
+        if not toggle_name:
+            logger.debug(
+                "scrapingant routing: module=%s enabled=%s category=%s transport=%s reason=%s",
+                zone, enabled, "n/a", "n/a", "unknown_zone",
+            )
+            return ScrapingAntMode.DISABLED
+
+        if not toggle_val:
+            logger.debug(
+                "scrapingant routing: module=%s enabled=%s category=%s transport=%s reason=%s",
+                zone, enabled, toggle_name, "n/a", f"{toggle_name}=false",
+            )
             return ScrapingAntMode.DISABLED
 
         transport = self.transport
@@ -74,16 +124,80 @@ class ScrapingAntConfig:
 
         if transport == ScrapingAntMode.REST_API.value:
             if self.api_key:
+                logger.debug(
+                    "scrapingant routing: module=%s enabled=%s category=%s transport=%s reason=%s",
+                    zone, enabled, toggle_name, "rest_api", "ok",
+                )
                 return ScrapingAntMode.REST_API
+            reason = "api_key_missing"
+            logger.debug(
+                "scrapingant routing: module=%s enabled=%s category=%s transport=%s reason=%s",
+                zone, enabled, toggle_name, "rest_api", reason,
+            )
+            # M4: one-time startup warning
+            key = f"rest_api:no_api_key:{zone}"
+            if key not in _warning_issued:
+                _warning_issued.add(key)
+                logger.warning(
+                    "ScrapingAnt transport is rest_api but SCRAPINGANT_API_KEY is not set "
+                    "— routing will fail. Run: mailaccess keys set SCRAPINGANT_API_KEY <key>",
+                )
             return ScrapingAntMode.DISABLED
+
         if transport == ScrapingAntMode.RESIDENTIAL_PROXY.value:
             if self.proxy_residential_username and self.proxy_residential_password:
+                logger.debug(
+                    "scrapingant routing: module=%s enabled=%s category=%s transport=%s reason=%s",
+                    zone, enabled, toggle_name, "residential_proxy", "ok",
+                )
                 return ScrapingAntMode.RESIDENTIAL_PROXY
+            reason = "residential_credentials_missing"
+            logger.debug(
+                "scrapingant routing: module=%s enabled=%s category=%s transport=%s reason=%s",
+                zone, enabled, toggle_name, "residential_proxy", reason,
+            )
+            # M4: one-time startup warning
+            key = f"residential:no_creds:{zone}"
+            if key not in _warning_issued:
+                _warning_issued.add(key)
+                logger.warning(
+                    "ScrapingAnt transport is residential_proxy but "
+                    "SCRAPINGANT_PROXY_RESIDENTIAL_USERNAME or PASSWORD is not set "
+                    "— routing will fail. Run: mailaccess keys set "
+                    "SCRAPINGANT_PROXY_RESIDENTIAL_USERNAME <user> && "
+                    "mailaccess keys set SCRAPINGANT_PROXY_RESIDENTIAL_PASSWORD <pass>",
+                )
             return ScrapingAntMode.DISABLED
+
         if transport == ScrapingAntMode.DATACENTER_PROXY.value:
             if self.proxy_datacenter_username and self.proxy_datacenter_password:
+                logger.debug(
+                    "scrapingant routing: module=%s enabled=%s category=%s transport=%s reason=%s",
+                    zone, enabled, toggle_name, "datacenter_proxy", "ok",
+                )
                 return ScrapingAntMode.DATACENTER_PROXY
+            reason = "datacenter_credentials_missing"
+            logger.debug(
+                "scrapingant routing: module=%s enabled=%s category=%s transport=%s reason=%s",
+                zone, enabled, toggle_name, "datacenter_proxy", reason,
+            )
+            # M4: one-time startup warning
+            key = f"datacenter:no_creds:{zone}"
+            if key not in _warning_issued:
+                _warning_issued.add(key)
+                logger.warning(
+                    "ScrapingAnt transport is datacenter_proxy but "
+                    "SCRAPINGANT_PROXY_DATACENTER_USERNAME or PASSWORD is not set "
+                    "— routing will fail. Run: mailaccess keys set "
+                    "SCRAPINGANT_PROXY_DATACENTER_USERNAME <user> && "
+                    "mailaccess keys set SCRAPINGANT_PROXY_DATACENTER_PASSWORD <pass>",
+                )
             return ScrapingAntMode.DISABLED
+
+        logger.debug(
+            "scrapingant routing: module=%s enabled=%s category=%s transport=%s reason=%s",
+            zone, enabled, toggle_name, transport, "fallback_disabled",
+        )
         return ScrapingAntMode.DISABLED
 
     def rest_api_params(self, url: str) -> dict[str, str]:
@@ -116,13 +230,19 @@ class ScrapingAntTransport:
         *,
         rest_transport: httpx.AsyncBaseTransport | None = None,
         proxy_transport: httpx.AsyncBaseTransport | None = None,
+        strict_proxy: bool = True,
     ) -> None:
         self._config = config
         self._rest_transport = rest_transport
         self._proxy_transport = proxy_transport
+        self._strict_proxy = strict_proxy
 
     def mode_for(self, zone: str) -> ScrapingAntMode:
         return self._config.mode_for(zone)
+
+    @property
+    def strict_proxy(self) -> bool:
+        return self._strict_proxy
 
     async def send(self, request: httpx.Request, zone: str) -> httpx.Response:
         mode = self.mode_for(zone)
@@ -199,8 +319,17 @@ class ScrapingAntTransport:
         return await self._send_proxy(request, proxy_url)
 
     async def _send_proxy(self, request: httpx.Request, proxy_url: str) -> httpx.Response:
+        # H4: explicit per-operation timeouts — a hung proxy CONNECT handshake
+        # fails fast (10s connect) rather than blocking for the full module
+        # timeout. Separate read/write/pool limits prevent one slow request from
+        # blocking the entire connection pool.
         client_kwargs: dict[str, Any] = {
-            "timeout": self._config.timeout,
+            "timeout": httpx.Timeout(
+                connect=10.0,   # proxy CONNECT handshake deadline
+                read=self._config.timeout,   # response read after connect
+                write=10.0,    # request write deadline
+                pool=5.0,      # connection pool acquisition deadline
+            ),
             "verify": False,
         }
         if self._proxy_transport is None:
@@ -235,6 +364,7 @@ class ScrapingAntTransport:
 
 
 scrapingant_config = ScrapingAntConfig(
+    scrapingant_enabled=settings.scrapingant_enabled,
     api_key=settings.scrapingant_api_key,
     enabled_dorking=settings.scrapingant_enabled_dorking,
     enabled_platforms=settings.scrapingant_enabled_platforms,

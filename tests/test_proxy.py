@@ -81,3 +81,40 @@ def test_random_ua_distribution(monkeypatch: pytest.MonkeyPatch) -> None:
     config = ProxyConfig()
 
     assert len({config.random_ua() for _ in range(1_000)}) > 1
+
+
+# ── H5: async httpx for proxy verification ────────────────────────────────────────
+
+
+def test_verify_script_uses_async_httpx() -> None:
+    """H5: verify_residential_proxy.py must use httpx.AsyncClient, not httpx.get.
+
+    The script at scripts/verify_residential_proxy.py uses httpx.AsyncClient
+    (confirmed at lines 56, 67, 77). This test ensures the script is never
+    refactored to use httpx.get (sync) in its async main() function.
+    """
+    import ast
+    from pathlib import Path
+
+    script_path = Path(__file__).parents[1] / "scripts" / "verify_residential_proxy.py"
+    with open(script_path) as fh:
+        source = fh.read()
+
+    tree = ast.parse(source)
+
+    # Collect all httpx.get / httpx.post / httpx.put calls (sync)
+    sync_calls: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            call_str = ""
+            if isinstance(node.func, ast.Attribute):
+                if isinstance(node.func.value, ast.Name) and node.func.value.id == "httpx":
+                    call_str = f"httpx.{node.func.attr}"
+            if call_str and not call_str.startswith("httpx.AsyncClient"):
+                sync_calls.append(call_str)
+
+    assert sync_calls == [], (
+        f"H5 regression: proxy verification script must not use sync httpx calls. "
+        f"Found: {sync_calls}. Use httpx.AsyncClient instead."
+    )
+

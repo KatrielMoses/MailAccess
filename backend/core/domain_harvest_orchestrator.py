@@ -600,6 +600,7 @@ async def _safe_phase12_run(
     cc_max_records: int | None = None,
     dork_lite_mode: bool | None = None,
     use_proxies: bool = False,
+    proxy_fallback_ok: bool = False,
 ) -> tuple[str, ModuleResult]:
     """Run a Phase 1+2 module with its optional kwargs.
 
@@ -620,6 +621,9 @@ async def _safe_phase12_run(
         kwargs["lite_mode"] = dork_lite_mode
     if use_proxies and name in _PROXY_AWARE_MODULES:
         kwargs["use_proxies"] = True
+        # strict_proxy: True = raise on proxy failure (default when --use-proxies)
+        #               False = allow direct fallback (when --proxy-fallback-ok)
+        kwargs["strict_proxy"] = not proxy_fallback_ok
     accepted = _kwargs_accepted(module)
     try:
         if accepted is None:
@@ -684,6 +688,7 @@ async def run_domain_harvest(
     dork_lite_mode: bool | None = None,
     cc_max_records: int | None = None,
     use_proxies: bool = False,
+    proxy_fallback_ok: bool = False,
     on_module_complete: Any | None = None,
 ) -> DomainHarvestResult:
     """Run all eight harvest modules in the recommended sequence.
@@ -753,6 +758,7 @@ async def run_domain_harvest(
         dork_lite_mode=dork_lite_mode,
         cc_max_records=cc_max_records,
         use_proxies=use_proxies,
+        proxy_fallback_ok=proxy_fallback_ok,
         on_module_complete=on_module_complete,
     )
 
@@ -772,6 +778,7 @@ async def _orchestrate(
     dork_lite_mode: bool | None = None,
     cc_max_records: int | None = None,
     use_proxies: bool = False,
+    proxy_fallback_ok: bool = False,
     on_module_complete: Any | None = None,
 ) -> DomainHarvestResult:
     """Inner orchestration — runs the 8 modules in sequence.
@@ -808,8 +815,15 @@ async def _orchestrate(
         status_value = (
             mr.status.value if hasattr(mr.status, "value") else str(mr.status)
         )
+        errors = list(mr.errors or [])
         try:
-            on_module_complete(name, status_value)
+            on_module_complete(name, status_value, errors)
+        except TypeError:
+            # Backwards compatibility: old callbacks only accept (name, status).
+            try:
+                on_module_complete(name, status_value)
+            except Exception:  # noqa: BLE001
+                pass
         except Exception:  # noqa: BLE001
             # Callback must never break the harvest.
             _LOG.debug(
@@ -841,12 +855,14 @@ async def _orchestrate(
             domain,
             dork_lite_mode=dork_lite_mode,
             use_proxies=use_proxies,
+            proxy_fallback_ok=proxy_fallback_ok,
         ),
         _safe_phase12_run(
             MODULE_EMPLOYEE_NAMES,
             emp,
             domain,
             use_proxies=use_proxies,
+            proxy_fallback_ok=proxy_fallback_ok,
         ),
         _safe_phase12_run(MODULE_NPM_EMAIL, npm, domain),
         _safe_phase12_run(MODULE_PYPI_EMAIL, pypi, domain),
