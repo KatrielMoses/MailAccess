@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sys
 import time
 from pathlib import Path
@@ -52,18 +53,14 @@ from backend.core.domain_harvest_report import (
     format_harvest_cli_output,
     serialise_harvest_for_export,
 )
+from backend.core.email_extraction import validate_domain
 
 
 def _resolve_export_path(export: str) -> Path:
-    """Route bare filenames into ``./results/`` to match the existing
-    platform-audit convention (see ``cli/platform_audit.py``).
-    """
     p = Path(export)
-    if p.parent == Path("."):
-        results_dir = Path(__file__).resolve().parent.parent / "results"
-        results_dir.mkdir(exist_ok=True)
-        return results_dir / p.name
-    return p
+    if p.is_absolute():
+        return p
+    return Path(os.getcwd()) / p
 
 
 def _is_proxy_fail(status: str, errors: list[str]) -> bool:
@@ -273,9 +270,17 @@ def run_harvest_emails(
     # ------------------------------------------------------------------
     try:
         cleaned_domain = domain.strip().lower()
-        if not cleaned_domain:
+        from backend.modules.domain_intel import _FREE_PROVIDERS
+
+        if cleaned_domain in _FREE_PROVIDERS:
             console.print(
-                "[red]Error:[/] --domain must be a non-empty domain "
+                f"[red]Error:[/] {cleaned_domain} is a free email provider; "
+                "use a corporate or organizational domain."
+            )
+            return 2
+        if not validate_domain(cleaned_domain, reject_free_provider=True):
+            console.print(
+                "[red]Error:[/] --domain must be a valid non-free domain "
                 "(e.g. --domain example.com)"
             )
             return 2
@@ -352,7 +357,7 @@ def run_harvest_emails(
         # Mark all as running first so the first Live tick shows motion
         # even before any module has completed.
         for name in module_states:
-            module_states[name] = "running"
+            module_states[name] = ("running", [])
         return await run_domain_harvest(
             cleaned_domain,
             enable_smtp=verify_smtp,

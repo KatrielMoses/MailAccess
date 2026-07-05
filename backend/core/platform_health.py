@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import contextlib
 import logging
 import math
 import os
@@ -63,7 +64,10 @@ class PlatformHealthDB:
             home = os.environ.get("HOME")
             base = Path(home) if home else Path.home()
             db_path = base / ".mailaccess" / "platform_health.db"
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if os.name != "nt":
+            with contextlib.suppress(OSError):
+                os.chmod(db_path.parent, 0o700)
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(_CREATE_TABLE)

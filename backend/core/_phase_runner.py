@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -10,6 +11,20 @@ from ..modules.base import BaseModule, ModuleResult, ModuleStatus
 from .policy import _MODULE_TIMEOUT_FLOORS
 
 _ERROR_LIMIT = 200
+logger = logging.getLogger(__name__)
+
+
+def _normalize_module_result(module_name: str, result: ModuleResult | None) -> ModuleResult:
+    if result is not None:
+        return result
+    logger.warning(
+        "Module %s returned None instead of ModuleResult — skipping",
+        module_name,
+    )
+    return ModuleResult(
+        status=ModuleStatus.FAILED,
+        errors=["Module returned None — this is a bug in the module"],
+    )
 
 
 def resolve_timeout(
@@ -56,7 +71,8 @@ async def run_one_module(
                 coroutine = mod.run(target_email, original_email=email)
             else:
                 coroutine = mod.run(target_email)
-        return await asyncio.wait_for(coroutine, timeout=timeout)
+        result = await asyncio.wait_for(coroutine, timeout=timeout)
+        return _normalize_module_result(mod.name, result)
     except asyncio.TimeoutError:
         return ModuleResult(
             status=ModuleStatus.PARTIAL,

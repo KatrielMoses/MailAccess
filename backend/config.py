@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -20,13 +21,24 @@ _DEFAULT_CORS_ORIGINS = ["http://localhost:5173", "http://localhost:3000"]
 
 logger = logging.getLogger(__name__)
 
-# Dynamically read the installed package version so health / OpenAPI stay in sync.
-try:
-    from importlib.metadata import version as _pkg_version
+def _read_app_version() -> str:
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    if pyproject.exists():
+        match = re.search(
+            r'(?m)^version\s*=\s*["\']([^"\']+)["\']',
+            pyproject.read_text(encoding="utf-8"),
+        )
+        if match:
+            return match.group(1)
+    try:
+        from importlib.metadata import version as _pkg_version
 
-    APP_VERSION: str = _pkg_version("mailaccess")
-except Exception:
-    APP_VERSION = "0.0.0"
+        return _pkg_version("mailaccess")
+    except Exception:
+        return "0.0.0"
+
+
+APP_VERSION: str = _read_app_version()
 
 
 def _coerce_cors_origins(value: Any) -> list[str]:

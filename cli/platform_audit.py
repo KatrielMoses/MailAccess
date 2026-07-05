@@ -10,6 +10,7 @@ This module is intentionally read-only — it does not modify the health DB.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -542,10 +543,7 @@ def run_platform_audit(
 
 
 def _resolve_export_path(export: str) -> Path:
-    """Route bare filenames into ./results/ to match existing project convention."""
     p = Path(export)
-    if p.parent == Path("."):
-        results_dir = Path(__file__).resolve().parent.parent / "results"
-        results_dir.mkdir(exist_ok=True)
-        return results_dir / p.name
-    return p
+    if p.is_absolute():
+        return p
+    return Path(os.getcwd()) / p

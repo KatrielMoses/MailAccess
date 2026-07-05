@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.10.4&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.10.5&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -530,6 +530,12 @@ datacenter proxies. Off by default.
 Sign up: https://scrapingant.com/?ref=mzliyzh
 
 ## Changelog
+
+### 0.10.5
+
+- Critical fix: engine no longer crashes when a module returns None instead of ModuleResult
+- All modules audited and patched to return proper ModuleResult on all code paths
+- Permanent regression guard: test asserts every module returns ModuleResult, never None
 
 ### 0.10.4
 

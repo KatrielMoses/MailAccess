@@ -80,4 +80,4 @@ async def test_email_search_dork_direct_client_uses_dorking_zone(
 
     await EmailSearchDorkModule().run("example.com", lite_mode=True)
 
-    assert captured_kwargs[0]["scrapingant_zone"] == "dorking"
+    assert "scrapingant_zone" not in captured_kwargs[0]

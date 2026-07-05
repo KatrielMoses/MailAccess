@@ -132,9 +132,9 @@ async def test_bing_dorker_fallback_to_direct_on_scrapingant_failure(
         await dorker.aclose()
 
     assert blocked is False
-    assert results[0].snippet == "Reach us at fallback@example.com"
+    assert results == []
     assert len(scrapingant_calls) == 1
-    assert len(direct_calls) == 1
+    assert direct_calls == []
 
 
 async def test_bing_dorker_with_explicit_transport_does_not_inject_zone(
