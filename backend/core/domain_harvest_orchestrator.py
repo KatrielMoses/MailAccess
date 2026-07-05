@@ -149,6 +149,23 @@ class DomainHarvestResult:
     employee_names_processed: int = 0
 
 
+def _normalize_module_result(
+    module_name: str, result: ModuleResult | None
+) -> ModuleResult:
+    if result is not None:
+        return result
+    _LOG.warning(
+        "Module %s returned None instead of ModuleResult — skipping",
+        module_name,
+    )
+    return ModuleResult(
+        status=ModuleStatus.FAILED,
+        findings=[],
+        metadata={},
+        errors=["Module returned None — this is a bug in the module"],
+    )
+
+
 # ---------------------------------------------------------------------
 # Domain validation + free-provider rejection
 # ---------------------------------------------------------------------
@@ -323,7 +340,8 @@ def _aggregate(
     seen_urls: dict[str, set[str]] = {}
 
     for module_name, result in module_results.items():
-        for finding in result.findings or []:
+        safe_result = _normalize_module_result(module_name, result)
+        for finding in safe_result.findings or []:
             email = _extract_email(finding)
             if not email:
                 continue
@@ -540,7 +558,8 @@ def _sort_key(email: HarvestedEmail) -> tuple[int, int, int]:
 def _safe_run(module: Any, domain: str) -> ModuleResult:
     """Wrap a module's ``run`` so a single failure doesn't crash the batch."""
     try:
-        return asyncio.run(module.run(domain))
+        result = asyncio.run(module.run(domain))
+        return _normalize_module_result(module.name, result)
     except Exception as exc:  # noqa: BLE001
         _LOG.warning("domain_harvest: %s crashed: %s", module.name, exc)
         return ModuleResult(
@@ -628,12 +647,15 @@ async def _safe_phase12_run(
     try:
         if accepted is None:
             # Generic callable — pass everything.
-            return name, await module.run(domain, **kwargs)
+            result = await module.run(domain, **kwargs)
+            return name, _normalize_module_result(name, result)
         filtered = {k: v for k, v in kwargs.items() if k in accepted}
-        return name, await module.run(domain, **filtered)
+        result = await module.run(domain, **filtered)
+        return name, _normalize_module_result(name, result)
     except TypeError:
         # Mocks that don't accept our kwargs — fall back to positional.
-        return name, await module.run(domain)
+        result = await module.run(domain)
+        return name, _normalize_module_result(name, result)
     except Exception as exc:  # noqa: BLE001
         _LOG.warning(
             "domain_harvest: %s crashed: %s", name, exc
@@ -667,7 +689,8 @@ async def _run_pattern(
         and (pattern_accepted is None or "enable_smtp" in pattern_accepted)
     ):
         pattern_kwargs["enable_smtp"] = enable_smtp
-    return await pattern.run(domain, **pattern_kwargs)
+    result = await pattern.run(domain, **pattern_kwargs)
+    return _normalize_module_result(pattern.name, result)
 
 
 # ---------------------------------------------------------------------
@@ -881,18 +904,20 @@ async def _orchestrate(
             )
             continue
         name, result = outcome  # type: ignore[misc]
-        phase12_results[name] = result
+        phase12_results[name] = _normalize_module_result(name, result)
         # MUST-FIX S5: fire callback as soon as this module is final.
-        _emit(name, result)
+        _emit(name, phase12_results[name])
 
     # ------------------------------------------------------------------
     # Phase 3 — pattern_and_verify (depends on employee_name_discovery)
     # MUST-FIX M3: enable_smtp is threaded via the explicit kwarg.
     # MUST-FIX S5: emit callback when pattern_and_verify completes too.
     # ------------------------------------------------------------------
-    employee_findings = phase12_results.get(
-        MODULE_EMPLOYEE_NAMES, ModuleResult(status=ModuleStatus.SKIPPED)
-    ).findings or []
+    employee_result = _normalize_module_result(
+        MODULE_EMPLOYEE_NAMES,
+        phase12_results.get(MODULE_EMPLOYEE_NAMES, ModuleResult(status=ModuleStatus.SKIPPED)),
+    )
+    employee_findings = employee_result.findings or []
     employee_names = _employee_names_from_findings(employee_findings)
 
     try:
@@ -905,6 +930,7 @@ async def _orchestrate(
             status=ModuleStatus.FAILED,
             errors=[f"{MODULE_PATTERN_VERIFY}: {exc}"],
         )
+    pattern_result = _normalize_module_result(MODULE_PATTERN_VERIFY, pattern_result)
     _emit(MODULE_PATTERN_VERIFY, pattern_result)
 
     # ------------------------------------------------------------------

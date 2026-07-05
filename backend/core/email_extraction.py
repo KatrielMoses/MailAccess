@@ -17,12 +17,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from ipaddress import ip_address
 
 EMAIL_REGEX = re.compile(
     r"[a-zA-Z0-9][a-zA-Z0-9._%+\-]*"
     r"@"
     r"[a-zA-Z0-9][a-zA-Z0-9.\-]*"
     r"\.[a-zA-Z]{2,}"
+)
+DOMAIN_REGEX = re.compile(
+    r"^(?=.{4,253}$)(?!-)[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$"
 )
 
 # Obfuscation patterns.  The shorter / case-sensitive versions (``AT``,
@@ -141,6 +145,48 @@ class ExtractedEmail:
     email: str
     on_domain: bool
     source_text_snippet: str
+
+
+def validate_email(value: str) -> bool:
+    """Return True when *value* is safe to pass into investigation modules."""
+    if not isinstance(value, str):
+        return False
+    email = value.strip()
+    if not email or any(ch.isspace() for ch in email):
+        return False
+    if email.count("@") != 1:
+        return False
+    local, domain = email.split("@", 1)
+    if not local or len(local) > 64:
+        return False
+    if not domain or len(domain) < 4 or "." not in domain:
+        return False
+    if not DOMAIN_REGEX.fullmatch(domain):
+        return False
+    return True
+
+
+def validate_domain(value: str, *, reject_free_provider: bool = False) -> bool:
+    """Return True when *value* is a real domain, not an IP literal."""
+    if not isinstance(value, str):
+        return False
+    domain = value.strip().lower()
+    if not domain or any(ch.isspace() for ch in domain):
+        return False
+    try:
+        ip_address(domain)
+    except ValueError:
+        pass
+    else:
+        return False
+    if not DOMAIN_REGEX.fullmatch(domain):
+        return False
+    if reject_free_provider:
+        from ..modules.domain_intel import _FREE_PROVIDERS
+
+        if domain in _FREE_PROVIDERS:
+            return False
+    return True
 
 
 def _extract_mailto_values(text: str) -> list[str]:

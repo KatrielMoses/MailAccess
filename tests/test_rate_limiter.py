@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 
@@ -36,12 +35,18 @@ async def test_concurrent_acquire_same_domain_serialized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure(monkeypatch, delay_ms=30)
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     limiter = DomainRateLimiter()
-    started = time.monotonic()
 
     await asyncio.gather(limiter.acquire("x.com"), limiter.acquire("x.com"))
 
-    assert time.monotonic() - started >= 0.02
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] > 0
 
 
 async def test_acquire_different_domains_dont_block_each_other(

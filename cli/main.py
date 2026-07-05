@@ -42,12 +42,9 @@ _ENV_FILE = Path.home() / ".mailaccess" / ".env"
 if _ENV_FILE.exists():
     load_dotenv(_ENV_FILE, override=False)
 
-from importlib.metadata import version as pkg_version
+from backend.config import APP_VERSION
 
-try:
-    _VERSION = pkg_version("mailaccess")
-except Exception:
-    _VERSION = "dev"
+_VERSION = APP_VERSION
 
 BANNER = f"""\
 [#8B0000]
@@ -96,6 +93,38 @@ _SCRAPINGANT_KEY_NAMES = {key_name for key_name, _, _ in _SCRAPINGANT_KEYS}
 
 _EXPORT_FORMATS = {".json", ".csv", ".md", ".pdf", ".stix", ".mtgx"}
 _SCRAPINGANT_PROXY_TYPES = {"residential", "datacenter"}
+
+
+def _secure_mailaccess_dir() -> None:
+    ENV_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if sys.platform != "win32":
+        with contextlib.suppress(OSError):
+            os.chmod(ENV_FILE.parent, 0o700)
+
+
+def _secure_env_file() -> None:
+    _secure_mailaccess_dir()
+    if not ENV_FILE.exists():
+        ENV_FILE.touch(mode=0o600)
+    if sys.platform != "win32":
+        with contextlib.suppress(OSError):
+            os.chmod(ENV_FILE, 0o600)
+
+
+def _set_env_key(key_name: str, value: str) -> None:
+    _secure_env_file()
+    set_key(str(ENV_FILE), key_name, value)
+    _secure_env_file()
+
+
+def _print_invalid_email(value: str) -> None:
+    err_console.print(
+        Panel(
+            f"[bold red]Error:[/] {value!r} is not a valid email address.\n"
+            "Expected format: user@domain.com",
+            border_style="red",
+        )
+    )
 
 _HARDCODED_MODULES = [
     ("haveibeenpwned", "HIBP", "HIBP_API_KEY", "No", "Check email against known breach databases"),
@@ -153,9 +182,20 @@ def main_callback(
     no_banner: bool = typer.Option(
         False, "--no-banner", help="Skip the ASCII banner (for CI/scripting)"
     ),
+    version_flag: bool = typer.Option(
+        False,
+        "--version",
+        help="Show MailAccess version and exit.",
+        is_eager=True,
+    ),
 ) -> None:
     import sys
 
+    if version_flag:
+        from backend.config import APP_VERSION
+
+        console.print(f"mailaccess {APP_VERSION}")
+        raise typer.Exit()
     if sys.stderr.isatty() and not no_banner:
         err_console.print(BANNER)
     if ctx.invoked_subcommand is None:
@@ -468,10 +508,7 @@ def _run_proxy_wizard() -> None:
 
 def _wizard_set_key(key_name: str, value: str) -> None:
     """Persist a key to .env and sync runtime state (used by the wizard)."""
-    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not ENV_FILE.exists():
-        ENV_FILE.touch()
-    set_key(str(ENV_FILE), key_name, value)
+    _set_env_key(key_name, value)
     if key_name in _SCRAPINGANT_KEY_NAMES:
         _sync_scrapingant_runtime_value(key_name, value)
 
@@ -657,16 +694,13 @@ def proxy_enable(
 
     from datetime import datetime, timezone
 
-    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not ENV_FILE.exists():
-        ENV_FILE.touch()
-    set_key(str(ENV_FILE), "SCRAPINGANT_ENABLED", "true")
+    _set_env_key("SCRAPINGANT_ENABLED", "true")
     _sync_scrapingant_runtime_value("SCRAPINGANT_ENABLED", "true")
-    set_key(str(ENV_FILE), "SCRAPINGANT_TRANSPORT", transport_value)
+    _set_env_key("SCRAPINGANT_TRANSPORT", transport_value)
     _sync_scrapingant_runtime_value("SCRAPINGANT_TRANSPORT", transport_value)
     # L3: write last-configured timestamp to .env and sync to runtime
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    set_key(str(ENV_FILE), "SCRAPINGANT_LAST_CONFIGURED", timestamp)
+    _set_env_key("SCRAPINGANT_LAST_CONFIGURED", timestamp)
     os.environ["SCRAPINGANT_LAST_CONFIGURED"] = timestamp
     console.print(f"[green]✓ ScrapingAnt enabled (transport: {transport_value})[/]")
     proxy_show()
@@ -677,16 +711,13 @@ def proxy_disable() -> None:
     """Disable ScrapingAnt completely — all routing goes direct."""
     from datetime import datetime, timezone
 
-    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not ENV_FILE.exists():
-        ENV_FILE.touch()
-    set_key(str(ENV_FILE), "SCRAPINGANT_ENABLED", "false")
+    _set_env_key("SCRAPINGANT_ENABLED", "false")
     _sync_scrapingant_runtime_value("SCRAPINGANT_ENABLED", "false")
-    set_key(str(ENV_FILE), "SCRAPINGANT_TRANSPORT", "none")
+    _set_env_key("SCRAPINGANT_TRANSPORT", "none")
     _sync_scrapingant_runtime_value("SCRAPINGANT_TRANSPORT", "none")
     # L3: write last-configured timestamp to .env and sync to runtime
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    set_key(str(ENV_FILE), "SCRAPINGANT_LAST_CONFIGURED", timestamp)
+    _set_env_key("SCRAPINGANT_LAST_CONFIGURED", timestamp)
     os.environ["SCRAPINGANT_LAST_CONFIGURED"] = timestamp
     console.print("[green]✓ ScrapingAnt disabled[/green]")
     console.print("[dim]All traffic routes direct. Run `mailaccess configure proxy enable` to re-enable.[/dim]")
@@ -837,6 +868,14 @@ def harvest_emails_command(
         raise typer.Exit(exit_code)
 
 
+@app.command()
+def version() -> None:
+    """Show MailAccess version and exit."""
+    from backend.config import APP_VERSION
+
+    console.print(f"mailaccess {APP_VERSION}")
+
+
 # ── Platform Audit (Phase 6C) ─────────────────────────────────────────────────
 
 
@@ -941,10 +980,7 @@ def keys_set(
     value: str = typer.Argument(..., help="The key value to store"),
 ) -> None:
     """Save an API key to ~/.mailaccess/.env."""
-    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not ENV_FILE.exists():
-        ENV_FILE.touch()
-    set_key(str(ENV_FILE), key_name, value)
+    _set_env_key(key_name, value)
     if key_name in _SCRAPINGANT_KEY_NAMES:
         _sync_scrapingant_runtime_value(key_name, value)
     console.print(f"[green]✓ {key_name} saved to ~/.mailaccess/.env[/green]")
@@ -3018,6 +3054,8 @@ def investigate(
     if proxy_fallback_ok and not use_proxies:
         raise typer.BadParameter("--proxy-fallback-ok is only valid with --use-proxies")
 
+    from backend.core.email_extraction import validate_email
+
     scrapingant_transport_override = None
     if use_scraping_api:
         scrapingant_transport_override = "rest_api"
@@ -3031,11 +3069,17 @@ def investigate(
     else:
         emails = [email]
 
-    # Route bare filenames (no directory component) into results/
-    if output_file and Path(output_file).parent == Path("."):
-        results_dir = Path(__file__).resolve().parent.parent / "results"
-        results_dir.mkdir(exist_ok=True)
-        output_file = str(results_dir / output_file)
+    for target_email in emails:
+        if not validate_email(target_email):
+            _print_invalid_email(target_email)
+            raise typer.Exit(1)
+
+    if output_file:
+        output_path = Path(output_file)
+        if not output_path.is_absolute():
+            output_path = Path(os.getcwd()) / output_path
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_file = str(output_path)
 
     max_code = 0
     for i, target_email in enumerate(emails):

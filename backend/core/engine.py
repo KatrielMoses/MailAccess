@@ -30,6 +30,24 @@ logger = logging.getLogger(__name__)
 _ENRICHMENT_TIMEOUT_SECONDS = 30
 
 
+def _normalize_module_result(
+    module_name: str,
+    result: ModuleResult | None,
+) -> ModuleResult:
+    if result is not None:
+        return result
+    logger.warning(
+        "Module %s returned None instead of ModuleResult — skipping",
+        module_name,
+    )
+    return ModuleResult(
+        status=ModuleStatus.FAILED,
+        findings=[],
+        metadata={},
+        errors=["Module returned None — this is a bug in the module"],
+    )
+
+
 def _finding_sort_key(finding) -> tuple[str, str, str]:
     if not isinstance(finding, dict):
         return ("", "", str(finding))
@@ -43,7 +61,7 @@ def _finding_sort_key(finding) -> tuple[str, str, str]:
 def _sort_collected(results: dict[str, ModuleResult]) -> dict[str, ModuleResult]:
     ordered: dict[str, ModuleResult] = {}
     for name in sorted(results):
-        result = results[name]
+        result = _normalize_module_result(name, results[name])
         result.findings = sorted(result.findings, key=_finding_sort_key)
         ordered[name] = result
     return ordered
@@ -55,7 +73,7 @@ def _compute_exposure_score(
 ) -> int:
     total = 0.0
     for name in sorted(results):
-        result = results[name]
+        result = _normalize_module_result(name, results[name])
         if result.status not in (ModuleStatus.SUCCESS, ModuleStatus.PARTIAL):
             continue
         weight = module_weight(name)
@@ -91,7 +109,7 @@ def _build_graph(
         findings = [
             {"module_name": module_name, "data": finding}
             for module_name, result in collected.items()
-            for finding in result.findings
+            for finding in _normalize_module_result(module_name, result).findings
         ]
         findings = collapse_breach_findings(findings)
         graph = IdentityGraph.build(
@@ -142,12 +160,13 @@ async def _build_graph_with_timeout(
 def _prepare_results(collected: dict[str, ModuleResult]) -> dict[str, ModuleResult]:
     final = {
         name: ModuleResult(
-            status=result.status,
-            findings=list(result.findings),
-            metadata=deepcopy(result.metadata) if result.metadata else {},
-            errors=list(result.errors) if result.errors else [],
+            status=safe_result.status,
+            findings=list(safe_result.findings),
+            metadata=deepcopy(safe_result.metadata) if safe_result.metadata else {},
+            errors=list(safe_result.errors) if safe_result.errors else [],
         )
         for name, result in collected.items()
+        if (safe_result := _normalize_module_result(name, result))
     }
     from .platform_dedup import deduplicate_platform_findings
 
@@ -160,12 +179,13 @@ def _prepare_results(collected: dict[str, ModuleResult]) -> dict[str, ModuleResu
     collapsed = collapse_breach_findings(flattened)
     final = {
         name: ModuleResult(
-            status=result.status,
+            status=safe_result.status,
             findings=[],
-            metadata=deepcopy(result.metadata) if result.metadata else {},
-            errors=list(result.errors) if result.errors else [],
+            metadata=deepcopy(safe_result.metadata) if safe_result.metadata else {},
+            errors=list(safe_result.errors) if safe_result.errors else [],
         )
         for name, result in final.items()
+        if (safe_result := _normalize_module_result(name, result))
     }
     for finding in collapsed:
         module_name = str(finding.get("module_name") or "").strip()
@@ -355,19 +375,25 @@ class InvestigationEngine:
         graph_data: dict | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
+        safe_collected = {
+            name: _normalize_module_result(name, result)
+            for name, result in collected.items()
+        }
         name_result = NameConsensusEngine(original_email).resolve(
-            extract_name_candidates(collected, original_email)
+            extract_name_candidates(safe_collected, original_email)
         )
-        score = _compute_exposure_score(collected, name_result.name_confidence)
-        credential_risk = assess_credential_risk_from_results(collected, as_of=now)
+        score = _compute_exposure_score(safe_collected, name_result.name_confidence)
+        credential_risk = assess_credential_risk_from_results(
+            safe_collected, as_of=now
+        )
         timeline_rows = [
             {"module_name": module_name, "data": finding}
-            for module_name, result in collected.items()
+            for module_name, result in safe_collected.items()
             for finding in result.findings
         ]
         timeline = TimelineBuilder(as_of=now).build_timeline(timeline_rows)
         credibility = {}
-        credibility_result = collected.get("email_credibility")
+        credibility_result = safe_collected.get("email_credibility")
         if credibility_result and isinstance(credibility_result.metadata, dict):
             credibility = credibility_result.metadata
         defenders_brief = defenders_brief_to_dict(
@@ -403,7 +429,7 @@ class InvestigationEngine:
                     .where(Investigation.id == investigation_id)
                     .values(**values)
                 )
-                for module_name, result in collected.items():
+                for module_name, result in safe_collected.items():
                     session.add(
                         ModuleRun(
                             investigation_id=investigation_id,
