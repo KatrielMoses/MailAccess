@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,24 @@ _STATUS_COLORS = {
     "partial": "yellow",
     "skipped": "dim",
 }
+
+
+def _format_timestamp(value: str | None) -> str:
+    if not value:
+        return "unknown"
+    text = str(value).strip()
+    if not text:
+        return "unknown"
+    try:
+        if len(text) == 14 and text.isdigit():
+            return datetime.strptime(text, "%Y%m%d%H%M%S").strftime("%Y-%m-%d")
+        if len(text) == 8 and text.isdigit():
+            return datetime.strptime(text, "%Y%m%d").strftime("%Y-%m-%d")
+        if "T" in text or "-" in text:
+            return text[:10]
+    except (TypeError, ValueError):
+        return text[:10] if text else "unknown"
+    return text[:10] if len(text) >= 10 else text
 
 
 def _module_display_name(name: str) -> str:
@@ -357,8 +376,8 @@ def _format_emails_block(
             text.append("[ROLE]", style="yellow")
         if entry.first_seen_timestamp or entry.last_seen_timestamp:
             text.append("  ")
-            first = (entry.first_seen_timestamp or "")[:7]
-            last = (entry.last_seen_timestamp or entry.first_seen_timestamp or "")[:7]
+            first = _format_timestamp(entry.first_seen_timestamp)
+            last = _format_timestamp(entry.last_seen_timestamp or entry.first_seen_timestamp)
             if first and first == last:
                 text.append(f"seen {first}", style="dim")
             else:
