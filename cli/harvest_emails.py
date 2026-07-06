@@ -221,14 +221,23 @@ def _apply_filters(
         module_results=result.module_results,
         unique_emails=filtered_emails,
         total_unique_emails=len(filtered_emails),
+        # Phase 1 of 4: tier counts are PERSONAL-only — match the
+        # orchestrator's semantics so the filtered summary stays
+        # consistent with the unfiltered one.
         high_confidence_count=sum(
-            1 for e in filtered_emails if e.confidence_label == "HIGH"
+            1
+            for e in filtered_emails
+            if e.confidence_label == "HIGH" and not e.is_role
         ),
         medium_confidence_count=sum(
-            1 for e in filtered_emails if e.confidence_label == "MEDIUM"
+            1
+            for e in filtered_emails
+            if e.confidence_label == "MEDIUM" and not e.is_role
         ),
         low_confidence_count=sum(
-            1 for e in filtered_emails if e.confidence_label == "LOW"
+            1
+            for e in filtered_emails
+            if e.confidence_label == "LOW" and not e.is_role
         ),
         role_account_count=sum(1 for e in filtered_emails if e.is_role),
         personal_email_count=sum(
@@ -256,6 +265,10 @@ def run_harvest_emails(
     min_confidence_score: float = 0.0,
     exclude_domains: tuple[str, ...] = (),
     on_domain_only: bool = False,
+    show_low: bool = False,
+    show_unverified_patterns: bool = False,
+    show_role: bool = False,
+    full: bool = False,
 ) -> int:
     """Run the domain email harvest and render / export results.
 
@@ -409,9 +422,19 @@ def run_harvest_emails(
         )
 
     # ------------------------------------------------------------------
-    # 6. Render CLI output.
+    # 6. Render CLI output.  Phase 1 of 4: pass the four display flags
+    # through to ``format_harvest_cli_output``.  ``full`` is the
+    # restore-legacy alias and is handled inside the formatter itself.
     # ------------------------------------------------------------------
-    console.print(format_harvest_cli_output(result))
+    console.print(
+        format_harvest_cli_output(
+            result,
+            show_low=show_low,
+            show_unverified_patterns=show_unverified_patterns,
+            show_role=show_role,
+            full=full,
+        )
+    )
 
     # M2: if any module had a proxy failure, show a hint.
     proxy_failed = any(

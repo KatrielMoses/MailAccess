@@ -85,6 +85,7 @@ def _rationale_chip(entry: HarvestedEmail) -> str:
     # Map source_types to compact display labels.
     compact_map = {
         "common_crawl_single": "cc",
+        "common_crawl_medium": "cc",
         "common_crawl_high_density": "cc*",
         "ca_attested": "ca",
         "smtp_verified": "smtp",
@@ -94,7 +95,6 @@ def _rationale_chip(entry: HarvestedEmail) -> str:
         "github_commit_author": "gh",
         "github_code_match": "gh-code",
         "press_release": "press",
-        "search_snippet": "search",
         "search_snippet_ddg": "ddg",
         "search_snippet_bing": "bing",
         # W5: the three new structured-source modules.
@@ -109,7 +109,7 @@ def _rationale_chip(entry: HarvestedEmail) -> str:
             chips.append(label)
     multiplier_label = breakdown.get("multiplier_label") or ""
     # Tighten "smtp_verified" → "smtp", collapse synonyms
-    if "smtp" in chips and multiplier_label in ("smtp_verified", "ca_attested"):
+    if "smtp" in chips and multiplier_label in ("smtp_verified", "pgp_or_ca"):
         # already covered by smtp chip
         pass
     freshness = breakdown.get("freshness")
@@ -135,6 +135,34 @@ def _rationale_chip(entry: HarvestedEmail) -> str:
     return "(" + " ".join(parts) + ")"
 
 
+def _is_unverified_permutation(entry: HarvestedEmail) -> bool:
+    """Return True for emails generated as patterns but never SMTP-verified.
+
+    Phase 1 of 4: after Change 1 (``permutation_unverified`` weight
+    drops to 0.0) these candidates always score 0.0 and therefore
+    always land in LOW.  They are qualitatively different from a real
+    email that happened to score LOW (e.g. stale CC data): they were
+    synthesised from a name pattern and the SMTP probe didn't confirm
+    them.  The CLI hides them by default and shows a dedicated
+    suppressed-count line.
+
+    Detection rule (per spec): any evidence entry from the
+    ``pattern_and_verify`` module carrying
+    ``verification_status="unverified"``.
+    """
+    for ev in entry.evidence or []:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("module") != "pattern_and_verify":
+            continue
+        meta = ev.get("metadata") or {}
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("verification_status") == "unverified":
+            return True
+    return False
+
+
 def _extract_discovered_names(result: DomainHarvestResult) -> list[dict[str, Any]]:
     """Pull discovered employee names from the ``employee_name_discovery``
     module's findings.
@@ -149,6 +177,21 @@ def _extract_discovered_names(result: DomainHarvestResult) -> list[dict[str, Any
     )
     if module_result is None:
         return []
+    pattern_result = (result.module_results or {}).get("pattern_and_verify")
+    pattern_by_name: dict[str, dict[str, Any]] = {}
+    pattern_medium_threshold = 0.50
+    if pattern_result is not None:
+        pattern_meta = pattern_result.metadata or {}
+        if isinstance(pattern_meta, dict):
+            pattern_medium_threshold = float(
+                pattern_meta.get("pattern_medium_confidence_threshold") or 0.50
+            )
+            for item in pattern_meta.get("pattern_generation_by_name") or []:
+                if not isinstance(item, dict):
+                    continue
+                name_key = str(item.get("name") or "").strip().lower()
+                if name_key:
+                    pattern_by_name[name_key] = item
     findings = module_result.findings or []
     out: list[dict[str, Any]] = []
     for finding in findings:
@@ -160,18 +203,29 @@ def _extract_discovered_names(result: DomainHarvestResult) -> list[dict[str, Any
         name = meta.get("name")
         if not name:
             continue
-        out.append(
-            {
-                "name": str(name),
-                "sources": list(meta.get("sources") or []),
-                "source_count": int(meta.get("source_count") or 0),
-                "title_or_role": meta.get("title_or_role"),
-                "confidence_score": float(
-                    meta.get("confidence_score") or 0.0
-                ),
-                "source_urls": list(meta.get("source_urls") or []),
-            }
-        )
+        row = {
+            "name": str(name),
+            "sources": list(meta.get("sources") or []),
+            "source_count": int(meta.get("source_count") or 0),
+            "title_or_role": meta.get("title_or_role"),
+            "confidence_score": float(
+                meta.get("confidence_score") or 0.0
+            ),
+            "source_urls": list(meta.get("source_urls") or []),
+        }
+        pattern_row = pattern_by_name.get(str(name).strip().lower())
+        if pattern_row:
+            row["pattern_tier"] = pattern_row.get("tier")
+            row["patterns_generated"] = int(
+                pattern_row.get("patterns_generated") or 0
+            )
+            row["pattern_skipped"] = bool(pattern_row.get("skipped"))
+            row["pattern_skip_reason"] = pattern_row.get("skip_reason")
+            row["pattern_medium_confidence_threshold"] = pattern_medium_threshold
+            row["downgraded_for_budget"] = bool(
+                pattern_row.get("downgraded_for_budget")
+            )
+        out.append(row)
     # Highest-confidence first, multi-source wins ties.
     out.sort(
         key=lambda r: (
@@ -199,7 +253,10 @@ def _format_discovered_names_panel(
         text.append("  No employee names discovered.", style="dim")
     else:
         for entry in names[:max_lines]:
-            label = label_for_score(entry["confidence_score"])
+            label = str(entry.get("pattern_tier") or "").upper()
+            if not label:
+                label = label_for_score(entry["confidence_score"])
+            display_label = "MED" if label == "MEDIUM" else label
             color = _LABEL_COLORS.get(label, "white")
             text.append("  * ", style="dim")
             text.append(entry["name"], style=color)
@@ -209,6 +266,19 @@ def _format_discovered_names_panel(
                 f"  via {','.join(entry['sources'])}",
                 style="cyan",
             )
+            if entry.get("pattern_tier"):
+                text.append("  ")
+                text.append(display_label, style=color)
+                text.append(" -> ", style="dim")
+                if entry.get("pattern_skipped"):
+                    text.append("skipped", style="dim")
+                else:
+                    text.append(
+                        f"{entry.get('patterns_generated', 0)} patterns",
+                        style="dim",
+                    )
+                if entry.get("downgraded_for_budget"):
+                    text.append(" (budget)", style="dim")
             if len(names) > max_lines:
                 # full count shown in title; max_lines enforces panel height.
                 pass
@@ -216,6 +286,31 @@ def _format_discovered_names_panel(
         if len(names) > max_lines:
             text.append(
                 f"  …and {len(names) - max_lines} more\n",
+                style="dim",
+            )
+        tiered = [n for n in names if n.get("pattern_tier")]
+        if tiered:
+            medium_threshold = float(
+                tiered[0].get("pattern_medium_confidence_threshold") or 0.50
+            )
+            high_count = sum(1 for n in tiered if n.get("pattern_tier") == "high")
+            med_count = sum(1 for n in tiered if n.get("pattern_tier") == "medium")
+            low_count = sum(1 for n in tiered if n.get("pattern_tier") == "low")
+            high_patterns = sum(
+                int(n.get("patterns_generated") or 0)
+                for n in tiered
+                if n.get("pattern_tier") == "high"
+            )
+            med_patterns = sum(
+                int(n.get("patterns_generated") or 0)
+                for n in tiered
+                if n.get("pattern_tier") == "medium"
+            )
+            text.append(
+                f"  Pattern generation: {high_count} HIGH names -> "
+                f"{high_patterns} patterns · {med_count} MED names -> "
+                f"{med_patterns} patterns · {low_count} LOW names skipped "
+                f"(confidence < {medium_threshold:.2f})\n",
                 style="dim",
             )
     return Panel(
@@ -260,9 +355,14 @@ def _format_emails_block(
         if entry.is_role:
             text.append("  ")
             text.append("[ROLE]", style="yellow")
-        if entry.first_seen_timestamp:
+        if entry.first_seen_timestamp or entry.last_seen_timestamp:
             text.append("  ")
-            text.append(f"first seen {entry.first_seen_timestamp[:10]}", style="dim")
+            first = (entry.first_seen_timestamp or "")[:7]
+            last = (entry.last_seen_timestamp or entry.first_seen_timestamp or "")[:7]
+            if first and first == last:
+                text.append(f"seen {first}", style="dim")
+            else:
+                text.append(f"first: {first or '?'} · last: {last or '?'}", style="dim")
         text.append("\n")
     if len(emails) > max_lines:
         text.append(
@@ -342,8 +442,22 @@ def _build_sources_table(result: DomainHarvestResult) -> Table:
     return table
 
 
-def _build_suggested_next_steps(result: DomainHarvestResult) -> list[str]:
-    """Conditional hints based on what happened during the harvest."""
+def _build_suggested_next_steps(
+    result: DomainHarvestResult,
+    *,
+    show_low: bool = False,
+    show_unverified_patterns: bool = False,
+    show_role: bool = False,
+    suppressed_low_count: int = 0,
+    unverified_permutation_count: int = 0,
+    role_count: int = 0,
+) -> list[str]:
+    """Conditional hints based on what happened during the harvest.
+
+    Phase 1 of 4: extended to surface the new display-filter flags so
+    the analyst knows what was hidden by default and which flag
+    re-reveals each category.
+    """
     hints: list[str] = []
     if result.total_unique_emails == 0:
         hints.append(
@@ -353,6 +467,30 @@ def _build_suggested_next_steps(result: DomainHarvestResult) -> list[str]:
         )
         return hints
 
+    # Phase 1: hint about suppressed unverified permutations when SMTP
+    # was not used.  This is the highest-leverage hint — re-running with
+    # --verify-smtp is the most common path from "lots of LOW junk" to
+    # "a handful of SMTP-confirmed candidates".
+    if unverified_permutation_count > 0 and not result.smtp_verification_used:
+        hints.append(
+            f"-> {unverified_permutation_count} pattern candidates "
+            "suppressed — re-run with --verify-smtp to expand into "
+            "SMTP-verified findings."
+        )
+
+    if suppressed_low_count > 0 and not show_low:
+        hints.append(
+            f"-> {suppressed_low_count} LOW confidence emails hidden — "
+            "use --show-low to reveal."
+        )
+
+    if role_count > 0 and not show_role:
+        hints.append(
+            f"-> {role_count} role accounts hidden — "
+            "use --show-role to reveal."
+        )
+
+    # Legacy hints preserved verbatim.
     if (
         result.employee_names_processed > 0
         and not result.smtp_verification_used
@@ -375,6 +513,10 @@ def _build_suggested_next_steps(result: DomainHarvestResult) -> list[str]:
             "checking related domains, or pivoting through discovered names."
         )
 
+    # Phase 1: always-present "reveal everything" hint — the user can
+    # opt into the legacy "show everything" surface with a single flag.
+    hints.append("-> --full reveals everything.")
+
     if not hints:
         hints.append(
             "All set — review HIGH-confidence candidates above and "
@@ -383,12 +525,46 @@ def _build_suggested_next_steps(result: DomainHarvestResult) -> list[str]:
     return hints
 
 
-def format_harvest_cli_output(result: DomainHarvestResult) -> str:
+def format_harvest_cli_output(
+    result: DomainHarvestResult,
+    *,
+    show_low: bool = False,
+    show_unverified_patterns: bool = False,
+    show_role: bool = False,
+    full: bool = False,
+) -> str:
     """Build the Rich-formatted CLI output.
 
     Returns a plain ``str`` — callers should pass it to a Rich
     ``Console.print()`` so glyphs render correctly.
+
+    Phase 1 of 4 — display-filter surface:
+
+    * ``show_low`` (default False) — LOW-confidence emails are hidden.
+      When False and there are LOW personal emails, a suppressed-
+      count line is rendered below the panels.
+    * ``show_unverified_patterns`` (default False) — pattern
+      candidates generated by ``pattern_and_verify`` but never
+      SMTP-verified are hidden (independent of ``show_low``).  When
+      False and there are any, a dedicated suppressed-count line is
+      rendered with the ``--verify-smtp`` hint.
+    * ``show_role`` (default False) — role accounts render as a
+      collapsed name-only list.  When True they expand with full
+      metadata same as personal emails.
+    * ``full`` (default False) — convenience alias that sets all
+      three flags to True.  Restores the pre-Phase-1 surface exactly.
+
+    Role accounts (``is_role=True``) are excluded from the HIGH /
+    MEDIUM / LOW tier panels regardless of confidence label — they
+    live in their own section so the analyst's tier counts reflect
+    personal emails only.
     """
+    # ``full`` is the convenience restore-legacy alias.
+    if full:
+        show_low = True
+        show_unverified_patterns = True
+        show_role = True
+
     console = Console(record=True, width=120)
     console.print(
         Rule(
@@ -397,21 +573,58 @@ def format_harvest_cli_output(result: DomainHarvestResult) -> str:
         )
     )
 
-    # Per-source status table
+    # Per-source status table (unchanged).
     console.print(_build_sources_table(result))
 
-    verified_count = sum(1 for e in result.unique_emails if e.is_smtp_verified)
+    # ------------------------------------------------------------------
+    # Phase 1: split personal vs role emails, and unverified permutations
+    # out of the personal LOW bucket.  All three bucketings are derived
+    # from ``result.unique_emails`` directly — the report layer is
+    # self-contained and does not depend on the orchestrator's count
+    # fields, which means downstream tests can construct mock results
+    # with arbitrary count fields and the display stays correct.
+    # ------------------------------------------------------------------
+    personal_emails = [e for e in result.unique_emails if not e.is_role]
+    role_emails = [e for e in result.unique_emails if e.is_role]
+
+    unverified_perms = [
+        e for e in personal_emails if _is_unverified_permutation(e)
+    ]
+    non_perm_personal = [
+        e for e in personal_emails if not _is_unverified_permutation(e)
+    ]
+
+    # HIGH / MEDIUM / LOW — personal, excluding unverified permutations.
+    high = [e for e in non_perm_personal if e.confidence_label == "HIGH"]
+    medium = [
+        e for e in non_perm_personal if e.confidence_label == "MEDIUM"
+    ]
+    low = [e for e in non_perm_personal if e.confidence_label == "LOW"]
+
+    # ------------------------------------------------------------------
+    # Phase 1: new summary bar.  Replaces the legacy "Total: N candidates"
+    # with an "Actionable: ..." line that names each visible bucket and
+    # the suppressed count.
+    # ------------------------------------------------------------------
+    suppressed_total = len(low) + len(unverified_perms)
+    summary_parts: list[str] = [
+        f"[bold green]{len(high)} HIGH[/bold green]",
+        f"[bold yellow]{len(medium)} MEDIUM[/bold yellow] personal emails",
+    ]
+    if role_emails:
+        summary_parts.append(f"{len(role_emails)} role accounts")
+    if suppressed_total > 0:
+        summary_parts.append(
+            f"{suppressed_total:,} suppressed (LOW + unverified patterns)"
+        )
+    console.print("\n[bold]Actionable:[/bold] " + " · ".join(summary_parts))
     console.print(
-        f"\n[bold]Total:[/bold] {result.total_unique_emails} candidate emails, "
-        f"{verified_count} verified "
-        f"[dim](took {result.duration_seconds:.1f}s)[/dim]\n"
+        "[dim]Run with --full to show everything.[/dim]\n"
     )
 
-    # HIGH / MEDIUM / LOW sections
-    high = [e for e in result.unique_emails if e.confidence_label == "HIGH"]
-    medium = [e for e in result.unique_emails if e.confidence_label == "MEDIUM"]
-    low = [e for e in result.unique_emails if e.confidence_label == "LOW"]
-
+    # ------------------------------------------------------------------
+    # HIGH / MEDIUM / LOW panels.
+    # ------------------------------------------------------------------
     console.print(
         Panel(
             _format_emails_block(high),
@@ -426,33 +639,98 @@ def format_harvest_cli_output(result: DomainHarvestResult) -> str:
             border_style="yellow",
         )
     )
-    console.print(
-        Panel(
-            _format_emails_block(low),
-            title=f"[dim]LOW CONFIDENCE ({len(low)})[/dim]",
-            border_style="dim",
-        )
-    )
 
-    # Role accounts section
-    role_accts = [e for e in result.unique_emails if e.is_role]
-    role_text = Text()
-    if role_accts:
-        for entry in role_accts:
-            role_text.append(f"  * {entry.email}", style="yellow")
+    # LOW: hidden by default.  When shown, unverified permutations are
+    # included only if ``show_unverified_patterns`` is also True (the
+    # two flags are independent).
+    if show_low:
+        low_panel_emails = list(low)
+        if show_unverified_patterns:
+            low_panel_emails.extend(unverified_perms)
+        console.print(
+            Panel(
+                _format_emails_block(low_panel_emails),
+                title=(
+                    f"[dim]LOW CONFIDENCE ({len(low_panel_emails)})"
+                    "[/dim]"
+                ),
+                border_style="dim",
+            )
+        )
+    elif low:
+        # LOW panel suppressed — print the dedicated suppressed-count line.
+        console.print(
+            f"[dim]LOW confidence: {len(low)} emails hidden. "
+            "Run with --show-low to reveal.[/dim]"
+        )
+
+    # Unverified permutations: always suppressed unless the explicit
+    # flag is passed.  Independent of ``show_low`` — even when LOW is
+    # shown, unverified patterns stay hidden behind their own flag.
+    if unverified_perms and not show_unverified_patterns:
+        console.print(
+            f"[dim]Unverified pattern candidates: {len(unverified_perms)} "
+            "hidden (score 0.0 — no SMTP verification). "
+            "Run with --verify-smtp to verify, or "
+            "--show-unverified-patterns to view raw.[/dim]"
+        )
+
+    # ------------------------------------------------------------------
+    # Role accounts section.  Phase 1: collapsed by default — a comma-
+    # separated name-only list with a hint at the bottom.  When
+    # ``show_role`` is True, expand to full metadata same as personal
+    # emails (via ``_format_emails_block`` which already tags rows with
+    # ``[ROLE]``).
+    # ------------------------------------------------------------------
+    if role_emails:
+        role_text = Text()
+        if show_role:
+            # Expanded: full per-email rendering identical to personal.
+            for entry in role_emails:
+                # Inline copy of _format_emails_block rendering so we
+                # can capture the [ROLE] tag in this section without
+                # inheriting the "via N source(s)" / rationale chip
+                # layout that personal emails get.  Keep it focused on
+                # the metadata the analyst needs when expanding roles.
+                line_style = _LABEL_COLORS.get(entry.confidence_label, "white")
+                role_text.append("  * ", style="dim")
+                role_text.append(entry.email, style=line_style)
+                role_text.append("  ")
+                role_text.append(
+                    f"({entry.confidence_label})",
+                    style="dim",
+                )
+                role_text.append("  ")
+                role_text.append("[ROLE]", style="yellow")
+                role_text.append("\n")
+            console.print(
+                Panel(
+                    role_text,
+                    title=(
+                        f"[bold yellow]ROLE ACCOUNTS ({len(role_emails)})"
+                        "[/bold yellow]"
+                    ),
+                    border_style="yellow",
+                )
+            )
+        else:
+            # Collapsed: comma-separated list with hint.
+            emails_csv = ", ".join(e.email for e in role_emails)
+            role_text.append(f"  {emails_csv}\n")
             role_text.append(
-                f"  ({entry.confidence_label})\n",
+                "  Run with --show-role for full list.\n",
                 style="dim",
             )
-    else:
-        role_text.append("  (none)", style="dim")
-    console.print(
-        Panel(
-            role_text,
-            title=f"[bold yellow]Role accounts ({len(role_accts)})[/bold yellow]",
-            border_style="yellow",
-        )
-    )
+            console.print(
+                Panel(
+                    role_text,
+                    title=(
+                        f"[bold yellow]ROLE ACCOUNTS ({len(role_emails)})"
+                        "[/bold yellow]"
+                    ),
+                    border_style="yellow",
+                )
+            )
 
     # MUST-FIX S13: Discovered employee names — these are the names
     # pattern_and_verify already used to generate permutations. Showing
@@ -463,8 +741,16 @@ def format_harvest_cli_output(result: DomainHarvestResult) -> str:
     discovered = _extract_discovered_names(result)
     console.print(_format_discovered_names_panel(discovered))
 
-    # Suggested next steps
-    hints = _build_suggested_next_steps(result)
+    # Suggested next steps — now display-aware.
+    hints = _build_suggested_next_steps(
+        result,
+        show_low=show_low,
+        show_unverified_patterns=show_unverified_patterns,
+        show_role=show_role,
+        suppressed_low_count=len(low),
+        unverified_permutation_count=len(unverified_perms),
+        role_count=len(role_emails),
+    )
     hint_text = Text()
     for hint in hints:
         hint_text.append("  • ", style="cyan")
@@ -541,8 +827,8 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
                         "smtp_verified"
                         if entry.is_smtp_verified
                         else (
-                            "ca_attested"
-                            if entry.is_ca_attested
+                            "pgp_or_ca"
+                            if entry.is_pgp_or_ca
                             else (
                                 "multi_source"
                                 if entry.source_count >= 2
@@ -563,6 +849,7 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
                 "found_by_modules": entry.found_by_modules,
                 "source_count": entry.source_count,
                 "first_seen_timestamp": entry.first_seen_timestamp,
+                "last_seen_timestamp": entry.last_seen_timestamp,
                 "is_smtp_verified": entry.is_smtp_verified,
                 "is_ca_attested": entry.is_ca_attested,
                 "evidence": entry.evidence,
@@ -618,6 +905,15 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
             "catchall_detected": result.catchall_detected,
             "confirmed_pattern": result.confirmed_pattern,
             "employee_names_processed": result.employee_names_processed,
+            # Phase 1 of 4: signal to downstream tooling that the CLI
+            # hid a class of emails by default.  The JSON/CSV/NDJSON
+            # exports always carry the FULL email list (hiding is a
+            # CLI display decision only); ``display_filter`` is
+            # documentation, NOT a filter applied to ``emails``.
+            # Values:
+            #     "all"               — no filter applied (legacy)
+            #     "medium_and_above"  — LOW + unverified patterns hidden
+            "display_filter": "medium_and_above",
         },
         "emails": emails_out,
         "module_metadata": module_metadata,
@@ -653,6 +949,7 @@ _CSV_COLUMNS = [
     "found_by_modules",
     "source_count",
     "first_seen_timestamp",
+    "last_seen_timestamp",
     "subaddress_variants",
     "rationale_chip",
 ]
@@ -680,6 +977,7 @@ def format_harvest_csv_export(result: DomainHarvestResult) -> str:
             "found_by_modules": ",".join(entry.found_by_modules or []),
             "source_count": entry.source_count,
             "first_seen_timestamp": entry.first_seen_timestamp or "",
+            "last_seen_timestamp": entry.last_seen_timestamp or "",
             "subaddress_variants": ",".join(entry.subaddress_variants or []),
             "rationale_chip": _rationale_chip(entry),
         }
@@ -708,8 +1006,8 @@ def format_harvest_ndjson_export(result: DomainHarvestResult) -> str:
                     "smtp_verified"
                     if entry.is_smtp_verified
                     else (
-                        "ca_attested"
-                        if entry.is_ca_attested
+                            "pgp_or_ca"
+                            if entry.is_pgp_or_ca
                         else (
                             "multi_source"
                             if entry.source_count >= 2
@@ -730,6 +1028,7 @@ def format_harvest_ndjson_export(result: DomainHarvestResult) -> str:
             "found_by_modules": entry.found_by_modules,
             "source_count": entry.source_count,
             "first_seen_timestamp": entry.first_seen_timestamp,
+            "last_seen_timestamp": entry.last_seen_timestamp,
             "is_smtp_verified": entry.is_smtp_verified,
             "is_ca_attested": entry.is_ca_attested,
             "total_finding_count": entry.total_finding_count,

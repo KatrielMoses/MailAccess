@@ -45,7 +45,7 @@ from ..core.duckduckgo_dorker import DuckDuckGoDorker
 from ..core.http_client import build_client
 from ..core.scrapingant import get_active_transport
 from ..core.linkedin_name_discovery import discover_linkedin_names
-from ..core.name_quality import is_plausible_person_name
+from ..core.name_quality import is_plausible_person_name, name_suspicion_penalty
 from .base import BaseModule, ModuleResult, ModuleStatus
 
 # Imported eagerly so monkeypatch.setattr works in tests; the three
@@ -202,6 +202,12 @@ class EmployeeNameDiscoveryModule(BaseModule):
             cleaned = nd.name.strip()
             if not is_plausible_person_name(cleaned):
                 return
+            # Phase 4: apply suspicion penalty before recording.
+            # 0.0 penalty means the name was already rejected by
+            # name_quality but the caller skipped that check — skip here too.
+            penalty = name_suspicion_penalty(cleaned)
+            if penalty == 0.0:
+                return
             key = cleaned.lower()
             existing = aggregated.get(key)
             if existing is None:
@@ -210,15 +216,15 @@ class EmployeeNameDiscoveryModule(BaseModule):
                     sources=[nd.source],
                     source_count=1,
                     title_or_role=nd.title_or_role,
-                    confidence=nd.confidence,
+                    confidence=round(nd.confidence * penalty, 4),
                     source_urls=[nd.source_url] if nd.source_url else [],
                 )
                 return
             if nd.source not in existing.sources:
                 existing.sources.append(nd.source)
                 existing.source_count += 1
-                # Boost: top base confidence × (1 + bonus).
-                best_base = max(existing.confidence, nd.confidence)
+                # Boost: top base confidence × (1 + bonus), then reapply penalty.
+                best_base = max(existing.confidence, nd.confidence * penalty)
                 bonus = _MULTI_SOURCE_BONUS.get(
                     min(existing.source_count, 3),
                     _MULTI_SOURCE_BONUS[3],
@@ -496,6 +502,9 @@ def discover_names_for_tests(
         cleaned = nd.name.strip()
         if not is_plausible_person_name(cleaned):
             continue
+        penalty = name_suspicion_penalty(cleaned)
+        if penalty == 0.0:
+            continue
         key = cleaned.lower()
         existing = aggregated.get(key)
         if existing is None:
@@ -504,14 +513,14 @@ def discover_names_for_tests(
                 sources=[nd.source],
                 source_count=1,
                 title_or_role=nd.title_or_role,
-                confidence=nd.confidence,
+                confidence=round(nd.confidence * penalty, 4),
                 source_urls=[nd.source_url] if nd.source_url else [],
             )
             continue
         if nd.source not in existing.sources:
             existing.sources.append(nd.source)
             existing.source_count += 1
-            best_base = max(existing.confidence, nd.confidence)
+            best_base = max(existing.confidence, nd.confidence * penalty)
             bonus = _MULTI_SOURCE_BONUS.get(
                 min(existing.source_count, 3),
                 _MULTI_SOURCE_BONUS[3],
