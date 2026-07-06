@@ -1,0 +1,1 @@
+{"_meta": {"upstream": "test"}, "sites": {"Bad": {"url": "https://example.com/{}", "error_type": "weird"}}}

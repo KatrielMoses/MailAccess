@@ -1,0 +1,1 @@
+[{"Domain": "", "Name": "No Domain", "BreachDate": "2024-01-02", "PwnCount": 1000, "DataClasses": ["Email addresses"]}, {"Domain": "example.com", "Name": "Example", "BreachDate": "2024-01-02", "PwnCount": 10, "DataClasses": ["Email addresses"]}]
