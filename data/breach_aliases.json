@@ -1,0 +1,339 @@
+[
+  {
+    "canonical_id": "synthientcredentialstuffingthreatdata",
+    "canonical_name": "Synthient Credential Stuffing Threat Data",
+    "name": "SynthientCredentialStuffingThreatData",
+    "title": "Synthient Credential Stuffing Threat Data"
+  },
+  {
+    "canonical_id": "collection1",
+    "canonical_name": "Collection #1",
+    "name": "Collection1",
+    "title": "Collection #1"
+  },
+  {
+    "canonical_id": "verificationsio",
+    "canonical_name": "Verifications.io",
+    "name": "VerificationsIO",
+    "title": "Verifications.io",
+    "domain": "verifications.io"
+  },
+  {
+    "canonical_id": "onlinerspambot",
+    "canonical_name": "Onliner Spambot",
+    "name": "OnlinerSpambot",
+    "title": "Onliner Spambot"
+  },
+  {
+    "canonical_id": "pdl",
+    "canonical_name": "Data Enrichment Exposure From PDL Customer",
+    "name": "PDL",
+    "title": "Data Enrichment Exposure From PDL Customer"
+  },
+  {
+    "canonical_id": "exploitin",
+    "canonical_name": "Exploit.In",
+    "name": "ExploitIn",
+    "title": "Exploit.In"
+  },
+  {
+    "canonical_id": "facebook",
+    "canonical_name": "Facebook",
+    "name": "Facebook",
+    "title": "Facebook",
+    "domain": "facebook.com"
+  },
+  {
+    "canonical_id": "antipublic",
+    "canonical_name": "Anti Public Combo List",
+    "name": "AntiPublic",
+    "title": "Anti Public Combo List"
+  },
+  {
+    "canonical_id": "rivercitymedia",
+    "canonical_name": "River City Media Spam List",
+    "name": "RiverCityMedia",
+    "title": "River City Media Spam List",
+    "domain": "rivercitymediaonline.com"
+  },
+  {
+    "canonical_id": "telegramcombolists",
+    "canonical_name": "Combolists Posted to Telegram",
+    "name": "TelegramCombolists",
+    "title": "Combolists Posted to Telegram"
+  },
+  {
+    "canonical_id": "myspace",
+    "canonical_name": "MySpace",
+    "name": "MySpace",
+    "title": "MySpace",
+    "domain": "myspace.com"
+  },
+  {
+    "canonical_id": "alienstealerlogs",
+    "canonical_name": "ALIEN TXTBASE Stealer Logs",
+    "name": "AlienStealerLogs",
+    "title": "ALIEN TXTBASE Stealer Logs"
+  },
+  {
+    "canonical_id": "notsocradar",
+    "canonical_name": "Not SOCRadar",
+    "name": "NotSOCRadar",
+    "title": "Not SOCRadar"
+  },
+  {
+    "canonical_id": "wattpad",
+    "canonical_name": "Wattpad",
+    "name": "Wattpad",
+    "title": "Wattpad",
+    "domain": "wattpad.com"
+  },
+  {
+    "canonical_id": "netease",
+    "canonical_name": "NetEase",
+    "name": "NetEase",
+    "title": "NetEase",
+    "domain": "163.com"
+  },
+  {
+    "canonical_id": "deezer",
+    "canonical_name": "Deezer",
+    "name": "Deezer",
+    "title": "Deezer",
+    "domain": "deezer.com"
+  },
+  {
+    "canonical_id": "cit0day",
+    "canonical_name": "Cit0day",
+    "name": "Cit0day",
+    "title": "Cit0day",
+    "domain": "cit0day.in"
+  },
+  {
+    "canonical_id": "twitter200m",
+    "canonical_name": "Twitter (200M)",
+    "name": "Twitter200M",
+    "title": "Twitter (200M)",
+    "domain": "twitter.com"
+  },
+  {
+    "canonical_id": "synthientstealerlogthreatdata",
+    "canonical_name": "Synthient Stealer Log Threat Data",
+    "name": "SynthientStealerLogThreatData",
+    "title": "Synthient Stealer Log Threat Data"
+  },
+  {
+    "canonical_id": "zynga",
+    "canonical_name": "Zynga",
+    "name": "Zynga",
+    "title": "Zynga",
+    "domain": "zynga.com"
+  },
+  {
+    "canonical_id": "adultfriendfinder2016",
+    "canonical_name": "Adult FriendFinder (2016)",
+    "name": "AdultFriendFinder2016",
+    "title": "Adult FriendFinder (2016)",
+    "domain": "adultfriendfinder.com"
+  },
+  {
+    "canonical_id": "linkedin",
+    "canonical_name": "LinkedIn",
+    "name": "LinkedIn",
+    "title": "LinkedIn",
+    "domain": "linkedin.com",
+    "aliases": ["linkedin.com", "linkedincom"]
+  },
+  {
+    "canonical_id": "dubsmash",
+    "canonical_name": "Dubsmash",
+    "name": "Dubsmash",
+    "title": "Dubsmash",
+    "domain": "dubsmash.com"
+  },
+  {
+    "canonical_id": "adobe",
+    "canonical_name": "Adobe",
+    "name": "Adobe",
+    "title": "Adobe",
+    "domain": "adobe.com"
+  },
+  {
+    "canonical_id": "myfitnesspal",
+    "canonical_name": "MyFitnessPal",
+    "name": "MyFitnessPal",
+    "title": "MyFitnessPal",
+    "domain": "myfitnesspal.com"
+  },
+  {
+    "canonical_id": "canva",
+    "canonical_name": "Canva",
+    "name": "Canva",
+    "title": "Canva",
+    "domain": "canva.com"
+  },
+  {
+    "canonical_id": "nationalpublicdata",
+    "canonical_name": "National Public Data",
+    "name": "NationalPublicData",
+    "title": "National Public Data"
+  },
+  {
+    "canonical_id": "exactis",
+    "canonical_name": "Exactis",
+    "name": "Exactis",
+    "title": "Exactis",
+    "domain": "exactis.com"
+  },
+  {
+    "canonical_id": "apollo",
+    "canonical_name": "Apollo",
+    "name": "Apollo",
+    "title": "Apollo",
+    "domain": "apollo.io"
+  },
+  {
+    "canonical_id": "linkedinscrape",
+    "canonical_name": "LinkedIn Scraped Data (2021)",
+    "name": "LinkedInScrape",
+    "title": "LinkedIn Scraped Data (2021)",
+    "domain": "linkedin.com"
+  },
+  {
+    "canonical_id": "demandscience",
+    "canonical_name": "DemandScience by Pure Incubation",
+    "name": "DemandScience",
+    "title": "DemandScience by Pure Incubation",
+    "domain": "demandscience.com"
+  },
+  {
+    "canonical_id": "gravatar",
+    "canonical_name": "Gravatar",
+    "name": "Gravatar",
+    "title": "Gravatar",
+    "domain": "gravatar.com"
+  },
+  {
+    "canonical_id": "badoo",
+    "canonical_name": "Badoo",
+    "name": "Badoo",
+    "title": "Badoo",
+    "domain": "badoo.com"
+  },
+  {
+    "canonical_id": "pemiblanc",
+    "canonical_name": "Pemiblanc",
+    "name": "Pemiblanc",
+    "title": "Pemiblanc",
+    "domain": "pemiblanc.com"
+  },
+  {
+    "canonical_id": "datatrollstealerlogs",
+    "canonical_name": "Data Troll Stealer Logs",
+    "name": "DataTrollStealerLogs",
+    "title": "Data Troll Stealer Logs"
+  },
+  {
+    "canonical_id": "b2busabusinesses",
+    "canonical_name": "B2B USA Businesses",
+    "name": "B2BUSABusinesses",
+    "title": "B2B USA Businesses"
+  },
+  {
+    "canonical_id": "evite",
+    "canonical_name": "Evite",
+    "name": "Evite",
+    "title": "Evite",
+    "domain": "evite.com"
+  },
+  {
+    "canonical_id": "1win",
+    "canonical_name": "1win",
+    "name": "1win",
+    "title": "1win",
+    "domain": "1win.com"
+  },
+  {
+    "canonical_id": "vk",
+    "canonical_name": "VK",
+    "name": "VK",
+    "title": "VK",
+    "domain": "vk.com"
+  },
+  {
+    "canonical_id": "myheritage",
+    "canonical_name": "MyHeritage",
+    "name": "MyHeritage",
+    "title": "MyHeritage",
+    "domain": "myheritage.com"
+  },
+  {
+    "canonical_id": "youku",
+    "canonical_name": "Youku",
+    "name": "Youku",
+    "title": "Youku",
+    "domain": "youku.com"
+  },
+  {
+    "canonical_id": "rambler",
+    "canonical_name": "Rambler",
+    "name": "Rambler",
+    "title": "Rambler",
+    "domain": "rambler.ru"
+  },
+  {
+    "canonical_id": "dailymotion",
+    "canonical_name": "Dailymotion",
+    "name": "Dailymotion",
+    "title": "Dailymotion",
+    "domain": "dailymotion.com"
+  },
+  {
+    "canonical_id": "2844breaches",
+    "canonical_name": "2,844 Separate Data Breaches",
+    "name": "2844Breaches",
+    "title": "2,844 Separate Data Breaches"
+  },
+  {
+    "canonical_id": "advanceautoparts",
+    "canonical_name": "Advance Auto Parts",
+    "name": "AdvanceAutoParts",
+    "title": "Advance Auto Parts",
+    "domain": "advanceautoparts.com"
+  },
+  {
+    "canonical_id": "jd",
+    "canonical_name": "JD",
+    "name": "JD",
+    "title": "JD",
+    "domain": "jd.com"
+  },
+  {
+    "canonical_id": "nitro",
+    "canonical_name": "Nitro",
+    "name": "Nitro",
+    "title": "Nitro",
+    "domain": "gonitro.com"
+  },
+  {
+    "canonical_id": "luxottica",
+    "canonical_name": "Luxottica",
+    "name": "Luxottica",
+    "title": "Luxottica",
+    "domain": "luxottica.com"
+  },
+  {
+    "canonical_id": "underarmour",
+    "canonical_name": "Under Armour",
+    "name": "UnderArmour",
+    "title": "Under Armour",
+    "domain": "underarmour.com"
+  },
+  {
+    "canonical_id": "tokopedia",
+    "canonical_name": "Tokopedia",
+    "name": "Tokopedia",
+    "title": "Tokopedia",
+    "domain": "tokopedia.com"
+  }
+]

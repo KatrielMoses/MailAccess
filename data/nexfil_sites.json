@@ -1,0 +1,2856 @@
+{
+  "_meta": {
+    "upstream": "thewhiteh4t/nexfil",
+    "upstream_url": "https://raw.githubusercontent.com/thewhiteh4t/nexfil/main/src/nexfil/url_store.json",
+    "license": "MIT",
+    "authors": [
+      "thewhiteh4t (Mayank Dabas)"
+    ],
+    "ported_at": "2026-06-22",
+    "site_count": 310,
+    "skipped_headless": 18,
+    "skipped_malformed": 0
+  },
+  "categories": [
+    "social",
+    "dev",
+    "gaming",
+    "media",
+    "forum",
+    "regional",
+    "creative",
+    "professional",
+    "shopping",
+    "misc"
+  ],
+  "sites": {
+    "RiveFlare": {
+      "url": "https://flare.rive.app/a/{}/",
+      "url_main": "https://flare.rive.app",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "7cups": {
+      "url": "https://www.7cups.com/@{}",
+      "url_main": "https://www.7cups.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "9gag": {
+      "url": "https://9gag.com/u/{}",
+      "url_main": "https://9gag.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "About": {
+      "url": "https://about.me/{}",
+      "url_main": "https://about.me",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "AcademiaIndependent": {
+      "url": "https://independent.academia.edu/{}",
+      "url_main": "https://independent.academia.edu",
+      "error_type": "message",
+      "error_msg": [
+        "Oops! Something went wrong on our end"
+      ],
+      "category": "social"
+    },
+    "Alik": {
+      "url": "https://www.alik.cz/u/{}",
+      "url_main": "https://www.alik.cz",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "AppleDiscussions": {
+      "url": "https://discussions.apple.com/profile/{}",
+      "url_main": "https://discussions.apple.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Archive": {
+      "url": "https://archive.org/details/@{}",
+      "url_main": "https://archive.org",
+      "error_type": "message",
+      "error_msg": [
+        "cannot find account"
+      ],
+      "category": "social"
+    },
+    "Asciinema": {
+      "url": "https://asciinema.org/~{}",
+      "url_main": "https://asciinema.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "FedoraprojectAsk": {
+      "url": "https://ask.fedoraproject.org/u/{}",
+      "url_main": "https://ask.fedoraproject.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Ask": {
+      "url": "https://ask.fm/{}",
+      "url_main": "https://ask.fm",
+      "error_type": "message",
+      "error_msg": [
+        "Well, apparently not anymore."
+      ],
+      "category": "social"
+    },
+    "Audiojungle": {
+      "url": "https://audiojungle.net/user/{}",
+      "url_main": "https://audiojungle.net",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Avizo": {
+      "url": "https://www.avizo.cz/{}/",
+      "url_main": "https://www.avizo.cz",
+      "error_type": "response_url",
+      "category": "regional"
+    },
+    "Blip": {
+      "url": "https://blip.fm/{}",
+      "url_main": "https://blip.fm",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "BoothUsernameSubdomain": {
+      "url": "https://{}.booth.pm/",
+      "url_main": "https://username.booth.pm",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "strip_bad_char": ".",
+      "category": "shopping"
+    },
+    "Bandcamp": {
+      "url": "https://bandcamp.com/{}",
+      "url_main": "https://bandcamp.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Bazar": {
+      "url": "https://www.bazar.cz/{}/",
+      "url_main": "https://www.bazar.cz",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Behance": {
+      "url": "https://www.behance.net/{}",
+      "url_main": "https://www.behance.net",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "creative"
+    },
+    "Bitbucket": {
+      "url": "https://bitbucket.org/{}/",
+      "url_main": "https://bitbucket.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "BitbucketForum": {
+      "url": "https://bitcoinforum.com/profile/{}",
+      "url_main": "https://bitcoinforum.com",
+      "error_type": "message",
+      "error_msg": [
+        "The user whose profile you are trying to view does not exist."
+      ],
+      "category": "social"
+    },
+    "BlogspotSubdomain": {
+      "url": "https://{}.blogspot.com/",
+      "url_main": "https://username.blogspot.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "BodybuildingBodyspace": {
+      "url": "https://bodyspace.bodybuilding.com/{}/",
+      "url_main": "https://bodyspace.bodybuilding.com",
+      "error_type": "response_url",
+      "category": "social"
+    },
+    "Bookcrossing": {
+      "url": "https://www.bookcrossing.com/mybookshelf/{}/",
+      "url_main": "https://www.bookcrossing.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Buymeacoffee": {
+      "url": "https://www.buymeacoffee.com/{}",
+      "url_main": "https://www.buymeacoffee.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Buzzfeed": {
+      "url": "https://www.buzzfeed.com/{}",
+      "url_main": "https://www.buzzfeed.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Cnet": {
+      "url": "https://www.cnet.com/profiles/{}/",
+      "url_main": "https://www.cnet.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Capfriendly": {
+      "url": "https://www.capfriendly.com/users/{}",
+      "url_main": "https://www.capfriendly.com",
+      "error_type": "message",
+      "error_msg": [
+        "<h5>Forum Posts</h5><div class=\"ml10\">0</div>"
+      ],
+      "category": "social"
+    },
+    "CarbonmadeUsernameSubdomain": {
+      "url": "https://{}.carbonmade.com/",
+      "url_main": "https://username.carbonmade.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "creative"
+    },
+    "HabrCareer": {
+      "url": "https://career.habr.com/{}",
+      "url_main": "https://career.habr.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "CentAPI": {
+      "url": "https://beta.cent.co/{}/",
+      "url_main": "https://beta.cent.co",
+      "url_probe": "https://beta.cent.co/data/user/profile?userHandles={}",
+      "error_type": "api",
+      "api_keys": [
+        "results",
+        "users",
+        "username"
+      ],
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Championat": {
+      "url": "https://www.championat.com/user/{}/",
+      "url_main": "https://www.championat.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "ChatujmeProfil": {
+      "url": "https://profil.chatujme.cz/{}",
+      "url_main": "https://profil.chatujme.cz",
+      "error_type": "message",
+      "error_msg": [
+        "Neexistujicí profil"
+      ],
+      "category": "regional"
+    },
+    "Chess": {
+      "url": "https://www.chess.com/member/{}",
+      "url_main": "https://www.chess.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "gaming"
+    },
+    "Clozemaster": {
+      "url": "https://www.clozemaster.com/players/{}",
+      "url_main": "https://www.clozemaster.com",
+      "error_type": "message",
+      "error_msg": [
+        "Player not found"
+      ],
+      "category": "social"
+    },
+    "Codecademy": {
+      "url": "https://www.codecademy.com/profiles/{}",
+      "url_main": "https://www.codecademy.com",
+      "error_type": "message",
+      "error_msg": [
+        "This profile could not be found"
+      ],
+      "category": "social"
+    },
+    "Codechef": {
+      "url": "https://www.codechef.com/users/{}",
+      "url_main": "https://www.codechef.com",
+      "error_type": "response_url",
+      "category": "social"
+    },
+    "Codewars": {
+      "url": "https://www.codewars.com/users/{}",
+      "url_main": "https://www.codewars.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Colourlovers": {
+      "url": "https://www.colourlovers.com/lover/{}",
+      "url_main": "https://www.colourlovers.com",
+      "error_type": "message",
+      "error_msg": [
+        "No one's home"
+      ],
+      "category": "creative"
+    },
+    "ContentlyUsernameSubdomain": {
+      "url": "https://{}.contently.com/",
+      "url_main": "https://username.contently.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Coroflot": {
+      "url": "https://www.coroflot.com/{}",
+      "url_main": "https://www.coroflot.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "creative"
+    },
+    "Causes": {
+      "url": "https://www.causes.com/api/v3/users?id={}",
+      "url_main": "https://www.causes.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Cracked": {
+      "url": "https://www.cracked.com/members/{}/",
+      "url_main": "https://www.cracked.com",
+      "error_type": "response_url",
+      "category": "social"
+    },
+    "CrevadoUsernameSubdomain": {
+      "url": "https://{}.crevado.com/",
+      "url_main": "https://username.crevado.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "creative"
+    },
+    "Dev": {
+      "url": "https://dev.to/{}",
+      "url_main": "https://dev.to",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "dev"
+    },
+    "Dailymotion": {
+      "url": "https://www.dailymotion.com/{}",
+      "url_main": "https://www.dailymotion.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "media"
+    },
+    "Designspiration": {
+      "url": "https://www.designspiration.com/{}/",
+      "url_main": "https://www.designspiration.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "creative"
+    },
+    "Deviantart": {
+      "url": "https://www.deviantart.com/{}",
+      "url_main": "https://www.deviantart.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "creative"
+    },
+    "Discogs": {
+      "url": "https://www.discogs.com/user/{}",
+      "url_main": "https://www.discogs.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Elastic": {
+      "url": "https://discuss.elastic.co/u/{}",
+      "url_main": "https://discuss.elastic.co",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "forum"
+    },
+    "Disqus": {
+      "url": "https://disqus.com/by/{}/",
+      "url_main": "https://disqus.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "DockerHubAPI": {
+      "url": "https://hub.docker.com/u/{}/",
+      "url_main": "https://hub.docker.com",
+      "url_probe": "https://hub.docker.com/v2/users/{}/",
+      "error_type": "api",
+      "api_keys": [
+        "results",
+        "users",
+        "username"
+      ],
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Dribbble": {
+      "url": "https://dribbble.com/{}/about",
+      "url_main": "https://dribbble.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "creative"
+    },
+    "DuolingoAPI": {
+      "url": "https://www.duolingo.com/profile/{}",
+      "url_main": "https://www.duolingo.com",
+      "url_probe": "https://www.duolingo.com/2017-06-30/users?username={}",
+      "error_type": "api",
+      "api_keys": [
+        "results",
+        "users",
+        "username"
+      ],
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Etsy": {
+      "url": "https://www.etsy.com/shop/{}",
+      "url_main": "https://www.etsy.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "shopping"
+    },
+    "OpEuw": {
+      "url": "https://euw.op.gg/summoner/userName={}",
+      "url_main": "https://euw.op.gg",
+      "error_type": "message",
+      "error_msg": [
+        "This summoner is not registered"
+      ],
+      "category": "gaming"
+    },
+    "Eyeem": {
+      "url": "https://www.eyeem.com/u/{}",
+      "url_main": "https://www.eyeem.com",
+      "error_type": "message",
+      "error_msg": [
+        "Whoops! We can&#x27;t find the page you&#x27;re looking for..."
+      ],
+      "category": "social"
+    },
+    "F3": {
+      "url": "https://f3.cool/{}/",
+      "url_main": "https://f3.cool",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Fandom": {
+      "url": "https://www.fandom.com/u/{}",
+      "url_main": "https://www.fandom.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Flickr": {
+      "url": "https://www.flickr.com/people/{}",
+      "url_main": "https://www.flickr.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "media"
+    },
+    "Flightradar24My": {
+      "url": "https://my.flightradar24.com/{}",
+      "url_main": "https://my.flightradar24.com",
+      "error_type": "message",
+      "error_msg": [
+        "<body class=\"landing"
+      ],
+      "category": "social"
+    },
+    "Flipboard": {
+      "url": "https://flipboard.com/@{}",
+      "url_main": "https://flipboard.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Rusfootball": {
+      "url": "https://www.rusfootball.info/user/{}/",
+      "url_main": "https://www.rusfootball.info",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Fortnitetracker": {
+      "url": "https://fortnitetracker.com/profile/all/{}",
+      "url_main": "https://fortnitetracker.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "gaming"
+    },
+    "HabrFreelance": {
+      "url": "https://freelance.habr.com/freelancers/{}",
+      "url_main": "https://freelance.habr.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Freelancer": {
+      "url": "https://www.freelancer.com/u/{}",
+      "url_main": "https://www.freelancer.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "professional"
+    },
+    "Freesound": {
+      "url": "https://freesound.org/people/{}/",
+      "url_main": "https://freesound.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "media"
+    },
+    "Gamespot": {
+      "url": "https://www.gamespot.com/profile/{}/",
+      "url_main": "https://www.gamespot.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Getmyuni": {
+      "url": "https://www.getmyuni.com/user/{}",
+      "url_main": "https://www.getmyuni.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Giphy": {
+      "url": "https://giphy.com/{}",
+      "url_main": "https://giphy.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "media"
+    },
+    "GitHub": {
+      "url": "https://github.com/{}",
+      "url_main": "https://github.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "dev"
+    },
+    "Gitlab": {
+      "url": "https://gitlab.com/{}",
+      "url_main": "https://gitlab.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "dev"
+    },
+    "Goodreads": {
+      "url": "https://www.goodreads.com/{}",
+      "url_main": "https://www.goodreads.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Gravatar": {
+      "url": "http://en.gravatar.com/{}",
+      "url_main": "http://en.gravatar.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "GumroadUsernameSubdomain": {
+      "url": "https://{}.gumroad.com/",
+      "url_main": "https://username.gumroad.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "shopping"
+    },
+    "Gunsandammo": {
+      "url": "https://forums.gunsandammo.com/profile/{}",
+      "url_main": "https://forums.gunsandammo.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "forum"
+    },
+    "Hackthebox": {
+      "url": "https://forum.hackthebox.eu/profile/{}",
+      "url_main": "https://forum.hackthebox.eu",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "forum"
+    },
+    "Hackaday": {
+      "url": "https://hackaday.io/{}",
+      "url_main": "https://hackaday.io",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Hackerone": {
+      "url": "https://hackerone.com/{}",
+      "url_main": "https://hackerone.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Hackerrank": {
+      "url": "https://hackerrank.com/{}",
+      "url_main": "https://hackerrank.com",
+      "error_type": "message",
+      "error_msg": [
+        "Something went wrong!"
+      ],
+      "category": "dev"
+    },
+    "HouseMixes": {
+      "url": "https://www.house-mixes.com/profile/{}",
+      "url_main": "https://www.house-mixes.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Houzz": {
+      "url": "https://houzz.com/user/{}",
+      "url_main": "https://houzz.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Hubpages": {
+      "url": "https://hubpages.com/@{}",
+      "url_main": "https://hubpages.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Hubski": {
+      "url": "https://hubski.com/user/{}",
+      "url_main": "https://hubski.com",
+      "error_type": "message",
+      "error_msg": [
+        "No such user."
+      ],
+      "category": "social"
+    },
+    "Icq": {
+      "url": "https://icq.im/{}",
+      "url_main": "https://icq.im",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Ifttt": {
+      "url": "https://www.ifttt.com/p/{}",
+      "url_main": "https://www.ifttt.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Imgup": {
+      "url": "https://imgup.cz/{}",
+      "url_main": "https://imgup.cz",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Instructables": {
+      "url": "https://www.instructables.com/member/{}",
+      "url_main": "https://www.instructables.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Issuu": {
+      "url": "https://issuu.com/{}",
+      "url_main": "https://issuu.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "ItchUsernameSubdomain": {
+      "url": "https://{}.itch.io/",
+      "url_main": "https://username.itch.io",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Kaggle": {
+      "url": "https://www.kaggle.com/{}",
+      "url_main": "https://www.kaggle.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Keybase": {
+      "url": "https://keybase.io/{}",
+      "url_main": "https://keybase.io",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Kik": {
+      "url": "https://kik.me/{}",
+      "url_main": "https://kik.me",
+      "error_type": "message",
+      "error_msg": [
+        "class=\"pic-none\""
+      ],
+      "category": "social"
+    },
+    "Kongregate": {
+      "url": "https://www.kongregate.com/accounts/{}",
+      "url_main": "https://www.kongregate.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "OrgLinux": {
+      "url": "https://www.linux.org.ru/people/{}/profile",
+      "url_main": "https://www.linux.org.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Launchpad": {
+      "url": "https://launchpad.net/~{}",
+      "url_main": "https://launchpad.net",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "dev"
+    },
+    "Leetcode": {
+      "url": "https://leetcode.com/{}",
+      "url_main": "https://leetcode.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Letterboxd": {
+      "url": "https://letterboxd.com/{}",
+      "url_main": "https://letterboxd.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Lichess": {
+      "url": "https://lichess.org/@/{}",
+      "url_main": "https://lichess.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "gaming"
+    },
+    "LivejournalUsernameSubdomain": {
+      "url": "https://{}.livejournal.com",
+      "url_main": "https://username.livejournal.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Lobste": {
+      "url": "https://lobste.rs/u/{}",
+      "url_main": "https://lobste.rs",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Lolchess": {
+      "url": "https://lolchess.gg/profile/na/{}",
+      "url_main": "https://lolchess.gg",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "gaming"
+    },
+    "Medium": {
+      "url": "https://medium.com/@{}",
+      "url_main": "https://medium.com",
+      "error_type": "message",
+      "error_msg": [
+        "PAGE NOT FOUND"
+      ],
+      "category": "social"
+    },
+    "Memrise": {
+      "url": "https://www.memrise.com/user/{}/",
+      "url_main": "https://www.memrise.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "MixcloudAPI": {
+      "url": "https://www.mixcloud.com/{}/",
+      "url_main": "https://www.mixcloud.com",
+      "url_probe": "https://api.mixcloud.com/{}/",
+      "error_type": "api",
+      "api_keys": [
+        "results",
+        "users",
+        "username"
+      ],
+      "error_code": [
+        404
+      ],
+      "category": "media"
+    },
+    "Munzee": {
+      "url": "https://www.munzee.com/m/{}",
+      "url_main": "https://www.munzee.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Myanimelist": {
+      "url": "https://myanimelist.net/profile/{}",
+      "url_main": "https://myanimelist.net",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Myminifactory": {
+      "url": "https://www.myminifactory.com/users/{}",
+      "url_main": "https://www.myminifactory.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Myspace": {
+      "url": "https://myspace.com/{}",
+      "url_main": "https://myspace.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "NativeInstruments": {
+      "url": "https://community.native-instruments.com/profile/{}",
+      "url_main": "https://community.native-instruments.com",
+      "error_type": "message",
+      "error_msg": [
+        "User Not Found"
+      ],
+      "category": "forum"
+    },
+    "NaverBlog": {
+      "url": "https://blog.naver.com/{}",
+      "url_main": "https://blog.naver.com",
+      "error_type": "message",
+      "error_msg": [
+        "<h1 class=\"error_h1\">죄송합니다. 유효하지 않은 요청입니다.</h1>"
+      ],
+      "category": "social"
+    },
+    "Ok": {
+      "url": "https://ok.ru/{}",
+      "url_main": "https://ok.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Openstreetmap": {
+      "url": "https://www.openstreetmap.org/user/{}",
+      "url_main": "https://www.openstreetmap.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Opensource": {
+      "url": "https://opensource.com/users/{}",
+      "url_main": "https://opensource.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Ourdjtalk": {
+      "url": "https://ourdjtalk.com/members?username={}",
+      "url_main": "https://ourdjtalk.com",
+      "error_type": "message",
+      "error_msg": [
+        "The specified member cannot be found. Please enter a member's entire name."
+      ],
+      "category": "social"
+    },
+    "Pcgamer": {
+      "url": "https://forums.pcgamer.com/members/?username={}",
+      "url_main": "https://forums.pcgamer.com",
+      "error_type": "message",
+      "error_msg": [
+        "The specified member cannot be found. Please enter a member's entire name."
+      ],
+      "category": "forum"
+    },
+    "Psnprofiles": {
+      "url": "https://psnprofiles.com/{}",
+      "url_main": "https://psnprofiles.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "gaming"
+    },
+    "Pastebin": {
+      "url": "https://pastebin.com/u/{}",
+      "url_main": "https://pastebin.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Patreon": {
+      "url": "https://www.patreon.com/{}",
+      "url_main": "https://www.patreon.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Pinkbike": {
+      "url": "https://www.pinkbike.com/u/{}/",
+      "url_main": "https://www.pinkbike.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Pinterest": {
+      "url": "https://www.pinterest.com/{}/",
+      "url_main": "https://www.pinterest.com",
+      "error_type": "message",
+      "error_msg": [
+        "<title></title>"
+      ],
+      "category": "social"
+    },
+    "GooglePlay": {
+      "url": "https://play.google.com/store/apps/developer?id={}",
+      "url_main": "https://play.google.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Pokemonshowdown": {
+      "url": "https://pokemonshowdown.com/users/{}",
+      "url_main": "https://pokemonshowdown.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "gaming"
+    },
+    "Polarsteps": {
+      "url": "https://polarsteps.com/{}",
+      "url_main": "https://polarsteps.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Polygon": {
+      "url": "https://www.polygon.com/users/{}",
+      "url_main": "https://www.polygon.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Producthunt": {
+      "url": "https://www.producthunt.com/@{}",
+      "url_main": "https://www.producthunt.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Promodj": {
+      "url": "http://promodj.com/{}",
+      "url_main": "http://promodj.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Pypi": {
+      "url": "https://pypi.org/user/{}",
+      "url_main": "https://pypi.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "dev"
+    },
+    "Quizlet": {
+      "url": "https://quizlet.com/{}",
+      "url_main": "https://quizlet.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Quora": {
+      "url": "https://www.quora.com/{}",
+      "url_main": "https://www.quora.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "IdnesRajceSubdomain": {
+      "url": "https://{}.rajce.idnes.cz/",
+      "url_main": "https://username.rajce.idnes.cz",
+      "error_type": "message",
+      "error_msg": [
+        "Uživatel neexistuje"
+      ],
+      "category": "regional"
+    },
+    "Redbubble": {
+      "url": "https://www.redbubble.com/people/{}",
+      "url_main": "https://www.redbubble.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "shopping"
+    },
+    "RedditOld": {
+      "url": "https://old.reddit.com/user/{}",
+      "url_main": "https://old.reddit.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Repl": {
+      "url": "https://repl.it/@{}",
+      "url_main": "https://repl.it",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "dev"
+    },
+    "Reverbnation": {
+      "url": "https://www.reverbnation.com/{}",
+      "url_main": "https://www.reverbnation.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Roblox": {
+      "url": "https://www.roblox.com/user.aspx?username={}",
+      "url_main": "https://www.roblox.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "gaming"
+    },
+    "Rubygems": {
+      "url": "https://rubygems.org/profiles/{}",
+      "url_main": "https://rubygems.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "dev"
+    },
+    "Sbazar": {
+      "url": "https://www.sbazar.cz/{}",
+      "url_main": "https://www.sbazar.cz",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "MitScratch": {
+      "url": "https://scratch.mit.edu/users/{}",
+      "url_main": "https://scratch.mit.edu",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Scribd": {
+      "url": "https://www.scribd.com/{}",
+      "url_main": "https://www.scribd.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Shitpostbot": {
+      "url": "https://www.shitpostbot.com/user/{}",
+      "url_main": "https://www.shitpostbot.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Signalusers": {
+      "url": "https://community.signalusers.org/u/{}",
+      "url_main": "https://community.signalusers.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "forum"
+    },
+    "SlackUsernameSubdomain": {
+      "url": "https://{}.slack.com",
+      "url_main": "https://username.slack.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Slashdot": {
+      "url": "https://slashdot.org/~{}",
+      "url_main": "https://slashdot.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Slideshare": {
+      "url": "https://slideshare.net/{}",
+      "url_main": "https://slideshare.net",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Smule": {
+      "url": "https://www.smule.com/{}",
+      "url_main": "https://www.smule.com",
+      "error_type": "message",
+      "error_msg": [
+        "Smule | Page Not Found (404)"
+      ],
+      "category": "social"
+    },
+    "Soundcloud": {
+      "url": "https://soundcloud.com/{}",
+      "url_main": "https://soundcloud.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "media"
+    },
+    "Sourceforge": {
+      "url": "https://sourceforge.net/u/{}",
+      "url_main": "https://sourceforge.net",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "dev"
+    },
+    "Soylentnews": {
+      "url": "https://soylentnews.org/~{}",
+      "url_main": "https://soylentnews.org",
+      "error_type": "message",
+      "error_msg": [
+        "The user you requested does not exist, no matter how much you wish this might be the case."
+      ],
+      "category": "social"
+    },
+    "Sparkpeople": {
+      "url": "https://www.sparkpeople.com/mypage.asp?id={}",
+      "url_main": "https://www.sparkpeople.com",
+      "error_type": "message",
+      "error_msg": [
+        "We couldn't find that user."
+      ],
+      "category": "social"
+    },
+    "Speedrun": {
+      "url": "https://speedrun.com/user/{}",
+      "url_main": "https://speedrun.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "gaming"
+    },
+    "Splits": {
+      "url": "https://splits.io/users/{}",
+      "url_main": "https://splits.io",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Sporcle": {
+      "url": "https://www.sporcle.com/user/{}/people",
+      "url_main": "https://www.sporcle.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Sports": {
+      "url": "https://www.sports.ru/profile/{}/",
+      "url_main": "https://www.sports.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "SpotifyOpen": {
+      "url": "https://open.spotify.com/user/{}",
+      "url_main": "https://open.spotify.com",
+      "error_type": "message",
+      "error_msg": [
+        "<title>Spotify – Web Player</title>"
+      ],
+      "category": "media"
+    },
+    "Robertsspaceindustries": {
+      "url": "https://robertsspaceindustries.com/citizens/{}",
+      "url_main": "https://robertsspaceindustries.com",
+      "error_type": "message",
+      "error_msg": [
+        "404 - Roberts Space Industries"
+      ],
+      "category": "social"
+    },
+    "Steamcommunity": {
+      "url": "https://steamcommunity.com/id/{}",
+      "url_main": "https://steamcommunity.com",
+      "error_type": "message",
+      "error_msg": [
+        "The specified profile could not be found."
+      ],
+      "category": "gaming"
+    },
+    "SteamcommunityGroups": {
+      "url": "https://steamcommunity.com/groups/{}",
+      "url_main": "https://steamcommunity.com",
+      "error_type": "message",
+      "error_msg": [
+        "No group could be retrieved for the given URL."
+      ],
+      "category": "gaming"
+    },
+    "Strava": {
+      "url": "https://www.strava.com/athletes/{}",
+      "url_main": "https://www.strava.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Sublimetext": {
+      "url": "https://forum.sublimetext.com/u/{}",
+      "url_main": "https://forum.sublimetext.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "forum"
+    },
+    "TetrioAPI": {
+      "url": "https://ch.tetr.io/u/{}",
+      "url_main": "https://ch.tetr.io",
+      "url_probe": "https://ch.tetr.io/api/users/{}",
+      "error_type": "api",
+      "api_keys": [
+        "results",
+        "users",
+        "username"
+      ],
+      "error_code": [
+        404
+      ],
+      "category": "gaming"
+    },
+    "Telegram": {
+      "url": "https://t.me/{}",
+      "url_main": "https://t.me",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Tinder": {
+      "url": "https://www.tinder.com/@{}",
+      "url_main": "https://www.tinder.com",
+      "error_type": "message",
+      "error_msg": [
+        "Tinder | Dating, Make Friends & Meet New People"
+      ],
+      "category": "social"
+    },
+    "TmLadder": {
+      "url": "http://en.tm-ladder.com/{}_rech.php",
+      "url_main": "http://en.tm-ladder.com",
+      "error_type": "message",
+      "error_msg": [
+        "player unknown or invalid"
+      ],
+      "category": "social"
+    },
+    "Tradingview": {
+      "url": "https://www.tradingview.com/u/{}/",
+      "url_main": "https://www.tradingview.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Trakt": {
+      "url": "https://trakt.tv/users/{}",
+      "url_main": "https://trakt.tv",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Trashbox": {
+      "url": "https://trashbox.ru/users/{}",
+      "url_main": "https://trashbox.ru",
+      "error_type": "message",
+      "error_msg": [
+        "Пользователь не найден"
+      ],
+      "category": "regional"
+    },
+    "TrelloAPI": {
+      "url": "https://trello.com/{}/activity",
+      "url_main": "https://trello.com",
+      "url_probe": "https://trello.com/1/Members/{}",
+      "error_type": "api",
+      "api_keys": [
+        "results",
+        "users",
+        "username"
+      ],
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Tryhackme": {
+      "url": "https://tryhackme.com/p/{}",
+      "url_main": "https://tryhackme.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Twitch": {
+      "url": "https://m.twitch.tv/{}",
+      "url_main": "https://m.twitch.tv",
+      "error_type": "message",
+      "error_msg": [
+        "Sorry, that page is in another castle!"
+      ],
+      "category": "media"
+    },
+    "TyperacerData": {
+      "url": "https://data.typeracer.com/pit/profile?user={}",
+      "url_main": "https://data.typeracer.com",
+      "error_type": "message",
+      "error_msg": [
+        "Profile Not Found"
+      ],
+      "category": "social"
+    },
+    "UltimateGuitar": {
+      "url": "https://ultimate-guitar.com/u/{}",
+      "url_main": "https://ultimate-guitar.com",
+      "error_type": "message",
+      "error_msg": [
+        "Oops! We couldn't find that page."
+      ],
+      "category": "social"
+    },
+    "Unsplash": {
+      "url": "https://unsplash.com/@{}",
+      "url_main": "https://unsplash.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "creative"
+    },
+    "Vk": {
+      "url": "https://vk.com/{}",
+      "url_main": "https://vk.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Vsco": {
+      "url": "https://vsco.co/{}",
+      "url_main": "https://vsco.co",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Velomania": {
+      "url": "https://forum.velomania.ru/member.php?username={}",
+      "url_main": "https://forum.velomania.ru",
+      "error_type": "message",
+      "error_msg": [
+        "Пользователь не зарегистрирован и не имеет профиля для просмотра."
+      ],
+      "category": "forum"
+    },
+    "Venmo": {
+      "url": "https://venmo.com/{}",
+      "url_main": "https://venmo.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Vero": {
+      "url": "https://vero.co/{}",
+      "url_main": "https://vero.co",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Vimeo": {
+      "url": "https://vimeo.com/{}",
+      "url_main": "https://vimeo.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "media"
+    },
+    "Virgool": {
+      "url": "https://virgool.io/@{}",
+      "url_main": "https://virgool.io",
+      "error_type": "message",
+      "error_msg": [
+        "۴۰۴"
+      ],
+      "category": "social"
+    },
+    "VirusTotalAlt": {
+      "url": "https://www.virustotal.com/gui/user/{}",
+      "url_main": "https://www.virustotal.com",
+      "url_probe": "https://www.virustotal.com/ui/users/{}/avatar",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "WarriorforumSubdomain": {
+      "url": "https://www.warriorforum.com/members/{}.html",
+      "url_main": "https://www.warriorforum.com",
+      "error_type": "message",
+      "error_msg": [
+        "Error 400"
+      ],
+      "category": "social"
+    },
+    "Wattpad": {
+      "url": "https://www.wattpad.com/user/{}",
+      "url_main": "https://www.wattpad.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "WebnodeUsernameSubdomain": {
+      "url": "https://{}.webnode.cz/",
+      "url_main": "https://username.webnode.cz",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Wikidot": {
+      "url": "http://www.wikidot.com/user:info/{}",
+      "url_main": "http://www.wikidot.com",
+      "error_type": "message",
+      "error_msg": [
+        "User does not exist."
+      ],
+      "category": "social"
+    },
+    "Wikipedia": {
+      "url": "https://www.wikipedia.org/wiki/User:{}",
+      "url_main": "https://www.wikipedia.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Windy": {
+      "url": "https://community.windy.com/user/{}",
+      "url_main": "https://community.windy.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "forum"
+    },
+    "WixUsernameSubdomain": {
+      "url": "https://{}.wix.com",
+      "url_main": "https://username.wix.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "WordpressUsernameSubdomain": {
+      "url": "https://{}.wordpress.com/",
+      "url_main": "https://username.wordpress.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Wordpress": {
+      "url": "https://profiles.wordpress.org/{}/",
+      "url_main": "https://profiles.wordpress.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "YounowAPI": {
+      "url": "https://www.younow.com/{}",
+      "url_main": "https://www.younow.com",
+      "url_probe": "https://api.younow.com/php/api/broadcast/info/curId=0/lang=en/user={}",
+      "error_type": "api",
+      "api_keys": [
+        "results",
+        "users",
+        "username"
+      ],
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Youpic": {
+      "url": "https://youpic.com/photographer/{}/",
+      "url_main": "https://youpic.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Youtube": {
+      "url": "https://www.youtube.com/{}",
+      "url_main": "https://www.youtube.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "media"
+    },
+    "Zhihu": {
+      "url": "https://www.zhihu.com/people/{}",
+      "url_main": "https://www.zhihu.com",
+      "error_type": "message",
+      "error_msg": [
+        "你似乎来到了没有知识存在的荒原"
+      ],
+      "category": "social"
+    },
+    "Akniga": {
+      "url": "https://akniga.org/profile/{}",
+      "url_main": "https://akniga.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Baby": {
+      "url": "https://www.baby.ru/u/{}/",
+      "url_main": "https://www.baby.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Babyblog": {
+      "url": "https://www.babyblog.ru/user/info/{}",
+      "url_main": "https://www.babyblog.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Chaos": {
+      "url": "https://chaos.social/@{}",
+      "url_main": "https://chaos.social",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Couchsurfing": {
+      "url": "https://www.couchsurfing.com/people/{}",
+      "url_main": "https://www.couchsurfing.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "D3": {
+      "url": "https://d3.ru/user/{}/posts",
+      "url_main": "https://d3.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Dailykos": {
+      "url": "https://www.dailykos.com/user/{}",
+      "url_main": "https://www.dailykos.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Dating": {
+      "url": "http://dating.ru/{}",
+      "url_main": "http://dating.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Devrant": {
+      "url": "https://devrant.com/users/{}",
+      "url_main": "https://devrant.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Drive2": {
+      "url": "https://www.drive2.ru/users/{}",
+      "url_main": "https://www.drive2.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Egpu": {
+      "url": "https://egpu.io/forums/profile/{}/",
+      "url_main": "https://egpu.io",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "forum"
+    },
+    "Eintracht": {
+      "url": "https://community.eintracht.de/fans/{}",
+      "url_main": "https://community.eintracht.de",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "forum"
+    },
+    "Fl": {
+      "url": "https://www.fl.ru/users/{}",
+      "url_main": "https://www.fl.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Guns": {
+      "url": "https://forum.guns.ru/forummisc/blog/{}",
+      "url_main": "https://forum.guns.ru",
+      "error_type": "message",
+      "error_msg": [
+        "нет такого участника"
+      ],
+      "category": "forum"
+    },
+    "Forumhouse": {
+      "url": "https://www.forumhouse.ru/members/?username={}",
+      "url_main": "https://www.forumhouse.ru",
+      "error_type": "message",
+      "error_msg": [
+        "Указанный пользователь не найден. Пожалуйста, введите другое имя."
+      ],
+      "category": "regional"
+    },
+    "Geocaching": {
+      "url": "https://www.geocaching.com/p/default.aspx?u={}",
+      "url_main": "https://www.geocaching.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Gfycat": {
+      "url": "https://gfycat.com/@{}",
+      "url_main": "https://gfycat.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Habr": {
+      "url": "https://habr.com/ru/users/{}",
+      "url_main": "https://habr.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Hackster": {
+      "url": "https://www.hackster.io/{}",
+      "url_main": "https://www.hackster.io",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Hunting": {
+      "url": "https://www.hunting.ru/forum/members/?username={}",
+      "url_main": "https://www.hunting.ru",
+      "error_type": "message",
+      "error_msg": [
+        "Указанный пользователь не найден. Пожалуйста, введите другое имя."
+      ],
+      "category": "forum"
+    },
+    "Imgsrc": {
+      "url": "https://imgsrc.ru/main/user.php?user={}",
+      "url_main": "https://imgsrc.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Igromania": {
+      "url": "http://forum.igromania.ru/member.php?username={}",
+      "url_main": "http://forum.igromania.ru",
+      "error_type": "message",
+      "error_msg": [
+        "Пользователь не зарегистрирован и не имеет профиля для просмотра."
+      ],
+      "category": "forum"
+    },
+    "Interpals": {
+      "url": "https://www.interpals.net/{}",
+      "url_main": "https://www.interpals.net",
+      "error_type": "message",
+      "error_msg": [
+        "The requested user does not exist or is inactive."
+      ],
+      "category": "social"
+    },
+    "Irecommend": {
+      "url": "https://irecommend.ru/users/{}",
+      "url_main": "https://irecommend.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "ComJbzd": {
+      "url": "https://jbzd.com.pl/uzytkownik/{}",
+      "url_main": "https://jbzd.com.pl",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Jeuxvideo": {
+      "url": "http://www.jeuxvideo.com/profil/{}?mode=infos",
+      "url_main": "http://www.jeuxvideo.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Kwork": {
+      "url": "https://kwork.ru/user/{}",
+      "url_main": "https://kwork.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "PentestitLab": {
+      "url": "https://lab.pentestit.ru/profile/{}",
+      "url_main": "https://lab.pentestit.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Last": {
+      "url": "https://last.fm/user/{}",
+      "url_main": "https://last.fm",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Leasehackr": {
+      "url": "https://forum.leasehackr.com/u/{}/summary/",
+      "url_main": "https://forum.leasehackr.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "forum"
+    },
+    "Livelib": {
+      "url": "https://www.livelib.ru/reader/{}",
+      "url_main": "https://www.livelib.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Mastodon": {
+      "url": "https://mastodon.cloud/@{}",
+      "url_main": "https://mastodon.cloud",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "MastodonProfile": {
+      "url": "https://mastodon.social/@{}",
+      "url_main": "https://mastodon.social",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "MastodonProfile2": {
+      "url": "https://mastodon.xyz/@{}",
+      "url_main": "https://mastodon.xyz",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "ComMercadolivre": {
+      "url": "https://www.mercadolivre.com.br/perfil/{}",
+      "url_main": "https://www.mercadolivre.com.br",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Moikrug": {
+      "url": "https://moikrug.ru/{}",
+      "url_main": "https://moikrug.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Mstdn": {
+      "url": "https://mstdn.io/@{}",
+      "url_main": "https://mstdn.io",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "NnUsernameSubdomain": {
+      "url": "https://{}.www.nn.ru/",
+      "url_main": "https://username.www.nn.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Note": {
+      "url": "https://note.com/{}",
+      "url_main": "https://note.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Npmjs": {
+      "url": "https://www.npmjs.com/~{}",
+      "url_main": "https://www.npmjs.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "dev"
+    },
+    "Opennet": {
+      "url": "https://www.opennet.ru/~{}",
+      "url_main": "https://www.opennet.ru",
+      "error_type": "message",
+      "error_msg": [
+        "Имя участника не найдено"
+      ],
+      "category": "regional"
+    },
+    "PpyOsu": {
+      "url": "https://osu.ppy.sh/users/{}",
+      "url_main": "https://osu.ppy.sh",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "gaming"
+    },
+    "Php": {
+      "url": "https://php.ru/forum/members/?username={}",
+      "url_main": "https://php.ru",
+      "error_type": "message",
+      "error_msg": [
+        "Указанный пользователь не найден. Пожалуйста, введите другое имя."
+      ],
+      "category": "forum"
+    },
+    "Pikabu": {
+      "url": "https://pikabu.ru/@{}",
+      "url_main": "https://pikabu.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Pr0grammAPI": {
+      "url": "https://pr0gramm.com/user/{}",
+      "url_main": "https://pr0gramm.com",
+      "url_probe": "https://pr0gramm.com/api/profile/info?name={}",
+      "error_type": "api",
+      "api_keys": [
+        "results",
+        "users",
+        "username"
+      ],
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Satsis": {
+      "url": "https://satsis.info/user/{}",
+      "url_main": "https://satsis.info",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "TchncsSocial": {
+      "url": "https://social.tchncs.de/@{}",
+      "url_main": "https://social.tchncs.de",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Spletnik": {
+      "url": "https://spletnik.ru/user/{}",
+      "url_main": "https://spletnik.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Svidbook": {
+      "url": "https://www.svidbook.ru/user/{}",
+      "url_main": "https://www.svidbook.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Toster": {
+      "url": "https://www.toster.ru/user/{}/answers",
+      "url_main": "https://www.toster.ru",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "regional"
+    },
+    "Uid": {
+      "url": "http://uid.me/{}",
+      "url_main": "http://uid.me",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "GithubGist": {
+      "url": "https://gist.github.com/{}/",
+      "url_main": "https://gist.github.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "dev"
+    },
+    "Zoomit": {
+      "url": "https://www.zoomit.ir/user/{}/",
+      "url_main": "https://www.zoomit.ir",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "GithubUsernameSubdomain": {
+      "url": "https://{}.github.io/",
+      "url_main": "https://username.github.io",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Code": {
+      "url": "https://code.golf/golfers/{}",
+      "url_main": "https://code.golf",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Hashnode": {
+      "url": "https://hashnode.com/@{}",
+      "url_main": "https://hashnode.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Pixelfed": {
+      "url": "https://pixelfed.de/{}",
+      "url_main": "https://pixelfed.de",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "PixelfedProfile": {
+      "url": "https://pixelfed.tokyo/{}",
+      "url_main": "https://pixelfed.tokyo",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "PixelfedProfile2": {
+      "url": "https://pixelfed.se/{}",
+      "url_main": "https://pixelfed.se",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "PixelfedProfile3": {
+      "url": "https://pixelfed.uno/{}",
+      "url_main": "https://pixelfed.uno",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "PixelfedProfile4": {
+      "url": "https://pixelfed.nz/{}",
+      "url_main": "https://pixelfed.nz",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Change": {
+      "url": "https://www.change.org/o/{}",
+      "url_main": "https://www.change.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Antichat": {
+      "url": "https://forum.antichat.ru/search/search?users={}",
+      "url_main": "https://forum.antichat.ru",
+      "error_type": "message",
+      "error_msg": [
+        "The following members could not be found"
+      ],
+      "category": "forum"
+    },
+    "Majorgeeks": {
+      "url": "https://forums.majorgeeks.com/search/search?users={}",
+      "url_main": "https://forums.majorgeeks.com",
+      "error_type": "message",
+      "error_msg": [
+        "The following members could not be found"
+      ],
+      "category": "forum"
+    },
+    "Musicbrainz": {
+      "url": "https://musicbrainz.org/user/{}",
+      "url_main": "https://musicbrainz.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Archiveofourown": {
+      "url": "https://archiveofourown.org/users/{}",
+      "url_main": "https://archiveofourown.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "TumblrUsernameSubdomain": {
+      "url": "https://{}.tumblr.com/",
+      "url_main": "https://username.tumblr.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Codeforces": {
+      "url": "https://codeforces.com/profile/{}",
+      "url_main": "https://codeforces.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "dev"
+    },
+    "Boardgamegeek": {
+      "url": "https://boardgamegeek.com/user/{}",
+      "url_main": "https://boardgamegeek.com",
+      "error_type": "message",
+      "error_msg": [
+        "Error: User does not exist."
+      ],
+      "category": "social"
+    },
+    "Vimgolf": {
+      "url": "http://www.vimgolf.com/{}",
+      "url_main": "http://www.vimgolf.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Ifunny": {
+      "url": "https://ifunny.co/user/{}",
+      "url_main": "https://ifunny.co",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Linktr": {
+      "url": "https://linktr.ee/{}",
+      "url_main": "https://linktr.ee",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Hackerearth": {
+      "url": "https://www.hackerearth.com/@{}",
+      "url_main": "https://www.hackerearth.com",
+      "error_type": "message",
+      "error_msg": [
+        "<span class=\"error-heading\">404. URL not found.</span>"
+      ],
+      "category": "dev"
+    },
+    "Valorantforums": {
+      "url": "https://valorantforums.com/u/{}",
+      "url_main": "https://valorantforums.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "JupyterDiscourse": {
+      "url": "https://discourse.jupyter.org/u/{}/summary",
+      "url_main": "https://discourse.jupyter.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "forum"
+    },
+    "Cplusplus": {
+      "url": "https://cplusplus.com/user/{}/",
+      "url_main": "https://cplusplus.com",
+      "error_type": "message",
+      "error_msg": [
+        "404 Page Not Found"
+      ],
+      "category": "social"
+    },
+    "RubyForum": {
+      "url": "https://www.ruby-forum.com/u/{}/summary",
+      "url_main": "https://www.ruby-forum.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Python": {
+      "url": "https://discuss.python.org/u/{}/summary",
+      "url_main": "https://discuss.python.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "forum"
+    },
+    "Baraza": {
+      "url": "https://baraza.africa/u/{}",
+      "url_main": "https://baraza.africa",
+      "error_type": "message",
+      "error_msg": [
+        "couldnt_find_that_username_or_email"
+      ],
+      "category": "social"
+    },
+    "BitbucketUsernameSubdomain": {
+      "url": "https://{}.bitbucket.io/",
+      "url_main": "https://username.bitbucket.io",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Bitchute": {
+      "url": "https://www.bitchute.com/channel/{}/",
+      "url_main": "https://www.bitchute.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "media"
+    },
+    "CarrdUsernameSubdomain": {
+      "url": "https://{}.carrd.co/",
+      "url_main": "https://username.carrd.co",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Casually": {
+      "url": "https://casually.cat/@{}",
+      "url_main": "https://casually.cat",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Codeberg": {
+      "url": "https://codeberg.org/{}",
+      "url_main": "https://codeberg.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "dev"
+    },
+    "CodebergUsernameSubdomain": {
+      "url": "https://{}.codeberg.page/",
+      "url_main": "https://username.codeberg.page",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "CtcinUsernameSubdomain": {
+      "url": "http://{}.ctcin.bio/",
+      "url_main": "http://username.ctcin.bio",
+      "error_type": "message",
+      "error_msg": [
+        "Page not found"
+      ],
+      "category": "social"
+    },
+    "ContactinUsernameSubdomain": {
+      "url": "https://{}.contactin.bio/",
+      "url_main": "https://username.contactin.bio",
+      "error_type": "message",
+      "error_msg": [
+        "Page not found"
+      ],
+      "category": "social"
+    },
+    "ContactinbioUsernameSubdomain": {
+      "url": "http://{}.contactinbio.com/",
+      "url_main": "http://username.contactinbio.com",
+      "error_type": "message",
+      "error_msg": [
+        "Page not found"
+      ],
+      "category": "social"
+    },
+    "Coub": {
+      "url": "https://coub.com/{}",
+      "url_main": "https://coub.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "LemmyDs9": {
+      "url": "https://ds9.lemmy.ml/u/{}",
+      "url_main": "https://ds9.lemmy.ml",
+      "error_type": "message",
+      "error_msg": [
+        "couldnt_find_that_username_or_email"
+      ],
+      "category": "social"
+    },
+    "RealunifyApp": {
+      "url": "https://app.realunify.com/users/{}",
+      "url_main": "https://app.realunify.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Flowcode": {
+      "url": "https://www.flowcode.com/page/{}",
+      "url_main": "https://www.flowcode.com",
+      "error_type": "message",
+      "error_msg": [
+        "Nobody&#x27;s reserved this Flowpage yet"
+      ],
+      "category": "social"
+    },
+    "GabTv": {
+      "url": "https://tv.gab.com/channel/{}",
+      "url_main": "https://tv.gab.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "GlasgowLemmy": {
+      "url": "https://lemmy.glasgow.social/u/{}",
+      "url_main": "https://lemmy.glasgow.social",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Hypel": {
+      "url": "https://hypel.ink/{}",
+      "url_main": "https://hypel.ink",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "ImgbbUsernameSubdomain": {
+      "url": "https://{}.imgbb.com/",
+      "url_main": "https://username.imgbb.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Lemmy": {
+      "url": "https://lemmy.ml/u/{}",
+      "url_main": "https://lemmy.ml",
+      "error_type": "message",
+      "error_msg": [
+        "couldnt_find_that_username_or_email"
+      ],
+      "category": "social"
+    },
+    "LemmyU": {
+      "url": "https://lemmy.eus/u/{}",
+      "url_main": "https://lemmy.eus",
+      "error_type": "message",
+      "error_msg": [
+        "couldnt_find_that_username_or_email"
+      ],
+      "category": "social"
+    },
+    "TedomumLemmy": {
+      "url": "https://lemmy.tedomum.net/u/{}",
+      "url_main": "https://lemmy.tedomum.net",
+      "error_type": "message",
+      "error_msg": [
+        "couldnt_find_that_username_or_email"
+      ],
+      "category": "social"
+    },
+    "Lemmygrad": {
+      "url": "https://lemmygrad.ml/u/{}",
+      "url_main": "https://lemmygrad.ml",
+      "error_type": "message",
+      "error_msg": [
+        "couldnt_find_that_username_or_email"
+      ],
+      "category": "social"
+    },
+    "LemmyVoyager": {
+      "url": "https://voyager.lemmy.ml/u/{}",
+      "url_main": "https://voyager.lemmy.ml",
+      "error_type": "message",
+      "error_msg": [
+        "couldnt_find_that_username_or_email"
+      ],
+      "category": "social"
+    },
+    "Liinks": {
+      "url": "https://www.liinks.co/{}",
+      "url_main": "https://www.liinks.co",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Linktube": {
+      "url": "https://linktube.com/{}",
+      "url_main": "https://linktube.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Litelink": {
+      "url": "https://litelink.at/{}",
+      "url_main": "https://litelink.at",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Lnk": {
+      "url": "https://lnk.bio/{}",
+      "url_main": "https://lnk.bio",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Many": {
+      "url": "https://many.link/{}",
+      "url_main": "https://many.link",
+      "error_type": "message",
+      "error_msg": [
+        "Couldn't find a profile named"
+      ],
+      "category": "social"
+    },
+    "NeocitiesUsernameSubdomain": {
+      "url": "https://{}.neocities.org/",
+      "url_main": "https://username.neocities.org",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Pixelhub": {
+      "url": "https://pixelhub.me/pixelhub1/index.php?user={}",
+      "url_main": "https://pixelhub.me",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Shor": {
+      "url": "https://shor.by/{}",
+      "url_main": "https://shor.by",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Sr": {
+      "url": "https://sr.ht/~{}/",
+      "url_main": "https://sr.ht",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "dev"
+    },
+    "Spreaker": {
+      "url": "https://www.spreaker.com/user/{}",
+      "url_main": "https://www.spreaker.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "media"
+    },
+    "SquarespaceUsernameSubdomain": {
+      "url": "https://{}.squarespace.com/",
+      "url_main": "https://username.squarespace.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "SurgeUsernameSubdomain": {
+      "url": "https://{}.surge.sh",
+      "url_main": "https://username.surge.sh",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "WeeblyUsernameSubdomain": {
+      "url": "https://{}.weebly.com/",
+      "url_main": "https://username.weebly.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Worldtruth": {
+      "url": "https://www.worldtruth.online/{}",
+      "url_main": "https://www.worldtruth.online",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Bugcrowd": {
+      "url": "https://bugcrowd.com/{}",
+      "url_main": "https://bugcrowd.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "social"
+    },
+    "Tenor": {
+      "url": "https://tenor.com/users/{}",
+      "url_main": "https://tenor.com",
+      "error_type": "status_code",
+      "error_code": [
+        404
+      ],
+      "category": "media"
+    }
+  }
+}

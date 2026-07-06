@@ -31,10 +31,18 @@ data/
 !data/
 data/*
 !data/mailaccess-extra-sites.json
+!data/breach_aliases.json
+!data/common_names.json
 !data/disposable_domains.json
+!data/fediverse_instances.json
+!data/harvester_sources.json
 !data/reset_signals.json
+!data/role_prefixes.json
 !data/sherlock_sites.json
 !data/service_categories.yaml
+!data/nexfil_sites.json
+!data/subdomain_wordlist.txt
+!data/wmn_sites.json
 maltego/*.mtz
 
 # IDE

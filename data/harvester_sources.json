@@ -1,0 +1,54 @@
+{
+  "_meta": {
+    "license": "MIT (data only; collectors are native ports)",
+    "sources_total": 5,
+    "key_required_sources_excluded": ["hunter", "intelx", "shodan", "tomba", "leakix", "urlscan", "otx"]
+  },
+  "sources": [
+    {
+      "name": "crtsh",
+      "display_name": "crt.sh",
+      "url_template": "https://crt.sh/?q=%25.{domain}&output=json",
+      "type": "json",
+      "auth_required": false,
+      "rate_limit_hint": "5 req/min — be polite",
+      "parser": "crtsh"
+    },
+    {
+      "name": "rapiddns",
+      "display_name": "RapidDNS",
+      "url_template": "https://rapiddns.io/subdomain/{domain}?full=1",
+      "type": "html",
+      "auth_required": false,
+      "rate_limit_hint": "no key, no documented limit — be polite",
+      "parser": "rapiddns"
+    },
+    {
+      "name": "certspotter",
+      "display_name": "Cert Spotter",
+      "url_template": "https://api.certspotter.com/v1/issuances?domain={domain}&include_subdomains=true&expand=dns_names",
+      "type": "json",
+      "auth_required": false,
+      "rate_limit_hint": "no key, modest rate",
+      "parser": "certspotter"
+    },
+    {
+      "name": "bufferoverun",
+      "display_name": "BufferOverRun",
+      "url_template": "https://tls.bufferover.run/dns?q={domain}",
+      "type": "json",
+      "auth_required": false,
+      "rate_limit_hint": "100 queries/month free, no key",
+      "parser": "bufferoverun"
+    },
+    {
+      "name": "threatminer",
+      "display_name": "ThreatMiner",
+      "url_template": "https://api.threatminer.org/v2/domain.php?q={domain}&rt=5",
+      "type": "json",
+      "auth_required": false,
+      "rate_limit_hint": "no key, modest rate",
+      "parser": "threatminer"
+    }
+  ]
+}
