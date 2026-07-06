@@ -1,22 +1,4 @@
-"""Confidence scoring constants and aggregator for email harvesting.
-
-The Common Crawl module today and every future domain-harvest module
-(press releases, GitHub commit authors, name discovery, ...) feed into
-the same scoring surface.  Keeping the model here — even though only
-Common Crawl populates it in Phase A — means future phases plug in
-without rewriting the scoring code.
-
-Three signal classes stack multiplicatively:
-
-* **Base weight** — how trustworthy the *source type* is
-  (CA-attested > 0.7, single URL crawl > 0.5).
-* **Verification multiplier** — whether the email was cross-confirmed
-  by another source or a live SMTP handshake.
-* **Freshness factor** — how recent the attestation is.
-
-The final score is capped at 1.5 to keep the field numeric and
-comparable across modules.
-"""
+"""Confidence scoring constants and aggregator for email harvesting."""
 
 from __future__ import annotations
 
@@ -24,76 +6,72 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 SOURCE_WEIGHTS: dict[str, float] = {
-    "ca_attested": 1.0,
-    "smtp_verified": 1.0,
-    "github_commit_author": 0.9,
-    "github_code_match": 0.6,
-    "common_crawl_high_density": 0.7,
-    "common_crawl_single": 0.5,
-    "press_release": 0.8,
-    "search_snippet": 0.5,
-    "search_snippet_ddg": 0.5,
-    "search_snippet_bing": 0.4,
-    "permutation_verified": 0.5,
-    "permutation_catchall": 0.2,
-    "permutation_unverified": 0.05,
-    # W5: Phase 0.10.0 final additions — three new structured-source
-    # modules added to the harvest pipeline.
-    #
-    # npm_package_author / pypi_package_author: explicit maintainer
-    # attribution on a published package (not just a string mention in
-    # code, which is what github_code_match catches). Both weighted at
-    # 0.7 — same tier as common_crawl_high_density: a deliberate user
-    # assertion that they own / maintain a published artifact, but
-    # without the cryptographic / cross-source confirmation that pushes
-    # ca_attested / smtp_verified up to 1.0.
-    #
-    # pgp_uid: a UID on a PGP key is a deliberate, user-verified
-    # assertion of identity — the key holder signed the UID binding
-    # the email to their real name. Matches the ca_attested tier of
-    # 1.0 (both are "user-verified assertions").
-    "npm_package_author": 0.7,
-    "pypi_package_author": 0.7,
-    "pgp_uid": 1.0,
+    "pgp_uid": 1.00,
+    "ca_attested": 0.95,
+    "github_commit_author": 0.95,
+    "npm_package_author": 0.75,
+    "pypi_package_author": 0.75,
+    "press_release": 0.70,
+    "common_crawl_high_density": 0.75,
+    "common_crawl_medium": 0.55,
+    "common_crawl_single": 0.30,
+    "search_snippet_ddg": 0.35,
+    "search_snippet_bing": 0.25,
+    "github_code_match": 0.45,
+    "permutation_verified": 0.65,
+    "permutation_catchall": 0.10,
+    "permutation_unverified": 0.00,
 }
 
 VERIFICATION_MULTIPLIER: dict[str, float] = {
-    "no_verification": 0.6,
-    "single_source": 0.9,
-    "multi_source": 1.2,
-    "smtp_verified": 1.4,
-    "ca_attested": 1.5,
+    "single_source": 1.00,
+    "multi_source_2": 1.20,
+    "multi_source_3": 1.45,
+    "multi_source_4plus": 1.65,
+    "smtp_verified": 1.50,
+    "pgp_or_ca": 1.55,
+}
+
+SOURCE_CLASS: dict[str, str] = {
+    "pgp_uid": "cryptographic",
+    "ca_attested": "cryptographic",
+    "github_commit_author": "developer",
+    "github_code_match": "developer",
+    "npm_package_author": "developer",
+    "pypi_package_author": "developer",
+    "common_crawl_high_density": "scraping",
+    "common_crawl_medium": "scraping",
+    "common_crawl_single": "scraping",
+    "search_snippet_ddg": "scraping",
+    "search_snippet_bing": "scraping",
+    "press_release": "press",
+    "permutation_verified": "verification",
+    "permutation_catchall": "verification",
+    "permutation_unverified": "verification",
 }
 
 MAX_SCORE = 1.5
+HIGH_THRESHOLD = 0.85
+MEDIUM_THRESHOLD = 0.55
 
 
 @dataclass
 class ConfidenceLabel:
     score: float
     label: str
-    breakdown: dict[str, float]
+    breakdown: dict[str, float | str | list[str]]
 
 
 def freshness_factor(timestamp: str | None) -> float:
-    """Return a freshness multiplier in [0.3, 1.0].
-
-    Bands:
-        <= 90 days        → 1.0
-        90 - 365 days     → 0.85
-        365 - 1095 days   → 0.6
-        > 1095 days       → 0.3
-        None / unparseable→ 0.7 (unknown age, moderate penalty)
-    """
+    """Return the freshness multiplier for the newest supporting hit."""
     if not timestamp:
-        return 0.7
+        return 0.50
 
     cleaned = str(timestamp).strip()
     if not cleaned:
-        return 0.7
+        return 0.50
 
     parsed: datetime | None = None
-    # Try common CC and ISO formats.
     for fmt in ("%Y%m%d%H%M%S", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
             parsed = datetime.strptime(cleaned[: len(fmt) + 6], fmt)  # noqa: PERF203
@@ -106,38 +84,67 @@ def freshness_factor(timestamp: str | None) -> float:
         try:
             parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
         except ValueError:
-            return 0.7
+            return 0.50
 
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
 
-    now = datetime.now(timezone.utc)
-    age_days = max((now - parsed).days, 0)
-
-    if age_days <= 90:
-        return 1.0
+    age_days = max((datetime.now(timezone.utc) - parsed).days, 0)
+    if age_days <= 180:
+        return 1.00
     if age_days <= 365:
         return 0.85
-    if age_days <= 1095:
-        return 0.6
-    return 0.3
+    if age_days <= 365 * 2:
+        return 0.65
+    if age_days <= 365 * 3:
+        return 0.40
+    return 0.15
+
+
+def _source_family(source_type: str) -> str:
+    """Return the corroboration bucket for multiplier selection."""
+    if source_type.startswith(("common_crawl_", "search_snippet_")):
+        return source_type
+    return SOURCE_CLASS.get(source_type, source_type)
+
+
+def _label(final: float) -> str:
+    if final >= HIGH_THRESHOLD:
+        return "HIGH"
+    if final >= MEDIUM_THRESHOLD:
+        return "MEDIUM"
+    return "LOW"
 
 
 def _select_verification_multiplier(
     source_types: list[str],
     is_smtp_verified: bool,
-    is_ca_attested: bool,
+    is_pgp_or_ca: bool,
 ) -> tuple[float, str]:
-    if is_ca_attested:
-        return VERIFICATION_MULTIPLIER["ca_attested"], "ca_attested"
+    if is_pgp_or_ca:
+        return VERIFICATION_MULTIPLIER["pgp_or_ca"], "pgp_or_ca"
     if is_smtp_verified:
         return VERIFICATION_MULTIPLIER["smtp_verified"], "smtp_verified"
-    distinct = len(set(source_types))
-    if distinct >= 2:
-        return VERIFICATION_MULTIPLIER["multi_source"], "multi_source"
-    if distinct == 1:
-        return VERIFICATION_MULTIPLIER["single_source"], "single_source"
-    return VERIFICATION_MULTIPLIER["no_verification"], "no_verification"
+
+    distinct_families = len({_source_family(st) for st in source_types if st})
+    if distinct_families >= 4:
+        return VERIFICATION_MULTIPLIER["multi_source_4plus"], "multi_source_4plus"
+    if distinct_families >= 3:
+        return VERIFICATION_MULTIPLIER["multi_source_3"], "multi_source_3"
+    if distinct_families >= 2:
+        return VERIFICATION_MULTIPLIER["multi_source_2"], "multi_source_2"
+    return VERIFICATION_MULTIPLIER["single_source"], "single_source"
+
+
+def _pgp_or_ca_flag(
+    unique_types: set[str],
+    *,
+    is_ca_attested: bool,
+    is_pgp_or_ca: bool | None,
+) -> bool:
+    if is_pgp_or_ca is not None:
+        return is_pgp_or_ca
+    return is_ca_attested or bool(unique_types & {"pgp_uid", "ca_attested"})
 
 
 def compute_confidence(
@@ -145,86 +152,53 @@ def compute_confidence(
     source_types: list[str],
     is_smtp_verified: bool = False,
     is_ca_attested: bool = False,
+    is_pgp_or_ca: bool | None = None,
     oldest_timestamp: str | None = None,
+    last_seen_timestamp: str | None = None,
 ) -> tuple[float, str]:
-    """Compute a (score, label) pair for an aggregated email attestation.
-
-    Parameters
-    ----------
-    source_count:
-        Number of *distinct* evidence hits across all sources.
-        Currently informational only — weights use ``source_types``.
-    source_types:
-        Strings drawn from :data:`SOURCE_WEIGHTS`.  Duplicates are
-        de-duplicated before scoring so a single source appearing
-        5 times does not 5x its weight.
-    is_smtp_verified / is_ca_attested:
-        See module docstring.
-    oldest_timestamp:
-        ISO-ish timestamp of the OLDEST supporting hit (CC format
-        ``YYYYMMDDHHMMSS`` is supported).  Used for freshness decay.
-
-    Returns
-    -------
-    (score, label): ``score`` ∈ [0, 1.5], ``label`` ∈ {"HIGH", "MEDIUM", "LOW"}.
-    """
-    del source_count  # reserved for future "extras boost" rules
+    """Compute a ``(score, label)`` pair for aggregated email evidence."""
+    del source_count
 
     unique_types = {st for st in source_types if st}
     base_score = sum(SOURCE_WEIGHTS.get(t, 0.0) for t in unique_types)
-
-    multiplier, multiplier_label = _select_verification_multiplier(
+    pgp_or_ca = _pgp_or_ca_flag(
+        unique_types,
+        is_ca_attested=is_ca_attested,
+        is_pgp_or_ca=is_pgp_or_ca,
+    )
+    multiplier, _ = _select_verification_multiplier(
         source_types=list(unique_types),
         is_smtp_verified=is_smtp_verified,
-        is_ca_attested=is_ca_attested,
+        is_pgp_or_ca=pgp_or_ca,
     )
-
-    freshness = freshness_factor(oldest_timestamp)
-
-    raw = base_score * multiplier * freshness
-    final = min(max(raw, 0.0), MAX_SCORE)
-
-    if final >= 0.8:
-        label = "HIGH"
-    elif final >= 0.5:
-        label = "MEDIUM"
-    else:
-        label = "LOW"
-
-    # Stash a breakdown on the side-effect-free return; we return only
-    # (score, label) here, callers that want the breakdown should
-    # use :func:`compute_confidence_breakdown`.
-    _ = ConfidenceLabel  # silence linters — public class for callers
-    return final, label
+    freshness = freshness_factor(last_seen_timestamp or oldest_timestamp)
+    final = min(max(base_score * multiplier * freshness, 0.0), MAX_SCORE)
+    return final, _label(final)
 
 
 def compute_confidence_breakdown(
     source_types: list[str],
     is_smtp_verified: bool = False,
     is_ca_attested: bool = False,
+    is_pgp_or_ca: bool | None = None,
     oldest_timestamp: str | None = None,
+    last_seen_timestamp: str | None = None,
 ) -> ConfidenceLabel:
-    """Like :func:`compute_confidence` but returns the full breakdown.
-
-    Useful for debugging and for surfacing the reasoning in API
-    responses.
-    """
+    """Like :func:`compute_confidence` but returns the full breakdown."""
     unique_types = {st for st in source_types if st}
     base_score = sum(SOURCE_WEIGHTS.get(t, 0.0) for t in unique_types)
+    pgp_or_ca = _pgp_or_ca_flag(
+        unique_types,
+        is_ca_attested=is_ca_attested,
+        is_pgp_or_ca=is_pgp_or_ca,
+    )
     multiplier, multiplier_label = _select_verification_multiplier(
         source_types=list(unique_types),
         is_smtp_verified=is_smtp_verified,
-        is_ca_attested=is_ca_attested,
+        is_pgp_or_ca=pgp_or_ca,
     )
-    freshness = freshness_factor(oldest_timestamp)
-    raw = base_score * multiplier * freshness
-    final = min(max(raw, 0.0), MAX_SCORE)
-    if final >= 0.8:
-        label = "HIGH"
-    elif final >= 0.5:
-        label = "MEDIUM"
-    else:
-        label = "LOW"
+    freshness = freshness_factor(last_seen_timestamp or oldest_timestamp)
+    final = min(max(base_score * multiplier * freshness, 0.0), MAX_SCORE)
     breakdown = {
         "base_score": round(base_score, 4),
         "multiplier": multiplier,
@@ -232,13 +206,9 @@ def compute_confidence_breakdown(
         "freshness": freshness,
         "source_types": sorted(unique_types),
     }
-    return ConfidenceLabel(score=final, label=label, breakdown=breakdown)
+    return ConfidenceLabel(score=final, label=_label(final), breakdown=breakdown)
 
 
 def label_for_score(score: float) -> str:
-    """Public threshold helper — exposed for downstream consumers/tests."""
-    if score >= 0.8:
-        return "HIGH"
-    if score >= 0.5:
-        return "MEDIUM"
-    return "LOW"
+    """Public threshold helper, exposed for downstream consumers/tests."""
+    return _label(score)

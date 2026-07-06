@@ -314,6 +314,8 @@ class Settings(BaseSettings):
     # Master kill switch for the pattern_and_verify module.  Lives in
     # domain harvest mode; takes the names from Phase C1's output.
     enable_email_pattern_and_verify: bool = True
+    pattern_high_confidence_threshold: float = 0.75
+    pattern_medium_confidence_threshold: float = 0.50
 
     # W5: Phase 0.10.0 final additions — three new structured-source
     # modules that slot into Phase 1 of the harvest orchestrator

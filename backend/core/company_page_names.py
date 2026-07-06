@@ -15,10 +15,12 @@ clustering later.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
 from html import unescape
+from typing import Any
 
 import httpx
 
@@ -31,6 +33,10 @@ _LOG = logging.getLogger(__name__)
 # is more reliable than a random match anywhere else, but unverified
 # against a structured registry.
 _COMPANY_PAGE_CONFIDENCE = 0.6
+
+# Phase 4: role-context multipliers.
+_COMPANY_PAGE_NO_ROLE_PENALTY = 0.7   # name found without nearby role → 0.7×
+_COMPANY_PAGE_JSON_LD_BONUS = 1.2     # name from JSON-LD Person schema → 1.2×
 
 # Common about/team/leadership URL paths. Ordered roughly by
 # likelihood per research.
@@ -57,6 +63,12 @@ _MAX_REDIRECTS = 2
 _TAG_RE = re.compile(r"<[^>]+>")
 _SCRIPT_RE = re.compile(
     r"<(?:script|style|noscript|svg|iframe)[^>]*>.*?</(?:script|style|noscript|svg|iframe)>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+# Phase 4: JSON-LD script tag extractor.
+_JSON_LD_RE = re.compile(
+    r'<script[^>]*\btype\s*=\s*["\']application/ld\+json["\'][^>]*>(.*?)</script\s*>',
     flags=re.IGNORECASE | re.DOTALL,
 )
 
@@ -111,12 +123,21 @@ _TITLE_AFTER_NAME_RE = re.compile(
 )
 
 
+# Phase 4: source type distinguishes role-context levels for confidence.
+# "with_role"   — name found alongside a title ("John Smith, CTO")
+# "no_role"     — name found standalone in body text
+# "json_ld"     — name extracted from JSON-LD Person schema (highest quality)
+SourceType = str  # literal: "with_role" | "no_role" | "json_ld"
+
+
 @dataclass
 class CompanyPageName:
     name: str
     source_url: str
     title_or_role: str | None
     confidence: float
+    source_type: SourceType = "no_role"          # Phase 4 field; default = no_role
+    email: str | None = None                     # Phase 4: from JSON-LD Person.email
 
 
 # ----------------------------------------------------------------------
@@ -184,19 +205,69 @@ def _candidate_in_page_furniture(name: str, page_furniture: tuple[str | None, st
     return False
 
 
+# ----------------------------------------------------------------------
+# Phase 4: JSON-LD Person schema extractor
+# ----------------------------------------------------------------------
+def _extract_json_ld_persons(html: str) -> list[dict[str, Any]]:
+    """Extract Person entities from JSON-LD <script> blocks in *html*.
+
+    Handles the common ``@graph`` wrapper format used by many CMSes /
+    schema-org generators, as well as top-level ``@type: Person`` nodes.
+    Returns a list of dicts with keys: ``name``, ``jobTitle`` (optional),
+    ``email`` (optional).
+    """
+    found: list[dict[str, Any]] = []
+    for m in _JSON_LD_RE.finditer(html):
+        raw = m.group(1)
+        try:
+            data = json.loads(raw)
+        except Exception:  # noqa: BLE001 — malformed JSON-LD is not fatal
+            continue
+        found.extend(_walk_json_ld(data))
+    return found
+
+
+def _walk_json_ld(node: Any) -> list[dict[str, Any]]:
+    """Recursively walk a JSON-LD tree, collecting Person entities."""
+    results: list[dict[str, Any]] = []
+    if isinstance(node, dict):
+        # Check if this node is a Person.
+        typ = node.get("type") or node.get("@type", "")
+        # @type can be a string or a list.
+        types: list[str] = [typ] if isinstance(typ, str) else typ
+        if any(t in ("Person", "person", "https://schema.org/Person") for t in types):
+            name = node.get("name") or ""
+            if isinstance(name, str) and name.strip():
+                results.append(
+                    {
+                        "name": name.strip(),
+                        "jobTitle": node.get("jobTitle") or node.get("jobTitle"),
+                        "email": node.get("email") or None,
+                    }
+                )
+        # Recurse into children.
+        for val in node.values():
+            results.extend(_walk_json_ld(val))
+    elif isinstance(node, list):
+        for item in node:
+            results.extend(_walk_json_ld(item))
+    return results
+
+
+# ----------------------------------------------------------------------
+# Phase 4: role-context aware name extractor
+# ----------------------------------------------------------------------
 def _extract_names_from_text(
     text: str,
     domain: str | None = None,
     *,
     page_furniture: tuple[str | None, str | None] = (None, None),
-) -> list[tuple[str, str | None]]:
-    """Return ``[(name, role_or_None)]`` tuples extracted from page text.
+) -> list[tuple[str, str | None, SourceType]]:
+    """Return ``[(name, role_or_None, source_type)]`` tuples extracted from page text.
 
     Uses two complementary passes:
-    1. Strict "Name, Title" pattern (very high precision).
-    2. Loose "Capitalised token sequence" pattern, filtered through
-       :func:`name_quality.is_plausible_person_name` (lower precision
-       but higher recall).
+    1. Strict "Name, Title" pattern (very high precision) → ``source_type="with_role"``.
+    2. Loose "Capitalised token sequence" pattern → ``source_type="no_role"``.
 
     Pass ``domain`` to drop candidates that match the target company
     name itself ("Acme Welcome" → reject because "acme" == the
@@ -208,7 +279,8 @@ def _extract_names_from_text(
     """
     from .name_quality import matches_domain as _matches_domain
 
-    found: list[tuple[str, str | None]] = []
+    # Phase 4: source_type distinguishes role context.
+    found: list[tuple[str, str | None, SourceType]] = []
     seen: set[str] = set()
 
     def _matches_company_token(name: str) -> bool:
@@ -224,7 +296,7 @@ def _extract_names_from_text(
                 return True
         return False
 
-    def _keep(name: str, role: str | None) -> None:
+    def _keep(name: str, role: str | None, source_type: SourceType) -> None:
         cleaned_name = name.strip()
         if not is_plausible_person_name(cleaned_name):
             return
@@ -238,9 +310,9 @@ def _extract_names_from_text(
         if key in seen:
             return
         seen.add(key)
-        found.append((cleaned_name, role))
+        found.append((cleaned_name, role, source_type))
 
-    # Pass 1: "Name, Title" or "Name - Title" patterns.
+    # Pass 1: "Name, Title" or "Name - Title" patterns → with_role.
     for match in _TITLE_AFTER_NAME_RE.finditer(text):
         name = match.group(1).strip()
         role = match.group(2).strip()
@@ -254,9 +326,9 @@ def _extract_names_from_text(
             role = role[: cut.start() + 10].strip(" ,;-")
         if role and role.lower().startswith(("and", "or", "the ")):
             continue
-        _keep(name, role)
+        _keep(name, role, "with_role")
 
-    # Pass 2: standalone capitalised sequences.
+    # Pass 2: standalone capitalised sequences → no_role.
     #
     # We scan the text manually because ``re.finditer`` is position-
     # greedy and may consume a position-based match that would
@@ -286,7 +358,7 @@ def _extract_names_from_text(
             if key in seen:
                 continue
             seen.add(key)
-            found.append((candidate, None))
+            found.append((candidate, None, "no_role"))
 
     return found
 
@@ -361,19 +433,47 @@ async def discover_company_page_names(
                 page_names = _extract_names_from_text(
                     text, domain=cleaned, page_furniture=page_furniture
                 )
-                for name, role in page_names:
+                for name, role, source_type in page_names:
                     if not is_plausible_person_name(name):
                         continue
                     key = name.lower()
                     if key in seen_names:
                         continue
+                    # Phase 4: apply role-context multipliers.
+                    multiplier = (
+                        1.0
+                        if source_type == "with_role"
+                        else _COMPANY_PAGE_NO_ROLE_PENALTY
+                    )
                     entry = CompanyPageName(
                         name=name,
                         source_url=url,
                         title_or_role=role,
-                        confidence=_COMPANY_PAGE_CONFIDENCE,
+                        confidence=round(_COMPANY_PAGE_CONFIDENCE * multiplier, 4),
+                        source_type=source_type,
                     )
                     seen_names[key] = entry
+                    names.append(entry)
+
+                # Phase 4: emit JSON-LD Person entities as separate high-confidence records.
+                for person in _extract_json_ld_persons(html):
+                    pname = person.get("name", "")
+                    if not is_plausible_person_name(pname):
+                        continue
+                    pkey = pname.lower()
+                    if pkey in seen_names:
+                        continue
+                    entry = CompanyPageName(
+                        name=pname,
+                        source_url=url,
+                        title_or_role=person.get("jobTitle"),
+                        confidence=round(
+                            _COMPANY_PAGE_CONFIDENCE * _COMPANY_PAGE_JSON_LD_BONUS, 4
+                        ),
+                        source_type="json_ld",
+                        email=person.get("email"),
+                    )
+                    seen_names[pkey] = entry
                     names.append(entry)
         finally:
             if owns_client:
@@ -384,37 +484,69 @@ async def discover_company_page_names(
 
 
 def discover_for_tests(
-    page_text_by_url: dict[str, str],
+    page_html_by_url: dict[str, str],
     domain: str | None = None,
     *,
     metadata_by_url: dict[str, tuple[str | None, str | None]] | None = None,
 ) -> list[CompanyPageName]:
-    """Test-only helper to derive CompanyPageName records from
-    already-rendered page text.  Pass ``domain`` to enable the
-    company-name self-match filter.
+    """Test-only helper to derive CompanyPageName records from raw HTML.
 
+    Pass ``domain`` to enable the company-name self-match filter.
     Pass ``metadata_by_url`` (URL → (title, meta_description) tuples)
     to enable the FIX-1 page-furniture verbatim filter — this is
     how the ``test_*_title_verbatim_*`` tests opt in.
     """
     out: list[CompanyPageName] = []
-    for url, text in page_text_by_url.items():
+    seen: set[str] = set()
+    for url, raw_html in page_html_by_url.items():
         furniture = (
             metadata_by_url.get(url, (None, None))
             if metadata_by_url
             else (None, None)
         )
-        for name, role in _extract_names_from_text(
+        # Convert to plain text for the token-based name extractor.
+        text = _html_to_text(raw_html)
+        for name, role, source_type in _extract_names_from_text(
             text, domain=domain, page_furniture=furniture
         ):
             if not is_plausible_person_name(name):
                 continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            # Phase 4: apply role-context multipliers.
+            multiplier = (
+                1.0 if source_type == "with_role" else _COMPANY_PAGE_NO_ROLE_PENALTY
+            )
             out.append(
                 CompanyPageName(
                     name=name,
                     source_url=url,
                     title_or_role=role,
-                    confidence=_COMPANY_PAGE_CONFIDENCE,
+                    confidence=round(_COMPANY_PAGE_CONFIDENCE * multiplier, 4),
+                    source_type=source_type,
+                )
+            )
+        # Phase 4: emit JSON-LD Person entities from the raw HTML.
+        for person in _extract_json_ld_persons(raw_html):
+            pname = person.get("name", "")
+            if not is_plausible_person_name(pname):
+                continue
+            pkey = pname.lower()
+            if pkey in seen:
+                continue
+            seen.add(pkey)
+            out.append(
+                CompanyPageName(
+                    name=pname,
+                    source_url=url,
+                    title_or_role=person.get("jobTitle"),
+                    confidence=round(
+                        _COMPANY_PAGE_CONFIDENCE * _COMPANY_PAGE_JSON_LD_BONUS, 4
+                    ),
+                    source_type="json_ld",
+                    email=person.get("email"),
                 )
             )
     return out

@@ -47,6 +47,11 @@ _LOG = logging.getLogger(__name__)
 _SOURCE_TYPE_VERIFIED = "permutation_verified"
 _SOURCE_TYPE_CATCHALL = "permutation_catchall"
 _SOURCE_TYPE_UNVERIFIED = "permutation_unverified"
+_TOP_THREE_TEMPLATES = [
+    "{first}.{last}@{domain}",
+    "{first}@{domain}",
+    "{f}{last}@{domain}",
+]
 
 
 @dataclass
@@ -140,39 +145,22 @@ class PatternAndVerifyModule(BaseModule):
                 },
             )
 
-        # ------------------------------------------------------------------
-        # 1. Generate the full candidate set up-front.  Each candidate
-        #    starts as ``permutation_unverified``; we'll retag below
-        #    based on SMTP results.
-        # ------------------------------------------------------------------
         candidates: list[GeneratedPatternResult] = []
         confirmed_pattern: str | None = None
-        for emp in employee_names:
-            base_template = (
-                confirmed_pattern_priority(confirmed_pattern)
-                if confirmed_pattern
-                else None
-            )
-            try:
-                patterns = generate_patterns(
-                    emp.name,
-                    cleaned_domain,
-                    patterns=base_template,
-                )
-            except Exception as exc:  # noqa: BLE001 - defensive
-                _LOG.warning(
-                    "pattern_and_verify: pattern generation failed for %r: %s",
-                    emp.name,
-                    exc,
-                )
-                continue
-            for pattern in patterns:
-                candidates.append(
-                    _to_result(pattern, _SOURCE_TYPE_UNVERIFIED)
-                )
+        names_processed_high = 0
+        names_processed_medium = 0
+        names_skipped_low = 0
+        patterns_generated_high = 0
+        patterns_generated_medium = 0
+        patterns_skipped = 0
+        skipped_low_confidence_names: list[dict[str, Any]] = []
+        pattern_generation_by_name: list[dict[str, Any]] = []
+
+        high_threshold = float(settings.pattern_high_confidence_threshold)
+        medium_threshold = float(settings.pattern_medium_confidence_threshold)
 
         # ------------------------------------------------------------------
-        # 2. SMTP opt-in.  MUST-FIX M3: explicit parameter wins; only
+        # 1. SMTP opt-in.  MUST-FIX M3: explicit parameter wins; only
         #    fall back to settings when called outside an orchestrator.
         # ------------------------------------------------------------------
         smtp_enabled = (
@@ -184,7 +172,149 @@ class PatternAndVerifyModule(BaseModule):
         batch_meta: dict[str, Any] = {}
         probes_used_total = 0
 
-        if smtp_enabled and candidates:
+        def _base_tier(confidence: float) -> str:
+            if confidence >= high_threshold:
+                return "high"
+            if confidence >= medium_threshold:
+                return "medium"
+            return "low"
+
+        def _tier_templates(
+            tier: str,
+            *,
+            confirmed_template: str | None = None,
+            downgrade_high: bool = False,
+        ) -> list[str] | None:
+            if tier == "high" and not downgrade_high:
+                if confirmed_template:
+                    return confirmed_pattern_priority(confirmed_template)
+                return None
+            templates = list(_TOP_THREE_TEMPLATES)
+            if confirmed_template:
+                templates = [
+                    confirmed_template,
+                    *[t for t in templates if t != confirmed_template],
+                ][:3]
+            return templates
+
+        def _minimum_templates_for_tier(tier: str) -> int:
+            return 11 if tier == "high" else 3
+
+        def _record_skip(
+            emp: EmployeeNameResult,
+            *,
+            tier: str,
+            reason: str,
+        ) -> None:
+            nonlocal names_skipped_low, patterns_skipped
+            if tier == "low":
+                names_skipped_low += 1
+                skipped_low_confidence_names.append(
+                    {
+                        "name": emp.name,
+                        "confidence": float(emp.confidence),
+                        "sources": list(emp.sources or []),
+                        "title_or_role": emp.title_or_role,
+                        "reason": reason,
+                    }
+                )
+            patterns_skipped += _minimum_templates_for_tier(tier)
+            pattern_generation_by_name.append(
+                {
+                    "name": emp.name,
+                    "confidence": float(emp.confidence),
+                    "tier": tier,
+                    "templates_generated": 0,
+                    "patterns_generated": 0,
+                    "skipped": True,
+                    "skip_reason": reason,
+                }
+            )
+
+        def _append_generated(
+            emp: EmployeeNameResult,
+            patterns: list[GeneratedEmail],
+            *,
+            tier: str,
+            generation_tier: str,
+            downgraded: bool = False,
+        ) -> None:
+            nonlocal names_processed_high, names_processed_medium
+            nonlocal patterns_generated_high, patterns_generated_medium
+            if tier == "high":
+                names_processed_high += 1
+                patterns_generated_high += len(patterns)
+            else:
+                names_processed_medium += 1
+                patterns_generated_medium += len(patterns)
+            for pattern in patterns:
+                candidates.append(_to_result(pattern, _SOURCE_TYPE_UNVERIFIED))
+            pattern_generation_by_name.append(
+                {
+                    "name": emp.name,
+                    "confidence": float(emp.confidence),
+                    "tier": tier,
+                    "generation_tier": generation_tier,
+                    "templates_generated": len(patterns),
+                    "patterns_generated": len(patterns),
+                    "skipped": False,
+                    "downgraded_for_budget": downgraded,
+                }
+            )
+
+        def _generate_for_employee(
+            emp: EmployeeNameResult,
+            *,
+            confirmed_template: str | None = None,
+            remaining_probe_budget: int | None = None,
+        ) -> list[GeneratedEmail]:
+            tier = _base_tier(float(emp.confidence))
+            if tier == "low":
+                _record_skip(emp, tier=tier, reason="low_confidence")
+                return []
+            downgraded = False
+            generation_tier = tier
+            if remaining_probe_budget is not None:
+                if remaining_probe_budget < 3:
+                    _record_skip(emp, tier=tier, reason="smtp_probe_budget_exhausted")
+                    return []
+                if tier == "high" and remaining_probe_budget < 11:
+                    downgraded = True
+                    generation_tier = "medium"
+            try:
+                patterns = generate_patterns(
+                    emp.name,
+                    cleaned_domain,
+                    patterns=_tier_templates(
+                        tier,
+                        confirmed_template=confirmed_template,
+                        downgrade_high=downgraded,
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - defensive
+                _LOG.warning(
+                    "pattern_and_verify: pattern generation failed for %r: %s",
+                    emp.name,
+                    exc,
+                )
+                return []
+            _append_generated(
+                emp,
+                patterns,
+                tier=tier,
+                generation_tier=generation_tier,
+                downgraded=downgraded,
+            )
+            return patterns
+
+        def _generate_without_probing() -> None:
+            for emp in employee_names:
+                _generate_for_employee(emp)
+
+        if not smtp_enabled:
+            _generate_without_probing()
+
+        if smtp_enabled:
             # MUST-FIX M2: open ONE SMTPVerifier for the whole batch.
             # The per-name loop previously constructed N verifiers,
             # triggering N TCP connects + N MAIL FROM handshakes against
@@ -199,6 +329,7 @@ class PatternAndVerifyModule(BaseModule):
 
             if not mx_records:
                 batch_meta["stop_reason"] = "no_mx_records"
+                _generate_without_probing()
             else:
                 async with SMTPVerifier(
                     mx_records=mx_records,
@@ -226,13 +357,14 @@ class PatternAndVerifyModule(BaseModule):
                         # and would only add noise. Mark all candidates
                         # not_attempted (the retag below turns them
                         # into ``permutation_catchall``).
-                        pass
+                        _generate_without_probing()
                     elif is_catchall is None:
                         # Catch-all check itself failed (timeout, block
                         # signal, ambiguous response). Per the design
                         # notes in smtp_verifier.py we MUST NOT probe
                         # individuals in this case — refuse to proceed.
                         batch_meta["stop_reason"] = "catchall_check_failed"
+                        _generate_without_probing()
                     else:
                         # Not catch-all — run the batched probe loop.
                         # We probe per-name to preserve the propagation
@@ -244,31 +376,6 @@ class PatternAndVerifyModule(BaseModule):
                             int(settings.smtp_max_probes_per_domain),
                             MAX_PROBES_HARD_CAP,
                         )
-                        # Build per-name pattern lists once for the
-                        # inner loop. We don't modify the global
-                        # ``candidates`` ordering; instead we walk it
-                        # by index ranges derived here.
-                        per_name_patterns: list[list[GeneratedEmail]] = []
-                        cursor = 0
-                        for emp in employee_names:
-                            try:
-                                pats = generate_patterns(
-                                    emp.name,
-                                    cleaned_domain,
-                                    patterns=(
-                                        confirmed_pattern_priority(
-                                            confirmed_pattern
-                                        )
-                                        if confirmed_pattern
-                                        else None
-                                    ),
-                                )
-                            except Exception:
-                                pats = []
-                            # Match ``candidates[cursor:cursor+len(pats)]``
-                            per_name_patterns.append(pats)
-                            cursor += len(pats)
-
                         # MUST-FIX S3: track the candidate index with
                         # an integer counter instead of calling
                         # ``patterns.index(pattern)`` on every iteration
@@ -278,10 +385,34 @@ class PatternAndVerifyModule(BaseModule):
                         # 11-pattern × 50-name batch cost 275 index()
                         # calls. The counter makes every lookup O(1).
                         cand_index = 0
-                        for pats in per_name_patterns:
+                        stop_for_block = False
+                        for emp_index, emp in enumerate(employee_names):
+                            remaining_budget = cap - probes_used_total
+                            if remaining_budget < 3:
+                                remaining_names = employee_names[emp_index:]
+                                for skipped_emp in remaining_names:
+                                    _record_skip(
+                                        skipped_emp,
+                                        tier=_base_tier(float(skipped_emp.confidence)),
+                                        reason="smtp_probe_budget_exhausted",
+                                    )
+                                batch_meta["stop_reason"] = (
+                                    batch_meta.get("stop_reason")
+                                    or "budget_exhausted"
+                                )
+                                _LOG.warning(
+                                    "SMTP probe budget exhausted - %s names skipped",
+                                    len(remaining_names),
+                                )
+                                break
+                            pats = _generate_for_employee(
+                                emp,
+                                confirmed_template=confirmed_pattern,
+                                remaining_probe_budget=remaining_budget,
+                            )
                             if not pats:
                                 continue
-                            for pattern in pats:
+                            for pattern_offset, pattern in enumerate(pats):
                                 if probes_used_total >= cap:
                                     batch_meta["stop_reason"] = (
                                         batch_meta.get("stop_reason")
@@ -320,12 +451,7 @@ class PatternAndVerifyModule(BaseModule):
                                     batch_meta["stop_reason"] = (
                                         "blocked_mid_batch"
                                     )
-                                    # Skip remaining patterns in this
-                                    # name and break out of the outer
-                                    # per-name loop.
-                                    cand_index = (
-                                        len(candidates)
-                                    )  # forces outer break
+                                    stop_for_block = True
                                     break
                                 if getattr(res, "exists", None) is True:
                                     # MUST-FIX S3: ``cand_index`` is an
@@ -350,9 +476,11 @@ class PatternAndVerifyModule(BaseModule):
                                         )
                                     # Stop probing patterns for this
                                     # name — we found a working one.
-                                    cand_index += 1
+                                    cand_index += len(pats) - pattern_offset
                                     break
                                 cand_index += 1
+                            if stop_for_block:
+                                break
 
         # ------------------------------------------------------------------
         # 3. If catch-all was detected and we never probed individuals,
@@ -427,6 +555,16 @@ class PatternAndVerifyModule(BaseModule):
                 "verified_count": verified_count,
                 "stopped_early": batch_meta.get("stop_reason") is not None,
                 "stop_reason": batch_meta.get("stop_reason"),
+                "names_processed_high": names_processed_high,
+                "names_processed_medium": names_processed_medium,
+                "names_skipped_low": names_skipped_low,
+                "patterns_generated_high": patterns_generated_high,
+                "patterns_generated_medium": patterns_generated_medium,
+                "patterns_skipped": patterns_skipped,
+                "skipped_low_confidence_names": skipped_low_confidence_names,
+                "pattern_generation_by_name": pattern_generation_by_name,
+                "pattern_high_confidence_threshold": high_threshold,
+                "pattern_medium_confidence_threshold": medium_threshold,
             },
         )
 
