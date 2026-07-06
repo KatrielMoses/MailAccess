@@ -98,6 +98,16 @@ def test_org_and_bot_names_are_discarded() -> None:
     assert result.name_confidence == "unknown"
 
 
+def test_module_artifact_tokens_are_rejected() -> None:
+    result = NameConsensusEngine("katrield.moses@lavellenetworks.com").resolve(
+        [{"raw_name": "Katrieldmoses Sec", "source": "sec_edgar"}]
+    )
+
+    assert result.confirmed_name is None
+    assert result.name_confidence == "unknown"
+    assert result.all_candidates == []
+
+
 def test_extract_name_candidates_reads_profile_platform_fields() -> None:
     collected = {
         "github_commits": SimpleNamespace(findings=[

@@ -91,6 +91,12 @@ _NAV_FOOTER_STOPLIST: frozenset[str] = frozenset(
         "newsletter",
         "skip to content",
         "skip to main",
+        "cisco networking",
+        "kubernetes operations",
+        "cloud wilson",
+        "smith network",
+        "error sorry",
+        "partner partner",
     }
 )
 
@@ -211,7 +217,6 @@ _NAVIGATION_TOKENS: frozenset[str] = frozenset(
         "envoy",
         "linkerd",
         "linux",
-        "python",
         "devops",
         "ceh",
         # ── Category 2: Certification & training terms ────────────────────
@@ -298,6 +303,33 @@ _NAVIGATION_TOKENS: frozenset[str] = frozenset(
         "azuread",
         # ── Category 4: Marketing & navigation phrases ────────────────────
         "learn",
+        "study",
+        "case",
+        "cases",
+        "chain",
+        "supply",
+        "sector",
+        "industry",
+        "industries",
+        "solution",
+        "hybrid",
+        "edge",
+        "gateway",
+        "controller",
+        "locator",
+        "multicloud",
+        "programmable",
+        "undertaking",
+        "sorry",
+        "error",
+        "explore",
+        "vulnerabilities",
+        "targets",
+        "remain",
+        "governments",
+        "zero-days",
+        "zerodays",
+        "pentester",
         "growing",
         "grow",
         "transform",
@@ -305,6 +337,7 @@ _NAVIGATION_TOKENS: frozenset[str] = frozenset(
         "discover",
         "discovering",
         "journey",
+        "networking",
         "experience",
         "experiences",
         "engineered",
@@ -401,6 +434,7 @@ _NAVIGATION_TOKENS: frozenset[str] = frozenset(
         "management",
         # ── Retained legacy terms (infrastructure / business / UI) ────────
         "network",
+        "operations",
         "cloud",
         "technology",
         "infrastructure",
@@ -431,6 +465,8 @@ _NAVIGATION_TOKENS: frozenset[str] = frozenset(
         "news",
         "event",
         "events",
+        "error",
+        "sorry",
     }
 )
 
@@ -453,6 +489,8 @@ _NON_NAME_WORDS: frozenset[str] = frozenset(
         "company",
         "blog",
         "news",
+        "networking",
+        "operations",
         "legal",
         "privacy",
         "policy",
@@ -556,6 +594,8 @@ def is_plausible_person_name(text: str) -> bool:
             if role_suspicious_count == token_count:
                 return False
             if token_count >= 3 and role_suspicious_count / token_count >= 0.5:
+                return False
+            if len({t.lower().strip(".,;:'-") for t in tokens}) != token_count:
                 return False
             if tokens[0].lower().strip(".,;:'-") in _NON_NAME_WORDS:
                 return False

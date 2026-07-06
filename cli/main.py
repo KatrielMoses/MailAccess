@@ -126,6 +126,21 @@ def _print_invalid_email(value: str) -> None:
         )
     )
 
+
+def _read_scrapingant_last_configured() -> str | None:
+    value = os.environ.get("SCRAPINGANT_LAST_CONFIGURED")
+    if value:
+        return value
+    if ENV_FILE.exists():
+        with contextlib.suppress(Exception):
+            from dotenv import dotenv_values
+
+            persisted = dotenv_values(str(ENV_FILE))
+            value = persisted.get("SCRAPINGANT_LAST_CONFIGURED")
+            if value:
+                return str(value)
+    return None
+
 _HARDCODED_MODULES = [
     ("haveibeenpwned", "HIBP", "HIBP_API_KEY", "No", "Check email against known breach databases"),
     (
@@ -309,6 +324,48 @@ def _strip_rich_link_markup(text: str) -> str:
 
 def _banner_line_visible_width(line: str) -> int:
     return Text.from_markup(_strip_rich_link_markup(line)).cell_len
+
+
+def _build_investigate_summary(
+    *,
+    score_color: str,
+    score_str: str,
+    credential_color: str,
+    credential_summary: str,
+    provider: str,
+    disposable: bool,
+    risk_color: str,
+    risk: str,
+    breach_count: int,
+    paste_count: int,
+    stealer_count: int,
+    confirmed_name: str | None = None,
+    malicious: bool = False,
+    first_seen_year: str = "-",
+    active_risk_text: str = "[green]NO[/green]",
+    alt_email_count: int | None = None,
+) -> str:
+    provider_segment = (
+        f"[bold]{provider}[/]" if provider and not disposable else "[bold]⚠ DISPOSABLE[/]"
+    )
+    summary = (
+        f" [bold]Exposure:[/] [{score_color}]{score_str}[/]  |  "
+        f"[bold]Cred Risk:[/] [{credential_color}]{credential_summary}[/]  |  "
+        f"{provider_segment}  |  "
+        f"[bold]Coverage:[/] [{risk_color}]{risk.upper()}[/]  |  "
+        f"[bold]Breaches:[/] {breach_count} | [bold]Pastes:[/] {paste_count} | [bold]Stealer:[/] {stealer_count} "
+    )
+    if confirmed_name:
+        summary += f" | [bold]{confirmed_name}[/]"
+    if malicious and not disposable:
+        summary += " | [bold red]SUSPICIOUS[/bold red]"
+    summary += (
+        f" | [bold]First seen:[/] {first_seen_year} "
+        f"| [bold]Active risk:[/] {active_risk_text}"
+    )
+    if alt_email_count:
+        summary += f" | [bold]Alt emails:[/] {alt_email_count}"
+    return summary
 
 
 configure_app = typer.Typer(
@@ -568,7 +625,7 @@ def proxy_show() -> None:
     dc_user = settings.scrapingant_proxy_datacenter_username
     dc_pass = settings.scrapingant_proxy_datacenter_password
     enabled = settings.scrapingant_enabled
-    last_configured = os.environ.get("SCRAPINGANT_LAST_CONFIGURED")
+    last_configured = _read_scrapingant_last_configured()
 
     table = Table(title="ScrapingAnt Proxy State", box=None, show_header=False)
     table.add_column("Key", style="cyan")
@@ -999,6 +1056,7 @@ def keys_list() -> None:
         table.add_row(key_name, module, service, status)
 
     console.print()
+    console.print(table)
     table2 = Table(title="ScrapingAnt Keys (Optional Partnership)")
     table2.add_column("Key Name", style="cyan")
     table2.add_column("Required For")
@@ -1601,24 +1659,13 @@ async def _investigate(
                     if mod != "hudson_rock" and src != "hudson_rock":
                         breach_count += 1
 
-            provider_segment = (
-                f"[bold]{provider}[/]" if provider and not disposable else "[bold]⚠ DISPOSABLE[/]"
-            )
-            summary = (
-                f" [bold]Exposure:[/] [{score_color}]{score_str}[/]  |  "
-                f"[bold]Cred Risk:[/] [{credential_color}]{credential_summary}[/]  |  "
-                f"{provider_segment}  |  "
-                f"[bold]Risk:[/] [{risk_color}]{risk.upper()}[/]  |  "
-                f"[bold]Breaches:[/] {breach_count} | [bold]Pastes:[/] {paste_count} | [bold]Stealer:[/] {stealer_count} "
-            )
             consensus = _name_consensus(rep)
+            confirmed_name = None
             if (
                 consensus.get("confirmed_name")
                 and str(consensus.get("name_confidence") or "").lower() == "confirmed"
             ):
-                summary += f" | [bold]{consensus.get('confirmed_name')}[/]"
-            if malicious and not disposable:
-                summary += " | [bold red]SUSPICIOUS[/bold red]"
+                confirmed_name = str(consensus.get("confirmed_name"))
             timeline = rep.get("timeline") if isinstance(rep.get("timeline"), dict) else {}
             first_seen = str(timeline.get("first_seen_date") or "")
             first_seen_year = first_seen[:4] if len(first_seen) >= 4 else "-"
@@ -1627,14 +1674,25 @@ async def _investigate(
             except (TypeError, ValueError):
                 active_risk_count = 0
             active_risk_text = "[red]YES[/red]" if active_risk_count > 0 else "[green]NO[/green]"
-            summary += (
-                f" | [bold]First seen:[/] {first_seen_year} "
-                f"| [bold]Active risk:[/] {active_risk_text}"
-            )
-
             alt_emails = _get_alternate_emails(rep)
-            if alt_emails:
-                summary += f" | [bold]Alt emails:[/] {len(alt_emails)}"
+            summary = _build_investigate_summary(
+                score_color=score_color,
+                score_str=score_str,
+                credential_color=credential_color,
+                credential_summary=credential_summary,
+                provider=provider,
+                disposable=disposable,
+                risk_color=risk_color,
+                risk=risk,
+                breach_count=breach_count,
+                paste_count=paste_count,
+                stealer_count=stealer_count,
+                confirmed_name=confirmed_name,
+                malicious=malicious,
+                first_seen_year=first_seen_year,
+                active_risk_text=active_risk_text,
+                alt_email_count=len(alt_emails) if alt_emails else None,
+            )
 
             out.print(Panel(summary, border_style=score_color))
             if skipped_count > 3:

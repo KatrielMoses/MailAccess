@@ -90,6 +90,10 @@ _META_DESC_PROP_RE = re.compile(
     r'<meta\s+[^>]*property\s*=\s*["\']og:description["\'][^>]*content\s*=\s*["\']([^"\']*)["\']',
     flags=re.IGNORECASE | re.DOTALL,
 )
+_HEADING_RE = re.compile(
+    r"<h[23][^>]*>(.*?)</h[23]>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
 # Borrowed from name_consensus.PERSON_RE composition (Latin + non-Latin).
 _LATIN_TOKEN = r"[A-Z][a-zA-Z''\-]+"
@@ -177,7 +181,16 @@ def _extract_page_metadata(html: str) -> tuple[str | None, str | None]:
     return title, meta_desc
 
 
-def _candidate_in_page_furniture(name: str, page_furniture: tuple[str | None, str | None]) -> bool:
+def _extract_page_headings(html: str) -> tuple[str, ...]:
+    headings: list[str] = []
+    for match in _HEADING_RE.finditer(html or ""):
+        heading = _html_to_text(match.group(1))
+        if heading:
+            headings.append(heading)
+    return tuple(headings)
+
+
+def _candidate_in_page_furniture(name: str, page_furniture: tuple[str | None, ...]) -> bool:
     """Return True when *name* appears verbatim in the page title or meta description.
 
     QA-found case: H1 / H2 / nav text like "Azure DevOps" appears in
@@ -201,6 +214,24 @@ def _candidate_in_page_furniture(name: str, page_furniture: tuple[str | None, st
         # "Azure DevOps Certification - INE" but "Azure Devops" (typo)
         # would NOT be, which is the desired conservative behaviour.
         if needle in haystack:
+            return True
+    return False
+
+
+def _matches_company_name(name: str, domain: str | None) -> bool:
+    if not name or not domain:
+        return False
+    registrable = domain.strip().lower().rsplit(".", 1)[0]
+    cleaned_name = re.sub(r"[^a-z0-9]+", "", name.lower())
+    cleaned_domain = re.sub(r"[^a-z0-9]+", "", registrable)
+    if not cleaned_name or not cleaned_domain:
+        return False
+    if cleaned_name == cleaned_domain:
+        return True
+    tokens = [part for part in re.split(r"\s+", name.lower()) if part]
+    if len(tokens) >= 2:
+        sorted_joined = "".join(sorted(re.sub(r"[^a-z0-9]+", "", token) for token in tokens))
+        if sorted_joined == cleaned_domain:
             return True
     return False
 
@@ -261,7 +292,7 @@ def _extract_names_from_text(
     text: str,
     domain: str | None = None,
     *,
-    page_furniture: tuple[str | None, str | None] = (None, None),
+    page_furniture: tuple[str | None, ...] = (None, None),
 ) -> list[tuple[str, str | None, SourceType]]:
     """Return ``[(name, role_or_None, source_type)]`` tuples extracted from page text.
 
@@ -301,6 +332,8 @@ def _extract_names_from_text(
         if not is_plausible_person_name(cleaned_name):
             return
         if _matches_company_token(cleaned_name):
+            return
+        if _matches_company_name(cleaned_name, domain):
             return
         if domain and _matches_domain(cleaned_name, domain):
             return
@@ -349,6 +382,8 @@ def _extract_names_from_text(
             if not is_plausible_person_name(candidate):
                 continue
             if _matches_company_token(candidate):
+                continue
+            if _matches_company_name(candidate, domain):
                 continue
             if domain and _matches_domain(candidate, domain):
                 continue
@@ -429,7 +464,7 @@ async def discover_company_page_names(
                 # Nav / H1 / H2 text from training / vendor / enterprise
                 # sites is the primary source of garbage name candidates
                 # (Azure DevOps, Cert Prep Want, etc.).
-                page_furniture = _extract_page_metadata(html)
+                page_furniture = _extract_page_metadata(html) + _extract_page_headings(html)
                 page_names = _extract_names_from_text(
                     text, domain=cleaned, page_furniture=page_furniture
                 )
@@ -506,8 +541,9 @@ def discover_for_tests(
         )
         # Convert to plain text for the token-based name extractor.
         text = _html_to_text(raw_html)
+        headings = _extract_page_headings(raw_html)
         for name, role, source_type in _extract_names_from_text(
-            text, domain=domain, page_furniture=furniture
+            text, domain=domain, page_furniture=furniture + headings
         ):
             if not is_plausible_person_name(name):
                 continue

@@ -66,6 +66,28 @@ CREDENTIAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+MODULE_ARTIFACT_TOKENS = frozenset(
+    {
+        "sec",
+        "edgar",
+        "hibp",
+        "xon",
+        "wmn",
+        "cc",
+        "orcid",
+        "pgp",
+        "npm",
+        "pypi",
+        "ddg",
+        "bing",
+        "whois",
+        "rdap",
+        "smtp",
+        "api",
+        "scrape",
+    }
+)
+
 # Unicode-aware person name pattern: Latin (uppercase-first), Cyrillic, Arabic, CJK, Devanagari.
 _LATIN_TOKEN = r"[A-Z][a-zA-Z''-]+"
 _NONLATIN_TOKEN = r"[Ѐ-ӿ؀-ۿ一-鿿ऀ-ॿ]+"
@@ -288,6 +310,10 @@ def _tokens(value: str) -> set[str]:
     return {token.lower().strip(".") for token in value.split() if token.strip(".")}
 
 
+def _contains_module_artifact_token(value: str) -> bool:
+    return any(token in MODULE_ARTIFACT_TOKENS for token in _tokens(value))
+
+
 def _email_localpart(email: str | None) -> str:
     if not email or "@" not in email:
         return ""
@@ -480,6 +506,8 @@ class NameConsensusEngine:
                 continue
             if BOT_TERMS.search(raw_name) or ORG_TERMS.search(raw_name):
                 continue
+            if _contains_module_artifact_token(raw_name):
+                continue
             if self.target_email and raw_name.strip().lower() == self.target_email.strip().lower():
                 continue
 
@@ -487,6 +515,8 @@ class NameConsensusEngine:
             if not normalized or len(normalized) > 40:
                 continue
             if ORG_TERMS.search(normalized) or BOT_TERMS.search(normalized):
+                continue
+            if _contains_module_artifact_token(normalized):
                 continue
             if self.target_email and normalized.lower() == self.target_email.strip().lower():
                 continue
