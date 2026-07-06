@@ -584,13 +584,19 @@ def format_harvest_cli_output(
         show_unverified_patterns = True
         show_role = True
 
-    console = Console(record=True, width=120)
-    console.print(
+    # Record the rich render without writing the intermediate Rule to the
+    # real terminal. The caller prints the exported text once, which keeps
+    # the visible header but avoids the duplicate console render.
+    header_console = Console(record=True, width=120, file=io.StringIO())
+    header_console.print(
         Rule(
             title=f"[bold]DOMAIN EMAIL HARVEST — {result.domain}[/bold]",
             style="cyan",
         )
     )
+    header = header_console.export_text()
+
+    console = Console(record=True, width=120, file=io.StringIO())
 
     # Per-source status table (unchanged).
     console.print(_build_sources_table(result))
@@ -800,7 +806,7 @@ def format_harvest_cli_output(
             )
         )
 
-    return console.export_text()
+    return header + console.export_text()
 
 
 def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:

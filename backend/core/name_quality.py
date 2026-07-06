@@ -534,6 +534,233 @@ _NON_NAME_WORDS: frozenset[str] = frozenset(
     }
 )
 
+_PRODUCT_PATTERNS = re.compile(r"^[A-Z][a-z]+(?:[A-Z][A-Za-z]+)+$")
+_MIXED_CASE_TRANSITION_RE = re.compile(r"[a-z][A-Z]")
+
+_SURNAME_PREFIX_EXCEPTIONS: frozenset[str] = frozenset(
+    {
+        "mc",
+        "mac",
+        "o'",
+        "de",
+        "van",
+        "von",
+        "la",
+        "le",
+        "du",
+        "di",
+    }
+)
+
+# A broad set of common business / tech nouns and adjectives that are
+# unlikely to be person-name components. The structural checks below use
+# this to reject noun-noun or adjective-noun fragments that look like
+# page headings or product/category names instead of people.
+COMMON_ENGLISH_NOUNS: frozenset[str] = frozenset(
+    {
+        "acquisition",
+        "account",
+        "accounts",
+        "acceleration",
+        "administration",
+        "administrative",
+        "advisor",
+        "advisors",
+        "aggregation",
+        "algorithm",
+        "analytics",
+        "application",
+        "applications",
+        "architecture",
+        "architectures",
+        "assessment",
+        "availability",
+        "automation",
+        "banking",
+        "branch",
+        "business",
+        "capability",
+        "capabilities",
+        "chain",
+        "cloud",
+        "commercial",
+        "communication",
+        "communications",
+        "community",
+        "compliance",
+        "configuration",
+        "connection",
+        "converged",
+        "conversion",
+        "coordination",
+        "control",
+        "customer",
+        "customers",
+        "data",
+        "database",
+        "decision",
+        "deployment",
+        "design",
+        "development",
+        "digital",
+        "distribution",
+        "documentation",
+        "edge",
+        "efficiency",
+        "education",
+        "engineering",
+        "engagement",
+        "enterprise",
+        "environment",
+        "equity",
+        "event",
+        "events",
+        "experience",
+        "experiences",
+        "expertise",
+        "factory",
+        "finance",
+        "financial",
+        "flexible",
+        "framework",
+        "gateway",
+        "global",
+        "governance",
+        "growth",
+        "guide",
+        "guides",
+        "health",
+        "human",
+        "implementation",
+        "industrial",
+        "industry",
+        "industries",
+        "infrastructure",
+        "innovation",
+        "integration",
+        "intelligence",
+        "international",
+        "investment",
+        "leadership",
+        "legal",
+        "local",
+        "logistics",
+        "management",
+        "manufacturing",
+        "market",
+        "marketing",
+        "medical",
+        "monitoring",
+        "network",
+        "networks",
+        "operations",
+        "optimization",
+        "organization",
+        "organizational",
+        "performance",
+        "platform",
+        "platforms",
+        "policy",
+        "portfolio",
+        "presentation",
+        "processing",
+        "product",
+        "products",
+        "productivity",
+        "professional",
+        "program",
+        "project",
+        "public",
+        "quality",
+        "reliability",
+        "reporting",
+        "research",
+        "resources",
+        "retention",
+        "risk",
+        "sales",
+        "scalability",
+        "science",
+        "security",
+        "sector",
+        "service",
+        "services",
+        "solution",
+        "solutions",
+        "standards",
+        "strategic",
+        "strategy",
+        "story",
+        "support",
+        "supply",
+        "system",
+        "systems",
+        "technical",
+        "technology",
+        "testing",
+        "transformation",
+        "transport",
+        "trust",
+        "undertaking",
+        "venture",
+        "workflow",
+    }
+)
+
+_STOPWORD_TOKENS: frozenset[str] = frozenset(
+    set(_NAVIGATION_TOKENS)
+    | set(_ROLE_WORDS)
+    | set(_NON_NAME_WORDS)
+)
+
+
+def _clean_token(token: str) -> str:
+    return token.lower().strip(".,;:'-")
+
+
+def _is_product_token(token: str) -> bool:
+    cleaned = token.strip()
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    if any(lowered.startswith(prefix) for prefix in _SURNAME_PREFIX_EXCEPTIONS):
+        return False
+    return bool(
+        _PRODUCT_PATTERNS.match(cleaned)
+        or _MIXED_CASE_TRANSITION_RE.search(cleaned)
+    )
+
+
+def _token_is_common_word(token: str) -> bool:
+    return _clean_token(token) in COMMON_ENGLISH_NOUNS
+
+
+def _looks_like_common_noun_phrase(tokens: list[str]) -> bool:
+    if not tokens:
+        return False
+
+    common_count = sum(1 for token in tokens if _token_is_common_word(token))
+    if common_count == 0:
+        return False
+
+    token_count = len(tokens)
+    if token_count == 2 and common_count == 2:
+        return True
+    if token_count == 3 and common_count == 3:
+        return True
+    if token_count == 3 and common_count == 2:
+        remaining = next(
+            (token for token in tokens if not _token_is_common_word(token)),
+            "",
+        )
+        if _clean_token(remaining) in _STOPWORD_TOKENS:
+            return True
+    return False
+
+
+def _contains_product_token(tokens: list[str]) -> bool:
+    return any(_is_product_token(token) for token in tokens)
+
 
 # ----------------------------------------------------------------------
 # Public API
@@ -596,6 +823,10 @@ def is_plausible_person_name(text: str) -> bool:
             if token_count >= 3 and role_suspicious_count / token_count >= 0.5:
                 return False
             if len({t.lower().strip(".,;:'-") for t in tokens}) != token_count:
+                return False
+            if _contains_product_token(tokens):
+                return False
+            if _looks_like_common_noun_phrase(tokens):
                 return False
             if tokens[0].lower().strip(".,;:'-") in _NON_NAME_WORDS:
                 return False
@@ -691,9 +922,15 @@ def name_suspicion_penalty(name: str) -> float:
     if not isinstance(name, str):
         return 1.0
 
-    tokens = [t.lower().strip(".,;:'-") for t in name.split()]
-    if not tokens:
+    raw_tokens = [t.strip(".,;:'-") for t in name.split()]
+    if not raw_tokens:
         return 1.0
+
+    if _contains_product_token(raw_tokens):
+        return 0.0
+    tokens = [t.lower() for t in raw_tokens]
+    if _looks_like_common_noun_phrase(tokens):
+        return 0.0
 
     suspicious_count = sum(
         1
