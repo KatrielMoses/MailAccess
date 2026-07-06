@@ -18,6 +18,7 @@ paths without dragging in rapidfuzz / unidecode.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 # ----------------------------------------------------------------------
 # Validation patterns
@@ -141,35 +142,266 @@ _ROLE_WORDS: frozenset[str] = frozenset(
     }
 )
 
-# Tech / marketing / product / certification terms that show up constantly
-# in site navigation, headings, and H1/H2 copy on training / vendor /
-# enterprise sites but are NEVER person-name components.  Reject any
-# candidate that contains ANY of these tokens, regardless of position
-# (defence against multi-token fragments like "Azure DevOps",
-# "Cert Prep Want", "Branch Network Control Network" that the regex
-# structural check happily accepts as 2-4 capitalised tokens).
+# Phase 4 expanded stopword set — covers five categories of tokens that
+# show up as "name" fragments in training / vendor / enterprise page
+# copy but are NEVER person-name components:
+#
+#   1. Cloud & vendor product names   (azure, aws, gcp, kubernetes …)
+#   2. Certification & training terms (cert, certification, training …)
+#   3. Microsoft stack specifics      (dynamics, powerbi, teams …)
+#   4. Marketing & navigation phrases (learn, platform, solutions …)
+#   5. Geographic / page-furniture  (north, login, dashboard …)
+#
+# Rejection rule (Phase 4): REJECT only when ALL tokens are stopwords,
+# OR when >=50 % tokens are stopwords in a 3+ token name.  Two-token
+# names where only ONE token is suspicious pass but get a confidence
+# penalty via :func:`name_suspicion_penalty`.
+#
+# The hard stopword check lives in :func:`is_plausible_person_name`.
+# :func:`name_suspicion_penalty` scores the greyer cases for downstream
+# confidence adjustment.
 _NAVIGATION_TOKENS: frozenset[str] = frozenset(
     {
-        # Product / vendor / brand names
+        # ── Category 1: Cloud & vendor product / platform names ──────────
         "azure",
         "aws",
         "gcp",
-        "linux",
-        "kubernetes",
-        "docker",
-        "python",
+        "google",
+        "microsoft",
+        "oracle",
+        "salesforce",
         "cisco",
+        "vmware",
+        "redhat",
+        "ibm",
+        "kubernetes",
+        "k8s",
+        "docker",
+        "docker",
+        "terraform",
+        "ansible",
+        "jenkins",
+        "gitlab",
+        "github",
+        "jira",
+        "confluence",
+        "splunk",
+        "datadog",
+        "pagerduty",
+        "cloudflare",
+        "fastly",
+        "snowflake",
+        "databricks",
+        "elastic",
+        "elasticsearch",
+        "mongodb",
+        "postgres",
+        "postgresql",
+        "redis",
+        "kafka",
+        "airflow",
+        "grafana",
+        "prometheus",
+        "vault",
+        "consul",
+        "nomad",
+        "argocd",
+        "helm",
+        "istio",
+        "envoy",
+        "linkerd",
+        "linux",
+        "python",
+        "devops",
+        "ceh",
+        # ── Category 2: Certification & training terms ────────────────────
+        "cert",
+        "certified",
+        "certification",
+        "certifications",
+        "microcredential",
+        "credential",
+        "credentials",
+        "specialization",
+        "specializations",
+        "associate",
+        "professional",
+        "practitioner",
+        "expert",
+        "master",
+        "foundation",
+        "fundamentals",
+        "essentials",
+        "bootcamp",
+        "academy",
+        "institute",
+        "school",
+        "training",
+        "course",
+        "courses",
+        "curriculum",
+        "learning",
+        "learner",
+        "enrollment",
+        "cohort",
+        "lab",
+        "labs",
+        "sandbox",
+        "workshop",
+        "webinar",
+        "masterclass",
+        "instructor",
+        "self-paced",
+        # Named cert acronyms
         "comptia",
         "cissp",
-        "ceh",
-        "devops",
-        # Tech / infrastructure nouns
-        "network",
-        "cloud",
-        "portal",
-        "platform",
+        "cism",
+        "cisa",
+        "crisc",
+        "cgeit",
+        "pmp",
+        "capm",
+        "prince2",
+        "itil",
+        "togaf",
+        "cobit",
+        "ccna",
+        "ccnp",
+        "ccie",
+        "mcsa",
+        "mcse",
+        "mcsd",
+        "rhce",
+        "rhcsa",
+        "lpic",
+        "lfcs",
+        "lfce",
+        # ── Category 3: Microsoft stack specifics ──────────────────────────
+        "dynamics",
+        "powerbi",
+        "powerapps",
+        "powerautomate",
+        "dataverse",
+        "fabric",
+        "copilot",
+        "entra",
+        "defender",
+        "sentinel",
+        "purview",
+        "intune",
+        "endpoint",
+        "sharepoint",
+        "teams",
+        "onedrive",
+        "exchange",
+        "activedirectory",
+        "azuread",
+        # ── Category 4: Marketing & navigation phrases ────────────────────
+        "learn",
+        "growing",
+        "grow",
+        "transform",
+        "transforming",
+        "discover",
+        "discovering",
+        "journey",
+        "experience",
+        "experiences",
+        "engineered",
+        "trusted",
+        "proven",
+        "simple",
+        "secure",
+        "flexible",
+        "scalable",
+        "reliable",
+        "innovative",
+        "innovation",
         "solutions",
         "services",
+        "platform",
+        "platforms",
+        "product",
+        "products",
+        "offering",
+        "offerings",
+        "capability",
+        "capabilities",
+        "resource",
+        "resources",
+        "guide",
+        "guides",
+        "overview",
+        "introduction",
+        "advanced",
+        "beginner",
+        "intermediate",
+        # ── Category 5: Geographic & page-furniture terms ─────────────────
+        "north",
+        "south",
+        "east",
+        "west",
+        "northeast",
+        "northwest",
+        "southeast",
+        "southwest",
+        "americas",
+        "emea",
+        "apac",
+        "global",
+        "regional",
+        "international",
+        "worldwide",
+        "domestic",
+        "local",
+        "national",
+        "login",
+        "signin",
+        "signup",
+        "register",
+        "registration",
+        "subscribe",
+        "unsubscribe",
+        "newsletter",
+        "portal",
+        "dashboard",
+        "console",
+        "panel",
+        "admin",
+        "settings",
+        "profile",
+        "account",
+        "billing",
+        "pricing",
+        "plans",
+        "features",
+        "benefits",
+        "testimonials",
+        "customers",
+        "partners",
+        "careers",
+        "jobs",
+        "hiring",
+        "recruitment",
+        "newsroom",
+        "press",
+        "events",
+        "forum",
+        "podcast",
+        "webcast",
+        "livestream",
+        "download",
+        "downloads",
+        "documentation",
+        "docs",
+        "helpdesk",
+        "faq",
+        "contact",
+        "about",
+        "management",
+        # ── Retained legacy terms (infrastructure / business / UI) ────────
+        "network",
+        "cloud",
         "technology",
         "infrastructure",
         "architecture",
@@ -183,24 +415,11 @@ _NAVIGATION_TOKENS: frozenset[str] = frozenset(
         "analytics",
         "enterprise",
         "security",
-        # FIX 1 — generic UI / nav abbreviations that are virtually
-        # never person-name components.  The QA spec listed
-        # "App CloudPort" as a confirmed fragment; ``App`` is a 3-char
-        # UI label that doesn't pass the avg<4 check on its own but
-        # is a strong nav signal when paired with another token.
         "app",
-        # Training / education / certification language
-        "learning",
-        "certification",
         "prep",
-        "training",
-        "courses",
-        "labs",
         "skills",
         "path",
         "paths",
-        # Business / org / marketing language
-        "management",
         "action",
         "built",
         "branch",
@@ -323,8 +542,22 @@ def is_plausible_person_name(text: str) -> bool:
     if _LATIN_PERSON_RE.match(cleaned):
         tokens = [t for t in cleaned.split() if t]
         if tokens:
-            first = tokens[0].lower().strip(".,;:'-")
-            if first in _ROLE_WORDS or first in _NON_NAME_WORDS:
+            token_count = len(tokens)
+            # Apply the same Phase 4 ALL-stopwords rule to role words.
+            # "Chief Executive Officer" → all 3 tokens role words → reject.
+            # "Chief John Smith" → 1 role word / 3 tokens → 33 % → allowed
+            #   (penalty applied downstream by name_suspicion_penalty).
+            role_suspicious = [
+                t.lower().strip(".,;:'-")
+                for t in tokens
+                if t.lower().strip(".,;:'-") in _ROLE_WORDS
+            ]
+            role_suspicious_count = len(role_suspicious)
+            if role_suspicious_count == token_count:
+                return False
+            if token_count >= 3 and role_suspicious_count / token_count >= 0.5:
+                return False
+            if tokens[0].lower().strip(".,;:'-") in _NON_NAME_WORDS:
                 return False
             # Reject candidates whose AVERAGE token length is below 4
             # characters.  Real first / last names in Latin script
@@ -354,19 +587,23 @@ def is_plausible_person_name(text: str) -> bool:
                     and cleaned_token.isupper()
                 ):
                     return False
-            # Reject candidates that contain ANY token in the
-            # navigation-token list (case-insensitive).  Catches
-            # fragments like "Azure DevOps" (both tokens in list),
-            # "Cert Prep Want" (all three), "Branch Network Control
-            # Network" (all four), "App CloudPort" if CloudPort
-            # happens to appear elsewhere in the list.  We check ALL
-            # positions, not just the first, because nav labels can
-            # legitimately appear mid-candidate when the page parser
-            # merges multiple heading cells.
-            for token in tokens:
-                token_lower = token.lower().strip(".,;:'-")
-                if token_lower in _NAVIGATION_TOKENS:
-                    return False
+            # Phase 4 navigation-token rejection rule:
+            #   REJECT if ALL tokens are in _NAVIGATION_TOKENS
+            #   OR if >= 50 % tokens are in _NAVIGATION_TOKENS in a 3+ token name
+            #   ALLOW (pass through, penalized later by name_suspicion_penalty)
+            #     if only ONE token is suspicious in a 2-token name
+            #     (e.g. "Azure Smith" — Azure is a real first name for some people)
+            suspicious_tokens = [
+                t.lower().strip(".,;:'-")
+                for t in tokens
+                if t.lower().strip(".,;:'-") in _NAVIGATION_TOKENS
+            ]
+            token_count = len(tokens)
+            suspicious_count = len(suspicious_tokens)
+            if suspicious_count == token_count:
+                return False
+            if token_count >= 3 and suspicious_count / token_count >= 0.5:
+                return False
         return True
     if _NONLATIN_PERSON_RE.match(cleaned):
         # Reject mixed scripts by checking there's at least one
@@ -393,17 +630,93 @@ def is_plausible_person_name(text: str) -> bool:
     return False
 
 
-def dedupe_names(names: list[str]) -> list[str]:
-    """Case-insensitive dedup, prefer the longest canonical form.
+def name_suspicion_penalty(name: str) -> float:
+    """Return a confidence penalty multiplier (0.0–1.0) for a candidate name.
 
-    "John Smith" / "john  smith" / "JOHN SMITH" all collapse to
-    "John Smith" (the longest input wins, but length is the tiebreaker
-    only after exact case-insensitive equality).
+    Phase 4 introduces a suspicion-score layer between the binary
+    ``is_plausible_person_name`` pass and the confidence scoring in
+    :mod:`backend.modules.employee_name_discovery`.  The idea is:
+
+      - Fully clean names  → 1.0  (no penalty)
+      - One suspicious token in a 2-token name  → 0.6  (e.g. "Azure Smith")
+      - Minority suspicious in a 3+ token name  → 0.8  (e.g. "John Cloud Wilson")
+      - All tokens suspicious  → 0.0  (reject; ``is_plausible_person_name``
+        already returned False for these, but callers that skip that check
+        get the zero here)
+      - Majority suspicious in a 3+ token name  → 0.0  (reject)
+
+    The combined stopword set for this function includes both
+    ``_NAVIGATION_TOKENS`` and ``_ROLE_WORDS``.
+    """
+    if not isinstance(name, str):
+        return 1.0
+
+    tokens = [t.lower().strip(".,;:'-") for t in name.split()]
+    if not tokens:
+        return 1.0
+
+    suspicious_count = sum(
+        1
+        for t in tokens
+        if t in _NAVIGATION_TOKENS or t in _ROLE_WORDS
+    )
+    total = len(tokens)
+
+    if suspicious_count == 0:
+        return 1.0
+    if suspicious_count == total:
+        return 0.0
+    if total >= 3 and suspicious_count / total >= 0.5:
+        return 0.0
+    if suspicious_count == 1 and total == 2:
+        return 0.6
+    return 0.8
+
+
+def _accent_count(s: str) -> int:
+    """Number of Unicode combining marks (accents, diacritics) in *s*."""
+    return sum(1 for c in unicodedata.normalize("NFD", s) if unicodedata.combining(c))
+
+
+def dedupe_names(names: list[str]) -> list[str]:
+    """Phase 4 improved dedup with four capabilities:
+
+    1. Case-insensitive dedup (original behaviour).
+    2. Apostrophe / hyphen / period normalisation for canonical-key
+       building: "O'Brien" / "Obrien" share a key;
+       "Mary-Jane Watson" / "Mary Jane Watson" share a key;
+       "John D. Smith" / "John Smith" share a key.
+       (Periods are stripped so initials don't create spurious
+       distinct entries.)
+    3. Longer / more-complete form preferred when resolving duplicates:
+       "John D. Smith" beats "John Smith"; "María García" beats
+       "Maria Garcia".
+    4. Names with ``name_suspicion_penalty() == 0.0`` are silently
+       dropped — they have already been rejected and should not appear
+       in the dedup pool.
 
     We deliberately don't do fuzzy / token-set matching here — that
     complexity belongs to :mod:`backend.core.name_consensus`.  This is a
     cheap pre-aggregation filter only.
     """
+    # Normalisation targets the characters that create variant spellings
+    # of the same person.  Periods are included so "John D. Smith"
+    # and "John Smith" share the same dedup key.
+    _NORM_PUNCT = str.maketrans("", "", ".'-")
+
+    def _norm_key(s: str) -> str:
+        """Canonical dedup key: lowercase, whitespace collapsed, variant
+        punctuation stripped, accents normalised."""
+        # Replace hyphens with spaces before normalising so "Mary-Jane"
+        # and "Mary Jane" produce the same key.
+        no_hyphen = s.replace("-", " ")
+        stripped = no_hyphen.strip().translate(_NORM_PUNCT)
+        # NFD decomposes e.g. "á" into "a" + combining acute; filtering out
+        # combining marks makes "María" and "Maria" share a key.
+        no_accents = unicodedata.normalize("NFD", stripped)
+        ascii_only = "".join(c for c in no_accents if not unicodedata.combining(c))
+        return re.sub(r"\s+", " ", ascii_only).lower()
+
     canonical: dict[str, str] = {}
     order: list[str] = []
     for raw in names:
@@ -412,14 +725,22 @@ def dedupe_names(names: list[str]) -> list[str]:
         cleaned = re.sub(r"\s+", " ", raw.strip())
         if not cleaned:
             continue
-        key = cleaned.lower()
+        # Drop names already condemned by the suspicion penalty.
+        if name_suspicion_penalty(cleaned) == 0.0:
+            continue
+        key = _norm_key(cleaned)
         if key not in canonical:
             canonical[key] = cleaned
             order.append(key)
         else:
             existing = canonical[key]
-            # Prefer the longer / better-formed form.
-            if len(cleaned) > len(existing):
+            # Prefer the longer / better-formed form.  Use total char count as
+            # primary key; if tied (e.g. "Maria Garcia" vs "María García" — both
+            # 12 code points) prefer the one with more Unicode diacritical marks,
+            # which is the richer spelling.
+            existing_score = (len(existing), _accent_count(existing))
+            cleaned_score = (len(cleaned), _accent_count(cleaned))
+            if cleaned_score > existing_score:
                 canonical[key] = cleaned
 
     return [canonical[key] for key in order]

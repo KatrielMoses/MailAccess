@@ -54,7 +54,7 @@ from ..modules.pattern_and_verify import (
 )
 from ..modules.pgp_domain_email import PgpDomainEmailModule
 from ..modules.pypi_email import PyPIEmailModule
-from .email_confidence import compute_confidence
+from .email_confidence import compute_confidence, compute_confidence_breakdown
 from .email_extraction import subaddress_key
 
 _LOG = logging.getLogger(__name__)
@@ -95,8 +95,10 @@ class HarvestedEmail:
     source_count: int = 0
     evidence: list[dict[str, Any]] = field(default_factory=list)
     first_seen_timestamp: str | None = None
+    last_seen_timestamp: str | None = None
     is_smtp_verified: bool = False
     is_ca_attested: bool = False
+    is_pgp_or_ca: bool = False
     # MUST-FIX M4: how many raw findings contributed to this email
     # overall (across all modules). A CC module finding the same
     # address on 200 indexed pages contributes 200 to this counter
@@ -278,6 +280,18 @@ def _extract_timestamp(finding: dict[str, Any]) -> str | None:
     return None
 
 
+def _extract_last_seen_timestamp(finding: dict[str, Any]) -> str | None:
+    """Best-effort newest timestamp from a finding's metadata."""
+    meta = finding.get("metadata") or {}
+    if not isinstance(meta, dict):
+        return None
+    for key in ("last_seen_timestamp", "newest_timestamp", "timestamp"):
+        ts = meta.get(key)
+        if isinstance(ts, str) and ts.strip():
+            return ts
+    return _extract_timestamp(finding)
+
+
 def _extract_role(finding: dict[str, Any]) -> tuple[bool, str | None]:
     """Pull role classification from a finding's metadata."""
     meta = finding.get("metadata") or {}
@@ -370,6 +384,7 @@ def _aggregate(
                     source_count=0,
                     evidence=[],
                     first_seen_timestamp=None,
+                    last_seen_timestamp=None,
                 )
             else:
                 # MUST-FIX S2: if this email variant is different from
@@ -399,7 +414,8 @@ def _aggregate(
             if _extract_on_domain(finding, email, harvest_domain):
                 entry.on_domain = True
 
-            # Oldest timestamp across evidence.
+            # First and last timestamps across evidence. Freshness uses
+            # the newest sighting; first_seen remains display-only.
             ts = _extract_timestamp(finding)
             if ts:
                 if (
@@ -407,12 +423,21 @@ def _aggregate(
                     or ts < entry.first_seen_timestamp  # noqa: SIM118
                 ):
                     entry.first_seen_timestamp = ts
+            last_ts = _extract_last_seen_timestamp(finding)
+            if last_ts:
+                if (
+                    entry.last_seen_timestamp is None
+                    or last_ts > entry.last_seen_timestamp  # noqa: SIM118
+                ):
+                    entry.last_seen_timestamp = last_ts
 
             # SMTP-verified flag (only set by pattern_and_verify).
             if meta.get("verification_status") == "verified":
                 entry.is_smtp_verified = True
             if meta.get("source_type") in ("ca_attested",):
                 entry.is_ca_attested = True
+            if meta.get("source_type") in ("ca_attested", "pgp_uid"):
+                entry.is_pgp_or_ca = True
 
             # MUST-FIX M4: dedupe evidence by (module, email). The
             # FIRST finding's metadata is the canonical evidence
@@ -502,7 +527,8 @@ def _aggregate(
             source_types=all_source_types,
             is_smtp_verified=entry.is_smtp_verified,
             is_ca_attested=entry.is_ca_attested,
-            oldest_timestamp=entry.first_seen_timestamp,
+            is_pgp_or_ca=entry.is_pgp_or_ca,
+            last_seen_timestamp=entry.last_seen_timestamp,
         )
 
         entry.confidence_score = round(score, 4)
@@ -514,26 +540,19 @@ def _aggregate(
         # freshness + multiplier math); otherwise we synthesise a
         # minimal one from the public input so the CLI / JSON shape
         # is uniform across emails.
+        current_breakdown = compute_confidence_breakdown(
+            source_types=all_source_types,
+            is_smtp_verified=entry.is_smtp_verified,
+            is_ca_attested=entry.is_ca_attested,
+            is_pgp_or_ca=entry.is_pgp_or_ca,
+            last_seen_timestamp=entry.last_seen_timestamp,
+        ).breakdown
         if best_breakdown is not None:
+            best_breakdown.update(current_breakdown)
             entry.confidence_breakdown = best_breakdown
         else:
-            entry.confidence_breakdown = {
-                "source_types": sorted({st for st in all_source_types if st}),
-                "multiplier_label": (
-                    "smtp_verified"
-                    if entry.is_smtp_verified
-                    else (
-                        "ca_attested"
-                        if entry.is_ca_attested
-                        else (
-                            "multi_source"
-                            if len({st for st in all_source_types if st}) >= 2
-                            else "single_source"
-                        )
-                    )
-                ),
-                "synthesised": True,
-            }
+            current_breakdown["synthesised"] = True
+            entry.confidence_breakdown = current_breakdown
         final.append(entry)
 
     return final
@@ -948,9 +967,27 @@ async def _orchestrate(
     completed_iso = completed.isoformat().replace("+00:00", "Z")
     duration = (completed - started).total_seconds()
 
-    high = sum(1 for e in unique_emails if e.confidence_label == "HIGH")
-    medium = sum(1 for e in unique_emails if e.confidence_label == "MEDIUM")
-    low = sum(1 for e in unique_emails if e.confidence_label == "LOW")
+    # Phase 1 of 4: HIGH / MEDIUM / LOW counts in the summary are
+    # PERSONAL-only (``is_role=False``).  Role accounts are tracked
+    # separately via ``role_account_count`` and rendered in their own
+    # section.  The previous semantics counted all emails regardless of
+    # role, which inflated the analyst's HIGH/MEDIUM counts with
+    # generic mailbox hits (info@, support@, …).
+    high = sum(
+        1
+        for e in unique_emails
+        if e.confidence_label == "HIGH" and not e.is_role
+    )
+    medium = sum(
+        1
+        for e in unique_emails
+        if e.confidence_label == "MEDIUM" and not e.is_role
+    )
+    low = sum(
+        1
+        for e in unique_emails
+        if e.confidence_label == "LOW" and not e.is_role
+    )
     role = sum(1 for e in unique_emails if e.is_role)
     personal = sum(1 for e in unique_emails if not e.is_role)
 
