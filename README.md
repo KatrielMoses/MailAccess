@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.10.9&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.11.0&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -530,6 +530,11 @@ datacenter proxies. Off by default.
 Sign up: https://scrapingant.com/?ref=mzliyzh
 
 ## Changelog
+
+### 0.11.0
+
+- Banner: rewrote the CLI ASCII art from the old heavy block-face to a cleaner wordmark in flat red purple (`#820747`); background is left to the terminal so the banner now reads clearly on any TTY
+- Banner: the blocks are no longer a faded multi-row gradient, and the letterforms are no longer carved out as negative space — solid red-purple wordmark on the user's terminal background
 
 ### 0.10.9
 
