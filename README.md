@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.11.0&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.11.2&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -530,6 +530,18 @@ datacenter proxies. Off by default.
 Sign up: https://scrapingant.com/?ref=mzliyzh
 
 ## Changelog
+
+### 0.11.2
+
+This is a maintenance / quality release — no new modules, no new public APIs. Focus is on FP suppression (false-positive killers), leaked-name cleanup, exposure-score correctness, and a critical Wayback hang fix.
+
+- **Test suite fixes (1A–1E)** — Deleted stale tests for the removed private Bing/DDG dorker APIs (`test_bing_dorker.py`, `test_duckduckgo_dorker.py`). Updated the `_patch_fast_success_path` mock signature to accept the post-Phase-4 `lite_mode` / `aggressive` kwargs. Replaced `asyncio.get_event_loop()` (deprecated) with `asyncio.run()` in `test_avatar_hasher.py`. Audited the residential-proxy path against the ScrapingAnt dashboard (already verified live; no change). Fixed the `test_proxy_failure_returns_partial_with_errors` test that was patching the wrong layer — it was patching `httpx.AsyncClient` (`build_client`) but the production path uses `StealthSession` (curl-cffi) when available, so the patch was a silent no-op and the real network was being hit. Now patches `StealthSession.get()` to raise `httpx.ProxyError`, exercising the dorkers' fallback path correctly.
+- **Twitter display name cleanup (2A, 2C)** — Twitter / X sometimes concatenates `"(Twitter / X)"` into the display name on a profile lookup, which then bleeds into the confirmed-identity row. Added `clean_twitter_display_name()` in `twitter_profile.py` to strip the suffix on extraction. Added 6 unit tests covering the standard name, the `"(Twitter / X)"` suffix, the bare suffix, leading/trailing whitespace, and the empty / None edge cases.
+- **Bio parenthetical @-handle stripping (2B)** — Parenthetical Twitter handles (`@handle`) inside the bio / display name field were being captured by the name consensus layer and bleeding into the confirmed name. Added `@`-handle stripping inside `normalize_name()` in `name_consensus.py`. Added a regression test in `tests/test_name_consensus.py`.
+- **Exposure score correctness (3A–3C)** — The CLI summary's `exposure_score_pct` was dividing the executed-attack-surface score by `total_modules` instead of `executed_modules`, dragging LOW coverage runs down to ~0%. Fixed: `service.py` now computes the denominator from executed modules only. Added an engine-level helper `_max_exposure_score_for_executed()` in `engine.py` so other report paths use the same corrected denominator. Updated `render_summary()` in `cli/main.py` to surface the recomputed score alongside the existing personal-email rollup.
+- **Wayback hang fix** — `StealthSession.get()` silently drops unknown kwargs, so Wayback's `timeout=12.0` was being stripped and archive.org fetches had **no effective timeout** — a slow CDN edge could deadlock the entire orchestrator. Wrapped the Wayback session call in `asyncio.wait_for(timeout=timeout)` so every archive.org fetch has a hard 12s ceiling regardless of what the session does with kwargs. Audit confirmed this was the only `client.get(... timeout=...)` site that needed the wrap; the three remaining `client.get(timeout=…)` calls in `wayback.py` are on `httpx.AsyncClient`, which honours its own timeout natively.
+- **Navigation-graph simulation disabled for archive.org** — `_simulate_navigation()` fires blocking `time.sleep(4–20s)` plus intermediate homepage / parent-path GETs against every target. Archive.org performs no fingerprinting, so the hops are pure overhead on top of an already-slow T0 pacing budget. Added `_skip_nav_sim` field on `StealthSession`; `_build_stealth_session()` in `wayback.py` sets it to `True` after construction. Inter-request pacing (`timing_profile.get_delay()`) is preserved — only the nav-graph hops are skipped.
+- **Tests** — 4 new tests (3 in `tests/test_wayback_domain_harvest.py`, 1 in `tests/test_stealth_client.py`) covering the timeout ceiling, the Wayback session-builder flag, the DDG/Bing default (nav-sim still enabled), and the `_skip_nav_sim=True` no-hop behaviour on T0.
 
 ### 0.11.1
 
