@@ -1,6 +1,6 @@
 from .aggregator import ResultAggregator
 from .http_client import build_client
-from .proxy import ProxyConnectionError, ProxyConfig, proxy_config
+from .proxy import ProxyConfig, ProxyConnectionError, proxy_config
 from .rate_limiter import DomainRateLimiter, RateLimiter, rate_limiter
 from .result_aggregator import ProfileAggregator, UnifiedProfile
 from .scheduler import Scheduler

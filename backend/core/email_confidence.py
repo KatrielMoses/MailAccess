@@ -15,8 +15,14 @@ SOURCE_WEIGHTS: dict[str, float] = {
     "common_crawl_high_density": 0.75,
     "common_crawl_medium": 0.55,
     "common_crawl_single": 0.30,
+    "wayback_archive": 0.45,  # 0.11.1 Phase 3 — historical but real
     "search_snippet_ddg": 0.35,
     "search_snippet_bing": 0.25,
+    "search_snippet_google_cse": 0.55,  # 0.11.1 Phase 4
+    "github_org_member": 0.85,  # 0.11.1 Phase 4
+    "hunter_verified": 0.85,  # 0.11.1 Phase 4 — Hunter confidence >= 90
+    "hunter_high": 0.70,  # 0.11.1 Phase 4 — Hunter confidence 70-89
+    "hunter_low": 0.45,  # 0.11.1 Phase 4 — Hunter confidence < 70
     "github_code_match": 0.45,
     "permutation_verified": 0.65,
     "permutation_catchall": 0.10,
@@ -42,8 +48,14 @@ SOURCE_CLASS: dict[str, str] = {
     "common_crawl_high_density": "scraping",
     "common_crawl_medium": "scraping",
     "common_crawl_single": "scraping",
+    "wayback_archive": "scraping",  # 0.11.1 Phase 3 — CC/Wayback are sibling "scraping" buckets
     "search_snippet_ddg": "scraping",
     "search_snippet_bing": "scraping",
+    "search_snippet_google_cse": "scraping",  # 0.11.1 Phase 4
+    "github_org_member": "developer",  # 0.11.1 Phase 4
+    "hunter_verified": "api",
+    "hunter_high": "api",
+    "hunter_low": "api",
     "press_release": "press",
     "permutation_verified": "verification",
     "permutation_catchall": "verification",
@@ -103,7 +115,7 @@ def freshness_factor(timestamp: str | None) -> float:
 
 def _source_family(source_type: str) -> str:
     """Return the corroboration bucket for multiplier selection."""
-    if source_type.startswith(("common_crawl_", "search_snippet_")):
+    if source_type.startswith(("common_crawl_", "search_snippet_", "wayback_")):
         return source_type
     return SOURCE_CLASS.get(source_type, source_type)
 

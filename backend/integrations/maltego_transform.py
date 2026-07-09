@@ -6,13 +6,12 @@ generation for import into Maltego Desktop.
 from __future__ import annotations
 
 import io
+import logging
 import os
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from typing import Any
-
-import logging
 
 logger = logging.getLogger("mailaccess.maltego")
 

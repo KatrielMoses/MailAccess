@@ -1,19 +1,17 @@
-"""Email discovery via search-engine dorking (DuckDuckGo + Bing HTML).
+"""Email discovery via search-engine dorking (DuckDuckGo + Bing HTML + Google CSE).
 
-The orchestrator module for Phase B1 of the 0.10.0 rebuild.  Builds
-dork queries, runs them across two free engines, and merges the
-results into the same FindingItem shape Phase A's
-``commoncrawl_email`` produces.
+0.11.1 Phase 4 adds Google Custom Search Engine (CSE) as an optional
+concurrent third engine.  When ``GOOGLE_CSE_API_KEY`` and
+``GOOGLE_CSE_CX`` are both set, CSE runs alongside DDG and Bing.
+CSE results receive the ``search_snippet_google_cse`` source type
+(weight 0.55) and take priority in dedup over DDG/Bing results.
 
 Design constraints (from the phase spec):
 
-* Both engines run **concurrently** with each other; queries within
-  each engine run sequentially (because rate-limits are per-source).
-* CAPTCHA / block detection aborts that engine immediately and
-  returns whatever was already collected — we never retry against
-  a rate-limit wall.
-* Multi-engine hits naturally fall into the ``multi_source`` 1.2
-  multiplier branch via :func:`compute_confidence_breakdown`.
+* All active engines run **concurrently** with each other.
+* CAPTCHA / block detection aborts that engine immediately.
+* Multi-engine hits fall into the ``multi_source`` multiplier branch
+  via :func:`compute_confidence_breakdown`.
 """
 
 from __future__ import annotations
@@ -21,6 +19,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+
+import httpx
 
 from ..config import settings
 from ..core.bing_dorker import BingDorker
@@ -31,16 +31,93 @@ from ..core.email_extraction import extract_emails
 from ..core.http_client import build_client
 from ..core.role_classifier import classify_email
 from ..core.scrapingant import get_active_transport
+from ..core.stealth_client import StealthSession, resolve_timing_profile
 from .base import BaseModule, ModuleResult, ModuleStatus
 
 _LOG = logging.getLogger(__name__)
 
-_MAX_QUERIES_HARD_CAP = 50  # safety valve — never query more than this
+_MAX_QUERIES_HARD_CAP = 50  # safety valve
+
+_CSE_URL = "https://www.googleapis.com/customsearch/v1"
+_CSE_RATE_LIMIT_DELAY = 1.0  # 1 req/sec
+
+
+class _CseResult:
+    """A single Google CSE result."""
+
+    __slots__ = ("title", "snippet", "url", "query_used")
+
+    def __init__(
+        self,
+        title: str,
+        snippet: str,
+        url: str,
+        query_used: str,
+    ) -> None:
+        self.title = title
+        self.snippet = snippet
+        self.url = url
+        self.query_used = query_used
+
+
+async def _run_cse_query(
+    client: httpx.AsyncClient,
+    query: str,
+    api_key: str,
+    cx: str,
+    max_results: int = 10,
+) -> tuple[list[_CseResult], bool]:
+    """Execute one Google CSE query.  Returns (results, blocked)."""
+    try:
+        resp = await client.get(
+            _CSE_URL,
+            params={"key": api_key, "cx": cx, "q": query},
+            timeout=10.0,
+        )
+        if resp.status_code == 429:
+            _LOG.warning("Google CSE rate limit hit for query=%r", query)
+            return [], True
+        if resp.status_code != 200:
+            _LOG.warning(
+                "Google CSE returned HTTP %s for query=%r",
+                resp.status_code,
+                query,
+            )
+            return [], False
+
+        data = resp.json()
+        items: list[dict[str, Any]] = data.get("items") or []
+        return (
+            [
+                _CseResult(
+                    title=str(item.get("title", "")),
+                    snippet=str(item.get("snippet", "")),
+                    url=str(item.get("link", "")),
+                    query_used=query,
+                )
+                for item in items[:max_results]
+            ],
+            False,
+        )
+    except Exception as exc:
+        _LOG.warning("Google CSE query failed for query=%r: %s", query, exc)
+        return [], False
+
+
+async def _cse_available() -> tuple[bool, str, str]:
+    """Return (available, api_key, cx)."""
+    api_key = getattr(settings, "google_cse_api_key", None) or ""
+    cx = getattr(settings, "google_cse_cx", None) or ""
+    available = bool(api_key and cx)
+    return available, api_key, cx
 
 
 class EmailSearchDorkModule(BaseModule):
     name = "email_search_dork"
-    description = "Email discovery via search engine dorking — DuckDuckGo and Bing HTML."
+    description = (
+        "Email discovery via search engine dorking — "
+        "DuckDuckGo, Bing HTML, and optional Google CSE."
+    )
     requires_key = False
     default_enabled = False  # Opt-in: domain harvest mode only
 
@@ -49,22 +126,9 @@ class EmailSearchDorkModule(BaseModule):
         target: str,
         *,
         lite_mode: bool | None = None,
+        aggressive: bool | None = None,
         use_proxies: bool = False,
     ) -> ModuleResult:  # type: ignore[override]
-        """Run dorking for email discovery.
-
-        Parameters
-        ----------
-        target:
-            Target domain (e.g. ``"example.com"``).
-        lite_mode:
-            Explicit lite-mode override. MUST-FIX M3: when the
-            orchestrator calls this method it MUST pass ``lite_mode``
-            explicitly; ``None`` falls back to ``settings.dork_lite_mode``
-            only for standalone/test use. This eliminates the previous
-            race where the CLI mutated ``settings.dork_lite_mode``
-            globally and any concurrent reader saw the wrong value.
-        """
         if not settings.enable_email_search_dork:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
@@ -79,12 +143,15 @@ class EmailSearchDorkModule(BaseModule):
                 metadata={"skip_reason": "invalid_domain", "domain": domain},
             )
 
-        # MUST-FIX M3: explicit parameter wins; settings is a fallback
-        # for standalone callers that don't pass it.
         effective_lite_mode = (
             bool(lite_mode) if lite_mode is not None else bool(settings.dork_lite_mode)
         )
-        queries = build_dork_queries(domain, lite_mode=effective_lite_mode)
+        effective_aggressive = bool(aggressive) if aggressive is not None else bool(
+            getattr(settings, "harvest_aggressive", False)
+        )
+        queries = build_dork_queries(
+            domain, lite_mode=effective_lite_mode, aggressive=effective_aggressive
+        )
         if not queries:
             return ModuleResult(
                 status=ModuleStatus.FAILED,
@@ -101,40 +168,69 @@ class EmailSearchDorkModule(BaseModule):
         ddg_delay = float(settings.dork_ddg_delay_seconds)
         bing_delay = float(settings.dork_bing_delay_seconds)
 
-        # ddg_results / bing_results accumulate findings from each engine.
         ddg_findings: list[DorkRunSummary] = []
         bing_findings: list[DorkRunSummary] = []
+        cse_findings: list[DorkRunSummary] = []
         ddg_blocked = False
         bing_blocked = False
+        cse_blocked = False
         ddg_failed = False
         bing_failed = False
+        cse_failed = False
+
+        cse_available, cse_api_key, cse_cx = await _cse_available()
+
+        # 0.11.1 Phase 4: build StealthSession for DDG/Bing.
+        try:
+            profile = resolve_timing_profile(settings.harvest_timing_profile)
+            stealth_session: StealthSession | None = StealthSession(
+                timing_profile=profile,
+                impersonate=settings.harvest_impersonate_browser,
+            )
+        except ImportError as exc:
+            _LOG.debug(
+                "email_search_dork: curl-cffi unavailable; using httpx "
+                "fallback (install 'mailaccess[harvest]'): %s",
+                exc,
+            )
+            stealth_session = None
 
         client_factory = build_client
         client_kwargs: dict[str, Any] = {"timeout": 10.0, "follow_redirects": True}
         if use_proxies:
             client_kwargs["scrapingant_zone"] = "dorking"
             client_kwargs["strict_proxy"] = True
+
         try:
             async with client_factory(**client_kwargs) as shared_client:
                 ddg = DuckDuckGoDorker(
                     transport=shared_client,
                     min_interval=ddg_delay,
                     scrapingant_zone="dorking",
+                    stealth=stealth_session,
                 )
                 bing = BingDorker(
                     transport=shared_client,
                     min_interval=bing_delay,
                     scrapingant_zone="dorking",
+                    stealth=stealth_session,
                 )
+
+                # CSE gets its own httpx client (different upstream).
+                cse_client: httpx.AsyncClient | None = None
+                if cse_available:
+                    cse_client = httpx.AsyncClient(timeout=10.0)
 
                 async def run_ddg() -> None:
                     nonlocal ddg_blocked
                     for q in queries_for_run:
                         results, captcha = await ddg.search(q.query)
                         error = getattr(ddg, "_last_error", None)
-                        ddg_findings.append(DorkRunSummary(query=q, results=results, error=error))
+                        ddg_findings.append(
+                            DorkRunSummary(query=q, results=results, error=error)
+                        )
                         if error:
-                            continue  # stop further queries on network/proxy error
+                            continue
                         if captcha:
                             ddg_blocked = True
                             return
@@ -144,18 +240,58 @@ class EmailSearchDorkModule(BaseModule):
                     for q in queries_for_run:
                         results, blocked = await bing.search(q.query)
                         error = getattr(bing, "_last_error", None)
-                        bing_findings.append(DorkRunSummary(query=q, results=results, error=error))
+                        bing_findings.append(
+                            DorkRunSummary(query=q, results=results, error=error)
+                        )
                         if error:
-                            continue  # stop further queries on network/proxy error
+                            continue
                         if blocked:
                             bing_blocked = True
                             return
 
-                # Run both engines concurrently — *different* IP/domain
-                # pools, so the per-engine rate limiters don't collide.
-                ddg_task = asyncio.create_task(run_ddg())
-                bing_task = asyncio.create_task(run_bing())
-                outcomes = await asyncio.gather(ddg_task, bing_task, return_exceptions=True)
+                async def run_cse() -> None:
+                    """Run all CSE queries sequentially (rate-limited 1/s)."""
+                    nonlocal cse_blocked, cse_failed
+                    if cse_client is None:
+                        cse_failed = True
+                        return
+                    try:
+                        for q in queries_for_run:
+                            results, blocked = await _run_cse_query(
+                                cse_client,
+                                q.query,
+                                cse_api_key,
+                                cse_cx,
+                            )
+                            cse_findings.append(
+                                DorkRunSummary(query=q, results=results, error=None)
+                            )
+                            if blocked:
+                                cse_blocked = True
+                                return
+                            # Rate limit: 1 req/sec.
+                            await asyncio.sleep(_CSE_RATE_LIMIT_DELAY)
+                    except Exception as exc:
+                        _LOG.warning("email_search_dork: CSE task crashed: %s", exc)
+                        cse_failed = True
+                    finally:
+                        if cse_client is not None:
+                            await cse_client.aclose()
+
+                # Build the task list — CSE is only included when configured.
+                tasks_kw: dict[str, Any] = {
+                    "ddg": asyncio.create_task(run_ddg()),
+                    "bing": asyncio.create_task(run_bing()),
+                }
+                if cse_available:
+                    tasks_kw["cse"] = asyncio.create_task(run_cse())
+
+                outcomes = await asyncio.gather(
+                    *[tasks_kw[k] for k in tasks_kw],
+                    return_exceptions=True,
+                )
+                outcome_map = dict(zip(tasks_kw.keys(), outcomes))
+
         except Exception as exc:
             _LOG.error("email_search_dork: shared client crashed: %s", exc)
             return ModuleResult(
@@ -164,26 +300,24 @@ class EmailSearchDorkModule(BaseModule):
                 metadata={"domain": domain},
             )
 
-        if isinstance(outcomes[0], BaseException):
+        if isinstance(outcome_map.get("ddg"), BaseException):
             ddg_failed = True
-            _LOG.warning("email_search_dork: DDG task crashed: %s", outcomes[0])
-        if isinstance(outcomes[1], BaseException):
+            _LOG.warning("email_search_dork: DDG task crashed: %s", outcome_map["ddg"])
+        if isinstance(outcome_map.get("bing"), BaseException):
             bing_failed = True
-            _LOG.warning("email_search_dork: Bing task crashed: %s", outcomes[1])
+            _LOG.warning("email_search_dork: Bing task crashed: %s", outcome_map["bing"])
 
         # ------------------------------------------------------------------
-        # Aggregate per-engine SearchResult -> emails
+        # Aggregate per-engine SearchResult → emails
         # ------------------------------------------------------------------
         # email -> {
-        #     "ddg": bool, "bing": bool,
-        #     "queries": list[str], "snippets": list[str], "on_domain": bool,
+        #   "ddg": bool, "bing": bool, "cse": bool,
+        #   "queries": list[str], "snippets": list[str], "on_domain": bool,
         # }
         aggregated: dict[str, dict[str, Any]] = {}
 
         def _ingest(engine: str, summary: DorkRunSummary) -> None:
             for result in summary.results:
-                # Combine title + snippet — DDG/Bing snippets are short,
-                # so this maximises recall without ballooning work.
                 combined = f"{result.title}\n{result.snippet}"
                 for extracted in extract_emails(combined, target_domain=domain):
                     bucket = aggregated.setdefault(
@@ -191,6 +325,7 @@ class EmailSearchDorkModule(BaseModule):
                         {
                             "ddg": False,
                             "bing": False,
+                            "cse": False,
                             "queries": [],
                             "snippets": [],
                             "on_domain": False,
@@ -209,6 +344,8 @@ class EmailSearchDorkModule(BaseModule):
             _ingest("ddg", summary)
         for summary in bing_findings:
             _ingest("bing", summary)
+        for summary in cse_findings:
+            _ingest("cse", summary)
 
         # ------------------------------------------------------------------
         # Build findings
@@ -225,18 +362,22 @@ class EmailSearchDorkModule(BaseModule):
                 source_types.append("search_snippet_ddg")
             if data["bing"]:
                 source_types.append("search_snippet_bing")
+            if data["cse"]:
+                source_types.append("search_snippet_google_cse")
 
             confidence_info = compute_confidence_breakdown(
                 source_types=source_types,
                 is_smtp_verified=False,
                 is_ca_attested=False,
-                oldest_timestamp=None,  # snippet timestamps unavailable
+                oldest_timestamp=None,
             )
             classification = classify_email(email)
 
             if data["on_domain"]:
                 on_domain_count += 1
-            if data["ddg"] and data["bing"]:
+
+            active_engines = sum(1 for k in ("ddg", "bing", "cse") if data.get(k))
+            if active_engines >= 2:
                 dual_engine_confirmed += 1
 
             local_part = email.split("@", 1)[0]
@@ -253,6 +394,7 @@ class EmailSearchDorkModule(BaseModule):
                         "on_domain": on_domain,
                         "found_via_ddg": bool(data["ddg"]),
                         "found_via_bing": bool(data["bing"]),
+                        "found_via_cse": bool(data["cse"]),
                         "matching_queries": sorted(set(data["queries"]))[:8],
                         "is_role": classification.is_role,
                         "role_match_type": classification.match_type,
@@ -275,24 +417,28 @@ class EmailSearchDorkModule(BaseModule):
         # ------------------------------------------------------------------
         ddg_has_error = any(s.error for s in ddg_findings)
         bing_has_error = any(s.error for s in bing_findings)
+        cse_has_error = any(s.error for s in cse_findings)
         ddg_all_empty = ddg_findings and all(not s.results for s in ddg_findings)
         bing_all_empty = bing_findings and all(not s.results for s in bing_findings)
+        cse_all_empty = cse_findings and all(not s.results for s in cse_findings)
 
-        if (ddg_failed and bing_failed) or (ddg_blocked and bing_blocked):
+        # Collect active blocked/failed flags.
+        any_blocked = ddg_blocked or bing_blocked or cse_blocked
+        any_failed = ddg_failed or bing_failed or cse_failed
+
+        if (any_failed and not cse_available) or (ddg_failed and bing_failed and cse_failed):
             status = ModuleStatus.FAILED
         elif (
-            ddg_failed
-            or bing_failed
-            or ddg_blocked
-            or bing_blocked
+            any_failed
+            or any_blocked
             or (ddg_all_empty and ddg_has_error)
             or (bing_all_empty and bing_has_error)
+            or (cse_available and cse_all_empty and cse_has_error)
         ):
             status = ModuleStatus.PARTIAL
         else:
             status = ModuleStatus.SUCCESS
 
-        # Collect error strings for the harvest report
         errors: list[str] = []
         for s in ddg_findings:
             if s.error:
@@ -300,6 +446,9 @@ class EmailSearchDorkModule(BaseModule):
         for s in bing_findings:
             if s.error:
                 errors.append(f"[Bing] {s.error}")
+        for s in cse_findings:
+            if s.error:
+                errors.append(f"[Google CSE] {s.error}")
 
         return ModuleResult(
             status=status,
@@ -309,18 +458,24 @@ class EmailSearchDorkModule(BaseModule):
                 "domain": domain,
                 "ddg_queries_run": len(ddg_findings),
                 "bing_queries_run": len(bing_findings),
+                "cse_queries_run": len(cse_findings),
                 "ddg_results_collected": sum(len(s.results) for s in ddg_findings),
                 "bing_results_collected": sum(len(s.results) for s in bing_findings),
+                "cse_results_collected": sum(len(s.results) for s in cse_findings),
                 "ddg_blocked": ddg_blocked,
                 "bing_blocked": bing_blocked,
+                "cse_blocked": cse_blocked,
                 "ddg_failed": ddg_failed,
                 "bing_failed": bing_failed,
+                "cse_failed": cse_failed,
+                "cse_available": cse_available,
                 "total_emails_found": len(aggregated),
                 "on_domain_emails": on_domain_count,
                 "role_accounts": role_count,
                 "personal_emails": personal_count,
                 "dual_engine_confirmed": dual_engine_confirmed,
                 "lite_mode": effective_lite_mode,
+                "aggressive": effective_aggressive,
                 "use_proxies": use_proxies,
                 "active_scrapingant_transport": get_active_transport()
                 if use_proxies

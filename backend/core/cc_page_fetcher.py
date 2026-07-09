@@ -1,6 +1,8 @@
 """WARC range fetcher + direct page-fetch fallback for Common Crawl records.
 
-Two strategies, in priority order:
+MailAccess 0.11.1 Phase 3 — Archive Intelligence.
+
+Two fetch strategies, in priority order:
 
 1.  WARC range fetch — issues an HTTP ``Range`` request against
     ``https://data.commoncrawl.org/`` to grab only the bytes that contain
@@ -8,6 +10,19 @@ Two strategies, in priority order:
     target website.
 2.  Direct page fetch — falls back to a normal GET when the WARC fetch
     fails (S3 outage, malformed record, etc.).
+
+The 0.11.1 Phase 3 additions on top of the 0.10.0 fetcher:
+
+* After WARC decode (and after every direct fetch) the page HTML is
+  passed through :func:`backend.core.cf_decode.cf_decode` so the email
+  pass downstream sees the raw address instead of the obfuscated form.
+* Per-fetch metadata (``collection_id``, ``original_url``,
+  ``fetch_timestamp``, ``warc_offset``) is preserved on the
+  :class:`CCFetchResult` so the harvesting module can record
+  provenance per email finding.
+* Per-page structured person extraction is exposed as a separate
+  helper so the module layer can ask for both Person records and
+  email findings without re-fetching.
 
 All public methods never raise on network failure — they return
 ``None`` and log the reason instead.  This is critical because the
@@ -21,12 +36,16 @@ import asyncio
 import gzip
 import io
 import logging
+import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from ..config import APP_VERSION, settings
 from .cc_index_client import CCRecord
+from .cf_decode import cf_decode
+from .structured_data_extractor import PersonRecord, extract_people
 
 _LOG = logging.getLogger(__name__)
 
@@ -40,6 +59,39 @@ _MAX_CONTENT_BYTES = 2 * 1024 * 1024  # 2 MB cap before HTML truncation
 
 def _user_agent() -> str:
     return _CC_UA
+
+
+@dataclass
+class CCFetchResult:
+    """One fetch worth of data + per-source metadata.
+
+    ``html``
+        The decoded HTML page body (Cloudflare-obfuscation stripped).
+    ``collection_id``
+        Origin collection — ``None`` for direct-fallback fetches.
+    ``original_url``
+        The URL the record points at (matches ``record.url``).
+    ``fetch_timestamp``
+        ISO-8601 UTC timestamp of when the fetch completed.
+    ``warc_offset``
+        Byte offset into the WARC file — ``None`` for direct fetches.
+    """
+
+    html: str
+    collection_id: str | None
+    original_url: str
+    fetch_timestamp: str
+    warc_offset: int | None
+
+    @property
+    def is_historical(self) -> bool:
+        """Common Crawl snapshots are by definition historical."""
+        return True
+
+
+def _now_iso() -> str:
+    """Cheap ISO-8601 UTC timestamp — no external imports needed."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 class CCPageFetcher:
@@ -90,19 +142,90 @@ class CCPageFetcher:
     # Public API
     # ------------------------------------------------------------------
     async def fetch_content(self, record: CCRecord) -> str | None:
-        """Fetch page content, preferring WARC range, falling back to direct."""
+        """Fetch page content, preferring WARC range, falling back to direct.
+
+        Returned content is *post-CF-decode* — the same ``html`` the
+        email-extractor will see downstream.
+        """
+        result = await self.fetch_with_metadata(record)
+        return result.html if result is not None else None
+
+    async def fetch_with_metadata(self, record: CCRecord) -> CCFetchResult | None:
+        """Fetch *record* and return a :class:`CCFetchResult` with provenance.
+
+        ``result.html`` is post-CF-decode.  ``result.collection_id``
+        carries the originating collection.  Direct-fallback fetches
+        leave ``collection_id`` set from the original record (which is
+        fine — the source is still the indexed CC URL).
+
+        Returns ``None`` when both WARC and direct attempts fail.
+        """
+        warc_offset_value: int | None = None
+        try:
+            if record.offset is not None:
+                warc_offset_value = int(record.offset)
+        except (TypeError, ValueError):
+            warc_offset_value = None
+
         async with self._sem:
-            html = await self.fetch_warc_content(record)
-            if html is not None:
-                return html
-            return await self.fetch_direct(record.url)
+            warc = await self.fetch_warc_content(record)
+            if warc is not None:
+                decoded = cf_decode(warc)
+                return CCFetchResult(
+                    html=decoded,
+                    collection_id=getattr(record, "collection", None),
+                    original_url=record.url,
+                    fetch_timestamp=_now_iso(),
+                    warc_offset=warc_offset_value,
+                )
+            direct_html = await self.fetch_direct(record.url)
+            if direct_html is None:
+                return None
+            decoded = cf_decode(direct_html)
+            return CCFetchResult(
+                html=decoded,
+                collection_id=getattr(record, "collection", None),
+                original_url=record.url,
+                fetch_timestamp=_now_iso(),
+                warc_offset=warc_offset_value,
+            )
 
     async def fetch_many(self, records: list[CCRecord]) -> list[str | None]:
-        """Fetch many records concurrently, returning results in order."""
+        """Fetch many records concurrently, returning results in order.
+
+        Each entry is the decoded HTML body (``None`` for failures).
+        Convenience wrapper around :meth:`fetch_content` for callers
+        that do not need per-record metadata.
+        """
         if not records:
             return []
         tasks = [self.fetch_content(record) for record in records]
         return await asyncio.gather(*tasks, return_exceptions=False)
+
+    async def fetch_many_with_metadata(
+        self, records: list[CCRecord]
+    ) -> list[CCFetchResult | None]:
+        """Like :meth:`fetch_many` but returns full :class:`CCFetchResult`s."""
+        if not records:
+            return []
+        tasks = [self.fetch_with_metadata(record) for record in records]
+        return await asyncio.gather(*tasks, return_exceptions=False)
+
+    async def extract_people_from_html(
+        self,
+        html: str,
+        page_url: str,
+        domain: str,
+    ) -> list[PersonRecord]:
+        """Run structured-data person extraction on a single page body.
+
+        Wraps :func:`backend.core.structured_data_extractor.extract_people`
+        so the module layer does not need to import the extractor
+        directly — keeps the dependency arrow pointing one way.
+        """
+        if not html:
+            return []
+        return extract_people(html, page_url, domain)
 
     async def fetch_warc_content(self, record: CCRecord) -> str | None:
         """Fetch a single WARC record via HTTP Range request and decode gzip."""

@@ -1,6 +1,9 @@
 import asyncio
+
 import dns.resolver
+
 from .base import BaseModule, ModuleResult, ModuleStatus
+
 
 class DnsLookupModule(BaseModule):
     name = "dns_lookup"

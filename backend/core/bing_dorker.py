@@ -1,11 +1,15 @@
 """Async Bing HTML scraper for the email-harvest phase.
 
-Mirror of :mod:`backend.core.duckduckgo_dorker`, but for Bing's HTML
-search results page.  Bing result blocks live inside ``<li
-class="b_algo">`` containers with a heading anchor (``<h2><a>...</a></h2>``)
-and a snippet paragraph (``<p>...</p>``).  We parse these with the
-same regex-and-``build_client`` discipline used elsewhere in the
-codebase.
+0.11.1 Phase 4:
+  * Rewrites the HTTP transport to use :class:`StealthSession`
+    exclusively (same pattern as :mod:`backend.core.duckduckgo_dorker`).
+  * All Bing Web Search API references removed — the API was retired
+    2025-08-11 and returns HTTP 410 Gone.  This module now uses only
+    the Bing HTML search page, the same as the DDG dorker.
+  * On HTTP 202 (Bing's CAPTCHA/success-challenge signal) the dorker
+    sets ``self.blocked = True`` so callers can produce actionable logs.
+
+All other logic (HTML parsing, rate limiting) is unchanged.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from typing import Any
 import httpx
 
 from ..config import APP_VERSION
-from ..core.http_client import build_client
+from .stealth_client import StealthSession, resolve_timing_profile
 
 _LOG = logging.getLogger(__name__)
 
@@ -124,8 +128,13 @@ def _parse_bing_html(html: str, query: str, max_results: int) -> list[SearchResu
 class BingDorker:
     """Search Bing HTML for a single dork query.
 
-    Returns ``(results, blocked)``.  Blocked == CAPTCHA / rate-limit
-    pattern matched, caller should stop the current run.
+    0.11.1 Phase 4: all HTTP requests go through the injected
+    :class:`StealthSession`.  When no session is provided at
+    construction time the dorker builds one with the T2 timing
+    profile.
+
+    NOTE: The Bing Web Search API was retired 2025-08-11.
+    This module uses only the Bing HTML search page.
     """
 
     def __init__(
@@ -136,23 +145,46 @@ class BingDorker:
         follow_redirects: bool = True,
         *,
         scrapingant_zone: str | None = None,
+        stealth: StealthSession | None = None,
     ) -> None:
+        # Phase 4: when a StealthSession is injected, use it.
+        # When neither transport nor stealth is provided, build a
+        # StealthSession with T2 timing as the default HTTP transport.
+        # When transport is explicitly provided (for tests), skip
+        # StealthSession entirely so tests can mock the client directly.
+        if stealth is not None:
+            self._session: StealthSession = stealth
+        elif transport is None:
+            try:
+                profile = resolve_timing_profile("t2")
+                self._session = StealthSession(timing_profile=profile)
+            except ImportError:
+                self._session = None  # type: ignore[assignment]
+        else:
+            self._session = None  # type: ignore[assignment]
+
         self._owns_transport = transport is None
-        if transport is None:
-            self._client: httpx.AsyncClient = build_client(
-                scrapingant_zone=scrapingant_zone,
+        if transport is None and self._session is None:
+            self._client: httpx.AsyncClient = httpx.AsyncClient(
                 timeout=timeout,
                 follow_redirects=follow_redirects,
             )
-        else:
+        elif transport is not None:
             self._client = transport
+        else:
+            self._client = None  # type: ignore[assignment]
+
         self._min_interval = max(float(min_interval), 0.0)
         self._last_request_at: float = 0.0
         self._lock = asyncio.Lock()
-        self._last_error: str | None = None  # set by search() on exception
+        self._last_error: str | None = None
+        # 0.11.1 Phase 4: tracks whether a block (202/403/429/body marker)
+        # was hit.  Set by ``search()``; callers read it to produce
+        # actionable logs.
+        self.blocked: bool = False
 
     async def aclose(self) -> None:
-        if self._owns_transport:
+        if self._owns_transport and self._client is not None:
             await self._client.aclose()
 
     async def __aenter__(self) -> BingDorker:
@@ -171,14 +203,24 @@ class BingDorker:
 
         async with self._lock:
             await self._throttle()
-            self._last_error = None  # clear before attempt; set only on exception
+            self._last_error = None
+            self.blocked = False
 
             try:
-                response = await self._client.get(
-                    _BING_URL,
-                    params={"q": query, "count": max_results},
-                    headers={"User-Agent": _pick_user_agent()},
-                )
+                if self._session is not None:
+                    response = await self._session.get(
+                        _BING_URL,
+                        params={"q": query, "count": max_results},
+                    )
+                elif self._client is not None:
+                    response = await self._client.get(
+                        _BING_URL,
+                        params={"q": query, "count": max_results},
+                        headers={"User-Agent": _pick_user_agent()},
+                    )
+                else:
+                    _LOG.error("Bing dork: no transport and no session available")
+                    return [], False
             except httpx.TimeoutException:
                 _LOG.warning("Bing dork timed out: %s", query)
                 return [], False
@@ -187,7 +229,10 @@ class BingDorker:
                 self._last_error = str(exc)
                 return [], False
 
-            if response.status_code in (403, 429):
+            # 0.11.1 Phase 4: HTTP 202 is Bing's CAPTCHA/success-challenge
+            # signal (same as DDG).  Treat it identically to 403/429.
+            if response.status_code in (202, 403, 429):
+                self.blocked = True
                 _LOG.warning(
                     "Bing blocked (HTTP %s) for query=%r",
                     response.status_code,
@@ -204,6 +249,7 @@ class BingDorker:
 
             body = response.text or ""
             if _looks_like_block(body):
+                self.blocked = True
                 _LOG.warning("Bing block-marker detected in body for query=%r", query)
                 return [], True
 

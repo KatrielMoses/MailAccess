@@ -39,13 +39,15 @@ from ..config import settings
 from ..core.bing_dorker import BingDorker
 from ..core.company_page_names import (
     CompanyPageName,
-    discover_company_page_names,
+    PersonRecord,
+    discover_and_extract,
 )
 from ..core.duckduckgo_dorker import DuckDuckGoDorker
 from ..core.http_client import build_client
-from ..core.scrapingant import get_active_transport
 from ..core.linkedin_name_discovery import discover_linkedin_names
 from ..core.name_quality import is_plausible_person_name, name_suspicion_penalty
+from ..core.scrapingant import get_active_transport
+from ..core.stealth_client import StealthSession, resolve_timing_profile
 from .base import BaseModule, ModuleResult, ModuleStatus
 
 # Imported eagerly so monkeypatch.setattr works in tests; the three
@@ -55,6 +57,33 @@ from .press_intel import PressIntelModule
 from .sec_edgar import SecEdgarModule
 
 _LOG = logging.getLogger(__name__)
+
+
+def _try_build_stealth_session() -> StealthSession | None:
+    """Build a :class:`StealthSession` from current settings, returning
+    ``None`` when curl-cffi is not installed.
+
+    Harvest modules call this on every source; the lookup is cheap
+    (the heavy import work happens in ``StealthSession.__post_init__``)
+    and the ``None`` return is the documented "fall back to httpx"
+    signal used by the dorker / company-page code paths.
+    """
+    try:
+        profile = resolve_timing_profile(settings.harvest_timing_profile)
+        return StealthSession(
+            timing_profile=profile,
+            impersonate=settings.harvest_impersonate_browser,
+        )
+    except ImportError:
+        # curl-cffi missing — caller falls back to httpx.  The
+        # ImportError message already includes the install hint, so
+        # we just log at debug level (one line) and return None.
+        _LOG.debug(
+            "employee_name_discovery: curl-cffi unavailable; "
+            "falling back to httpx (install 'mailaccess[harvest]')",
+        )
+        return None
+
 
 # Per-source confidence baselines (mirrors spec).
 _SOURCE_CONFIDENCE: dict[str, float] = {
@@ -120,6 +149,11 @@ class EmployeeNameDiscoveryModule(BaseModule):
         use_proxies: bool = False,
     ) -> ModuleResult:  # type: ignore[override]
         self._use_proxies = use_proxies
+        # Phase 2: structured-data emails from the company-page
+        # pipeline are stashed here by :meth:`_company_pages`.  We
+        # default to an empty list so a fresh ``.run()`` call
+        # doesn't carry emails from a previous invocation.
+        self._structured_emails = []  # type: ignore[attr-defined]  (Phase 2 side-channel)
         if not settings.enable_employee_name_discovery:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
@@ -175,6 +209,13 @@ class EmployeeNameDiscoveryModule(BaseModule):
         sec_findings: list[NameDiscovery] = self._unwrap(outcomes[3], default=[], label="sec_edgar")
         oc_findings: list[NameDiscovery] = self._unwrap(
             outcomes[4], default=[], label="opencorporates"
+        )
+
+        # Phase 2: pull any direct emails the structured-data
+        # pipeline collected in :meth:`_company_pages`.  Default to
+        # an empty list when the company-page task failed.
+        structured_emails: list[dict[str, Any]] = list(
+            getattr(self, "_structured_emails", []) or []
         )
 
         all_names: list[NameDiscovery] = (
@@ -267,6 +308,12 @@ class EmployeeNameDiscoveryModule(BaseModule):
                 }
             )
 
+        # Phase 2: append structured-email findings as a separate
+        # signal_type so downstream pattern-generation can both
+        # (1) skip pattern build for names with a known direct
+        # email and (2) surface the email in the harvest report.
+        findings.extend(structured_emails)
+
         if ok_count == 0:
             status = ModuleStatus.FAILED
         elif ok_count == 1:
@@ -286,6 +333,12 @@ class EmployeeNameDiscoveryModule(BaseModule):
                 "opencorporates_names_found": len(oc_findings),
                 "total_unique_names": len(aggregated),
                 "multi_source_confirmed_names": multi_source_count,
+                # Phase 2: direct emails harvested from structured
+                # data (JSON-LD, microdata, hCard, mailto:).  Used
+                # by the CLI / report layer to surface "we know
+                # this person's exact address" rather than just a
+                # pattern candidate.
+                "structured_emails_found": len(structured_emails),
                 "use_proxies": use_proxies,
                 "active_scrapingant_transport": get_active_transport()
                 if use_proxies
@@ -310,54 +363,126 @@ class EmployeeNameDiscoveryModule(BaseModule):
                 # Exceptions propagate to ``_unwrap`` via ``asyncio.gather`` so
                 # the source-failure mask reflects reality.
                 return await discover_linkedin_names(domain=domain, ddg=ddg, bing=bing)
-        # No proxy: plain direct client
+        # No proxy: Chrome-impersonating StealthSession.  Falls back
+        # to a plain httpx transport if curl-cffi is not installed.
+        stealth = _try_build_stealth_session()
+        if stealth is None:
+            async with build_client(timeout=10.0, follow_redirects=True) as shared:
+                ddg = DuckDuckGoDorker(transport=shared, min_interval=0.0)
+                bing = BingDorker(transport=shared, min_interval=0.0)
+                return await discover_linkedin_names(domain=domain, ddg=ddg, bing=bing)
         async with build_client(timeout=10.0, follow_redirects=True) as shared:
-            ddg = DuckDuckGoDorker(transport=shared, min_interval=0.0)
-            bing = BingDorker(transport=shared, min_interval=0.0)
+            ddg = DuckDuckGoDorker(
+                transport=shared, min_interval=0.0, stealth=stealth
+            )
+            bing = BingDorker(
+                transport=shared, min_interval=0.0, stealth=stealth
+            )
             return await discover_linkedin_names(domain=domain, ddg=ddg, bing=bing)
 
     # ----------------------------------------------------------------------
     # Source 2 — Company pages (direct fetch)
     # ----------------------------------------------------------------------
     async def _company_pages(self, domain: str) -> list[NameDiscovery]:
-        max_pages = max(
+        r"""Phase 2: discovery-first structured-data pipeline.
+
+        The legacy ``discover_company_page_names`` (fixed path list +
+        body-text extraction) is preserved as a fallback for sites
+        where the structured pipeline returns empty.  This method
+        ALSO collects direct emails from ``PersonRecord`` instances
+        onto ``self._structured_emails`` so :meth:`run` can emit
+        them as separate ``structured_email`` findings.
+        """
+        max_candidates = max(
             1,
-            int(getattr(settings, "employee_name_max_company_pages", 5) or 5),
+            int(
+                getattr(settings, "site_discovery_max_candidates", 15)
+                or 15
+            ),
         )
-        # scrapingant: keep for public company-page HTML with anti-bot variance
+        timeout = max(
+            1, float(getattr(settings, "site_discovery_timeout_seconds", 5) or 5)
+        )
+        aggressive = bool(getattr(settings, "harvest_aggressive", False))
         use_proxies = getattr(self, "_use_proxies", False)
+
+        async def _scrape_with(session: Any) -> list[PersonRecord]:
+            return await discover_and_extract(
+                domain,
+                session,
+                aggressive=aggressive,
+                max_candidates=max_candidates,
+                timeout=timeout,
+            )
+
+        records: list[PersonRecord] = []
+        # scrapingant: keep for public company-page HTML with anti-bot variance
         if use_proxies:
             async with build_client(
                 scrapingant_zone="platforms",
                 strict_proxy=True,
-                timeout=5.0,
+                timeout=timeout,
                 follow_redirects=True,
             ) as shared:
-                pages: list[CompanyPageName] = await discover_company_page_names(
-                    domain, transport=shared, max_pages=max_pages
-                )
+                records = await _scrape_with(shared)
         else:
-            async with build_client(timeout=5.0, follow_redirects=True) as shared:
-                pages: list[CompanyPageName] = await discover_company_page_names(
-                    domain, transport=shared, max_pages=max_pages
-                )
+            # 0.11.1 Phase 1: Chrome-impersonating direct fetch via
+            # the same StealthSession used by the LinkedIn source.
+            # Falls back to a plain httpx transport if curl-cffi is
+            # not installed (StealthSession's ``__post_init__`` raises
+            # ``ImportError`` with install instructions in that case).
+            stealth = _try_build_stealth_session()
+            if stealth is not None:
+                records = await _scrape_with(stealth)
+            else:
+                async with build_client(
+                    timeout=timeout, follow_redirects=True
+                ) as shared:
+                    records = await _scrape_with(shared)
+
+        # Stash the discovered emails on the module instance so
+        # ``run()`` can emit them as separate ``structured_email``
+        # findings.  We attach a side-channel list rather than
+        # mixing email records into the names stream — the dedupe
+        # / boost logic in :meth:`run` is name-centric, and emails
+        # don't participate in the multi-source boost (they already
+        # carry a high confidence from the structured-data source).
+        self._structured_emails = [
+            {
+                "platform": "employee_name_discovery",
+                "signal_type": "structured_email",
+                "metadata": {
+                    "name": r.name,
+                    "email": r.email,
+                    "source": "structured_page",
+                    "source_url": r.page_url,
+                    "source_type": r.source_type,
+                    "confidence_score": r.confidence,
+                },
+                "profile_url": r.page_url,
+                "username": (r.email or "").split("@", 1)[0],
+                "confidence": "high" if r.confidence >= 0.7 else "medium",
+            }
+            for r in records
+            if (r.email or "").strip()
+        ]
 
         # FIX 1 — apply token-count-based confidence demotion for
         # company-page names.  Real names are 2 tokens; multi-token
         # candidates are disproportionately likely to be page
         # fragments and should contribute less to pattern generation.
         out: list[NameDiscovery] = []
-        for p in pages:
-            token_count = len(p.name.split())
-            confidence = p.confidence
+        for record in records:
+            token_count = len(record.name.split())
+            confidence = record.confidence
             if token_count >= 3:
                 confidence = round(confidence * _COMPANY_PAGE_MULTI_TOKEN_DEMOTION, 4)
             out.append(
                 NameDiscovery(
-                    name=p.name,
+                    name=record.name,
                     source="company_page",
-                    source_url=p.source_url,
-                    title_or_role=p.title_or_role,
+                    source_url=record.page_url,
+                    title_or_role=record.title,
                     confidence=confidence,
                 )
             )

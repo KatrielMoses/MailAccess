@@ -60,7 +60,11 @@ _DORK_PATTERNS: tuple[tuple[str, str], ...] = (
 )
 
 
-def build_dork_queries(domain: str, lite_mode: bool = False) -> list[DorkQuery]:
+def build_dork_queries(
+    domain: str,
+    lite_mode: bool = False,
+    aggressive: bool = False,
+) -> list[DorkQuery]:
     """Return the list of dork queries for *domain*.
 
     Parameters
@@ -71,13 +75,21 @@ def build_dork_queries(domain: str, lite_mode: bool = False) -> list[DorkQuery]:
         When ``True``, only patterns 1 and 2 (the broadest / cheapest
         two) are returned — used for fast harvests or rate-limited
         environments where every query counts.
+    aggressive:
+        0.11.1 Phase 5: when True, ignore ``lite_mode`` and return
+        all patterns (5 total).  ``aggressive`` wins over ``lite_mode``.
     """
 
     cleaned = (domain or "").strip().lower()
     if not is_valid_domain(cleaned):
         return []
 
-    pattern_limit = 2 if lite_mode else len(_DORK_PATTERNS)
+    if aggressive:
+        pattern_limit = len(_DORK_PATTERNS)
+    elif lite_mode:
+        pattern_limit = 2
+    else:
+        pattern_limit = len(_DORK_PATTERNS)
     queries: list[DorkQuery] = []
     for index, (template, description) in enumerate(_DORK_PATTERNS[:pattern_limit]):
         rendered = template.replace("{domain}", cleaned)

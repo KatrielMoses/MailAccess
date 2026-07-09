@@ -7,7 +7,6 @@ from typing import Any
 
 from .breach_normalizer import resolve_breach_identity
 
-
 _EVENT_TYPES = frozenset(
     {
         "first_seen",
