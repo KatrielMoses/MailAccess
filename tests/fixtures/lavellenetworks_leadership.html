@@ -1,0 +1,128 @@
+"""Fixture: synthetic HTML for Lavelle Networks /leadership.php.
+
+Models a non-standard team page URL with a mix of structured-data
+sources.  The fixture is purely synthetic and avoids linking to any
+real person — all names below are invented for this test file.
+"""
+LAVELLENETWORKS_LEADERSHIP_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Leadership - Lavelle Networks</title>
+    <meta name="description" content="Meet the Lavelle Networks leadership team driving secure SD-WAN innovation.">
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "Organization",
+      "name": "Lavelle Networks",
+      "url": "https://lavellenetworks.com",
+      "employee": [
+        {"@type": "Person", "name": "Subramanian Krishnan", "jobTitle": "Founder & CEO"},
+        {"@type": "Person", "name": "Vidya Sagar", "jobTitle": "Co-Founder & CTO"}
+      ]
+    }
+    </script>
+</head>
+<body>
+    <header>
+        <nav>
+            <a href="/about">About</a>
+            <a href="/products">Products</a>
+            <a href="/leadership.php">Leadership</a>
+            <a href="/careers">Careers</a>
+        </nav>
+    </header>
+    <main>
+        <h1>Meet the Leadership</h1>
+
+        <section class="leadership-grid">
+            <article class="bio-card">
+                <img src="/photos/subbu.jpg" alt="Subramanian Krishnan" />
+                <h3>Subramanian Krishnan</h3>
+                <p>Founder &amp; CEO</p>
+                <a href="mailto:subu@lavellenetworks.com">subu@lavellenetworks.com</a>
+            </article>
+            <article class="bio-card">
+                <img src="/photos/vidya.jpg" alt="Vidya Sagar" />
+                <h3>Vidya Sagar</h3>
+                <p>Co-Founder &amp; CTO</p>
+                <a href="mailto:vidya@lavellenetworks.com">vidya@lavellenetworks.com</a>
+            </article>
+            <article class="bio-card">
+                <img src="/photos/ankit.jpg" alt="Ankit Bhatt" />
+                <h3>Ankit Bhatt</h3>
+                <p>VP Engineering</p>
+                <a href="mailto:ankit@lavellenetworks.com">ankit@lavellenetworks.com</a>
+            </article>
+            <article class="bio-card">
+                <img src="/photos/priya.jpg" alt="Priya Iyer" />
+                <h3>Priya Iyer</h3>
+                <p>VP Product</p>
+                <a href="mailto:priya@lavellenetworks.com">priya@lavellenetworks.com</a>
+            </article>
+            <article class="bio-card">
+                <img src="/photos/naveen.jpg" alt="Naveen Mago" />
+                <h3>Naveen Mago</h3>
+                <p>Chief Revenue Officer</p>
+                <a href="mailto:naveen@lavellenetworks.com">naveen@lavellenetworks.com</a>
+            </article>
+            <article class="bio-card">
+                <img src="/photos/anita.jpg" alt="Anita Vohra" />
+                <h3>Anita Vohra</h3>
+                <p>Chief Financial Officer</p>
+                <a href="mailto:anita@lavellenetworks.com">anita@lavellenetworks.com</a>
+            </article>
+            <article class="bio-card">
+                <img src="/photos/deepak.jpg" alt="Deepak Bhalla" />
+                <h3>Deepak Bhalla</h3>
+                <p>Head of Operations</p>
+                <a href="mailto:deepak@lavellenetworks.com">deepak@lavellenetworks.com</a>
+            </article>
+            <article class="bio-card">
+                <img src="/photos/rekha.jpg" alt="Rekha Singh" />
+                <h3>Rekha Singh</h3>
+                <p>Director of People</p>
+                <a href="mailto:rekha@lavellenetworks.com">rekha@lavellenetworks.com</a>
+            </article>
+            <article class="bio-card">
+                <img src="/photos/sanjay.jpg" alt="Sanjay Pathak" />
+                <h3>Sanjay Pathak</h3>
+                <p>Head of Customer Success</p>
+                <a href="mailto:sanjay@lavellenetworks.com">sanjay@lavellenetworks.com</a>
+            </article>
+            <article class="bio-card">
+                <img src="/photos/anand.jpg" alt="Anand Krishnamurthy" />
+                <h3>Anand Krishnamurthy</h3>
+                <p>Director of Engineering</p>
+                <a href="mailto:anand@lavellenetworks.com">anand@lavellenetworks.com</a>
+            </article>
+            <article class="bio-card">
+                <img src="/photos/meera.jpg" alt="Meera Vaidyanathan" />
+                <h3>Meera Vaidyanathan</h3>
+                <p>Chief Marketing Officer</p>
+                <a href="mailto:meera@lavellenetworks.com">meera@lavellenetworks.com</a>
+            </article>
+        </section>
+
+        <section>
+            <div itemscope itemtype="https://schema.org/Person">
+                <span itemprop="name">Suresh Babu</span>
+                <span itemprop="jobTitle">Principal Architect</span>
+                <a itemprop="email" href="mailto:suresh@lavellenetworks.com">Email</a>
+            </div>
+            <div itemscope itemtype="https://schema.org/Person">
+                <span itemprop="name">Kavita Rao</span>
+                <span itemprop="jobTitle">Director of Sales</span>
+                <a itemprop="email" href="mailto:kavita@lavellenetworks.com">Email</a>
+            </div>
+        </section>
+
+        <section>
+            <p>For general press queries, reach out to <a href="mailto:press@lavellenetworks.com">press@lavellenetworks.com</a>.</p>
+        </section>
+    </main>
+    <footer>
+        <p>Lavelle Networks &copy; 2026</p>
+    </footer>
+</body>
+</html>
+"""

@@ -15,7 +15,7 @@ from typing import Type
 from .base import BaseModule, ModuleResult, ModuleStatus
 
 _SKIP = frozenset({"base"})
-_registry: dict[str, Type[BaseModule]] = {}
+_registry: dict[str, type[BaseModule]] = {}
 
 
 def _discover() -> None:
@@ -38,12 +38,12 @@ def _discover() -> None:
 _discover()
 
 
-def get_all_modules() -> list[Type[BaseModule]]:
+def get_all_modules() -> list[type[BaseModule]]:
     """Return all registered module classes."""
     return list(_registry.values())
 
 
-def get_module(name: str) -> Type[BaseModule] | None:
+def get_module(name: str) -> type[BaseModule] | None:
     """Return the module class registered under *name*, or None."""
     return _registry.get(name)
 

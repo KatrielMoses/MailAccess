@@ -259,6 +259,7 @@ def run_harvest_emails(
     lite: bool = False,
     export: str | None = None,
     max_cc_records: int | None = None,
+    cc_max_collections: int | None = None,
     console: Console | None = None,
     *,
     min_confidence: str = "low",
@@ -269,6 +270,7 @@ def run_harvest_emails(
     show_unverified_patterns: bool = False,
     show_role: bool = False,
     full: bool = False,
+    aggressive: bool = False,
 ) -> int:
     """Run the domain email harvest and render / export results.
 
@@ -311,6 +313,11 @@ def run_harvest_emails(
     cli_cc_max_records = (
         max(1, int(max_cc_records)) if max_cc_records is not None else None
     )
+    # 0.11.1 Phase 5: aggressive mode bumps CC collections to 24.
+    if aggressive and cc_max_collections is None:
+        cli_cc_max_collections = 24
+    else:
+        cli_cc_max_collections = cc_max_collections
 
     # ------------------------------------------------------------------
     # 3. Print SMTP opt-in notice (only when --verify-smtp is set).
@@ -321,6 +328,13 @@ def run_harvest_emails(
             "100 addresses via RCPT TO. This is a passive OSINT "
             "technique (no emails sent) but uses your network "
             "connection to contact target mail servers directly.[/yellow]"
+        )
+    # 0.11.1 Phase 2: surface aggressive mode visibly so analysts
+    # know the harvest is using looser thresholds.
+    if aggressive:
+        console.print(
+            "[yellow]⚠ Aggressive harvest mode — body-text name "
+            "extraction enabled. Expect more LOW-quality findings.[/yellow]"
         )
 
     # ------------------------------------------------------------------
@@ -378,6 +392,7 @@ def run_harvest_emails(
             proxy_fallback_ok=proxy_fallback_ok,
             dork_lite_mode=cli_dork_lite_mode,
             cc_max_records=cli_cc_max_records,
+            cc_max_collections=cli_cc_max_collections,
             on_module_complete=_on_module_complete,
         )
 

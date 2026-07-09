@@ -146,6 +146,7 @@ async def _clean_stale_investigations() -> None:
     async with AsyncSessionLocal() as session:
         async with session.begin():
             from datetime import datetime, timedelta, timezone
+
             from sqlalchemy import update
 
             cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_threshold_minutes)

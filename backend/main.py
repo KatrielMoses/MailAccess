@@ -12,8 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from rich.console import Console
 
-from .api.router import api_router, ws_router
 from .api.middleware.auth import APIKeyMiddleware, RequestIDMiddleware, request_id_contextvar
+from .api.router import api_router, ws_router
 from .api.routes.health import router as health_router
 from .api.routes.maltego import router as maltego_router
 from .config import APP_VERSION, settings

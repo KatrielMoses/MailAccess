@@ -1,5 +1,6 @@
 from .base import BaseModule, ModuleResult, ModuleStatus
 
+
 class SocialLinksModule(BaseModule):
     name = "social_links"
     description = "Discover social media profiles plausibly linked to the email address."
