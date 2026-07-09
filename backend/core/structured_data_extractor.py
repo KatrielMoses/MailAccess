@@ -111,6 +111,25 @@ _TITLE_TOKEN_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+_ORG_NAME_TOKENS = {
+    "capital",
+    "company",
+    "consulting",
+    "group",
+    "inc",
+    "labs",
+    "limited",
+    "llc",
+    "ltd",
+    "networks",
+    "partners",
+    "solutions",
+    "systems",
+    "technology",
+    "technologies",
+    "venture",
+}
+
 
 # ----------------------------------------------------------------------
 # JSON-LD helpers
@@ -984,7 +1003,7 @@ def _find_mailto_for_heading(
 def _extract_dom_team_card_records(
     html: str, page_url: str, is_team_page: bool
 ) -> list[PersonRecord]:
-    """5 — DOM team-card pattern: image + heading + title, 2+ times.
+    """5 — DOM team-card pattern: repeated name + role cards.
 
     We deliberately only emit on confirmed team pages — a single
     repeating "image + name + title" block is too noisy on
@@ -996,6 +1015,13 @@ def _extract_dom_team_card_records(
     email directly.  Without that pass we would emit a separate
     mailto-derived record (with a guessed local-part name) and
     the email would not link back to the structured identity.
+
+    The live Lavelle Networks page uses ``h3`` for the name and
+    ``h4`` for the role inside each repeated card, so the detector
+    treats the first plausible person heading as the name and the
+    following role-like text as the title even when it is not in a
+    paragraph tag.  The image/avatar is useful evidence but not a
+    hard requirement.
     """
     if not is_team_page or not html:
         return []
@@ -1003,21 +1029,44 @@ def _extract_dom_team_card_records(
     parser.feed(html)
     parser.close()
     parser.finalize()
-    headings = [h for h in parser.headings if h.get("name") and h.get("next_text")]
+    headings = [h for h in parser.headings if h.get("name")]
     if len(headings) < 2:
         # Need at least 2 cards for the pattern to be a "team grid".
         return []
-    images = _IMG_TAG_RE.findall(html)
-    if len(images) < 2:
-        return []
     out: list[PersonRecord] = []
     seen: set[str] = set()
-    for h in headings:
+    candidate_indices = [
+        idx
+        for idx, h in enumerate(headings)
+        if (h.get("tag") or "").lower() in ("h2", "h3")
+        and _looks_like_person_heading(h.get("name"))
+    ]
+    for idx, h in enumerate(headings):
         # The heading's *name* attribute holds the display name and
         # *next_text* holds the title pattern.
+        tag = (h.get("tag") or "").lower()
+        if tag not in ("h2", "h3"):
+            continue
         name = h.get("name") or ""
+        if not _looks_like_person_heading(name):
+            continue
         title = h.get("next_text") or ""
-        if not is_plausible_person_name(name):
+        # Keep the search within the current card: stop at the next
+        # plausible person heading so we do not borrow the following
+        # person's role.
+        next_person_idx = len(headings)
+        for cand_idx in candidate_indices:
+            if cand_idx > idx:
+                next_person_idx = cand_idx
+                break
+        if not _TITLE_TOKEN_RE.search(title):
+            title = ""
+            for lookahead in range(idx + 1, next_person_idx):
+                candidate_title = (headings[lookahead].get("name") or "").strip()
+                if _TITLE_TOKEN_RE.search(candidate_title):
+                    title = candidate_title
+                    break
+        if not title:
             continue
         if not _TITLE_TOKEN_RE.search(title):
             continue
@@ -1220,6 +1269,18 @@ def _ok_name(value: Any) -> bool:
     if not name:
         return False
     return bool(is_plausible_person_name(name))
+
+
+def _looks_like_person_heading(value: Any) -> bool:
+    if not _ok_name(value):
+        return False
+    name = str(value).strip().lower()
+    tokens = [tok for tok in re.split(r"[\s,/&-]+", name) if tok]
+    if not tokens:
+        return False
+    if any(tok in _ORG_NAME_TOKENS for tok in tokens):
+        return False
+    return True
 
 
 def _dedupe_records(

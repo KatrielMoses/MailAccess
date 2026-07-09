@@ -616,6 +616,35 @@ async def discover_team_pages(
             links = _extract_homepage_links(homepage_body, base)
             homepage_candidates = _candidates_from_homepage(links, cleaned)
 
+        # ----- Phase B2: one-hop recursion from section-like homepage links -----
+        recursive_candidates: list[PageCandidate] = []
+        recursive_seeds = []
+        for cand in homepage_candidates:
+            path_score, _ = _score_url_path(cand.url)
+            # Only recurse from URLs whose own path already carries a
+            # team/section signal.  This skips noisy homepage cards
+            # such as blog headlines that merely *mention* teams.
+            if path_score > 0:
+                recursive_seeds.append(cand)
+        recursive_seeds = sorted(
+            recursive_seeds, key=lambda c: (-c.score, c.url)
+        )[:5]
+        if recursive_seeds:
+            recursive_results = await asyncio.gather(
+                *(_get(session, cand.url, timeout=timeout) for cand in recursive_seeds),
+                return_exceptions=True,
+            )
+            for seed, outcome in zip(recursive_seeds, recursive_results):
+                if isinstance(outcome, BaseException):
+                    continue
+                status, body = outcome
+                if status != 200 or not body:
+                    continue
+                links = _extract_homepage_links(body, seed.url)
+                for cand in _candidates_from_homepage(links, cleaned):
+                    cand.source = "homepage_recursive"
+                    recursive_candidates.append(cand)
+
         # ----- Phase C: robots.txt hints (sequential is fine — usually tiny) -----
         robots_candidates: list[PageCandidate] = []
         robots_status, robots_body = await _get(
@@ -627,7 +656,12 @@ async def discover_team_pages(
 
         # ----- Merge + dedupe by normalised URL -----
         by_url: dict[str, PageCandidate] = {}
-        for cand in sitemap_candidates + homepage_candidates + robots_candidates:
+        for cand in (
+            sitemap_candidates
+            + homepage_candidates
+            + recursive_candidates
+            + robots_candidates
+        ):
             existing = by_url.get(cand.url)
             if existing is None or cand.score > existing.score:
                 by_url[cand.url] = cand
