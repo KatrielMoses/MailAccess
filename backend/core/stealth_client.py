@@ -390,6 +390,16 @@ class StealthSession:
     request_count: int = field(default=0, init=False)
     _session: Any = field(default=None, init=False, repr=False)
     _nav_graph_enabled: bool = field(default=False, init=False)
+    # Wayback fix: when True the navigation-graph simulation is
+    # suppressed even if the timing profile would otherwise enable it.
+    # Wayback / archive.org fetches have no fingerprinting check, so
+    # the intermediate homepage / parent-path GETs (which include a
+    # blocking ``time.sleep`` of 4–20s on T0) are pure overhead — and
+    # worse, they have no hard timeout, so a slow archive.org response
+    # can deadlock the entire harvest. The inter-request pacing delay
+    # (``self.timing_profile.get_delay()``) is kept; only the nav-graph
+    # fire-and-discord intermediate pages are skipped.
+    _skip_nav_sim: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         """Lazily build the underlying curl-cffi session.
@@ -507,10 +517,16 @@ class StealthSession:
         """Run one request through the underlying curl-cffi session.
 
         Centralises header building, delay application, and the
-        last_url update so :meth:`get` and :meth:`get_sync` cannot
+        ``last_url`` update so :meth:`get` and :meth:`get_sync` cannot
         drift apart.
         """
-        if self._nav_graph_enabled:
+        # Wayback fix: callers can flip ``_skip_nav_sim = True`` to
+        # suppress the navigation-graph simulation against targets that
+        # do no fingerprinting (archive.org Wayback snapshots, etc.).
+        # The delay below (``timing_profile.get_delay()``) still paces
+        # the request normally — only the intermediate homepage /
+        # parent-path hops are skipped.
+        if self._nav_graph_enabled and not self._skip_nav_sim:
             self._simulate_navigation(url)
         delay = self._resolve_delay()
         if delay > 0:
