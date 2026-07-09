@@ -173,7 +173,6 @@ Any auto-demotion should log + surface to user, not silently skip platforms.
 - `backend/platforms/github.yaml` `category: social` vs `_categorize_service` → `dev` mismatch
 - `test_config.py`: 3 CORS ordering test failures
 - `test_breach_normalizer.py`: 2 defenders_brief None test failures
-- PYPI version in README badge: says 0.8.0, `pyproject.toml` says 0.8.1 (stale badge)
 - Gitignore debt: 4 test files and 1 data directory still need unignoring in final commit
 
 ---
