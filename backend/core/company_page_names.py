@@ -15,17 +15,25 @@ clustering later.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from html import unescape
 from typing import Any
 
 import httpx
 
+from .cf_decode import cf_decode as _cf_decode_real
 from .http_client import build_client
 from .name_quality import is_plausible_person_name
+from .site_discovery import PageCandidate
+from .site_discovery import discover_team_pages as _discover_team_pages
+from .stealth_client import StealthSession
+from .structured_data_extractor import PersonRecord
+from .structured_data_extractor import extract_people as _extract_people
 
 _LOG = logging.getLogger(__name__)
 
@@ -398,14 +406,27 @@ def _extract_names_from_text(
     return found
 
 
-async def _fetch_page(client: httpx.AsyncClient, url: str) -> str | None:
-    """Fetch a single page; return decoded text or ``None`` on any failure."""
+async def _fetch_page(
+    client: httpx.AsyncClient | StealthSession,
+    url: str,
+) -> str | None:
+    """Fetch a single page; return decoded text or ``None`` on any failure.
+
+    Accepts either an :class:`httpx.AsyncClient` (legacy) or a
+    :class:`StealthSession` (0.11.1 Phase 1).  The dispatch is
+    transparent to callers because both expose ``async get(url)``.
+    """
     try:
-        response = await client.get(
-            url,
-            timeout=_FETCH_TIMEOUT,
-            follow_redirects=True,
-        )
+        if isinstance(client, StealthSession):
+            # StealthSession builds Chrome headers + Sec-Fetch-* on
+            # its own; we don't pass an explicit UA override.
+            response = await client.get(url)
+        else:
+            response = await client.get(
+                url,
+                timeout=_FETCH_TIMEOUT,
+                follow_redirects=True,
+            )
     except httpx.TimeoutException:
         return None
     except Exception as exc:  # noqa: BLE001 — defensive
@@ -427,12 +448,27 @@ async def discover_company_page_names(
     domain: str,
     transport: httpx.AsyncClient | None = None,
     max_pages: int = 5,
+    *,
+    stealth: StealthSession | None = None,
 ) -> list[CompanyPageName]:
     """Try the candidate about/team pages on *domain* and extract names.
 
     Stops after *max_pages* successful page fetches (defaults to 5)
     so we don't burn bandwidth hunting for paths the company doesn't
     expose.  Returns an empty list when nothing of value is found.
+
+    Parameters
+    ----------
+    transport:
+        Optional ``httpx.AsyncClient`` to share across pages.  When
+        ``None`` the function builds a one-shot client.  Ignored when
+        ``stealth`` is provided.
+    stealth:
+        Optional :class:`StealthSession` (0.11.1 Phase 1).  When
+        supplied, takes precedence over ``transport`` and the
+        function never builds its own client.  The StealthSession is
+        owned by the caller and is NOT closed when the function
+        returns.
     """
     cleaned = (domain or "").strip().lower()
     if not cleaned or "." not in cleaned:
@@ -445,8 +481,20 @@ async def discover_company_page_names(
     seen_names: dict[str, CompanyPageName] = {}
 
     async def _run() -> None:
-        owns_client = transport is None
-        client = transport if transport is not None else build_client(timeout=_FETCH_TIMEOUT)
+        # 0.11.1 Phase 1: StealthSession takes precedence when
+        # supplied; otherwise fall back to the legacy httpx path.
+        # ``owns_client`` is True only when we built the httpx client
+        # ourselves (so we still own closing it).  A borrowed
+        # ``transport`` or a caller-owned ``stealth`` outlives us.
+        if stealth is not None:
+            client: httpx.AsyncClient | StealthSession = stealth
+            owns_client = False
+        elif transport is not None:
+            client = transport
+            owns_client = False
+        else:
+            client = build_client(timeout=_FETCH_TIMEOUT)
+            owns_client = True
         try:
             for offset in range(limit):
                 if len(names) >= effective_cap * 8:  # rough upper bound
@@ -511,7 +559,7 @@ async def discover_company_page_names(
                     seen_names[pkey] = entry
                     names.append(entry)
         finally:
-            if owns_client:
+            if owns_client and not isinstance(client, StealthSession):
                 await client.aclose()
 
     await _run()
@@ -586,3 +634,310 @@ def discover_for_tests(
                 )
             )
     return out
+
+
+# ======================================================================
+# 0.11.1 Phase 2 — Site Intelligence Rebuild
+# ======================================================================
+# The legacy code above is *preserved* on purpose:
+#   * ``discover_company_page_names`` is still used by ``test_company_page_names.py``
+#     and the legacy pre-Phase-2 orchestration path.  Keeping it as-is
+#     means existing tests stay green and callers that haven't migrated
+#     to :func:`discover_and_extract` keep working unchanged.
+#   * ``discover_for_tests`` is a synchronous HTML→CompanyPageName
+#     helper used by the existing test suite.  It exercises the body-
+#     text extraction path (the same path that ``--aggressive`` mode
+#     uses internally to ``extractor``).
+#
+# The new pipeline lives below and is the one Phase 2 wants callers
+# to use going forward.  It discovers team pages dynamically and
+# extracts Person records from structured-data sources (JSON-LD,
+# microdata, RDFa, hCard, mailto:, DOM team-card pattern).  Body-text
+# extraction is gated behind ``aggressive=True`` per spec.
+# ----------------------------------------------------------------------
+async def _cf_decode(html: str) -> str:
+    """Wrap the real :func:`backend.core.cf_decode.cf_decode` for call-site stability.
+
+    0.11.1 Phase 3 — replaces the Phase-2 no-op stub with the real
+    Cloudflare email decoder.  Kept ``async`` so the
+    ``discover_and_extract`` call site (``await _cf_decode(html)``)
+    keeps compiling without further edits.
+    """
+    return _cf_decode_real(html)
+
+
+async def _candidate_fetcher(
+    session: Any,
+    url: str,
+    *,
+    timeout: float,
+) -> str | None:
+    """Fetch one URL through *session*; return decoded text or ``None``.
+
+    Accepts any object with ``async get(url) -> response`` — used for
+    both :class:`StealthSession` (the canonical caller) and bare
+    ``httpx.AsyncClient`` instances in the legacy path.
+    """
+    try:
+        response = await session.get(url, timeout=timeout)
+    except TypeError:
+        # Some sessions (notably ``StealthSession``) don't accept a
+        # ``timeout`` kwarg — fall back to a positional call.
+        try:
+            response = await session.get(url)
+        except Exception:  # noqa: BLE001
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status != 200:
+        return None
+    try:
+        return str(response.text or "")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _normalise_text(t: str) -> str:
+    return re.sub(r"\s+", " ", (t or "").strip())
+
+
+def _dedupe_person_records(
+    records: Iterable[PersonRecord],
+) -> list[PersonRecord]:
+    """Deduplicate PersonRecord by (lower(name), lower(email)).
+
+    When two records share a name or email, keep the one with the
+    higher confidence and fall back on name over email when the
+    confidences tie.  The loser's email is preserved when the
+    winner has none.
+
+    Separate from :func:`structured_data_extractor._dedupe_records`
+    because this version is per-page — we extend its logic with a
+    cross-page pass too (different pages might surface the same
+    identity with subtly different spellings).
+    """
+    merged: list[PersonRecord] = []
+
+    def _key(r: PersonRecord) -> tuple[str, str]:
+        return (
+            (r.name or "").strip().lower(),
+            (r.email or "").strip().lower(),
+        )
+
+    for new in records:
+        if not (new.name or "").strip():
+            continue
+        nname, nemail = _key(new)
+        target_idx = -1
+        for idx, existing in enumerate(merged):
+            ename, eemail = _key(existing)
+            if nname and nname == ename:
+                target_idx = idx
+                break
+            if nemail and nemail == eemail:
+                target_idx = idx
+                break
+        if target_idx == -1:
+            merged.append(new)
+            continue
+        target = merged[target_idx]
+        if new.confidence > target.confidence:
+            winner, loser = new, target
+            merged[target_idx] = winner
+        elif new.confidence == target.confidence:
+            # Tie — prefer the one with the longer / more specific name.
+            winner, loser = (
+                (new, target) if len(new.name) > len(target.name) else (target, new)
+            )
+        else:
+            winner, loser = target, new
+        if not winner.email and loser.email:
+            winner.email = loser.email
+        if not winner.title and loser.title:
+            winner.title = loser.title
+    return merged
+
+
+async def discover_and_extract(
+    domain: str,
+    session: Any,
+    *,
+    aggressive: bool = False,
+    max_candidates: int | None = None,
+    timeout: float = 5.0,
+    include_homepage: bool = True,
+) -> list[PersonRecord]:
+    """Run the full 0.11.1 Phase 2 site-intelligence pipeline.
+
+    Steps:
+
+    1. Call :func:`backend.core.site_discovery.discover_team_pages`
+       to locate team / leadership / people pages on *domain*.
+    2. For each confirmed candidate (and optionally the homepage),
+       fetch the HTML, run it through
+       :func:`backend.core.structured_data_extractor.extract_people`
+       with ``is_team_page=True`` when the URL is a discovered
+       candidate and ``is_team_page=False`` for the homepage.
+    3. Apply :func:`_dedupe_person_records` to collapse duplicates.
+    4. Return the list sorted by ``confidence`` descending.
+
+    Parameters
+    ----------
+    domain:
+        Bare hostname, e.g. ``"example.com"``.
+    session:
+        Async HTTP session — preferred shape is
+        :class:`backend.core.stealth_client.StealthSession`.  Any
+        object exposing ``async get(url) -> response`` works.
+    aggressive:
+        When ``True`` the inner :func:`extract_people` enables its
+        body-text extraction method (low-confidence fallback).
+        Defaults to ``False`` per spec.
+    max_candidates:
+        Override for the per-page candidate probe cap.  Defaults to
+        ``15`` — pull from
+        ``settings.site_discovery_max_candidates`` at the call
+        site to honour operator overrides.
+    timeout:
+        Per-request timeout in seconds; defaults to 5.
+    include_homepage:
+        When ``True`` (default) the homepage is fetched and
+        run through the extractor as a low-priority candidate
+        (some sites put team JSON-LD on their landing page for
+        SEO).  Toggle ``False`` to skip.
+    """
+    cleaned = (domain or "").strip().lower()
+    if not cleaned or "." not in cleaned:
+        return []
+
+    # 1. Discover team pages.
+    candidates: list[PageCandidate] = await _discover_team_pages(
+        cleaned,
+        session,
+        max_candidates=max_candidates,
+        timeout=timeout,
+    )
+
+    # Optionally prepend the homepage as a low-priority candidate.
+    if include_homepage:
+        candidates.append(
+            PageCandidate(
+                url=f"https://{cleaned}/",
+                score=0.5,
+                source="homepage_root",
+            )
+        )
+
+    # 2. Fetch + extract for each candidate in parallel.
+    async def _extract_one(candidate: PageCandidate) -> list[PersonRecord]:
+        html = await _candidate_fetcher(
+            session, candidate.url, timeout=timeout
+        )
+        if not html:
+            return []
+        html = await _cf_decode(html)
+        is_team = candidate.source != "homepage_root"
+        try:
+            return _extract_people(
+                html,
+                candidate.url,
+                cleaned,
+                is_team_page=is_team,
+                aggressive=aggressive,
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            _LOG.debug(
+                "discover_and_extract: extract_people failed on %s: %s",
+                candidate.url,
+                exc,
+            )
+            return []
+
+    nested = await asyncio.gather(
+        *(_extract_one(c) for c in candidates),
+        return_exceptions=True,
+    )
+    flat: list[PersonRecord] = []
+    for outcome in nested:
+        if isinstance(outcome, BaseException):
+            continue
+        flat.extend(outcome)
+
+    return sorted(
+        _dedupe_person_records(flat),
+        key=lambda r: (-r.confidence, r.name),
+    )
+
+
+async def _convert_person_records_to_company_page_names(
+    records: list[PersonRecord],
+) -> list[CompanyPageName]:
+    """Bridge :class:`PersonRecord` records into the legacy
+    :class:`CompanyPageName` shape so legacy callers
+    (``discover_company_page_names`` + ``employee_name_discovery`` pre
+    Phase 2) can consume the new pipeline output unchanged.
+
+    The conversion is lossy by design — :class:`CompanyPageName`
+    has fewer fields than :class:`PersonRecord`.  ``source_type`` is
+    retained so legacy consumers can decide whether the name came
+    from JSON-LD, body text, etc.
+
+    Async only because the import path stays consistent with the
+    rest of this module; no I/O is performed.
+    """
+    out: list[CompanyPageName] = []
+    for record in records:
+        if not (record.name or "").strip():
+            continue
+        # Confidence from a structured block is usually > 0.55; cap
+        # at the legacy 0.6 * multiplier when source_type is the
+        # legacy body-text or json_ld paths.  We use the legacy
+        # baselines so the existing
+        # test_company_page_names tests stay meaningful — the
+        # structured-data confidence (0.85/0.90) would otherwise
+        # muddy the legacy "with_role"/"no_role" comparison paths.
+        if record.source_type == "json_ld":
+            confidence = round(_COMPANY_PAGE_CONFIDENCE * _COMPANY_PAGE_JSON_LD_BONUS, 4)
+            source_type: SourceType = "json_ld"
+        elif record.source_type in ("microdata", "rdfa", "hcard"):
+            confidence = round(_COMPANY_PAGE_CONFIDENCE * 1.0, 4)
+            source_type = "no_role"
+        elif record.source_type in ("dom_team_card", "heading_plus_title"):
+            confidence = round(_COMPANY_PAGE_CONFIDENCE * 0.9, 4)
+            source_type = "with_role"
+        elif record.source_type == "mailto":
+            # Team-page mailto: 0.7 → legacy multiplier
+            # 0.6 × 1.17 ≈ 0.7; general-page mailto: 0.4 → 0.6 × 0.67
+            confidence = round(_COMPANY_PAGE_CONFIDENCE * (record.confidence / 0.6), 4)
+            source_type = "no_role"
+        elif record.source_type == "body_text_aggressive":
+            confidence = round(_COMPANY_PAGE_CONFIDENCE * _COMPANY_PAGE_NO_ROLE_PENALTY, 4)
+            source_type = "no_role"
+        else:
+            confidence = round(_COMPANY_PAGE_CONFIDENCE, 4)
+            source_type = "no_role"
+        out.append(
+            CompanyPageName(
+                name=record.name,
+                source_url=record.page_url,
+                title_or_role=record.title,
+                confidence=confidence,
+                source_type=source_type,
+                email=record.email,
+            )
+        )
+    return out
+
+
+__all__ = [
+    "CompanyPageName",
+    "SourceType",
+    "discover_company_page_names",
+    "discover_for_tests",
+    "discover_and_extract",
+    "PersonRecord",
+]
+
+
+# Re-export the new symbols for ergonomic imports.

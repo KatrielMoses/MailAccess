@@ -77,6 +77,8 @@ _API_KEYS: list[tuple[str, str, str]] = [
     ("SHODAN_API_KEY", "domain_intel", "shodan.io"),
     ("EMAILREP_API_KEY", "emailrep", "emailrep.io"),
     ("HUNTER_IO_API_KEY", "hunter_io", "hunter.io"),
+    ("GOOGLE_CSE_API_KEY", "email_search_dork", "Google CSE (programableseach.google.com)"),
+    ("GOOGLE_CSE_CX", "email_search_dork", "Google CSE Engine ID"),
     ("COMPANIES_HOUSE_API_KEY", "companies_house", "developer.company-information.service.gov.uk"),
     ("SLACK_WEBHOOK_URL", "notifications", "Slack app webhooks"),
     ("DISCORD_WEBHOOK_URL", "notifications", "Discord server webhooks"),
@@ -842,7 +844,10 @@ def harvest_emails_command(
     proxy_fallback_ok: bool = typer.Option(
         False,
         "--proxy-fallback-ok",
-        help="Allow direct fallback if ScrapingAnt proxy fails. Without this flag, proxy failures raise an error instead of falling back silently.",
+        help=(
+            "Allow direct fallback if ScrapingAnt proxy fails. "
+            "Without this flag, proxy failures raise an error instead of falling back silently."
+        ),
     ),
     lite: bool = typer.Option(
         False,
@@ -858,6 +863,14 @@ def harvest_emails_command(
         None,
         "--max-cc-records",
         help="Override cc_max_records for this run.",
+    ),
+    cc_max_collections: Optional[int] = typer.Option(
+        None,
+        "--cc-max-collections",
+        help=(
+            "Override the Common Crawl multi-collection sweep cap for this run. "
+            "Default: 6 (24 in --aggressive mode)."
+        ),
     ),
     min_confidence: str = typer.Option(
         "low",
@@ -930,6 +943,49 @@ def harvest_emails_command(
             "Restores the pre-Phase-1 surface."
         ),
     ),
+    stealth: bool = typer.Option(
+        False,
+        "--stealth/--no-stealth",
+        help=(
+            "0.11.1 Phase 1: use the T0 Ghost timing profile "
+            "(~8s mean, 4-20s pacing) for max-stealth harvest. "
+            "Overrides the HARVEST_TIMING_PROFILE setting. "
+            "Mutually exclusive with --fast; use --timing for "
+            "explicit selection."
+        ),
+    ),
+    fast: bool = typer.Option(
+        False,
+        "--fast/--no-fast",
+        help=(
+            "0.11.1 Phase 1: use the T4 Fast timing profile "
+            "(~0.3s mean, 0.1-1s pacing) for fast runs. "
+            "Overrides the HARVEST_TIMING_PROFILE setting. "
+            "Mutually exclusive with --stealth; use --timing for "
+            "explicit selection."
+        ),
+    ),
+    timing: Optional[str] = typer.Option(
+        None,
+        "--timing",
+        help=(
+            "0.11.1 Phase 1: explicit stealth timing profile. "
+            "One of: t0, t1, t2, t3, t4, t5. "
+            "Overrides HARVEST_TIMING_PROFILE and takes precedence "
+            "over --stealth / --fast when all three are set."
+        ),
+    ),
+    aggressive: bool = typer.Option(
+        False,
+        "--aggressive/--no-aggressive",
+        help=(
+            "0.11.1 Phase 2: enable aggressive harvest mode.  "
+            "Toggles on the low-confidence body-text name extraction "
+            "in the company-page harvester (label 'low').  Use for "
+            "high-recall bulk runs only — produces more LOW-quality "
+            "candidate emails."
+        ),
+    ),
 ) -> None:
     """Harvest email addresses associated with a domain.
 
@@ -942,24 +998,102 @@ def harvest_emails_command(
     Use --verify-smtp to enable SMTP RCPT TO verification
     (opt-in; passive OSINT, no emails sent).
     """
-    exit_code = run_harvest_emails(
-        domain=domain,
-        verify_smtp=verify_smtp,
-        use_proxies=use_proxies,
-        proxy_fallback_ok=proxy_fallback_ok,
-        lite=lite,
-        export=export,
-        max_cc_records=max_cc_records,
-        console=console,
-        min_confidence=min_confidence,
-        min_confidence_score=min_confidence_score,
-        exclude_domains=tuple(exclude_domain),
-        on_domain_only=on_domain_only,
-        show_low=show_low,
-        show_unverified_patterns=show_unverified_patterns,
-        show_role=show_role,
-        full=full,
-    )
+    # 0.11.1 Phase 1: resolve the stealth timing profile.
+    # Explicit --timing wins.  Then --stealth / --fast.  Otherwise
+    # the existing setting (default T2 Balanced) applies.
+    from backend.core.stealth_client import resolve_timing_profile
+
+    selected_profile: str | None = None
+    if timing is not None:
+        normalized = str(timing).strip().lower()
+        if normalized and normalized not in {"t0", "t1", "t2", "t3", "t4", "t5"}:
+            console.print(
+                f"[red]Error:[/] --timing must be one of t0..t5 (got {timing!r})."
+            )
+            raise typer.Exit(2)
+        selected_profile = normalized or None
+    elif stealth and aggressive:
+        selected_profile = "t1"
+    elif stealth:
+        selected_profile = "t0"
+    elif aggressive:
+        selected_profile = "t3"
+    elif fast:
+        selected_profile = "t4"
+
+    if selected_profile is not None:
+        # Mutate the runtime setting for this run only.  This is a
+        # single-process CLI command — no concurrent readers — so the
+        # ``race condition`` that the M3 fix avoided for
+        # ``dork_lite_mode`` does not apply here.
+        from backend.config import settings
+
+        original_profile = settings.harvest_timing_profile
+        settings.harvest_timing_profile = selected_profile
+        # 0.11.1 Phase 2: opt-in aggressive harvest (body-text name
+        # extraction, looser thresholds).  We mutate the global
+        # setting for the duration of this run so the downstream
+        # company-page pipeline picks it up.
+        original_aggressive = bool(settings.harvest_aggressive)
+        settings.harvest_aggressive = bool(aggressive)
+        try:
+            exit_code = run_harvest_emails(
+                domain=domain,
+                verify_smtp=verify_smtp,
+                use_proxies=use_proxies,
+                proxy_fallback_ok=proxy_fallback_ok,
+                lite=lite,
+                export=export,
+                max_cc_records=max_cc_records,
+                cc_max_collections=cc_max_collections,
+                console=console,
+                min_confidence=min_confidence,
+                min_confidence_score=min_confidence_score,
+                exclude_domains=tuple(exclude_domain),
+                on_domain_only=on_domain_only,
+                show_low=show_low,
+                show_unverified_patterns=show_unverified_patterns,
+                show_role=show_role,
+                full=full,
+                aggressive=aggressive,
+            )
+        finally:
+            settings.harvest_timing_profile = original_profile
+            settings.harvest_aggressive = original_aggressive
+    else:
+        # Resolve once so an unknown ``harvest_timing_profile`` setting
+        # still falls back gracefully (the resolve function defaults
+        # to T2 when the name is unrecognised).
+        resolve_timing_profile(None)
+        # 0.11.1 Phase 2: same aggressive toggle as above — mutate
+        # for the run, restore in a ``finally``-equivalent position.
+        from backend.config import settings as _settings
+
+        original_aggressive = bool(_settings.harvest_aggressive)
+        _settings.harvest_aggressive = bool(aggressive)
+        try:
+            exit_code = run_harvest_emails(
+                domain=domain,
+                verify_smtp=verify_smtp,
+                use_proxies=use_proxies,
+                proxy_fallback_ok=proxy_fallback_ok,
+                lite=lite,
+                export=export,
+                max_cc_records=max_cc_records,
+                cc_max_collections=cc_max_collections,
+                console=console,
+                min_confidence=min_confidence,
+                min_confidence_score=min_confidence_score,
+                exclude_domains=tuple(exclude_domain),
+                on_domain_only=on_domain_only,
+                show_low=show_low,
+                show_unverified_patterns=show_unverified_patterns,
+                show_role=show_role,
+                full=full,
+                aggressive=aggressive,
+            )
+        finally:
+            _settings.harvest_aggressive = original_aggressive
     if exit_code != 0:
         raise typer.Exit(exit_code)
 
@@ -3132,7 +3266,10 @@ def investigate(
     proxy_fallback_ok: bool = typer.Option(
         False,
         "--proxy-fallback-ok",
-        help="Allow direct fallback if ScrapingAnt proxy fails. Without this flag, proxy failures raise an error instead of falling back silently.",
+        help=(
+            "Allow direct fallback if ScrapingAnt proxy fails. "
+            "Without this flag, proxy failures raise an error instead of falling back silently."
+        ),
     ),
     proxy_type: str | None = typer.Option(
         None,

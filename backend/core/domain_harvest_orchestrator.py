@@ -1,17 +1,18 @@
-"""Domain Email Harvest orchestrator — Phase C3 (final) + W5.
+"""Domain Email Harvest orchestrator — Phase C3 (final) + W5 + 0.11.1 Phase 3.
 
-Ties the eight domain-mode modules together:
+Ties the nine domain-mode modules together:
 
-    commoncrawl_email     ─┐
-    code_and_cert_email  ─┤
-    email_search_dork    ─┤ Phase 1+2 (run concurrently)
-    employee_name_discovery ─┤
-    npm_email            ─┤
-    pypi_email           ─┤
-    pgp_domain_email     ─┘
-                            │
-                            │ (feeds pattern_and_verify)
-                            ▼
+    commoncrawl_email         ─┐
+    wayback_domain_harvest    ─┤  ← 0.11.1 Phase 3 (CC + Wayback are the
+    code_and_cert_email       ─┤    "best free sources when search is
+    email_search_dork         ─┤    blocked").
+    employee_name_discovery   ─┤ Phase 1+2 (run concurrently)
+    npm_email                 ─┤
+    pypi_email                ─┤
+    pgp_domain_email          ─┘
+                                │
+                                │ (feeds pattern_and_verify)
+                                ▼
                   pattern_and_verify   ─ Phase 3 (depends on C1)
 
 The W5 additions (npm_email, pypi_email, pgp_domain_email) slot into
@@ -19,10 +20,28 @@ Phase 1 — they share the same "fast / cheap / parallel" budget as
 commoncrawl_email and code_and_cert_email and run via
 ``asyncio.as_completed`` exactly like the existing Phase 1 modules.
 
-This module does NOT modify any of the eight sub-modules.  It only
+0.11.1 Phase 3 adds two modules:
+
+* ``commoncrawl_email`` was extended to sweep multiple CC collections
+  and to apply Cloudflare ``data-cfemail`` decoding + structured
+  person extraction on every fetched page.
+* ``wayback_domain_harvest`` was added — it sweeps Wayback CDX for
+  high-signal URLs on the target domain, fetches archived pages via
+  the operator's ``StealthSession``, runs the same CF decode +
+  person extraction, and emits findings tagged
+  ``is_historical=True``.
+
+This module does NOT modify any of the nine sub-modules.  It only
 wires them together, performs cross-module deduplication and
 confidence aggregation, and returns a single
 :class:`DomainHarvestResult` for the report layer to consume.
+
+Wayback historical findings naturally receive the freshness penalty
+the spec calls for — the orchestrator's existing
+:func:`backend.core.email_confidence.freshness_factor` reads
+``snapshot_timestamp`` (which :func:`_extract_oldest_timestamp` and
+the underlying metadata pick up).  Wayback snapshots are rarely
+recent so most of them land in the 0.40 or 0.15 buckets.
 
 SMTP verification is OFF BY DEFAULT — the *only* way to enable it is
 for the caller to explicitly pass ``enable_smtp=True`` to
@@ -40,12 +59,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from ..config import settings
 from ..modules.base import ModuleResult, ModuleStatus
 from ..modules.code_and_cert_email import CodeAndCertEmailModule
 from ..modules.commoncrawl_email import CommonCrawlEmailModule
 from ..modules.domain_intel import _FREE_PROVIDERS
 from ..modules.email_search_dork import EmailSearchDorkModule
 from ..modules.employee_name_discovery import EmployeeNameDiscoveryModule
+from ..modules.github_org_members import GitHubOrgMembersModule
 from ..modules.npm_email import NpmEmailModule
 from ..modules.pattern_and_verify import (
     EmployeeNameResult,
@@ -54,14 +75,17 @@ from ..modules.pattern_and_verify import (
 )
 from ..modules.pgp_domain_email import PgpDomainEmailModule
 from ..modules.pypi_email import PyPIEmailModule
+from ..modules.wayback import WaybackDomainHarvestModule
 from .email_confidence import compute_confidence, compute_confidence_breakdown
 from .email_extraction import subaddress_key
+from .hunter_client import search_domain as hunter_search
 
 _LOG = logging.getLogger(__name__)
 
 #: Module names we orchestrate.  Used as keys in
 #: ``DomainHarvestResult.module_results``.
 MODULE_COMMONCRAWL = "commoncrawl_email"
+MODULE_WAYBACK_DOMAIN = "wayback_domain_harvest"  # 0.11.1 Phase 3
 MODULE_CODE_CERT = "code_and_cert_email"
 MODULE_EMAIL_DORK = "email_search_dork"
 MODULE_EMPLOYEE_NAMES = "employee_name_discovery"
@@ -69,6 +93,7 @@ MODULE_NPM_EMAIL = "npm_email"
 MODULE_PYPI_EMAIL = "pypi_email"
 MODULE_PGP_DOMAIN_EMAIL = "pgp_domain_email"
 MODULE_PATTERN_VERIFY = "pattern_and_verify"
+MODULE_GITHUB_ORG_MEMBERS = "github_org_members"  # 0.11.1 Phase 4
 _PROXY_AWARE_MODULES = {
     MODULE_EMAIL_DORK,
     MODULE_EMPLOYEE_NAMES,
@@ -636,7 +661,9 @@ async def _safe_phase12_run(
     domain: str,
     *,
     cc_max_records: int | None = None,
+    cc_max_collections: int | None = None,
     dork_lite_mode: bool | None = None,
+    aggressive: bool = False,
     use_proxies: bool = False,
     proxy_fallback_ok: bool = False,
 ) -> tuple[str, ModuleResult]:
@@ -651,12 +678,28 @@ async def _safe_phase12_run(
     fabricate a FAILED ``ModuleResult`` so the partial-result
     contract is preserved — every module that was attempted is
     present in the final ``module_results`` dict, even on failure.
+
+    0.11.1 Phase 3: ``cc_max_collections`` and ``aggressive`` are
+    threaded down.  Common Crawl picks them up via ``max_collections``
+    / ``aggressive``; Wayback picks them up via ``aggressive`` +
+    ``max_urls``; the rest ignore both.
     """
     kwargs: dict[str, Any] = {}
-    if name == MODULE_COMMONCRAWL and cc_max_records is not None:
-        kwargs["max_records"] = cc_max_records
-    elif name == MODULE_EMAIL_DORK and dork_lite_mode is not None:
-        kwargs["lite_mode"] = dork_lite_mode
+    if name == MODULE_COMMONCRAWL:
+        if cc_max_records is not None:
+            kwargs["max_records"] = cc_max_records
+        if cc_max_collections is not None:
+            kwargs["max_collections"] = cc_max_collections
+        if aggressive:
+            kwargs["aggressive"] = True
+    elif name == MODULE_WAYBACK_DOMAIN:
+        if aggressive:
+            kwargs["aggressive"] = True
+    elif name == MODULE_EMAIL_DORK:
+        if dork_lite_mode is not None:
+            kwargs["lite_mode"] = dork_lite_mode
+        if aggressive:
+            kwargs["aggressive"] = True  # run all 5 dork patterns vs default 2
     if use_proxies and name in _PROXY_AWARE_MODULES:
         kwargs["use_proxies"] = True
         # strict_proxy: True = raise on proxy failure (default when --use-proxies)
@@ -720,20 +763,28 @@ async def run_domain_harvest(
     enable_smtp: bool = False,
     *,
     cc_module: Any | None = None,
+    wayback_module: Any | None = None,
     code_cert_module: Any | None = None,
     dork_module: Any | None = None,
     employee_module: Any | None = None,
     npm_module: Any | None = None,
     pypi_module: Any | None = None,
     pgp_module: Any | None = None,
+    github_org_module: Any | None = None,
     pattern_module: Any | None = None,
     dork_lite_mode: bool | None = None,
     cc_max_records: int | None = None,
+    cc_max_collections: int | None = None,
+    aggressive: bool = False,
     use_proxies: bool = False,
     proxy_fallback_ok: bool = False,
     on_module_complete: Any | None = None,
 ) -> DomainHarvestResult:
-    """Run all eight harvest modules in the recommended sequence.
+    """Run all nine harvest modules in the recommended sequence.
+
+    0.11.1 Phase 3 adds the ``wayback_module`` injection point and the
+    ``aggressive`` threading argument.  ``cc_max_collections`` lets
+    the operator override the default CC multi-collection cap.
 
     Parameters
     ----------
@@ -756,8 +807,17 @@ async def run_domain_harvest(
         The orchestrator does NOT mutate ``settings.dork_lite_mode``.
     cc_max_records:
         MUST-FIX M3: explicit override for the Common Crawl module's
-        record limit. Threaded down to ``commoncrawl_email.run``.
-        The orchestrator does NOT mutate ``settings.cc_max_records``.
+        record limit. Threaded down to ``commoncrawl_email.run`` as
+        a backwards-compatible budget (the module redistributes it
+        across the configured collection cap).
+    cc_max_collections:
+        0.11.1 Phase 3: explicit override for the Common Crawl
+        multi-collection sweep cap. Threaded down to
+        ``commoncrawl_email.run``.
+    aggressive:
+        0.11.1 Phase 3: when True the common-crawl + wayback modules
+        use their aggressive budgets (24 collections / 500 records
+        per collection / Wayback year-bounded sub-queries).
     use_proxies:
         When True, proxy-aware harvest modules route eligible HTML
         requests through the configured ScrapingAnt transport.
@@ -766,74 +826,170 @@ async def run_domain_harvest(
         to bypass real network calls.  Each mock must expose
         ``.name`` and an async ``run(domain)`` method. Mock modules
         MUST accept the ``enable_smtp`` / ``lite_mode`` /
-        ``max_records`` keyword arguments and either consume them or
-        accept them silently.
+        ``max_records`` / ``aggressive`` keyword arguments and
+        either consume them or accept them silently.
     npm_module / pypi_module / pgp_module:
         W5 injection points for the three new structured-source
         modules. Same contract as the other *_module kwargs.
+    wayback_module:
+        0.11.1 Phase 3 injection point for Wayback domain harvest.
+        Defaults to a real :class:`WaybackDomainHarvestModule`.
     """
     cleaned = _validate_domain(domain)
 
     # ------------------------------------------------------------------
-    # 1. Instantiate the eight modules (or accept injected mocks).
+    # 1. Instantiate the nine modules (or accept injected mocks).
     # ------------------------------------------------------------------
     cc = cc_module if cc_module is not None else CommonCrawlEmailModule()
+    wayback = wayback_module if wayback_module is not None else WaybackDomainHarvestModule()
     cc_cert = code_cert_module if code_cert_module is not None else CodeAndCertEmailModule()
     dork = dork_module if dork_module is not None else EmailSearchDorkModule()
     emp = employee_module if employee_module is not None else EmployeeNameDiscoveryModule()
     npm = npm_module if npm_module is not None else NpmEmailModule()
     pypi = pypi_module if pypi_module is not None else PyPIEmailModule()
     pgp = pgp_module if pgp_module is not None else PgpDomainEmailModule()
+    github = github_org_module if github_org_module is not None else GitHubOrgMembersModule()
     pattern = pattern_module if pattern_module is not None else PatternAndVerifyModule()
 
     return await _orchestrate(
         cleaned,
         cc,
+        wayback,
         cc_cert,
         dork,
         emp,
         npm,
         pypi,
         pgp,
+        github,
         pattern,
         enable_smtp=enable_smtp,
         dork_lite_mode=dork_lite_mode,
         cc_max_records=cc_max_records,
+        cc_max_collections=cc_max_collections,
+        aggressive=aggressive,
         use_proxies=use_proxies,
         proxy_fallback_ok=proxy_fallback_ok,
         on_module_complete=on_module_complete,
     )
 
 
+async def _run_hunter(
+    domain: str,
+    api_key: str | None,
+) -> tuple[str, ModuleResult]:
+    """Run Hunter.io domain search as a Phase 1 inline source.
+
+    0.11.1 Phase 4: Hunter.io runs alongside the other Phase 1
+    sources.  It is not a BaseModule subclass; this function wraps
+    the raw ``hunter_search`` call in a ModuleResult so it slots
+    into the same aggregation pipeline.
+    """
+    if not api_key:
+        return "hunter", ModuleResult(
+            status=ModuleStatus.SKIPPED,
+            findings=[],
+            errors=["Hunter API key not configured"],
+            metadata={"domain": domain, "skip_reason": "no_api_key"},
+        )
+    try:
+        results = await hunter_search(domain, api_key, limit=50)
+    except Exception as exc:
+        _LOG.warning("domain_harvest: Hunter search failed: %s", exc)
+        return "hunter", ModuleResult(
+            status=ModuleStatus.FAILED,
+            findings=[],
+            errors=[f"Hunter: {exc}"],
+            metadata={"domain": domain},
+        )
+
+    if not results:
+        return "hunter", ModuleResult(
+            status=ModuleStatus.PARTIAL,
+            findings=[],
+            metadata={"domain": domain, "hunter_results": 0},
+        )
+
+    findings: list[dict[str, Any]] = []
+    for r in results:
+        source_type = (
+            "hunter_verified"
+            if r.confidence >= 90
+            else ("hunter_high" if r.confidence >= 70 else "hunter_low")
+        )
+        from ..core.email_confidence import compute_confidence_breakdown, label_for_score
+
+        ci = compute_confidence_breakdown(
+            source_types=[source_type],
+            is_smtp_verified=False,
+            is_ca_attested=False,
+        )
+        local_part = r.email.split("@", 1)[0] if "@" in r.email else ""
+        findings.append(
+            {
+                "platform": "hunter",
+                "profile_url": "",
+                "username": local_part,
+                "confidence": label_for_score(ci.score).lower(),
+                "metadata": {
+                    "email": r.email,
+                    "on_domain": True,
+                    "email_type": r.email_type,
+                    "hunter_confidence": r.confidence,
+                    "first_name": r.first_name,
+                    "last_name": r.last_name,
+                    "position": r.position,
+                    "source_type": source_type,
+                    "confidence_score": round(ci.score, 4),
+                    "confidence_breakdown": ci.breakdown,
+                },
+            }
+        )
+
+    return "hunter", ModuleResult(
+        status=ModuleStatus.SUCCESS,
+        findings=findings,
+        metadata={
+            "domain": domain,
+            "hunter_results": len(results),
+            "hunter_verified": sum(1 for r in results if r.confidence >= 90),
+            "hunter_high": sum(1 for r in results if 70 <= r.confidence < 90),
+            "hunter_low": sum(1 for r in results if r.confidence < 70),
+        },
+    )
+
+
 async def _orchestrate(
     domain: str,
     cc: Any,
+    wayback: Any,
     cc_cert: Any,
     dork: Any,
     emp: Any,
     npm: Any,
     pypi: Any,
     pgp: Any,
+    github_org: Any,
     pattern: Any,
     *,
     enable_smtp: bool = False,
     dork_lite_mode: bool | None = None,
     cc_max_records: int | None = None,
+    cc_max_collections: int | None = None,
+    aggressive: bool = False,
     use_proxies: bool = False,
     proxy_fallback_ok: bool = False,
     on_module_complete: Any | None = None,
 ) -> DomainHarvestResult:
-    """Inner orchestration — runs the 8 modules in sequence.
+    """Inner orchestration — runs the 9 modules in sequence.
 
     Sequence:
-        Phase 1+2 — all seven data modules run concurrently
+        Phase 1+2 — all eight data modules run concurrently
                     (``asyncio.as_completed`` so each callback fires
                     as soon as its module finishes).  W5 adds three
                     modules to this phase (npm_email, pypi_email,
-                    pgp_domain_email) — they hit different upstreams
-                    and have no shared rate-limited budget, so
-                    running them in parallel is safe and gives the
-                    user faster results.
+                    pgp_domain_email); 0.11.1 Phase 3 adds
+                    wayback_domain_harvest alongside Common Crawl.
         Phase 3  — pattern_and_verify runs AFTER employee_name_discovery
                    completes, since it consumes that module's findings.
 
@@ -849,6 +1005,12 @@ async def _orchestrate(
     table would only refresh once at the very end. Callable signature
     is permissive (``*args, **kwargs``) so a plain function or a
     bound method both work.
+
+    0.11.1 Phase 3: ``cc_max_collections`` and ``aggressive`` are
+    threaded down to ``commoncrawl_email`` and ``wayback_domain_harvest``;
+    Wayback runs concurrently with Common Crawl in Phase 1 because
+    they hit different upstreams and have no shared rate-limited
+    budget.
     """
 
     def _emit(name: str, mr: ModuleResult) -> None:
@@ -878,17 +1040,33 @@ async def _orchestrate(
     started_iso = started.isoformat().replace("+00:00", "Z")
 
     # ------------------------------------------------------------------
-    # Phase 1+2 — concurrent run of all seven data modules
+    # Phase 1+2 — concurrent run of all data modules
     # MUST-FIX S5: ``asyncio.as_completed`` so we can fire the
     # ``on_module_complete`` callback as each module finishes, instead
-    # of waiting for ``gather`` to return all seven at once.
+    # of waiting for ``gather`` to return all at once.
     # W5: the three new structured-source modules (npm, pypi, pgp)
     # slot in here and run alongside commoncrawl_email and
     # code_and_cert_email — same parallel budget, no sequencing.
+    # 0.11.1 Phase 3: wayback_domain_harvest joins Phase 1 alongside
+    # Common Crawl — different upstream, no shared rate budget.
+    # 0.11.1 Phase 4: github_org_members and Hunter.io join Phase 1.
+    # Hunter.io is not a BaseModule — it is a direct function call
+    # wrapped in _run_hunter below.
     # ------------------------------------------------------------------
     phase12_coroutines = [
         _safe_phase12_run(
-            MODULE_COMMONCRAWL, cc, domain, cc_max_records=cc_max_records
+            MODULE_COMMONCRAWL,
+            cc,
+            domain,
+            cc_max_records=cc_max_records,
+            cc_max_collections=cc_max_collections,
+            aggressive=aggressive,
+        ),
+        _safe_phase12_run(
+            MODULE_WAYBACK_DOMAIN,
+            wayback,
+            domain,
+            aggressive=aggressive,
         ),
         _safe_phase12_run(MODULE_CODE_CERT, cc_cert, domain),
         _safe_phase12_run(
@@ -896,6 +1074,7 @@ async def _orchestrate(
             dork,
             domain,
             dork_lite_mode=dork_lite_mode,
+            aggressive=aggressive,
             use_proxies=use_proxies,
             proxy_fallback_ok=proxy_fallback_ok,
         ),
@@ -909,6 +1088,8 @@ async def _orchestrate(
         _safe_phase12_run(MODULE_NPM_EMAIL, npm, domain),
         _safe_phase12_run(MODULE_PYPI_EMAIL, pypi, domain),
         _safe_phase12_run(MODULE_PGP_DOMAIN_EMAIL, pgp, domain),
+        _safe_phase12_run(MODULE_GITHUB_ORG_MEMBERS, github_org, domain),
+        _run_hunter(domain, settings.hunter_io_api_key),
     ]
     phase12_results: dict[str, ModuleResult] = {}
     for fut in asyncio.as_completed(phase12_coroutines):

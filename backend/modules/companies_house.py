@@ -41,7 +41,7 @@ class CompaniesHouseModule(BaseModule):
                 errors=["not a UK-related domain"],
             )
 
-        auth = base64.b64encode(f"{key}:".encode("utf-8")).decode("ascii")
+        auth = base64.b64encode(f"{key}:".encode()).decode("ascii")
         headers = {"Authorization": f"Basic {auth}"}
         domain_keyword = _domain_keyword(domain)
         findings: list[dict[str, Any]] = []

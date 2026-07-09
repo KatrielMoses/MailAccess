@@ -1,17 +1,14 @@
 """Async DuckDuckGo HTML dork scraper for the email-harvest phase.
 
-Reuses the request / status-code pattern already established in
-``backend.modules.press_intel`` and ``backend.modules.linkedin_serp``:
-``build_client(follow_redirects=True)``, ``params={"q": query}``, and
-``status_code in (403, 429)`` to detect CAPTCHA / block.  No live
-network calls are made from tests — the parser is exercised against
-saved HTML fixtures in :mod:`tests.test_duckduckgo_dorker`.
+0.11.1 Phase 4 — rewrites the HTTP transport to use
+:class:`StealthSession` exclusively, replacing the legacy httpx
+fallback path.  On HTTP 202 responses (DDG's CAPTCHA/success-challenge
+pattern) the dorker sets ``self.blocked = True`` so the orchestrator
+can log a useful "DDG blocked — stealth client may help, try --stealth"
+message instead of returning a silent PARTIAL result.
 
-Why BeautifulSoup is *not* used here even though ``bs4`` is
-importable: ``bs4`` is not declared in ``pyproject.toml``, it ships
-only as a transitive dependency.  Pulling it in as a first-class
-dependency for parsing ~50 lines of HTML would be scope creep.  Regex
-is sufficient and matches the existing two DDG consumers.
+All other logic (query construction, HTML parsing, rate limiting)
+is unchanged from the previous version.
 """
 
 from __future__ import annotations
@@ -27,7 +24,7 @@ from typing import Any
 import httpx
 
 from ..config import APP_VERSION
-from ..core.http_client import build_client
+from .stealth_client import StealthSession, resolve_timing_profile
 
 _LOG = logging.getLogger(__name__)
 
@@ -78,9 +75,6 @@ _TAG_RE = re.compile(r"<[^>]+>")
 
 
 def _pick_user_agent() -> str:
-    # ``_UA_POOL`` is non-empty by construction; the tuple[0] fallback
-    # only kicks in if a caller somehow empties it (tests / future
-    # config).  Annotated to keep mypy quiet.
     return random.choice(_UA_POOL) if _UA_POOL else _DEFAULT_UA
 
 
@@ -149,10 +143,15 @@ def _parse_ddg_html(html: str, query: str, max_results: int) -> list[SearchResul
 class DuckDuckGoDorker:
     """Search DuckDuckGo HTML for a single dork query.
 
-    The class itself does not enforce the per-run query budget — the
-    orchestrator module (``email_search_dork``) does that.  Each call
-    to :meth:`search` performs one HTTP request and returns up to
-    *max_results* :class:`SearchResult` objects.
+    0.11.1 Phase 4: all HTTP requests go through the injected
+    :class:`StealthSession`.  When no session is provided at
+    construction time the dorker builds one with the T2 timing
+    profile (the same profile the orchestrator uses for other
+    harvest sources).
+
+    On HTTP 202 the dorker sets ``self.blocked = True`` so
+    callers can distinguish a CAPTCHA block from a plain
+    non-200 error.
     """
 
     def __init__(
@@ -163,23 +162,47 @@ class DuckDuckGoDorker:
         follow_redirects: bool = True,
         *,
         scrapingant_zone: str | None = None,
+        stealth: StealthSession | None = None,
     ) -> None:
+        # Phase 4: when a StealthSession is injected, use it.
+        # When neither transport nor stealth is provided, build a
+        # StealthSession with T2 timing as the default HTTP transport.
+        # When transport is explicitly provided (for tests), skip
+        # StealthSession entirely so tests can mock the client directly.
+        if stealth is not None:
+            self._session: StealthSession = stealth
+        elif transport is None:
+            try:
+                profile = resolve_timing_profile("t2")
+                self._session = StealthSession(timing_profile=profile)
+            except ImportError:
+                # curl-cffi not installed — fall back to building a
+                # plain httpx client as before.
+                self._session = None  # type: ignore[assignment]
+        else:
+            self._session = None  # type: ignore[assignment]
+
         self._owns_transport = transport is None
-        if transport is None:
-            self._client: httpx.AsyncClient = build_client(
-                scrapingant_zone=scrapingant_zone,
+        if transport is None and self._session is None:
+            self._client: httpx.AsyncClient = httpx.AsyncClient(
                 timeout=timeout,
                 follow_redirects=follow_redirects,
             )
-        else:
+        elif transport is not None:
             self._client = transport
+        else:
+            self._client = None  # type: ignore[assignment]
+
         self._min_interval = max(float(min_interval), 0.0)
         self._last_request_at: float = 0.0
         self._lock = asyncio.Lock()
-        self._last_error: str | None = None  # set by search() on exception
+        self._last_error: str | None = None
+        # 0.11.1 Phase 4: tracks whether a 202 CAPTCHA/block was hit.
+        # Set by ``search()``; callers read it to produce actionable logs.
+        self.blocked: bool = False
 
     async def aclose(self) -> None:
-        if self._owns_transport:
+        if self._owns_transport and self._client is not None:
             await self._client.aclose()
 
     async def __aenter__(self) -> DuckDuckGoDorker:
@@ -197,20 +220,34 @@ class DuckDuckGoDorker:
 
         Returns ``(results, captcha_hit)``.  When ``captcha_hit`` is
         ``True`` the caller should stop issuing further queries.
+        ``self.blocked`` will also be ``True`` so the orchestrator
+        can log a helpful message.
         """
         if not query:
             return [], False
 
         async with self._lock:
             await self._throttle()
-            self._last_error = None  # clear before attempt; set only on exception
+            self._last_error = None
+            self.blocked = False
 
             try:
-                response = await self._client.get(
-                    _DDG_HTML_URL,
-                    params={"q": query},
-                    headers={"User-Agent": _pick_user_agent()},
-                )
+                if self._session is not None:
+                    # StealthSession routes through curl-cffi's
+                    # Chrome-impersonation path.
+                    response = await self._session.get(
+                        _DDG_HTML_URL,
+                        params={"q": query},
+                    )
+                elif self._client is not None:
+                    response = await self._client.get(
+                        _DDG_HTML_URL,
+                        params={"q": query},
+                        headers={"User-Agent": _pick_user_agent()},
+                    )
+                else:
+                    _LOG.error("DuckDuckGo dork: no transport and no session available")
+                    return [], False
             except httpx.TimeoutException:
                 _LOG.warning("DuckDuckGo dork timed out: %s", query)
                 return [], False
@@ -219,7 +256,10 @@ class DuckDuckGoDorker:
                 self._last_error = str(exc)
                 return [], False
 
-            if response.status_code in (403, 429):
+            # 0.11.1 Phase 4: HTTP 202 is DDG's CAPTCHA/success-challenge
+            # signal.  Treat it identically to 403/429.
+            if response.status_code in (202, 403, 429):
+                self.blocked = True
                 _LOG.warning(
                     "DuckDuckGo CAPTCHA/block (HTTP %s) for query=%r",
                     response.status_code,
@@ -236,6 +276,7 @@ class DuckDuckGoDorker:
 
             body = response.text or ""
             if _looks_like_captcha(body):
+                self.blocked = True
                 _LOG.warning(
                     "DuckDuckGo CAPTCHA marker detected in body for query=%r",
                     query,

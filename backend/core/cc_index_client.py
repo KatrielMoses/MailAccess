@@ -1,18 +1,22 @@
 """Async Common Crawl Index API client.
 
 This module is the entry point for Domain Email Harvest (Phase A of the
-0.10.0 rebuild).  It exposes a thin wrapper around the Common Crawl
-Index API — used to discover WARC records for a target domain, which are
-later fetched and scanned for email addresses.
+0.10.0 rebuild) and is extended in 0.11.1 Phase 3 to sweep multiple
+Common Crawl collections concurrently and deduplicate by content
+digest — not just by URL.
 
 Design notes:
 - Public endpoints only, no API key required.
 - We respect a 1-request-per-2-seconds courtesy window per research
   recommendations.
 - The latest collection index name (CC-MAIN-YYYY-WW) is cached for 24h
-  because the index changes roughly monthly.
+  because the index changes roughly monthly.  The full collection
+  list has the same TTL — both refresh together when forced.
 - Every method degrades gracefully — network failures return empty data
   and log a warning rather than raising.
+- ``query_multi_collection`` sweeps up to N collections *in parallel*
+  via ``asyncio.gather`` while honouring the per-collection
+  politeness budget so we never hammer the index.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -32,18 +36,34 @@ _LOG = logging.getLogger(__name__)
 
 _INDEX_BASE = "https://index.commoncrawl.org"
 _COLLINFO_URL = f"{_INDEX_BASE}/collinfo.json"
+_CDX_BASE = f"{_INDEX_BASE}/cdx-by-index"
 _CC_UA = (
     f"MailAccess/{APP_VERSION} "
     "(+https://github.com/KatrielMoses/MailAccess)"
 )
 _DEFAULT_TIMEOUT = 10.0
+_CDX_TIMEOUT = 15.0
 _CACHE_TTL_SECONDS = 24 * 60 * 60
 _CC_REQUEST_INTERVAL = 2.0
+
+# Regex syntax used by Common Crawl to match high-signal URL paths
+# (about / team / contact / leadership / people / staff / board /
+# press / news).  ``( )`` groups are alternations the index treats
+# as "match any of these path segments".
+_HIGH_SIGNAL_PATH_REGEX = (
+    "(team|about|contact|leadership|people|staff|board|press|news)"
+)
 
 
 @dataclass
 class CCRecord:
-    """A single Common Crawl URL Index hit ready to be fetched."""
+    """A single Common Crawl URL Index hit ready to be fetched.
+
+    ``collection`` was added in 0.11.1 Phase 3 — it tracks which
+    collection the record came from so analysts can see which crawl
+    surfaced an address.  Older single-collection callers leave it
+    ``None``.
+    """
 
     url: str
     timestamp: str
@@ -52,6 +72,17 @@ class CCRecord:
     length: int
     mime: str | None
     status: str
+    collection: str | None = None
+    digest: str | None = field(default=None)
+
+
+@dataclass
+class _CollInfo:
+    """Internal cache struct — the full collection list + the latest id."""
+
+    ids: tuple[str, ...]
+    latest: str | None
+    fetched_at: float
 
 
 class CommonCrawlClient:
@@ -81,6 +112,10 @@ class CommonCrawlClient:
         self._index_lock = asyncio.Lock()
         self._cached_index: str | None = None
         self._cached_at: float = 0.0
+        # Phase 3: separate cache for the full collection list.  Both
+        # caches use the same TTL — refreshing ``get_available_collections``
+        # also brings ``get_latest_index_name`` up to date.
+        self._cached_collections: _CollInfo | None = None
 
     async def aclose(self) -> None:
         """Close the underlying client if this instance owns it."""
@@ -130,7 +165,7 @@ class CommonCrawlClient:
         return None
 
     # ------------------------------------------------------------------
-    # Public API
+    # Public API — single-collection (legacy / 0.10.0 callers)
     # ------------------------------------------------------------------
     async def get_latest_index_name(self, force_refresh: bool = False) -> str | None:
         """Return the most recent ``CC-MAIN-YYYY-WW`` index name.
@@ -157,89 +192,254 @@ class CommonCrawlClient:
                 _LOG.warning("Common Crawl collinfo.json returned invalid JSON")
                 return self._cached_index
 
-            if not isinstance(payload, list) or not payload:
-                _LOG.warning("Common Crawl collinfo.json unexpected shape")
+            info = self._parse_collinfo(payload)
+            if info is None:
                 return self._cached_index
 
-            # Each entry is a dict with an "id" key like "CC-MAIN-2025-13".
-            # Sort by id descending (lexicographic works because the WW tag
-            # increments), take the first.
-            best_id: str | None = None
-            for entry in payload:
-                if not isinstance(entry, dict):
-                    continue
-                candidate = entry.get("id")
-                if not isinstance(candidate, str):
-                    continue
-                if best_id is None or candidate > best_id:
-                    best_id = candidate
-            if best_id is None:
-                _LOG.warning("Common Crawl collinfo.json contains no usable id")
-                return self._cached_index
-
-            self._cached_index = best_id
+            self._cached_collections = info
+            self._cached_index = info.latest
             self._cached_at = now
-            return best_id
+            return info.latest
 
     async def invalidate_index_cache(self) -> None:
         """Drop the cached index name.  Tests use this to bypass the TTL."""
         async with self._index_lock:
             self._cached_index = None
             self._cached_at = 0.0
+            self._cached_collections = None
 
-    async def query_url_index(
+    # ------------------------------------------------------------------
+    # Public API — multi-collection (Phase 3)
+    # ------------------------------------------------------------------
+    async def get_available_collections(
+        self,
+        force_refresh: bool = False,
+    ) -> list[str]:
+        """Return all known collection IDs newest-first.
+
+        The list comes from ``collinfo.json`` and is cached for 24h.
+        Each entry is a ``CC-MAIN-YYYY-WW`` ID suitable for direct use
+        as the ``index_name`` argument on :meth:`query_url_index` or
+        as the ``collection`` field on the per-collection URL Index.
+        """
+        async with self._index_lock:
+            now = time.monotonic()
+            if (
+                not force_refresh
+                and self._cached_collections is not None
+                and (now - self._cached_collections.fetched_at) < _CACHE_TTL_SECONDS
+            ):
+                return list(self._cached_collections.ids)
+
+            response = await self._get(_COLLINFO_URL)
+            if response is None or response.status_code != 200:
+                _LOG.warning("Common Crawl collinfo.json unavailable (list)")
+                return list(self._cached_collections.ids) if self._cached_collections else []
+
+            try:
+                payload = response.json()
+            except json.JSONDecodeError:
+                _LOG.warning("Common Crawl collinfo.json returned invalid JSON (list)")
+                return (
+                    list(self._cached_collections.ids) if self._cached_collections else []
+                )
+
+            info = self._parse_collinfo(payload)
+            if info is None:
+                return (
+                    list(self._cached_collections.ids) if self._cached_collections else []
+                )
+
+            self._cached_collections = info
+            self._cached_index = info.latest
+            self._cached_at = now
+            return list(info.ids)
+
+    async def query_multi_collection(
         self,
         domain: str,
-        limit: int = 200,
-        index_name: str | None = None,
+        max_collections: int = 6,
+        max_records_per_collection: int = 250,
+        aggressive: bool = False,
     ) -> list[CCRecord]:
-        """Query the URL Index for a wildcard match of ``*.<domain>/*``.
+        """Sweep multiple Common Crawl collections for *domain*.
 
         Parameters
         ----------
         domain:
-            Target domain (e.g. ``example.com``).  Lowercased and stripped.
-        limit:
-            Maximum number of records to return.
-        index_name:
-            Optional explicit index.  Defaults to the most recent cached
-            ``CC-MAIN-YYYY-WW`` collection — refetched if not yet cached.
+            Target domain (e.g. ``"example.com"``).  Lowercased / stripped.
+        max_collections:
+            Cap on the number of collections to sweep.  When
+            ``aggressive=True`` the value is doubled to 24.
+        max_records_per_collection:
+            ``limit`` value handed to CDX per collection.  When
+            ``aggressive=True`` this is raised to 500.
+        aggressive:
+            Opt-in flag for low-recall-but-coverage-heavy harvests
+            (the CLI ``--aggressive`` mode sets this).
+
+        Returns
+        -------
+        list[CCRecord]
+            De-duplicated across collections by ``(urlkey, digest)``
+            pair — a page seen in two collections only appears once.
+            Sorted newest-first by ``timestamp`` then URL for stable
+            output.  Every record carries its origin ``collection``.
         """
         cleaned = (domain or "").strip().lower()
         if not cleaned or "." not in cleaned:
-            _LOG.debug("query_url_index: invalid domain %r", domain)
+            _LOG.debug("query_multi_collection: invalid domain %r", domain)
             return []
 
-        if index_name is None:
-            index_name = await self.get_latest_index_name()
+        eff_max_collections = 24 if aggressive else int(max_collections)
+        eff_max_records = 500 if aggressive else int(max_records_per_collection)
+        eff_max_collections = max(1, eff_max_collections)
+        eff_max_records = max(1, eff_max_records)
 
-        if not index_name:
-            _LOG.warning("query_url_index: no Common Crawl index available")
-            return []
+        # Resolve the collection list.
+        try:
+            collection_ids = await self.get_available_collections()
+        except Exception as exc:  # noqa: BLE001 — defensive
+            _LOG.warning("query_multi_collection: collinfo failed (%s)", exc)
+            collection_ids = []
 
-        url = f"{_INDEX_BASE}/{index_name}-index"
-        params = {
-            "url": f"*.{cleaned}/*",
-            "output": "json",
-            "limit": str(max(1, int(limit))),
-        }
+        # If the cache is empty (network unreachable), fall back to the
+        # single-collection legacy method so the module never starves.
+        if not collection_ids:
+            fallback = await self.get_latest_index_name()
+            if not fallback:
+                return []
+            collection_ids = [fallback]
 
-        response = await self._get(url, params=params)
-        if response is None:
-            _LOG.warning("Common Crawl URL index unreachable for %s", cleaned)
-            return []
-        if response.status_code != 200:
-            _LOG.warning(
-                "Common Crawl URL index returned HTTP %s for %s", response.status_code, cleaned
-            )
-            return []
+        collection_ids = collection_ids[:eff_max_collections]
 
-        records = self._parse_jsonl(response.text)
-        return self._filter_and_sort(records, limit=int(limit))
+        # ------------------------------------------------------------------
+        # Parallel sweep — broad + targeted query per collection.
+        # ``asyncio.gather`` keeps the total wall-time bounded by the
+        # slowest single query, not the sum of all of them.
+        # ------------------------------------------------------------------
+        async def _sweep_one(coll: str) -> list[CCRecord]:
+            try:
+                broad, targeted = await asyncio.gather(
+                    self._query_index(
+                        coll,
+                        cleaned,
+                        url_pattern=f"*.{cleaned}/*",
+                        limit=eff_max_records,
+                    ),
+                    self._query_index(
+                        coll,
+                        cleaned,
+                        url_pattern=f"{cleaned}/{_HIGH_SIGNAL_PATH_REGEX}/*",
+                        limit=None,  # no cap on the targeted query
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                _LOG.debug(
+                    "query_multi_collection: collection %s sweep failed (%s)",
+                    coll,
+                    exc,
+                )
+                return []
+
+            combined = broad + targeted
+            for record in combined:
+                record.collection = coll
+            return combined
+
+        per_collection = await asyncio.gather(
+            *(_sweep_one(coll) for coll in collection_ids),
+            return_exceptions=True,
+        )
+
+        flat: list[CCRecord] = []
+        for outcome in per_collection:
+            if isinstance(outcome, BaseException):
+                continue
+            flat.extend(outcome)
+
+        return self._dedupe_across_collections(flat)
 
     # ------------------------------------------------------------------
     # Parsing helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_collinfo(payload: Any) -> _CollInfo | None:
+        """Parse ``collinfo.json`` and return a sorted collection list.
+
+        ``payload`` is an iterable of dicts each with an ``id`` key
+        like ``CC-MAIN-2025-13``.  The list is sorted descending (newest
+        first).  ``latest`` is the highest-id entry.
+
+        Returns ``None`` when the payload is malformed / empty so the
+        caller can keep the previous cached value.
+        """
+        if not isinstance(payload, list) or not payload:
+            return None
+
+        ids: list[str] = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            cid = entry.get("id")
+            if not isinstance(cid, str):
+                continue
+            ids.append(cid)
+        if not ids:
+            return None
+
+        ids.sort(reverse=True)
+        return _CollInfo(
+            ids=tuple(ids),
+            latest=ids[0],
+            fetched_at=time.monotonic(),
+        )
+
+    async def _query_index(
+        self,
+        collection: str,
+        domain: str,
+        *,
+        url_pattern: str,
+        limit: int | None,
+    ) -> list[CCRecord]:
+        """Run a single CDX query against a single collection.
+
+        The CDX endpoint URL is constructed per-collection; we add
+        ``collapse=urlkey:digest`` so the response is already deduped
+        *within* a single collection.  Cross-collection dedup happens
+        in :meth:`_dedupe_across_collections`.
+        """
+        url = f"{_INDEX_BASE}/{collection}-index"
+        params: dict[str, Any] = {
+            "url": url_pattern,
+            "output": "json",
+            "filter": ["statuscode:200", "mime:text/html"],
+            "collapse": "urlkey:digest",
+        }
+        if limit is not None and int(limit) > 0:
+            params["limit"] = str(int(limit))
+
+        response = await self._get(url, params=params)
+        if response is None:
+            _LOG.debug(
+                "Common Crawl CDX query unreachable for collection %s", collection
+            )
+            return []
+        if response.status_code != 200:
+            _LOG.debug(
+                "Common Crawl CDX returned HTTP %s for collection %s",
+                response.status_code,
+                collection,
+            )
+            return []
+
+        records = self._parse_jsonl(response.text)
+        # Mark each record with this collection's id before we sort.
+        for record in records:
+            record["__collection__"] = collection
+        return self._filter_and_sort(records, limit=int(limit) if limit else 0)
+
     @staticmethod
     def _parse_jsonl(payload: str) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -258,7 +458,17 @@ class CommonCrawlClient:
         return rows
 
     @staticmethod
-    def _filter_and_sort(rows: list[dict[str, Any]], limit: int) -> list[CCRecord]:
+    def _filter_and_sort(
+        rows: list[dict[str, Any]],
+        limit: int,
+    ) -> list[CCRecord]:
+        """CDX JSONL → ``CCRecord`` list, sorted newest-first.
+
+        Populated rows must already be filtered to status=200 + text-ish
+        MIME by the upstream call (we still re-check defensively
+        because CDX occasionally emits a row that fails to deserialise
+        its offset/length fields cleanly).
+        """
         records: list[CCRecord] = []
         for row in rows:
             url = row.get("url")
@@ -268,11 +478,12 @@ class CommonCrawlClient:
             timestamp = row.get("timestamp")
             status = row.get("status")
             mime = row.get("mime")
+            digest = row.get("digest")
+            collection = row.get("__collection__")
 
             if not (isinstance(url, str) and isinstance(filename, str)):
                 continue
             if not (isinstance(offset, int) and isinstance(length, int)):
-                # Some CC payloads encode these as numeric strings.
                 try:
                     offset_i = int(offset)  # type: ignore[arg-type]
                     length_i = int(length)  # type: ignore[arg-type]
@@ -303,12 +514,93 @@ class CommonCrawlClient:
                     length=length_i,
                     mime=mime_str or None,
                     status=status_str,
+                    collection=collection if isinstance(collection, str) else None,
+                    digest=digest if isinstance(digest, str) else None,
                 )
             )
 
         # Sort by timestamp descending; ties broken by URL for stable output.
         records.sort(key=lambda r: (r.timestamp, r.url), reverse=True)
-        return records[: max(0, int(limit))]
+        if limit and int(limit) > 0:
+            return records[: int(limit)]
+        return records
+
+    @staticmethod
+    def _dedupe_across_collections(records: list[CCRecord]) -> list[CCRecord]:
+        """Drop records whose content digest we've already seen.
+
+        Dedup key preference (highest fidelity first):
+
+        1. ``digest`` — same digest ⇒ byte-identical WARC payload.
+        2. ``url`` + ``filename`` + ``offset`` — when digest is absent,
+           the same ``(URL, WARC file, offset)`` triple maps to one
+           physical record on the S3 mirror.
+
+        The first occurrence wins.  Records with neither digest nor a
+        parseable offset are kept as-is because we have no safe way to
+        decide whether they are duplicates.
+        """
+        by_digest: dict[str, CCRecord] = {}
+        by_anchor: dict[tuple[str, str, int], CCRecord] = {}
+        kept: list[CCRecord] = []
+        for record in records:
+            digest_key = record.digest
+            anchor_key: tuple[str, str, int] | None = None
+            try:
+                if record.filename and record.offset is not None:
+                    anchor_key = (record.url, record.filename, int(record.offset))
+            except (TypeError, ValueError):
+                anchor_key = None
+
+            if digest_key:
+                existing = by_digest.get(digest_key)
+                if existing is not None:
+                    continue
+                by_digest[digest_key] = record
+                kept.append(record)
+                continue
+            if anchor_key is not None:
+                existing = by_anchor.get(anchor_key)
+                if existing is not None:
+                    continue
+                by_anchor[anchor_key] = record
+                kept.append(record)
+                continue
+            kept.append(record)
+        return kept
+
+    # ------------------------------------------------------------------
+    # Legacy single-collection entry point — preserved for tests
+    # ------------------------------------------------------------------
+    async def query_url_index(
+        self,
+        domain: str,
+        limit: int = 200,
+        index_name: str | None = None,
+    ) -> list[CCRecord]:
+        """Query the URL Index for a wildcard match of ``*.<domain>/*``.
+
+        Retained from 0.10.0 for the single-collection code path.
+        Phase 3 callers should prefer :meth:`query_multi_collection`.
+        """
+        cleaned = (domain or "").strip().lower()
+        if not cleaned or "." not in cleaned:
+            _LOG.debug("query_url_index: invalid domain %r", domain)
+            return []
+
+        if index_name is None:
+            index_name = await self.get_latest_index_name()
+
+        if not index_name:
+            _LOG.warning("query_url_index: no Common Crawl index available")
+            return []
+
+        return await self._query_index(
+            index_name,
+            cleaned,
+            url_pattern=f"*.{cleaned}/*",
+            limit=int(limit) if int(limit) > 0 else None,
+        )
 
 
 def build_default_client() -> CommonCrawlClient:

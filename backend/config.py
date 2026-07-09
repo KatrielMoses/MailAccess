@@ -286,15 +286,34 @@ class Settings(BaseSettings):
     cc_max_records: int = 100
     cc_fetch_concurrency: int = 10
     cc_fetch_timeout_seconds: int = 8
+    # 0.11.1 Phase 3 — multi-collection sweep.  ``cc_max_collections``
+    # caps the number of CC crawls (newest first) the module sweeps.
+    # ``cc_max_records_per_collection`` caps the CDX row count returned
+    # per collection.  Aggressive mode (the CLI ``--aggressive`` flag)
+    # doubles both.  ``cc_max_records`` is preserved for legacy callers
+    # that pass a single budget; the module redistributes it across
+    # the configured collection count.
+    cc_max_collections: int = 6
+    cc_max_records_per_collection: int = 250
+    # 0.11.1 Phase 3 — Wayback Machine domain harvest.  When enabled,
+    # the orchestrator's Phase 1 spawns WaybackDomainHarvestModule
+    # alongside Common Crawl.  ``wayback_max_urls`` is the
+    # post-scoring cap on URLs fetched per harvest.
+    enable_wayback_harvest: bool = True
+    wayback_max_urls: int = 100
 
     # Search-engine dorking (domain harvest mode only — Phase B1 of 0.10.0).
     # Master kill switch for the search-dork module.  The module is
     # already opt-in via the domain harvest entry point.
+    # 0.11.1 Phase 4: Google CSE added as an optional third engine.
+    # Active only when google_cse_api_key and google_cse_cx are both set.
     enable_email_search_dork: bool = True
     dork_max_queries_per_engine: int = 5
     dork_lite_mode: bool = False
     dork_ddg_delay_seconds: float = 5.0
     dork_bing_delay_seconds: float = 4.0
+    google_cse_api_key: str | None = None
+    google_cse_cx: str | None = None
 
     # Code + certificate-transparency email harvest (Phase B2 of 0.10.0).
     # Master kill switch for the GitHub + crt.sh + certspotter module.
@@ -382,6 +401,34 @@ class Settings(BaseSettings):
     scrapingant_proxy_residential_password: str | None = None
     scrapingant_proxy_datacenter_username: str | None = None
     scrapingant_proxy_datacenter_password: str | None = None
+
+    # 0.11.1 Phase 1 — Stealth HTTP client (harvest mode only).
+    # ``harvest_timing_profile`` selects one of the six T0..T5 pacing
+    # profiles defined in :mod:`backend.core.stealth_client`.  The
+    # ``T2 Balanced`` default keeps the harvest at human-like
+    # cadence.  ``harvest_impersonate_browser`` is the curl-cffi
+    # impersonation target — only ``"chrome120"`` is currently
+    # exercised; the field exists so future Chrome fingerprints
+    # can be opted into via env without a code change.
+    harvest_timing_profile: str = "t2"
+    harvest_impersonate_browser: str = "chrome120"
+
+    # 0.11.1 Phase 2 — Site Intelligence Rebuild.
+    # ``harvest_aggressive`` enables the low-confidence body-text
+    # name extraction in :func:`backend.core.structured_data_extractor.extract_people`
+    # AND loosens a couple of upstream filters for higher recall.
+    # Default false — opt in via ``--aggressive`` CLI flag or the
+    # ``HARVEST_AGGRESSIVE`` env var.
+    #
+    # ``site_discovery_max_candidates`` caps the number of probe-
+    # fetched URLs after merging the sitemap / homepage / robots
+    # sources.  15 matches the spec.
+    #
+    # ``site_discovery_timeout_seconds`` is the per-request budget
+    # for each sitemap / homepage / robots / probe fetch.
+    harvest_aggressive: bool = False
+    site_discovery_max_candidates: int = 15
+    site_discovery_timeout_seconds: int = 5
 
     # Rate limiting
     rate_limit_enabled: bool = True

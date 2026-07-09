@@ -531,6 +531,22 @@ Sign up: https://scrapingant.com/?ref=mzliyzh
 
 ## Changelog
 
+### 0.11.1
+
+- Stealth HTTP client (curl-cffi): Chrome TLS/HTTP2 fingerprint, Gaussian timing profiles T0-T5, full Chrome header set with correct Sec-Fetch-* values, referrer chain maintenance
+- --stealth flag: T0 Ghost mode (8s mean delay, navigation graph simulation, near-undetectable)
+- --fast flag: T4 profile for time-sensitive runs
+- Site intelligence rebuild: sitemap discovery, homepage link traversal, finds /leadership.php and any non-standard team page URL
+- Structured data extraction: JSON-LD Person, microdata, hCard, DOM team card pattern — replaces body-text name regex entirely
+- Multi-collection Common Crawl: 6 collections default (24 in --aggressive), digest dedup, targeted team/contact/leadership URL queries
+- Cloudflare data-cfemail decode on all HTML
+- Wayback Machine domain-wide sweep: CDX query, archived team/contact/press pages, historical email recovery
+- GitHub org members module (no auth required)
+- Hunter.io optional source (50/mo free, no CC)
+- Google CSE optional search backend (100/day free, replaces broken DDG/Bing)
+- Bing Web Search API removed (retired Aug 2025)
+- --aggressive mode: maximum coverage, all sources at full depth, shows LOW results
+
 ### 0.11.0
 
 - Banner: rewrote the CLI ASCII art from the old heavy block-face to a cleaner wordmark in flat red purple (`#820747`); background is left to the terminal so the banner now reads clearly on any TTY

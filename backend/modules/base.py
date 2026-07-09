@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import inspect
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-import inspect
-import logging
 from functools import wraps
 from typing import Any
 
