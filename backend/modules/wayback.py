@@ -243,13 +243,18 @@ async def _safe_session_get(session: Any, url: str) -> Any:
 
     Both :class:`backend.core.stealth_client.StealthSession` (async
     façade over a sync ``curl-cffi`` session) and
-    :class:`httpx.AsyncClient` are accepted.  StealthSession doesn't
-    accept a ``timeout`` kwarg — we strip it defensively.
+    :class:`httpx.AsyncClient` are accepted.  This helper is now
+    timeout-less — callers that need a ceiling wrap it in
+    :func:`asyncio.wait_for` (see :func:`_fetch_wayback_snapshot`).
+
+    Wayback fix: ``StealthSession.get()`` used to receive a
+    ``timeout=`` kwarg that it silently dropped (the inner sync
+    curl-cffi call has no timeout, so the request would hang forever
+    on a slow archive.org CDN node). Wrapping with
+    :func:`asyncio.wait_for` puts the deadline on the *coroutine*,
+    which both StealthSession and httpx.AsyncClient honour.
     """
-    try:
-        return await session.get(url)
-    except TypeError:
-        return await session.get(url)
+    return await session.get(url)
 
 
 async def _fetch_wayback_snapshot(
@@ -266,15 +271,30 @@ async def _fetch_wayback_snapshot(
     toolbar-injected HTML with a navigation overlay.  ``session`` can
     be any object exposing ``async get(url)`` (StealthSession and
     httpx.AsyncClient both qualify).
+
+    Wayback fix: the whole call is wrapped in :func:`asyncio.wait_for`
+    so every archive.org fetch has a hard ``timeout`` ceiling
+    regardless of whether the underlying session honours a
+    ``timeout=`` kwarg.
     """
     wayback_url = f"https://web.archive.org/web/{timestamp}id_/{original_url}"
     try:
-        try:
-            response = await session.get(wayback_url, timeout=timeout)  # type: ignore[arg-type]
-        except TypeError:
-            # StealthSession does not take ``timeout=`` — fall back.
-            response = await session.get(wayback_url)  # type: ignore[arg-type]
+        # Wayback fix: hard ceiling on the coroutine — works for both
+        # ``httpx.AsyncClient`` (which has its own internal timeout) and
+        # ``StealthSession`` (which silently drops unknown kwargs).
+        # The previous inner-try / TypeError-fallback was unreachable
+        # from this code path: kwargs leaked past ``_safe_session_get``
+        # but were then dropped inside the session call. Now we put
+        # the deadline where it always matters — on the awaitable.
+        response = await asyncio.wait_for(
+            _safe_session_get(session, wayback_url),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        return None, "Wayback fetch timed out", False
     except httpx.TimeoutException:
+        # Defense-in-depth: even with ``wait_for``, some httpx
+        # code paths raise this; map it to the same contract.
         return None, "Wayback fetch timed out", False
     except Exception as exc:
         return None, f"Wayback fetch failed: {exc}", False
@@ -721,10 +741,22 @@ def _build_stealth_session() -> StealthSession | None:
     Returns ``None`` when ``curl-cffi`` is not installed — the
     :class:`WaybackDomainHarvestModule` will fall back to an httpx
     client instead of crashing the harvest.
+
+    Wayback fix: archive.org performs no fingerprinting, so the
+    navigation-graph simulation (intermediate homepage + parent-path
+    GETs) is pure overhead on top of an already-slow T0/T1 blocking
+    ``time.sleep`` call. We disable navigation simulation here while
+    keeping the operator's pacing profile intact — so the inter-
+    request pacing delay still applies, but no extra blocking
+    requests fire on top of it.
     """
     try:
         profile_name = str(getattr(settings, "harvest_timing_profile", "t5") or "t5")
         session = StealthSession(timing_profile=resolve_timing_profile(profile_name))
+        # Wayback fix: skip the navigation-graph simulation against
+        # archive.org. The operator's pacing profile (delay budget) is
+        # unchanged — only the intermediate hop GETs are suppressed.
+        session._skip_nav_sim = True
         return session
     except ImportError:
         return None
