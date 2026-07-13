@@ -57,13 +57,38 @@ _LOG = logging.getLogger(__name__)
 # contained to actually using the network layer.
 try:
     from curl_cffi import requests as cffi_requests  # type: ignore[import-not-found]
+    from curl_cffi.curl import CurlError, CurlHttpVersion  # type: ignore[import-not-found]
 
     _CFFI_AVAILABLE = True
     _CFFI_IMPORT_ERROR: ImportError | None = None
 except ImportError as _exc:  # pragma: no cover — exercised on import
     cffi_requests = None  # type: ignore[assignment]
+    CurlError = None  # type: ignore[assignment,misc]
+    CurlHttpVersion = None  # type: ignore[assignment,misc]
     _CFFI_AVAILABLE = False
     _CFFI_IMPORT_ERROR = _exc
+
+
+# ---------------------------------------------------------------------------
+# HTTP/2 / HTTP/3 retry
+# ---------------------------------------------------------------------------
+# curl-cffi raises ``CurlError`` with these codes against servers that
+# handle HTTP/2 / HTTP/3 poorly.  Most common offender: INE.com, which
+# closes the HTTP/2 stream mid-response and surfaces as code 16
+# ("HTTP/2 framing layer error").  Without an automatic downgrade
+# retry, the exception propagates to ``site_discovery._get`` which
+# catches ALL exceptions and silently returns ``(-1, "")`` — every
+# URL on the target site is then dropped on the floor.
+#
+# Code legend (curl/libcurl):
+#   16 = HTTP/2 framing layer error
+#   92 = HTTP/2 stream error
+#   95 = HTTP/3 error
+#
+# Retry once on HTTP/1.1 with the same session (per the project
+# "no new connections" rule — we still want cookie jar / connection
+# pool continuity).
+HTTP_VERSION_RETRY_CODES: frozenset[int] = frozenset({16, 92, 95})
 
 
 def _require_cffi() -> None:
@@ -381,6 +406,10 @@ class StealthSession:
 
     timing_profile: TimingProfile = T2_BALANCED
     impersonate: str = "chrome120"
+    # Per-request timeout (seconds) applied to all curl-cffi get() calls.
+    # Default 10s prevents a single unreachable/blocked host from hanging
+    # the entire harvest for libcurl's 21s default connection timeout.
+    timeout: float = field(default=10.0)
 
     # Internal state — populated by the lifecycle methods.  Declared as
     # ``field(default=...)`` so the dataclass decorator leaves them
@@ -519,6 +548,13 @@ class StealthSession:
         Centralises header building, delay application, and the
         ``last_url`` update so :meth:`get` and :meth:`get_sync` cannot
         drift apart.
+
+        HTTP/2 / HTTP/3 errors (curl codes 16, 92, 95) are caught
+        and the request is retried exactly once on HTTP/1.1 with the
+        same session.  See :data:`HTTP_VERSION_RETRY_CODES` for the
+        rationale and code legend.  Any other ``CurlError`` is
+        re-raised so the caller (typically
+        ``site_discovery._get``) can decide what to do with it.
         """
         # Wayback fix: callers can flip ``_skip_nav_sim = True`` to
         # suppress the navigation-graph simulation against targets that
@@ -537,13 +573,42 @@ class StealthSession:
         # override still gets a Chrome Sec-Fetch-Site etc.
         merged = dict(headers)
         merged.update(kwargs.pop("headers", {}) or {})
+        # The outer ``try``/``finally`` guarantees
+        # ``self.request_count += 1`` runs exactly once per call,
+        # regardless of which branch (normal / retry / re-raise) the
+        # inner block took.  The inner ``try``/``except`` isolates
+        # the CurlError retry so the outer bookkeeping still fires
+        # even when the except clause re-raises.
         try:
-            response = self._session.get(
-                url,
-                headers=merged,
-                impersonate=self._impersonate_value,
-                **kwargs,
-            )
+            try:
+                response = self._session.get(
+                    url,
+                    headers=merged,
+                    impersonate=self._impersonate_value,
+                    timeout=self.timeout,
+                    **kwargs,
+                )
+            except CurlError as exc:
+                # Server closed the HTTP/2 / HTTP/3 stream mid-response
+                # (most common: INE.com → code 16).  Downgrade to
+                # HTTP/1.1 on the same session and try once more.
+                # Anything else propagates — the caller decides.
+                if int(exc.code) in HTTP_VERSION_RETRY_CODES:
+                    _LOG.info(
+                        "HTTP/2/3 error (code=%s) on %s, retrying with HTTP/1.1",
+                        int(exc.code),
+                        url,
+                    )
+                    response = self._session.get(
+                        url,
+                        headers=merged,
+                        impersonate=self._impersonate_value,
+                        http_version=CurlHttpVersion.V1_1,
+                        timeout=self.timeout,
+                        **kwargs,
+                    )
+                else:
+                    raise
         finally:
             self.request_count += 1
         self.last_url = url

@@ -28,6 +28,7 @@ import httpx
 
 from .cf_decode import cf_decode as _cf_decode_real
 from .http_client import build_client
+from .hydration_extractor import HydrationDataExtractor
 from .name_quality import is_plausible_person_name
 from .site_discovery import PageCandidate
 from .site_discovery import discover_team_pages as _discover_team_pages
@@ -729,6 +730,9 @@ def _dedupe_person_records(
         if not (new.name or "").strip():
             continue
         nname, nemail = _key(new)
+        new_tokens = (
+            set(nname.split()) if nname else set()
+        )
         target_idx = -1
         for idx, existing in enumerate(merged):
             ename, eemail = _key(existing)
@@ -738,6 +742,32 @@ def _dedupe_person_records(
             if nemail and nemail == eemail:
                 target_idx = idx
                 break
+            # Subset-token collision: LinkedIn slugs frequently
+            # append a company / differentiator token to the
+            # canonical name (``/in/tracy-wallace-tec`` →
+            # ``Tracy Wallace Tec``). Strict name equality misses
+            # that — collapse when one record's name-tokens are
+            # a proper subset of the other AND both names are
+            # at least 2 tokens long (a 1-token "subset" match
+            # is too ambiguous, e.g. "Sam" subset-of "Sam Smith").
+            if (
+                new_tokens
+                and len(new_tokens) >= 2
+                and not (ename and eemail)
+            ):
+                existing_tokens = (
+                    set(ename.split()) if ename else set()
+                )
+                if (
+                    existing_tokens
+                    and len(existing_tokens) >= 2
+                    and (
+                        new_tokens < existing_tokens
+                        or existing_tokens < new_tokens
+                    )
+                ):
+                    target_idx = idx
+                    break
         if target_idx == -1:
             merged.append(new)
             continue
@@ -746,10 +776,43 @@ def _dedupe_person_records(
             winner, loser = new, target
             merged[target_idx] = winner
         elif new.confidence == target.confidence:
-            # Tie — prefer the one with the longer / more specific name.
-            winner, loser = (
-                (new, target) if len(new.name) > len(target.name) else (target, new)
-            )
+            # Tie-break. Real-world cases that hit this branch:
+            #   * DOM team-card h3 ("Tracy Wallace", title attached,
+            #     confidence 0.65) vs LinkedIn-slug
+            #     ("Tracy Wallace Tec", no title, confidence 0.65)
+            #     where the slug contains a trailing company /
+            #     differentiator token. The longer slug artifact
+            #     drops the title and the "real" record. Prefer
+            #     the record with a title attached — DOM cards,
+            #     JSON-LD and hCard always carry one, slug
+            #     artifacts never do.
+            #   * Two microdata/hCard extractions of the same
+            #     person, same confidence. The "longer name wins"
+            #     heuristic (used previously) actively harms the
+            #     slug case, so fall back to the name that's
+            #     not a strict superset of the other.
+            new_has_title = bool((new.title or "").strip())
+            target_has_title = bool((target.title or "").strip())
+            if new_has_title != target_has_title:
+                winner, loser = (
+                    (new, target) if new_has_title else (target, new)
+                )
+            else:
+                # Tokens of one name are a subset of the other:
+                # the shorter form is the canonical name. Otherwise
+                # keep the older record (first-inserted-wins) to
+                # match per-page dedup semantics.
+                new_tokens = set((new.name or "").lower().split())
+                target_tokens = set((target.name or "").lower().split())
+                if new_tokens and target_tokens:
+                    if new_tokens < target_tokens:
+                        winner, loser = new, target
+                    elif target_tokens < new_tokens:
+                        winner, loser = target, new
+                    else:
+                        winner, loser = target, new
+                else:
+                    winner, loser = target, new
         else:
             winner, loser = target, new
         if not winner.email and loser.email:
@@ -767,6 +830,7 @@ async def discover_and_extract(
     max_candidates: int | None = None,
     timeout: float = 5.0,
     include_homepage: bool = True,
+    candidate_paths: list[str] | tuple[str, ...] | None = None,
 ) -> list[PersonRecord]:
     """Run the full 0.11.1 Phase 2 site-intelligence pipeline.
 
@@ -806,6 +870,9 @@ async def discover_and_extract(
         run through the extractor as a low-priority candidate
         (some sites put team JSON-LD on their landing page for
         SEO).  Toggle ``False`` to skip.
+    candidate_paths:
+        Optional orchestrator-provided paths from
+        IndustryVocabularyRouter, added to the site discovery queue.
     """
     cleaned = (domain or "").strip().lower()
     if not cleaned or "." not in cleaned:
@@ -817,6 +884,7 @@ async def discover_and_extract(
         session,
         max_candidates=max_candidates,
         timeout=timeout,
+        candidate_paths=candidate_paths,
     )
 
     # Optionally prepend the homepage as a low-priority candidate.
@@ -839,13 +907,33 @@ async def discover_and_extract(
         html = await _cf_decode(html)
         is_team = candidate.source != "homepage_root"
         try:
-            return _extract_people(
+            records = _extract_people(
                 html,
                 candidate.url,
                 cleaned,
                 is_team_page=is_team,
                 aggressive=aggressive,
             )
+            # Framework hydration often contains the complete instructor or
+            # team-card dataset even when the visible HTML is sparse.  Merge
+            # those records into the same PersonRecord stream so the normal
+            # company-page dedupe and email side-channel remain authoritative.
+            for hit in HydrationDataExtractor.find_hits_from_html(
+                html, page_url=candidate.url
+            ):
+                if not hit.name:
+                    continue
+                records.append(
+                    PersonRecord(
+                        name=hit.name,
+                        email=hit.email,
+                        title=hit.role,
+                        source_type=f"hydration_{hit.framework}",
+                        confidence=0.68,
+                        page_url=candidate.url,
+                    )
+                )
+            return records
         except Exception as exc:  # noqa: BLE001 — defensive
             _LOG.debug(
                 "discover_and_extract: extract_people failed on %s: %s",

@@ -75,6 +75,7 @@ test_*.py
 !tests/test_breach_deep.py
 !tests/test_proxy.py
 !tests/test_aggregator.py
+!tests/test_no_live_network.py
 verify_*.py
 .pytest_cache/
 coverage/

@@ -24,6 +24,7 @@ import httpx
 
 from ..config import settings
 from ..core.bing_dorker import BingDorker
+from ..core.concurrent_fetch_cache import CachedFetch
 from ..core.dork_queries import build_dork_queries
 from ..core.duckduckgo_dorker import DuckDuckGoDorker
 from ..core.email_confidence import compute_confidence_breakdown, label_for_score
@@ -37,6 +38,7 @@ from .base import BaseModule, ModuleResult, ModuleStatus
 _LOG = logging.getLogger(__name__)
 
 _MAX_QUERIES_HARD_CAP = 50  # safety valve
+_MAX_CONSECUTIVE_ENGINE_ERRORS = 2
 
 _CSE_URL = "https://www.googleapis.com/customsearch/v1"
 _CSE_RATE_LIMIT_DELAY = 1.0  # 1 req/sec
@@ -128,6 +130,8 @@ class EmailSearchDorkModule(BaseModule):
         lite_mode: bool | None = None,
         aggressive: bool | None = None,
         use_proxies: bool = False,
+        fetch: CachedFetch | None = None,
+        signal_pool: Any | None = None,
     ) -> ModuleResult:  # type: ignore[override]
         if not settings.enable_email_search_dork:
             return ModuleResult(
@@ -181,18 +185,26 @@ class EmailSearchDorkModule(BaseModule):
         cse_available, cse_api_key, cse_cx = await _cse_available()
 
         # 0.11.1 Phase 4: build StealthSession for DDG/Bing.
-        try:
-            profile = resolve_timing_profile(settings.harvest_timing_profile)
-            stealth_session: StealthSession | None = StealthSession(
-                timing_profile=profile,
-                impersonate=settings.harvest_impersonate_browser,
-            )
-        except ImportError as exc:
-            _LOG.debug(
-                "email_search_dork: curl-cffi unavailable; using httpx "
-                "fallback (install 'mailaccess[harvest]'): %s",
-                exc,
-            )
+        # 0.11.1 Phase 3 cache: when ``fetch`` is injected by the
+        # orchestrator, the dorkers route through it instead of
+        # building their own session.  The cache owns the per-run
+        # StealthSession so the dorkers no longer construct one when
+        # the cache is in play.
+        if fetch is None:
+            try:
+                profile = resolve_timing_profile(settings.harvest_timing_profile)
+                stealth_session: StealthSession | None = StealthSession(
+                    timing_profile=profile,
+                    impersonate=settings.harvest_impersonate_browser,
+                )
+            except ImportError as exc:
+                _LOG.debug(
+                    "email_search_dork: curl-cffi unavailable; using httpx "
+                    "fallback (install 'mailaccess[harvest]'): %s",
+                    exc,
+                )
+                stealth_session = None
+        else:
             stealth_session = None
 
         client_factory = build_client
@@ -208,12 +220,14 @@ class EmailSearchDorkModule(BaseModule):
                     min_interval=ddg_delay,
                     scrapingant_zone="dorking",
                     stealth=stealth_session,
+                    fetch=fetch,
                 )
                 bing = BingDorker(
                     transport=shared_client,
                     min_interval=bing_delay,
                     scrapingant_zone="dorking",
                     stealth=stealth_session,
+                    fetch=fetch,
                 )
 
                 # CSE gets its own httpx client (different upstream).
@@ -222,7 +236,8 @@ class EmailSearchDorkModule(BaseModule):
                     cse_client = httpx.AsyncClient(timeout=10.0)
 
                 async def run_ddg() -> None:
-                    nonlocal ddg_blocked
+                    nonlocal ddg_blocked, ddg_failed
+                    consecutive_errors = 0
                     for q in queries_for_run:
                         results, captcha = await ddg.search(q.query)
                         error = getattr(ddg, "_last_error", None)
@@ -230,13 +245,23 @@ class EmailSearchDorkModule(BaseModule):
                             DorkRunSummary(query=q, results=results, error=error)
                         )
                         if error:
+                            consecutive_errors += 1
+                            if consecutive_errors >= _MAX_CONSECUTIVE_ENGINE_ERRORS:
+                                ddg_failed = True
+                                _LOG.warning(
+                                    "email_search_dork: DDG fast-failed after %d consecutive errors",
+                                    consecutive_errors,
+                                )
+                                return
                             continue
+                        consecutive_errors = 0
                         if captcha:
                             ddg_blocked = True
                             return
 
                 async def run_bing() -> None:
-                    nonlocal bing_blocked
+                    nonlocal bing_blocked, bing_failed
+                    consecutive_errors = 0
                     for q in queries_for_run:
                         results, blocked = await bing.search(q.query)
                         error = getattr(bing, "_last_error", None)
@@ -244,7 +269,16 @@ class EmailSearchDorkModule(BaseModule):
                             DorkRunSummary(query=q, results=results, error=error)
                         )
                         if error:
+                            consecutive_errors += 1
+                            if consecutive_errors >= _MAX_CONSECUTIVE_ENGINE_ERRORS:
+                                bing_failed = True
+                                _LOG.warning(
+                                    "email_search_dork: Bing fast-failed after %d consecutive errors",
+                                    consecutive_errors,
+                                )
+                                return
                             continue
+                        consecutive_errors = 0
                         if blocked:
                             bing_blocked = True
                             return

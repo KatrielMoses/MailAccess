@@ -133,7 +133,9 @@ class NpmEmailModule(BaseModule):
     requires_key = False
     default_enabled = False  # domain harvest mode only
 
-    async def run(self, target: str) -> ModuleResult:  # type: ignore[override]
+    async def run(
+        self, target: str, *, signal_pool: Any | None = None
+    ) -> ModuleResult:  # type: ignore[override]
         if not settings.enable_npm_email:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,

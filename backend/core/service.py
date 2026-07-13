@@ -15,6 +15,7 @@ from .credential_risk import assess_credential_risk_from_report, credential_risk
 from .defenders_brief import defenders_brief_to_dict, generate_defenders_brief_from_report
 from .email_credibility import normalize_email_address
 from .engine import InvestigationEngine
+from .policy import module_weight
 from .timeline import build_timeline
 
 
@@ -38,7 +39,24 @@ def _build_summary(data: dict) -> str:
     partial = sum(1 for r in runs if r["status"] == "partial")
     failed = sum(1 for r in runs if r["status"] == "failed")
     skipped = sum(1 for r in runs if r["status"] == "skipped")
-    return f"Ran {total} modules ({success} success, {partial} partial, {failed} failed, {skipped} skipped). Found {len(findings)} data points."
+    return (
+        f"Ran {total} modules ({success} success, {partial} partial, "
+        f"{failed} failed, {skipped} skipped). Found {len(findings)} data points."
+    )
+
+
+def _exposure_score_pct(score: int | None, module_runs: list[dict]) -> int | None:
+    if score is None:
+        return None
+    executed_statuses = {"success", "partial"}
+    denominator = sum(
+        module_weight(str(run.get("module_name") or ""))
+        for run in module_runs
+        if str(run.get("status") or "").lower() in executed_statuses
+    )
+    if denominator <= 0:
+        return 0
+    return max(0, min(round((score / denominator) * 100), 100))
 
 
 def _email_credibility_from_report(data: dict) -> dict | None:
@@ -58,6 +76,14 @@ def _email_credibility_from_report(data: dict) -> dict | None:
 def enrich_report(data: dict) -> dict:
     score = data.get("exposure_score")
     data["risk_level"] = _risk_level(score)
+    data["exposure_score_pct"] = _exposure_score_pct(
+        score if isinstance(score, int) else None,
+        [
+            run
+            for run in data.get("module_runs", [])
+            if isinstance(run, dict)
+        ],
+    )
     data.pop("credential_risk", None)
     data["original_email"] = data.get("email")
     name_sources = data.get("name_sources") if isinstance(data.get("name_sources"), list) else []
@@ -133,7 +159,9 @@ class InvestigationService:
     Intended to be instantiated per-request with an injected AsyncSession::
 
         service = InvestigationService(session)
-        investigation_id, created_at, queue, cached = await service.create_investigation("user@example.com")
+        investigation_id, created_at, queue, cached = await service.create_investigation(
+            "user@example.com"
+        )
     """
 
     def __init__(self, session: AsyncSession) -> None:

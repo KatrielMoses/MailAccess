@@ -1,0 +1,2 @@
+[console_scripts]
+transformers = transformers.cli.transformers:main

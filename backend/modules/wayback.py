@@ -31,6 +31,7 @@ import httpx
 
 from ..config import settings
 from ..core.cf_decode import cf_decode
+from ..core.concurrent_fetch_cache import CachedFetch
 from ..core.email_extraction import extract_emails
 from ..core.http_client import build_client
 from ..core.stealth_client import (
@@ -787,6 +788,11 @@ class WaybackDomainHarvestModule(BaseModule):
         super().__init__()
         self._session: Any = session
         self._owns_session = session is None
+        # 0.11.1 Phase 3 cache: when set by the orchestrator, Wayback
+        # routes every page fetch through this facade instead of its
+        # own self._session.  ``aclose`` is suppressed in that mode
+        # because the cache owns teardown for the whole run.
+        self._fetch: CachedFetch | None = None
 
     def set_session(self, session: Any) -> None:
         """Inject a session (used by orchestrator wiring)."""
@@ -796,6 +802,9 @@ class WaybackDomainHarvestModule(BaseModule):
         self._owns_session = False
 
     async def aclose(self) -> None:
+        if self._fetch is not None:
+            # Cache owns teardown; never close it from here.
+            return
         if self._owns_session and self._session is not None:
             close_session(self._session)
             self._session = None
@@ -806,6 +815,8 @@ class WaybackDomainHarvestModule(BaseModule):
         *,
         aggressive: bool | None = None,
         max_urls: int | None = None,
+        fetch: CachedFetch | None = None,
+        signal_pool: Any | None = None,
         **_unused: Any,
     ) -> ModuleResult:  # type: ignore[override]
         """Harvest emails for *target* (a domain) via Wayback CDX.
@@ -814,6 +825,12 @@ class WaybackDomainHarvestModule(BaseModule):
         the orchestrator's signature-aware runner can pass them without
         touching the legacy ``run(email)`` contract for the original
         single-email module.
+
+        ``fetch`` (0.11.1 Phase 3): when supplied by the orchestrator,
+        Wayback routes its archive.org page fetches through the per-run
+        :class:`CachedFetch` cache instead of building its own
+        ``StealthSession``.  Same URL across runs / modules collapses
+        to a single archive.org request.
         """
         if not getattr(settings, "enable_wayback_harvest", True):
             return ModuleResult(
@@ -836,11 +853,24 @@ class WaybackDomainHarvestModule(BaseModule):
             getattr(settings, "harvest_aggressive", False)
         )
 
-        # Resolve a session: caller-supplied, then stealth-built, then
-        # httpx fallback (when curl-cffi isn't installed).
-        if self._session is None:
-            self._session = _build_stealth_session() or build_client(follow_redirects=True)
+        # 0.11.1 Phase 3 cache: when ``fetch`` is provided, store it
+        # and use it as the "session" for helper calls.  CachedFetch
+        # exposes the same ``async get(url)`` shape as StealthSession,
+        # so the existing helpers consume it transparently.  We do NOT
+        # call _build_stealth_session when fetch is provided — the
+        # cache already owns a session for the run, and a second
+        # StealthSession would defeat the point of dedup.
+        if fetch is not None:
+            self._fetch = fetch
+            transport: Any = fetch
+        elif self._session is None:
+            # Resolve a session: caller-supplied, then stealth-built,
+            # then httpx fallback (when curl-cffi isn't installed).
+            transport = _build_stealth_session() or build_client(follow_redirects=True)
+            self._session = transport
             self._owns_session = True
+        else:
+            transport = self._session
 
         cap = int(
             max_urls
@@ -854,7 +884,7 @@ class WaybackDomainHarvestModule(BaseModule):
         try:
             results = await harvest_domain_emails(
                 domain,
-                self._session,
+                transport,
                 aggressive=effective_aggressive,
             )
         except Exception as exc:  # noqa: BLE001 — defensive

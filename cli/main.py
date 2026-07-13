@@ -872,6 +872,14 @@ def harvest_emails_command(
             "Default: 6 (24 in --aggressive mode)."
         ),
     ),
+    timeout: int | None = typer.Option(
+        None,
+        "--timeout",
+        help=(
+            "Maximum harvest duration in seconds. Defaults to "
+            "profile-based: T2=600s, T0=2700s"
+        ),
+    ),
     min_confidence: str = typer.Option(
         "low",
         "--min-confidence",
@@ -1056,6 +1064,7 @@ def harvest_emails_command(
                 show_role=show_role,
                 full=full,
                 aggressive=aggressive,
+                timeout_seconds=timeout,
             )
         finally:
             settings.harvest_timing_profile = original_profile
@@ -1091,6 +1100,7 @@ def harvest_emails_command(
                 show_role=show_role,
                 full=full,
                 aggressive=aggressive,
+                timeout_seconds=timeout,
             )
         finally:
             _settings.harvest_aggressive = original_aggressive

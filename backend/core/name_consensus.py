@@ -265,6 +265,11 @@ def normalize_name(raw_name: str) -> tuple[str, list[str], bool]:
         flags.append("transliterated")
     value = transliterated
 
+    # Strip " (@handle)" suffixes that aggregators and social platforms append
+    # to display names (e.g. "Katriel Moses (@katriel)" → "Katriel Moses").
+    # Applied before scoring so it cannot pull in a handle as a name token.
+    value = re.sub(r'\s*\(@[^)]+\)', '', value).strip()
+
     value = EMAIL_RE.sub("", value)
     while True:
         updated = CREDENTIAL_RE.sub("", value).strip()

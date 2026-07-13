@@ -22,10 +22,12 @@ import time
 from dataclasses import dataclass
 from html import unescape
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
 from ..config import APP_VERSION
+from .concurrent_fetch_cache import CachedFetch
 from .stealth_client import StealthSession, resolve_timing_profile
 
 _LOG = logging.getLogger(__name__)
@@ -146,13 +148,23 @@ class BingDorker:
         *,
         scrapingant_zone: str | None = None,
         stealth: StealthSession | None = None,
+        fetch: CachedFetch | None = None,
     ) -> None:
-        # Phase 4: when a StealthSession is injected, use it.
-        # When neither transport nor stealth is provided, build a
-        # StealthSession with T2 timing as the default HTTP transport.
-        # When transport is explicitly provided (for tests), skip
-        # StealthSession entirely so tests can mock the client directly.
-        if stealth is not None:
+        # 0.11.1 Phase 3 cache: when a CachedFetch facade is provided,
+        # route every request through it (the orchestrator's per-run
+        # ConcurrentFetchCache).  This supersedes both the stealth
+        # session and the transport — the cache is the new owner of
+        # HTTP for the harvest run.
+        #
+        # Otherwise follow the legacy priority:
+        #   1. ``stealth`` injected — use it (Phase 4 path).
+        #   2. ``transport`` injected (tests) — use it; skip stealth.
+        #   3. nothing injected — build a StealthSession with T2 timing,
+        #      or fall back to httpx if curl-cffi is unavailable.
+        self._fetch: CachedFetch | None = fetch
+        if fetch is not None:
+            self._session = None  # type: ignore[assignment]
+        elif stealth is not None:
             self._session: StealthSession = stealth
         elif transport is None:
             try:
@@ -207,7 +219,15 @@ class BingDorker:
             self.blocked = False
 
             try:
-                if self._session is not None:
+                if self._fetch is not None:
+                    # 0.11.1 Phase 3 cache path: build the full URL
+                    # with query + count so the cache key is
+                    # ``https://www.bing.com/search?q=...&count=...``.
+                    # Identical queries across modules collapse to a
+                    # single underlying request.
+                    full_url = f"{_BING_URL}?{urlencode({'q': query, 'count': max_results})}"
+                    response = await self._fetch.get(full_url)
+                elif self._session is not None:
                     response = await self._session.get(
                         _BING_URL,
                         params={"q": query, "count": max_results},

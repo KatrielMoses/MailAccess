@@ -25,6 +25,49 @@ _TWITTER_PLATFORM_NAMES = frozenset({
     "twitter (archived)",
 })
 
+# Display-name suffix patterns emitted by Twitter/X profile pages, search
+# snippets, and aggregators. Order matters — apply the most specific patterns
+# first so we don't accidentally over-strip a bare trailing "@handle" when a
+# full "(@handle) on Twitter" suffix is present.
+_TWITTER_DISPLAY_NAME_SUFFIXES: tuple[re.Pattern[str], ...] = (
+    # "Name (@handle) / X" / "Name (@handle) / Twitter" / "Name (@handle) /"
+    re.compile(r'\s*\(@[^)]+\)\s*/\s*(?:[Tt]witter|[Xx])?\s*$'),
+    # "Name (@handle) on Twitter" / "Name (@handle) On X" (any case)
+    re.compile(r'\s*\(@[^)]+\)\s+on\s+(?:[Tt]witter|[Xx])\s*$', re.IGNORECASE),
+    # "Name | Twitter" / "Name / X" (no handle)
+    re.compile(r'\s*[|/]\s*(?:[Tt]witter|[Xx])\s*$'),
+    # Bare trailing " (@handle)" with nothing after
+    re.compile(r'\s*\(@[^)]+\)\s*$'),
+    # Bare trailing "@handle" (no parens) — common in reposts / quoted text
+    re.compile(r'\s*@[\w.]+\s*$'),
+)
+
+
+def clean_twitter_display_name(value: str | None) -> str:
+    """Strip Twitter/X platform suffixes and trailing handles from a display name.
+
+    Examples
+    --------
+    >>> clean_twitter_display_name("Katriel Moses (@katriel) / X")
+    'Katriel Moses'
+    >>> clean_twitter_display_name("Jane Smith (@jsmith) on Twitter")
+    'Jane Smith'
+    >>> clean_twitter_display_name("Some User | Twitter")
+    'Some User'
+    >>> clean_twitter_display_name("Real Name @rehandle")
+    'Real Name'
+    >>> clean_twitter_display_name("Katriel Moses")
+    'Katriel Moses'
+    """
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return ""
+    for pattern in _TWITTER_DISPLAY_NAME_SUFFIXES:
+        updated = pattern.sub("", cleaned).strip()
+        if updated != cleaned:
+            cleaned = updated
+    return cleaned
+
 
 def _find_twitter_username(collected: dict[str, Any]) -> str | None:
     for module_name in ("whatsmyname", "username_pivot"):

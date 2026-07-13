@@ -1,0 +1,34 @@
+{
+  "props": {
+    "pageProps": {
+      "instructorsData": {
+        "cards": [
+          {
+            "title": "Alex Johnson",
+            "subtitle": "Senior Penetration Tester",
+            "description": "Alex has been breaking things professionally for over a decade, with a focus on red team operations and adversary emulation for the financial sector.",
+            "references": [
+              "https://www.linkedin.com/in/alex-johnson-osint"
+            ],
+            "button": {
+              "label": "View profile",
+              "target": "https://ine.com/search?q=Alex+Johnson"
+            }
+          },
+          {
+            "title": "Maria Santos",
+            "subtitle": "Red Team Lead",
+            "description": "Maria leads red team engagements and has published widely on detection engineering and purple team exercises.",
+            "references": [
+              "https://www.linkedin.com/in/maria-santos-redteam"
+            ],
+            "button": {
+              "label": "View profile",
+              "target": "https://ine.com/search?q=Maria+Santos"
+            }
+          }
+        ]
+      }
+    }
+  }
+}
