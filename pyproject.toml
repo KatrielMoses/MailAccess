@@ -89,6 +89,22 @@ packages = ["backend", "cli"]
 "data/subdomain_wordlist.txt" = "data/subdomain_wordlist.txt"
 "data/wmn_sites.json" = "data/wmn_sites.json"
 
+[tool.hatch.build.targets.sdist.force-include]
+"data/breach_aliases.json" = "data/breach_aliases.json"
+"data/common_names.json" = "data/common_names.json"
+"data/disposable_domains.json" = "data/disposable_domains.json"
+"data/fediverse_instances.json" = "data/fediverse_instances.json"
+"data/harvester_sources.json" = "data/harvester_sources.json"
+"data/industry_vocabulary.json" = "data/industry_vocabulary.json"
+"data/mailaccess-extra-sites.json" = "data/mailaccess-extra-sites.json"
+"data/nexfil_sites.json" = "data/nexfil_sites.json"
+"data/reset_signals.json" = "data/reset_signals.json"
+"data/role_prefixes.json" = "data/role_prefixes.json"
+"data/service_categories.yaml" = "data/service_categories.yaml"
+"data/sherlock_sites.json" = "data/sherlock_sites.json"
+"data/subdomain_wordlist.txt" = "data/subdomain_wordlist.txt"
+"data/wmn_sites.json" = "data/wmn_sites.json"
+
 [tool.ruff]
 line-length = 100
 
