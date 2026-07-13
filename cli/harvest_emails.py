@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -46,14 +47,19 @@ if sys.platform == "win32":
 
 from rich.console import Console
 from rich.live import Live
+from rich.prompt import Confirm
 from rich.table import Table
 
+from backend.config import settings
 from backend.core.domain_harvest_orchestrator import run_domain_harvest
 from backend.core.domain_harvest_report import (
     format_harvest_cli_output,
     serialise_harvest_for_export,
 )
 from backend.core.email_extraction import validate_domain
+from backend.core.name_classifier import is_ml_available
+
+_ML_PREF_VALUES = {"ask", "on", "off"}
 
 
 def _resolve_export_path(export: str) -> Path:
@@ -72,6 +78,51 @@ def _is_proxy_fail(status: str, errors: list[str]) -> bool:
             for e in errors
         )
     )
+
+
+def _persist_ml_pref(value: str) -> None:
+    env_path = Path.home() / ".mailaccess" / ".env"
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    from dotenv import set_key
+
+    set_key(str(env_path), "ML_NAME_CLASSIFIER", value)
+
+
+def _maybe_prompt_ml_install(console: Console) -> None:
+    ml_pref = str(getattr(settings, "ml_name_classifier", "ask") or "ask").lower()
+    if ml_pref not in _ML_PREF_VALUES:
+        ml_pref = "ask"
+
+    if ml_pref in {"off", "on"}:
+        return
+    if is_ml_available():
+        _persist_ml_pref("on")
+        return
+
+    console.print(
+        "\n[bold]Optional: ML name classifier[/bold]"
+        "\nReduces false positives like 'Going Blue Team' being classified as a person name."
+        "\nAdds ~190MB (spaCy + en_core_web_md model). CPU-only, offline after install.\n"
+    )
+    if Confirm.ask("Install ML deps now?", default=False):
+        console.print("Installing spaCy...")
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "mailaccess[ml]"],
+            stdout=subprocess.DEVNULL,
+        )
+        console.print("Downloading en_core_web_md...")
+        subprocess.check_call(
+            [sys.executable, "-m", "spacy", "download", "en_core_web_md"],
+            stdout=subprocess.DEVNULL,
+        )
+        console.print("[green]ML classifier ready.[/green]\n")
+        _persist_ml_pref("on")
+    else:
+        _persist_ml_pref("off")
+        console.print(
+            "[dim]Skipped. Using heuristic filter. "
+            "Set ML_NAME_CLASSIFIER=ask to prompt again.[/dim]\n"
+        )
 
 
 def _format_progress_table(
@@ -248,6 +299,8 @@ def _apply_filters(
         catchall_detected=result.catchall_detected,
         confirmed_pattern=result.confirmed_pattern,
         employee_names_processed=result.employee_names_processed,
+        fetch_cache_stats=result.fetch_cache_stats,
+        metadata=dict(getattr(result, "metadata", {}) or {}),
     )
 
 
@@ -271,6 +324,7 @@ def run_harvest_emails(
     show_role: bool = False,
     full: bool = False,
     aggressive: bool = False,
+    timeout_seconds: int | None = None,
 ) -> int:
     """Run the domain email harvest and render / export results.
 
@@ -302,6 +356,12 @@ def run_harvest_emails(
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Error:[/] {exc}")
         return 2
+
+    try:
+        _maybe_prompt_ml_install(console)
+    except subprocess.CalledProcessError as exc:
+        console.print(f"[red]Error:[/] ML classifier install failed: {exc}")
+        return 3
 
     # ------------------------------------------------------------------
     # 2. MUST-FIX M3: per-invocation options are threaded as explicit
@@ -394,6 +454,7 @@ def run_harvest_emails(
             cc_max_records=cli_cc_max_records,
             cc_max_collections=cli_cc_max_collections,
             on_module_complete=_on_module_complete,
+            timeout_seconds=timeout_seconds,
         )
 
     try:

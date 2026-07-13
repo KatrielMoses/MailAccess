@@ -301,6 +301,9 @@ class Settings(BaseSettings):
     # post-scoring cap on URLs fetched per harvest.
     enable_wayback_harvest: bool = True
     wayback_max_urls: int = 100
+    # Syndication feed sweep (domain harvest mode only).
+    # Scans homepage feed links and fallback feed endpoints for author data.
+    enable_syndication_feed_sweeper: bool = False
 
     # Search-engine dorking (domain harvest mode only — Phase B1 of 0.10.0).
     # Master kill switch for the search-dork module.  The module is
@@ -328,6 +331,8 @@ class Settings(BaseSettings):
     # pattern generation, not the email-mode investigation pipeline.
     enable_employee_name_discovery: bool = True
     employee_name_max_company_pages: int = 5
+    # Optional spaCy-backed classifier. One of: ask, on, off.
+    ml_name_classifier: str = "ask"
 
     # Email pattern generation + SMTP verification (Phase C2 of 0.10.0).
     # Master kill switch for the pattern_and_verify module.  Lives in
@@ -422,12 +427,13 @@ class Settings(BaseSettings):
     #
     # ``site_discovery_max_candidates`` caps the number of probe-
     # fetched URLs after merging the sitemap / homepage / robots
-    # sources.  15 matches the spec.
+    # sources.  25 gives enough budget to probe all industry-router
+    # paths AND the top universal paths; users can override per-run.
     #
     # ``site_discovery_timeout_seconds`` is the per-request budget
     # for each sitemap / homepage / robots / probe fetch.
     harvest_aggressive: bool = False
-    site_discovery_max_candidates: int = 15
+    site_discovery_max_candidates: int = 25
     site_discovery_timeout_seconds: int = 5
 
     # Rate limiting

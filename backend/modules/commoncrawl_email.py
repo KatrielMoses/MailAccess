@@ -40,6 +40,12 @@ _MAX_SOURCE_URLS = 5  # how many source URLs we attach to each finding
 _DENSITY_THRESHOLD = 3  # >= 3 distinct CC URLs → high_density source type
 
 
+def _email_domain_matches_target(email: str, target_domain: str) -> bool:
+    _, _, email_domain = email.strip().lower().partition("@")
+    target = target_domain.strip().lower()
+    return bool(email_domain == target or email_domain.endswith(f".{target}"))
+
+
 class CommonCrawlEmailModule(BaseModule):
     name = "commoncrawl_email"
     description = (
@@ -57,6 +63,7 @@ class CommonCrawlEmailModule(BaseModule):
         max_records: int | None = None,
         max_collections: int | None = None,
         aggressive: bool | None = None,
+        signal_pool: Any | None = None,
     ) -> ModuleResult:  # type: ignore[override]
         """Harvest emails for *target*, which is a domain (not an email).
 
@@ -213,6 +220,9 @@ class CommonCrawlEmailModule(BaseModule):
             if not body:
                 continue
             for extracted in extract_emails(body, target_domain=domain):
+                on_target_domain = _email_domain_matches_target(extracted.email, domain)
+                if not on_target_domain:
+                    continue
                 bucket = email_hits.setdefault(
                     extracted.email,
                     {
@@ -227,7 +237,7 @@ class CommonCrawlEmailModule(BaseModule):
                     bucket["timestamps"].append(record.timestamp)
                 if record.collection:
                     bucket["collections"].add(record.collection)
-                if extracted.on_domain:
+                if on_target_domain:
                     bucket["first_on_domain"] = True
 
             # Phase 3: structured person extraction on the same HTML.

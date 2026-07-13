@@ -31,6 +31,7 @@ from typing import Any
 import httpx
 
 from ..config import settings
+from ..core.concurrent_fetch_cache import CachedFetch
 from ..core.email_confidence import compute_confidence_breakdown, label_for_score
 from ..core.email_extraction import extract_emails
 from ..core.role_classifier import classify_email
@@ -125,14 +126,24 @@ async def _probe_org(
         return False
 
 
-async def _fetch_homepage_org(domain: str, stealth: StealthSession) -> str | None:
+async def _fetch_homepage_org(
+    domain: str, stealth: StealthSession | CachedFetch
+) -> str | None:
     """Fetch the domain's homepage and look for a github.com/{org} link.
 
     Returns the first org slug found, or None.
+
+    ``stealth`` may be either a :class:`StealthSession` (legacy) or
+    a :class:`CachedFetch` facade (0.11.1 Phase 3).  The former
+    accepts a ``timeout=`` kwarg; the cache is GET-only and rejects
+    kwargs with :class:`TypeError`, so we strip them here.
     """
     url = f"https://{domain}"
     try:
-        response = await stealth.get(url, timeout=10.0)
+        if isinstance(stealth, CachedFetch):
+            response = await stealth.get(url)
+        else:
+            response = await stealth.get(url, timeout=10.0)
         if response.status_code != 200:
             return None
         body = response.text or ""
@@ -242,6 +253,8 @@ class GitHubOrgMembersModule(BaseModule):
         *,
         lite_mode: bool | None = None,
         use_proxies: bool = False,
+        fetch: CachedFetch | None = None,
+        signal_pool: Any | None = None,
     ) -> ModuleResult:  # type: ignore[override]
         domain = (target or "").strip().lower()
         if not domain or "." not in domain:
@@ -256,15 +269,22 @@ class GitHubOrgMembersModule(BaseModule):
         # Build a shared httpx session for the API calls.
         async with httpx.AsyncClient(follow_redirects=True) as http_session:
             # Step 1: try to derive org from homepage link.
-            try:
-                stealth_profile = resolve_timing_profile("t2")
-                stealth = StealthSession(timing_profile=stealth_profile)
-            except ImportError:
-                stealth = None
+            # 0.11.1 Phase 3 cache: when the orchestrator injects
+            # ``fetch``, route the homepage fetch through it so the
+            # run's per-run cache is consulted.  Otherwise build a
+            # fresh StealthSession with T2 pacing (legacy behaviour).
+            if fetch is not None:
+                org_slug = await _fetch_homepage_org(domain, fetch)
+            else:
+                try:
+                    stealth_profile = resolve_timing_profile("t2")
+                    stealth = StealthSession(timing_profile=stealth_profile)
+                except ImportError:
+                    stealth = None
 
-            org_slug: str | None = None
-            if stealth is not None:
-                org_slug = await _fetch_homepage_org(domain, stealth)
+                org_slug = None
+                if stealth is not None:
+                    org_slug = await _fetch_homepage_org(domain, stealth)
 
             # Step 2: if no org found on homepage, probe candidates.
             if org_slug is None:

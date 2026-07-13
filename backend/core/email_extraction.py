@@ -15,6 +15,7 @@ Two stages:
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -136,6 +137,29 @@ _ASSET_LOCAL_PREFIX_RE = re.compile(
     r"^(?:[a-zA-Z0-9_\-]*\.(?:png|jpg|jpeg|gif|svg|webp|ico|css|js|woff2?|ttf))",
     re.IGNORECASE,
 )
+_ASSET_DOMAIN_SUFFIXES = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".otf",
+    ".css",
+    ".js",
+    ".json",
+    ".xml",
+    ".pdf",
+    ".zip",
+    ".tar",
+    ".gz",
+)
+_BARE_JSON_GT_RE = re.compile(r"(?i)(?<!\\)u003e")
+_ASSET_VERSION_DOMAIN_RE = re.compile(r"x\d+|\d+x", re.IGNORECASE)
 
 _SAFE_BODY_CHARS = 50  # length of the surrounding snippet captured as evidence
 
@@ -268,6 +292,13 @@ def _deobfuscate(text: str) -> str:
     return rewritten
 
 
+def _decode_text_entities(text: str) -> str:
+    """Decode HTML entities and JSON-unicode escapes before regex extraction."""
+    decoded = html.unescape(text)
+    decoded = decoded.encode().decode("unicode_escape", errors="ignore")
+    return _BARE_JSON_GT_RE.sub(">", decoded)
+
+
 def _looks_like_email(value: str) -> bool:
     if "@" not in value:
         return False
@@ -291,6 +322,12 @@ def _is_garbage(local: str, domain: str, full: str) -> bool:
     if domain.startswith(".") or domain.endswith("."):
         return True
     if _ASSET_LOCAL_PREFIX_RE.match(local):
+        return True
+    if domain.endswith(_ASSET_DOMAIN_SUFFIXES):
+        return True
+    if "@" in domain:
+        return True
+    if re.match(r"^\d", local) and _ASSET_VERSION_DOMAIN_RE.search(domain):
         return True
     # Version-y numeric local parts ("1.2.3") — too noisy.
     if re.fullmatch(r"\d+(?:\.\d+)+", local):
@@ -392,9 +429,11 @@ def extract_emails(text: str, target_domain: str | None = None) -> list[Extracte
 
     target = target_domain.strip().lower() if target_domain else None
 
+    decoded_text = _decode_text_entities(text)
+
     # Step 1: deobfuscate.  We keep the original text around for snippet
     # extraction so the user sees what the page actually said.
-    deobfuscated = _deobfuscate(text)
+    deobfuscated = _deobfuscate(decoded_text)
 
     # Step 2: regex.  Run twice — once on the original text, once on
     # the deobfuscated text — and merge.  The original pass catches
@@ -403,7 +442,7 @@ def extract_emails(text: str, target_domain: str | None = None) -> list[Extracte
     raw_matches: list[tuple[str, int, int]] = []
     for match in EMAIL_REGEX.finditer(deobfuscated):
         raw_matches.append((match.group(0).lower(), match.start(), match.end()))
-    for match in EMAIL_REGEX.finditer(text):
+    for match in EMAIL_REGEX.finditer(decoded_text):
         raw_matches.append((match.group(0).lower(), match.start(), match.end()))
 
     # MUST-FIX M6: explicit ``mailto:`` pre-processing. The regex above
@@ -416,7 +455,7 @@ def extract_emails(text: str, target_domain: str | None = None) -> list[Extracte
     #     (the deobfuscator now normalises the captured value)
     #   - HTML-escaped ampersands: ``mailto:foo&amp;bar@x.com``
     #     (rare but seen in old CMSes)
-    for mailto_value in _extract_mailto_values(text):
+    for mailto_value in _extract_mailto_values(decoded_text):
         # Use a synthetic span at position 0 so the snippet reflects
         # only the mailto value (the surrounding HTML is its own context).
         # But for actual snippets we want surrounding text — use the

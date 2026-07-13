@@ -52,6 +52,7 @@ truth for this decision.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import re
@@ -61,24 +62,20 @@ from typing import Any
 
 from ..config import settings
 from ..modules.base import ModuleResult, ModuleStatus
-from ..modules.code_and_cert_email import CodeAndCertEmailModule
-from ..modules.commoncrawl_email import CommonCrawlEmailModule
 from ..modules.domain_intel import _FREE_PROVIDERS
-from ..modules.email_search_dork import EmailSearchDorkModule
-from ..modules.employee_name_discovery import EmployeeNameDiscoveryModule
-from ..modules.github_org_members import GitHubOrgMembersModule
-from ..modules.npm_email import NpmEmailModule
 from ..modules.pattern_and_verify import (
     EmployeeNameResult,
-    PatternAndVerifyModule,
     employee_name_result_from_dict,
 )
-from ..modules.pgp_domain_email import PgpDomainEmailModule
-from ..modules.pypi_email import PyPIEmailModule
-from ..modules.wayback import WaybackDomainHarvestModule
-from .email_confidence import compute_confidence, compute_confidence_breakdown
+from .concurrent_fetch_cache import CachedFetch, ConcurrentFetchCache
+from .context_router import IndustryVocabularyResult, IndustryVocabularyRouter
+from .email_confidence import compute_confidence, compute_confidence_breakdown, label_for_score
 from .email_extraction import subaddress_key
+from .role_classifier import classify_email
 from .hunter_client import search_domain as hunter_search
+from .signal_pool import AsyncSignalPool
+from .stealth_client import StealthSession, resolve_timing_profile
+from .time_budget import TimeBudget, budget_for_profile
 
 _LOG = logging.getLogger(__name__)
 
@@ -92,6 +89,8 @@ MODULE_EMPLOYEE_NAMES = "employee_name_discovery"
 MODULE_NPM_EMAIL = "npm_email"
 MODULE_PYPI_EMAIL = "pypi_email"
 MODULE_PGP_DOMAIN_EMAIL = "pgp_domain_email"
+MODULE_SYNDICATION_FEED_SWEEPER = "syndication_feed_sweeper"
+MODULE_CONTENT_INTELLIGENCE = "content_intelligence"
 MODULE_PATTERN_VERIFY = "pattern_and_verify"
 MODULE_GITHUB_ORG_MEMBERS = "github_org_members"  # 0.11.1 Phase 4
 _PROXY_AWARE_MODULES = {
@@ -148,6 +147,12 @@ class HarvestedEmail:
     # JSON export in full so downstream tooling can build its own
     # explanations.
     confidence_breakdown: dict[str, Any] | None = None
+    # Signal-pool identity-cluster snapshot. This is kept separate from the
+    # source-confidence score so graph evidence is visible without silently
+    # rewriting provenance-based email scoring.
+    identity_graph_score: float | None = None
+    identity_graph_label: str | None = None
+    identity_graph_flags: list[str] = field(default_factory=list)
 
 
 # MUST-FIX M4: cap on aggregated_source_urls to keep JSON export
@@ -174,6 +179,11 @@ class DomainHarvestResult:
     catchall_detected: bool | None = None
     confirmed_pattern: str | None = None
     employee_names_processed: int = 0
+    # 0.11.1 Phase 3 cache: hits / misses / evictions from the
+    # per-run ConcurrentFetchCache.  ``None`` when the cache was
+    # disabled (e.g. curl-cffi unavailable in the test environment).
+    fetch_cache_stats: dict[str, int] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _normalize_module_result(
@@ -340,9 +350,147 @@ def _extract_source_types(finding: dict[str, Any]) -> list[str]:
     return out
 
 
+def _finding_confidence(meta: dict[str, Any]) -> float:
+    value = meta.get("confidence_score") or meta.get("confidence") or 0.5
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def _emit_finding_signals(
+    signal_pool: Any | None,
+    module_name: str,
+    findings: list[dict[str, Any]] | None,
+    domain: str,
+) -> None:
+    """Mirror ModuleResult findings into the shared signal pool."""
+    if signal_pool is None:
+        return
+    for finding in findings or []:
+        meta = finding.get("metadata") or {}
+        if not isinstance(meta, dict):
+            continue
+        confidence = _finding_confidence(meta)
+        email = _extract_email(finding)
+        if email and hasattr(signal_pool, "emit_email"):
+            signal_pool.emit_email(
+                email,
+                module_name,
+                confidence,
+                domain=email.rsplit("@", 1)[-1].lower(),
+                name=meta.get("name") or meta.get("person_name"),
+            )
+        name = meta.get("name") or meta.get("person_name")
+        if isinstance(name, str) and name.strip() and hasattr(signal_pool, "emit_name"):
+            signal_pool.emit_name(
+                name,
+                module_name,
+                confidence,
+                domain=domain,
+                email=email,
+            )
+
+
+def _pattern_shape_for_email(email: str) -> str | None:
+    local = email.rsplit("@", 1)[0].lower()
+    if "." in local:
+        parts = [p for p in local.split(".") if p]
+        if len(parts) == 2 and all(part.isalpha() for part in parts):
+            return "{first}.{last}@{domain}"
+    if "_" in local:
+        parts = [p for p in local.split("_") if p]
+        if len(parts) == 2 and all(part.isalpha() for part in parts):
+            return "{first}_{last}@{domain}"
+    if re.fullmatch(r"[a-z][a-z]{2,}", local):
+        return "{first}@{domain}"
+    return None
+
+
+def _infer_confirmed_pattern_from_emails(
+    emails: list[HarvestedEmail],
+    signal_pool: Any | None,
+) -> str | None:
+    """Infer and publish the dominant on-domain HIGH/MEDIUM template."""
+    if signal_pool is None or not hasattr(signal_pool, "emit_confirmed_pattern"):
+        return None
+    counts: dict[str, int] = {}
+    for entry in emails:
+        if not entry.on_domain or entry.confidence_label not in {"HIGH", "MEDIUM"}:
+            continue
+        shape = _pattern_shape_for_email(entry.email)
+        if shape is not None:
+            counts[shape] = counts.get(shape, 0) + 1
+    if not counts:
+        return None
+    dominant = max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+    signal_pool.emit_confirmed_pattern(dominant)
+    return dominant
+
+
+def _name_matches_email_local(name: str, local_part: str) -> bool:
+    tokens = [t.lower() for t in re.findall(r"[a-zA-Z]+", name)]
+    if len(tokens) < 2:
+        return False
+    local = re.sub(r"[^a-z0-9]", "", local_part.lower())
+    first, last = tokens[0], tokens[-1]
+    return (
+        (first in local and last in local)
+        or local.startswith(first[:1] + last)
+        or local.startswith(first + last[:1])
+        or local == f"{first[:1]}{last}"
+    )
+
+
+def _apply_signal_pool_correlation(
+    emails: list[HarvestedEmail],
+    signal_pool: Any | None,
+) -> None:
+    """Boost emails when a matching name was discovered by another source."""
+    if signal_pool is None or not hasattr(signal_pool, "get_names_for_domain"):
+        return
+    for entry in emails:
+        if "@" not in entry.email:
+            continue
+        if entry.is_role:
+            continue
+        local, domain = entry.email.rsplit("@", 1)
+        if entry.is_pgp_or_ca and len(local) < 3:
+            continue
+        for name_signal in signal_pool.get_names_for_domain(domain):
+            name = str(name_signal.get("name") or "")
+            if not _name_matches_email_local(name, local):
+                continue
+            source_modules = set(entry.found_by_modules)
+            name_sources = set(name_signal.get("sources") or [])
+            if source_modules and name_sources and source_modules >= name_sources:
+                continue
+            entry.confidence_score = round(entry.confidence_score * 2.5, 4)
+            entry.confidence_label = label_for_score(entry.confidence_score)
+            entry.evidence.append(
+                {
+                    "module": "signal_pool",
+                    "metadata": {
+                        "signal_type": "cross_module_name_email_correlation",
+                        "name": name,
+                        "sources": sorted(name_sources),
+                        "boost": "worksFor",
+                    },
+                }
+            )
+            if entry.confidence_breakdown is not None:
+                entry.confidence_breakdown["signal_pool_correlation"] = {
+                    "name": name,
+                    "boost": "worksFor",
+                }
+            break
+
+
 def _aggregate(
     harvest_domain: str,
     module_results: dict[str, ModuleResult],
+    signal_pool: Any | None = None,
+    identity_clusters: list[Any] | None = None,
 ) -> list[HarvestedEmail]:
     """Group findings across modules, dedup by email, aggregate confidence.
 
@@ -430,6 +578,11 @@ def _aggregate(
 
             # OR-semantics on role: any source flagging role wins.
             is_role, role_match = _extract_role(finding)
+            if not is_role:
+                role_classification = classify_email(email)
+                if role_classification.is_role:
+                    is_role = True
+                    role_match = role_classification.match_type
             if is_role:
                 entry.is_role = True
                 if role_match:
@@ -580,7 +733,47 @@ def _aggregate(
             entry.confidence_breakdown = current_breakdown
         final.append(entry)
 
+    _apply_signal_pool_correlation(final, signal_pool)
+    _apply_identity_cluster_snapshot(final, identity_clusters)
+    _infer_confirmed_pattern_from_emails(final, signal_pool)
     return final
+
+
+def _apply_identity_cluster_snapshot(
+    emails: list[HarvestedEmail], clusters: list[Any] | None
+) -> None:
+    """Attach signal-pool identity cluster evidence to harvested emails."""
+    if not clusters:
+        return
+    by_email: dict[str, Any] = {}
+    for cluster in clusters:
+        for signal in getattr(cluster, "signals", ()):
+            if getattr(signal, "kind", "") != "email":
+                continue
+            value = str(getattr(signal, "value", "") or "").strip().lower()
+            if value:
+                by_email[value] = cluster
+    for entry in emails:
+        cluster = by_email.get(entry.email.lower())
+        if cluster is None:
+            cluster = next(
+                (by_email.get(variant.lower()) for variant in entry.subaddress_variants if by_email.get(variant.lower())),
+                None,
+            )
+        if cluster is None:
+            continue
+        score = float(getattr(cluster, "score", 0.0) or 0.0)
+        tier = getattr(cluster, "export_tier", None)
+        flags = sorted(getattr(cluster, "boost_flags", set()) or set())
+        entry.identity_graph_score = round(score, 4)
+        entry.identity_graph_label = tier
+        entry.identity_graph_flags = flags
+        if entry.confidence_breakdown is not None:
+            entry.confidence_breakdown["identity_graph"] = {
+                "score": entry.identity_graph_score,
+                "label": tier,
+                "flags": flags,
+            }
 
 
 # ---------------------------------------------------------------------
@@ -666,6 +859,11 @@ async def _safe_phase12_run(
     aggressive: bool = False,
     use_proxies: bool = False,
     proxy_fallback_ok: bool = False,
+    fetch: CachedFetch | None = None,
+    candidate_paths: tuple[str, ...] = (),
+    signal_pool: Any | None = None,
+    budget: TimeBudget | None = None,
+    soft_timeout: float | None = None,
 ) -> tuple[str, ModuleResult]:
     """Run a Phase 1+2 module with its optional kwargs.
 
@@ -683,6 +881,13 @@ async def _safe_phase12_run(
     threaded down.  Common Crawl picks them up via ``max_collections``
     / ``aggressive``; Wayback picks them up via ``aggressive`` +
     ``max_urls``; the rest ignore both.
+
+    0.11.1 Phase 3 cache: ``fetch`` is the :class:`CachedFetch`
+    facade wrapping the per-run :class:`ConcurrentFetchCache`.
+    Modules that touch HTTP (email_search_dork, wayback,
+    github_org_members) accept it and route their requests through
+    it; the rest silently ignore it via the signature-aware kwarg
+    filter.
     """
     kwargs: dict[str, Any] = {}
     if name == MODULE_COMMONCRAWL:
@@ -705,19 +910,41 @@ async def _safe_phase12_run(
         # strict_proxy: True = raise on proxy failure (default when --use-proxies)
         #               False = allow direct fallback (when --proxy-fallback-ok)
         kwargs["strict_proxy"] = not proxy_fallback_ok
+    if fetch is not None:
+        kwargs["fetch"] = fetch
+    if candidate_paths and name == MODULE_EMPLOYEE_NAMES:
+        kwargs["candidate_paths"] = candidate_paths
+    if signal_pool is not None:
+        kwargs["signal_pool"] = signal_pool
     accepted = _kwargs_accepted(module)
     try:
         if accepted is None:
             # Generic callable — pass everything.
-            result = await module.run(domain, **kwargs)
-            return name, _normalize_module_result(name, result)
+            result = await _run_with_soft_timeout(
+                name,
+                module.run(domain, **kwargs),
+                budget,
+                soft_timeout=soft_timeout,
+            )
+            normalized = _normalize_module_result(name, result)
+            _emit_finding_signals(signal_pool, name, normalized.findings, domain)
+            return name, normalized
         filtered = {k: v for k, v in kwargs.items() if k in accepted}
-        result = await module.run(domain, **filtered)
-        return name, _normalize_module_result(name, result)
+        result = await _run_with_soft_timeout(
+            name,
+            module.run(domain, **filtered),
+            budget,
+            soft_timeout=soft_timeout,
+        )
+        normalized = _normalize_module_result(name, result)
+        _emit_finding_signals(signal_pool, name, normalized.findings, domain)
+        return name, normalized
     except TypeError:
         # Mocks that don't accept our kwargs — fall back to positional.
-        result = await module.run(domain)
-        return name, _normalize_module_result(name, result)
+        result = await _run_with_soft_timeout(name, module.run(domain), budget, soft_timeout=soft_timeout)
+        normalized = _normalize_module_result(name, result)
+        _emit_finding_signals(signal_pool, name, normalized.findings, domain)
+        return name, normalized
     except Exception as exc:  # noqa: BLE001
         _LOG.warning(
             "domain_harvest: %s crashed: %s", name, exc
@@ -728,12 +955,47 @@ async def _safe_phase12_run(
         )
 
 
+def _consume_background_module_result(task: asyncio.Task[Any]) -> None:
+    with contextlib.suppress(BaseException):
+        task.result()
+
+
+async def _run_with_soft_timeout(
+    module_name: str,
+    awaitable: Any,
+    budget: TimeBudget | None,
+    *,
+    soft_timeout: float | None = None,
+) -> ModuleResult:
+    if soft_timeout is None and budget is not None:
+        soft_timeout = budget.soft_timeout_for_module()
+    if soft_timeout is None:
+        return await awaitable
+    task = asyncio.create_task(awaitable)
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=soft_timeout)
+    except asyncio.TimeoutError:
+        task.add_done_callback(_consume_background_module_result)
+        _LOG.warning(
+            "Module %s exceeded soft timeout %.1fs - returning empty result",
+            module_name,
+            soft_timeout,
+        )
+        return ModuleResult(
+            status=ModuleStatus.PARTIAL,
+            findings=[],
+            errors=[f"Soft timeout after {soft_timeout:.1f}s"],
+        )
+
+
 async def _run_pattern(
     pattern: Any,
     domain: str,
     *,
     employee_names: list[EmployeeNameResult],
     enable_smtp: bool | None = None,
+    signal_pool: Any | None = None,
+    budget: TimeBudget | None = None,
 ) -> ModuleResult:
     """Run pattern_and_verify with explicit kwargs.
 
@@ -751,8 +1013,265 @@ async def _run_pattern(
         and (pattern_accepted is None or "enable_smtp" in pattern_accepted)
     ):
         pattern_kwargs["enable_smtp"] = enable_smtp
-    result = await pattern.run(domain, **pattern_kwargs)
-    return _normalize_module_result(pattern.name, result)
+    if signal_pool is not None and (
+        pattern_accepted is None or "signal_pool" in pattern_accepted
+    ):
+        pattern_kwargs["signal_pool"] = signal_pool
+    result = await _run_with_soft_timeout(
+        pattern.name,
+        pattern.run(domain, **pattern_kwargs),
+        budget,
+    )
+    normalized = _normalize_module_result(pattern.name, result)
+    _emit_finding_signals(signal_pool, pattern.name, normalized.findings, domain)
+    return normalized
+
+
+async def route_sitemap_content(
+    domain: str,
+    fetch: CachedFetch,
+    *,
+    pool: Any | None = None,
+    max_urls: int = 50,
+) -> list[str]:
+    """Discover sitemap-backed content hubs and stream them through extractors.
+
+    This is the orchestration hook for the new sitemap router.  It keeps the
+    routing logic separate from ``run_domain_harvest`` so callers can opt into
+    the content sweep without forcing the email harvest pipeline to do extra
+    live work by default.
+    """
+    from .pagination_handler import PaginationHandler
+    from .schema_content_extractor import SchemaContentExtractor
+    from .signal_pool import AsyncSignalPool
+    from .sitemap_content_router import SitemapContentRouter
+
+    router = SitemapContentRouter()
+    urls = await router.route(domain, fetch, max_urls=max_urls)
+    if not urls:
+        return []
+
+    owns_pool = pool is None
+    content_pool = pool if pool is not None else AsyncSignalPool()
+    paginator = PaginationHandler(fetch)
+    extractor = SchemaContentExtractor(content_pool)
+
+    try:
+        for content_url in urls:
+            async for page_url, raw_bytes in paginator.paginate(content_url):
+                await extractor.extract_from_html(
+                    raw_bytes,
+                    page_url=page_url,
+                    target_domain=domain,
+                )
+    finally:
+        if owns_pool:
+            await content_pool.close()
+
+    return urls
+
+
+async def _route_industry_candidates(
+    domain: str,
+    fetch: CachedFetch | None,
+) -> IndustryVocabularyResult:
+    """Run the homepage vocabulary router before harvest modules fire."""
+    homepage = ""
+    if fetch is not None:
+        try:
+            response = await fetch.get(f"https://{domain}/")
+            homepage = getattr(response, "text", "") or ""
+        except Exception as exc:  # noqa: BLE001
+            _LOG.debug("domain_harvest: industry router homepage fetch failed: %s", exc)
+    return IndustryVocabularyRouter().route(homepage)
+
+
+def _content_finding_from_email(
+    *,
+    email: str,
+    domain: str,
+    source_url: str = "",
+    name: str | None = None,
+    source_type: str = "content_intelligence",
+    confidence_score: float = 0.7,
+) -> dict[str, Any]:
+    local_part = email.split("@", 1)[0] if "@" in email else ""
+    return {
+        "platform": MODULE_CONTENT_INTELLIGENCE,
+        "profile_url": source_url or email,
+        "username": local_part,
+        "confidence": "high" if confidence_score >= 0.7 else "medium",
+        "metadata": {
+            "email": email,
+            "name": name,
+            "on_domain": email.rsplit("@", 1)[-1].lower() == domain,
+            "source": MODULE_CONTENT_INTELLIGENCE,
+            "source_url": source_url,
+            "source_type": source_type,
+            "confidence_score": round(confidence_score, 4),
+        },
+    }
+
+
+async def discover_and_extract_content(
+    *,
+    domain: str,
+    session: Any,
+    signal_pool: Any | None = None,
+    fetch_cache: CachedFetch | None = None,
+    cache: CachedFetch | None = None,
+    aggressive: bool = False,
+    candidate_paths: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    """Run the content-intelligence extraction phase and return findings.
+
+    This adapter wires the previously isolated content helpers into the
+    harvest shape consumed by ``_aggregate`` without changing the legacy
+    aggregation logic.
+    """
+    from .company_page_names import discover_and_extract
+    from .hydration_extractor import HydrationDataExtractor
+    from .pagination_handler import PaginationHandler
+    from .schema_content_extractor import SchemaContentExtractor
+    from .signal_pool import AsyncSignalPool
+    from .sitemap_content_router import SitemapContentRouter
+
+    fetch = fetch_cache or cache
+    if session is None and fetch is None:
+        return []
+    owns_pool = signal_pool is None
+    pool = signal_pool if signal_pool is not None else AsyncSignalPool(export_threshold=0.0)
+    findings: list[dict[str, Any]] = []
+    seen_emails: set[str] = set()
+
+    def add_email(
+        email: str | None,
+        *,
+        source_url: str = "",
+        name: str | None = None,
+        source_type: str = MODULE_CONTENT_INTELLIGENCE,
+        confidence_score: float = 0.7,
+    ) -> None:
+        if not email or "@" not in email:
+            return
+        cleaned_email = email.strip().lower()
+        if not cleaned_email or cleaned_email in seen_emails:
+            return
+        seen_emails.add(cleaned_email)
+        findings.append(
+            _content_finding_from_email(
+                email=cleaned_email,
+                domain=domain,
+                source_url=source_url,
+                name=name,
+                source_type=source_type,
+                confidence_score=confidence_score,
+            )
+        )
+
+    try:
+        records = await discover_and_extract(
+            domain,
+            session,
+            aggressive=aggressive,
+            max_candidates=max(
+                1,
+                int(getattr(settings, "site_discovery_max_candidates", 15) or 15),
+            ),
+            timeout=max(
+                1.0,
+                float(getattr(settings, "site_discovery_timeout_seconds", 5) or 5),
+            ),
+            candidate_paths=candidate_paths,
+        )
+        for record in records:
+            add_email(
+                getattr(record, "email", None),
+                source_url=getattr(record, "page_url", "") or "",
+                name=getattr(record, "name", None),
+                source_type=getattr(record, "source_type", MODULE_CONTENT_INTELLIGENCE),
+                confidence_score=float(getattr(record, "confidence", 0.7) or 0.7),
+            )
+
+        if fetch is not None:
+            router = SitemapContentRouter()
+            paginator = PaginationHandler(fetch)
+            schema_extractor = SchemaContentExtractor(pool)
+            hydration_extractor = HydrationDataExtractor(pool)
+            routed_urls = await router.route(domain, fetch, max_urls=50)
+            for content_url in routed_urls:
+                async for page_url, raw_bytes in paginator.paginate(content_url):
+                    await schema_extractor.extract_from_html(
+                        raw_bytes,
+                        page_url=page_url,
+                        target_domain=domain,
+                    )
+                    await hydration_extractor.extract_from_html(
+                        raw_bytes,
+                        page_url=page_url,
+                    )
+
+        if owns_pool:
+            await pool.close()
+        for cluster in await pool.all_candidates():
+            for signal in cluster.signals:
+                meta = signal.metadata or {}
+                person = meta.get("person") if isinstance(meta, dict) else None
+                email = None
+                if signal.kind == "email":
+                    email = signal.value
+                elif isinstance(person, dict):
+                    email = person.get("email")
+                add_email(
+                    email,
+                    source_url=str(meta.get("page_url") or ""),
+                    name=str(meta.get("name") or "") or None,
+                    source_type=str(meta.get("source_type") or signal.source),
+                    confidence_score=max(0.7, float(cluster.score or 0.0)),
+                )
+    finally:
+        if owns_pool:
+            await pool.close()
+
+    return findings
+
+
+async def _run_content_intelligence(
+    domain: str,
+    session: Any,
+    fetch: CachedFetch | None,
+    *,
+    aggressive: bool,
+    candidate_paths: tuple[str, ...],
+    discover_callable: Any,
+) -> tuple[str, ModuleResult]:
+    try:
+        findings = await discover_callable(
+            domain=domain,
+            session=session,
+            signal_pool=None,
+            fetch_cache=fetch,
+            aggressive=aggressive,
+            candidate_paths=candidate_paths,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("domain_harvest: content intelligence crashed: %s", exc)
+        return MODULE_CONTENT_INTELLIGENCE, ModuleResult(
+            status=ModuleStatus.FAILED,
+            findings=[],
+            errors=[f"{MODULE_CONTENT_INTELLIGENCE}: {exc}"],
+            metadata={"domain": domain},
+        )
+    if isinstance(findings, ModuleResult):
+        return MODULE_CONTENT_INTELLIGENCE, _normalize_module_result(
+            MODULE_CONTENT_INTELLIGENCE, findings
+        )
+    safe_findings = [f for f in (findings or []) if isinstance(f, dict)]
+    return MODULE_CONTENT_INTELLIGENCE, ModuleResult(
+        status=ModuleStatus.SUCCESS if safe_findings else ModuleStatus.PARTIAL,
+        findings=safe_findings,
+        metadata={"domain": domain, "findings": len(safe_findings)},
+    )
 
 
 # ---------------------------------------------------------------------
@@ -770,8 +1289,10 @@ async def run_domain_harvest(
     npm_module: Any | None = None,
     pypi_module: Any | None = None,
     pgp_module: Any | None = None,
+    syndication_module: Any | None = None,
     github_org_module: Any | None = None,
     pattern_module: Any | None = None,
+    content_intelligence_callable: Any | None = None,
     dork_lite_mode: bool | None = None,
     cc_max_records: int | None = None,
     cc_max_collections: int | None = None,
@@ -779,6 +1300,8 @@ async def run_domain_harvest(
     use_proxies: bool = False,
     proxy_fallback_ok: bool = False,
     on_module_complete: Any | None = None,
+    timeout_seconds: float | None = None,
+    enable_email_identity_enrichment: bool | None = None,
 ) -> DomainHarvestResult:
     """Run all nine harvest modules in the recommended sequence.
 
@@ -831,46 +1354,55 @@ async def run_domain_harvest(
     npm_module / pypi_module / pgp_module:
         W5 injection points for the three new structured-source
         modules. Same contract as the other *_module kwargs.
+    syndication_module:
+        Optional feed-sweeper injection point. Crawls RSS / Atom
+        feeds discovered from the homepage and publishes author data.
     wayback_module:
         0.11.1 Phase 3 injection point for Wayback domain harvest.
         Defaults to a real :class:`WaybackDomainHarvestModule`.
     """
-    cleaned = _validate_domain(domain)
+    from .harvest_runner import run_adaptive_harvest
 
-    # ------------------------------------------------------------------
-    # 1. Instantiate the nine modules (or accept injected mocks).
-    # ------------------------------------------------------------------
-    cc = cc_module if cc_module is not None else CommonCrawlEmailModule()
-    wayback = wayback_module if wayback_module is not None else WaybackDomainHarvestModule()
-    cc_cert = code_cert_module if code_cert_module is not None else CodeAndCertEmailModule()
-    dork = dork_module if dork_module is not None else EmailSearchDorkModule()
-    emp = employee_module if employee_module is not None else EmployeeNameDiscoveryModule()
-    npm = npm_module if npm_module is not None else NpmEmailModule()
-    pypi = pypi_module if pypi_module is not None else PyPIEmailModule()
-    pgp = pgp_module if pgp_module is not None else PgpDomainEmailModule()
-    github = github_org_module if github_org_module is not None else GitHubOrgMembersModule()
-    pattern = pattern_module if pattern_module is not None else PatternAndVerifyModule()
+    profile = getattr(settings, "harvest_timing_profile", "t2")
+    total = timeout_seconds or budget_for_profile(profile)
+    module_overrides = {
+        name: module
+        for name, module in {
+            MODULE_COMMONCRAWL: cc_module,
+            MODULE_WAYBACK_DOMAIN: wayback_module,
+            MODULE_CODE_CERT: code_cert_module,
+            MODULE_EMAIL_DORK: dork_module,
+            MODULE_EMPLOYEE_NAMES: employee_module,
+            MODULE_NPM_EMAIL: npm_module,
+            MODULE_PYPI_EMAIL: pypi_module,
+            MODULE_PGP_DOMAIN_EMAIL: pgp_module,
+            MODULE_SYNDICATION_FEED_SWEEPER: syndication_module,
+            MODULE_GITHUB_ORG_MEMBERS: github_org_module,
+            MODULE_PATTERN_VERIFY: pattern_module,
+        }.items()
+        if module is not None
+    }
 
-    return await _orchestrate(
-        cleaned,
-        cc,
-        wayback,
-        cc_cert,
-        dork,
-        emp,
-        npm,
-        pypi,
-        pgp,
-        github,
-        pattern,
+    # Injected modules are the isolated/mock path used by the orchestrator
+    # tests and embedders. Disable network-heavy identity enrichment there by
+    # default; production calls without injected modules keep it enabled.
+    if enable_email_identity_enrichment is None:
+        enable_email_identity_enrichment = not bool(module_overrides)
+
+    return await run_adaptive_harvest(
+        domain=domain,
+        timeout_seconds=total,
         enable_smtp=enable_smtp,
+        use_proxies=use_proxies,
+        aggressive=aggressive,
+        timing_profile=profile,
+        module_overrides=module_overrides,
+        on_module_complete=on_module_complete,
         dork_lite_mode=dork_lite_mode,
         cc_max_records=cc_max_records,
         cc_max_collections=cc_max_collections,
-        aggressive=aggressive,
-        use_proxies=use_proxies,
         proxy_fallback_ok=proxy_fallback_ok,
-        on_module_complete=on_module_complete,
+        enable_email_identity_enrichment=enable_email_identity_enrichment,
     )
 
 
@@ -969,8 +1501,11 @@ async def _orchestrate(
     npm: Any,
     pypi: Any,
     pgp: Any,
+    syndication: Any,
     github_org: Any,
     pattern: Any,
+    content_intelligence: Any,
+    content_fetch_enabled: bool,
     *,
     enable_smtp: bool = False,
     dork_lite_mode: bool | None = None,
@@ -980,6 +1515,7 @@ async def _orchestrate(
     use_proxies: bool = False,
     proxy_fallback_ok: bool = False,
     on_module_complete: Any | None = None,
+    budget: TimeBudget | None = None,
 ) -> DomainHarvestResult:
     """Inner orchestration — runs the 9 modules in sequence.
 
@@ -1038,172 +1574,320 @@ async def _orchestrate(
 
     started = datetime.now(timezone.utc)
     started_iso = started.isoformat().replace("+00:00", "Z")
+    signal_pool = AsyncSignalPool(export_threshold=0.0)
 
     # ------------------------------------------------------------------
-    # Phase 1+2 — concurrent run of all data modules
-    # MUST-FIX S5: ``asyncio.as_completed`` so we can fire the
-    # ``on_module_complete`` callback as each module finishes, instead
-    # of waiting for ``gather`` to return all at once.
-    # W5: the three new structured-source modules (npm, pypi, pgp)
-    # slot in here and run alongside commoncrawl_email and
-    # code_and_cert_email — same parallel budget, no sequencing.
-    # 0.11.1 Phase 3: wayback_domain_harvest joins Phase 1 alongside
-    # Common Crawl — different upstream, no shared rate budget.
-    # 0.11.1 Phase 4: github_org_members and Hunter.io join Phase 1.
-    # Hunter.io is not a BaseModule — it is a direct function call
-    # wrapped in _run_hunter below.
+    # 0.11.1 Phase 3: build the per-run HTTP cache.
+    #
+    # Every module in the new architecture fetches bytes through this
+    # cache rather than invoking StealthSession directly, so duplicate
+    # URLs across modules collapse to a single underlying request.
+    # The cache owns one StealthSession for the run; it is created
+    # here, passed to the modules via ``fetch=`` below, and torn down
+    # in the ``finally`` block so no state leaks across runs.
+    #
+    # If StealthSession cannot be constructed (curl-cffi missing in
+    # some test environment), we still wire the orchestrator together
+    # and let modules fall back to their own transports — the cache
+    # is best-effort, not load-bearing for tests.
     # ------------------------------------------------------------------
-    phase12_coroutines = [
-        _safe_phase12_run(
-            MODULE_COMMONCRAWL,
-            cc,
-            domain,
-            cc_max_records=cc_max_records,
-            cc_max_collections=cc_max_collections,
-            aggressive=aggressive,
-        ),
-        _safe_phase12_run(
-            MODULE_WAYBACK_DOMAIN,
-            wayback,
-            domain,
-            aggressive=aggressive,
-        ),
-        _safe_phase12_run(MODULE_CODE_CERT, cc_cert, domain),
-        _safe_phase12_run(
-            MODULE_EMAIL_DORK,
-            dork,
-            domain,
-            dork_lite_mode=dork_lite_mode,
-            aggressive=aggressive,
-            use_proxies=use_proxies,
-            proxy_fallback_ok=proxy_fallback_ok,
-        ),
-        _safe_phase12_run(
-            MODULE_EMPLOYEE_NAMES,
-            emp,
-            domain,
-            use_proxies=use_proxies,
-            proxy_fallback_ok=proxy_fallback_ok,
-        ),
-        _safe_phase12_run(MODULE_NPM_EMAIL, npm, domain),
-        _safe_phase12_run(MODULE_PYPI_EMAIL, pypi, domain),
-        _safe_phase12_run(MODULE_PGP_DOMAIN_EMAIL, pgp, domain),
-        _safe_phase12_run(MODULE_GITHUB_ORG_MEMBERS, github_org, domain),
-        _run_hunter(domain, settings.hunter_io_api_key),
-    ]
-    phase12_results: dict[str, ModuleResult] = {}
-    for fut in asyncio.as_completed(phase12_coroutines):
+    cache: ConcurrentFetchCache | None = None
+    fetch: CachedFetch | None = None
+    cache_session: StealthSession | None = None
+    cache_stats: dict[str, int] = {}
+    try:
         try:
-            outcome = await fut
-        except BaseException as exc:  # noqa: BLE001
-            _LOG.warning("domain_harvest: phase12 task raised: %s", exc)
-            continue
-        if isinstance(outcome, BaseException):
-            _LOG.warning(
-                "domain_harvest: phase12 task raised: %s", outcome
+            cache_profile = resolve_timing_profile(
+                getattr(settings, "harvest_timing_profile", None)
             )
-            continue
-        name, result = outcome  # type: ignore[misc]
-        phase12_results[name] = _normalize_module_result(name, result)
-        # MUST-FIX S5: fire callback as soon as this module is final.
-        _emit(name, phase12_results[name])
+            cache_session: StealthSession | None = StealthSession(
+                timing_profile=cache_profile,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOG.debug(
+                "domain_harvest: StealthSession unavailable, modules will "
+                "fall back to their own transports: %s",
+                exc,
+            )
+            cache_session = None
 
-    # ------------------------------------------------------------------
-    # Phase 3 — pattern_and_verify (depends on employee_name_discovery)
-    # MUST-FIX M3: enable_smtp is threaded via the explicit kwarg.
-    # MUST-FIX S5: emit callback when pattern_and_verify completes too.
-    # ------------------------------------------------------------------
-    employee_result = _normalize_module_result(
-        MODULE_EMPLOYEE_NAMES,
-        phase12_results.get(MODULE_EMPLOYEE_NAMES, ModuleResult(status=ModuleStatus.SKIPPED)),
-    )
-    employee_findings = employee_result.findings or []
-    employee_names = _employee_names_from_findings(employee_findings)
+        if cache_session is not None:
+            cache = ConcurrentFetchCache(cache_session)
+            fetch = CachedFetch(cache)
+    except Exception as exc:  # noqa: BLE001 — never let cache wiring kill the run
+        _LOG.debug("domain_harvest: cache init failed, continuing without: %s", exc)
+        cache = None
+        fetch = None
 
     try:
-        pattern_result = await _run_pattern(
-            pattern, domain, employee_names=employee_names, enable_smtp=enable_smtp
+        phase_fetch = fetch if content_fetch_enabled else None
+        phase_session = phase_fetch if phase_fetch is not None else cache_session
+        industry_result = await _route_industry_candidates(domain, phase_fetch)
+        candidate_paths = tuple(industry_result.target_paths)
+        # ------------------------------------------------------------------
+        # Phase 1+2 — concurrent run of all data modules
+        # MUST-FIX S5: ``asyncio.as_completed`` so we can fire the
+        # ``on_module_complete`` callback as each module finishes, instead
+        # of waiting for ``gather`` to return all at once.
+        # W5: the three new structured-source modules (npm, pypi, pgp)
+        # slot in here and run alongside commoncrawl_email and
+        # code_and_cert_email — same parallel budget, no sequencing.
+        # 0.11.1 Phase 3: wayback_domain_harvest joins Phase 1 alongside
+        # Common Crawl — different upstream, no shared rate budget.
+        # 0.11.1 Phase 3: syndication_feed_sweeper also runs here â€” it
+        # discovers feed links from the homepage and extracts authors.
+        # 0.11.1 Phase 4: github_org_members and Hunter.io join Phase 1.
+        # Hunter.io is not a BaseModule — it is a direct function call
+        # wrapped in _run_hunter below.
+        # 0.11.1 Phase 3 cache: every module that touches HTTP gets the
+        # shared ``fetch`` facade; the rest ignore it via signature-aware
+        # kwarg filtering.
+        # ------------------------------------------------------------------
+        phase12_coroutines = [
+            _safe_phase12_run(
+                MODULE_COMMONCRAWL,
+                cc,
+                domain,
+                cc_max_records=cc_max_records,
+                cc_max_collections=cc_max_collections,
+                aggressive=aggressive,
+                fetch=fetch,
+                signal_pool=signal_pool,
+                budget=budget,
+            ),
+            _safe_phase12_run(
+                MODULE_WAYBACK_DOMAIN,
+                wayback,
+                domain,
+                aggressive=aggressive,
+                fetch=fetch,
+                signal_pool=signal_pool,
+                budget=budget,
+            ),
+            _safe_phase12_run(
+                MODULE_CODE_CERT,
+                cc_cert,
+                domain,
+                fetch=fetch,
+                signal_pool=signal_pool,
+                budget=budget,
+            ),
+            _safe_phase12_run(
+                MODULE_EMAIL_DORK,
+                dork,
+                domain,
+                dork_lite_mode=dork_lite_mode,
+                aggressive=aggressive,
+                use_proxies=use_proxies,
+                proxy_fallback_ok=proxy_fallback_ok,
+                fetch=fetch,
+                signal_pool=signal_pool,
+                budget=budget,
+            ),
+            _safe_phase12_run(
+                MODULE_EMPLOYEE_NAMES,
+                emp,
+                domain,
+                use_proxies=use_proxies,
+                proxy_fallback_ok=proxy_fallback_ok,
+                fetch=fetch,
+                candidate_paths=candidate_paths,
+                signal_pool=signal_pool,
+                budget=budget,
+            ),
+            _safe_phase12_run(
+                MODULE_NPM_EMAIL,
+                npm,
+                domain,
+                fetch=fetch,
+                signal_pool=signal_pool,
+                budget=budget,
+            ),
+            _safe_phase12_run(
+                MODULE_PYPI_EMAIL,
+                pypi,
+                domain,
+                fetch=fetch,
+                signal_pool=signal_pool,
+                budget=budget,
+            ),
+            _safe_phase12_run(
+                MODULE_PGP_DOMAIN_EMAIL,
+                pgp,
+                domain,
+                fetch=fetch,
+                signal_pool=signal_pool,
+                budget=budget,
+            ),
+            _safe_phase12_run(
+                MODULE_SYNDICATION_FEED_SWEEPER,
+                syndication,
+                domain,
+                fetch=fetch,
+                signal_pool=signal_pool,
+                budget=budget,
+            ),
+            _safe_phase12_run(
+                MODULE_GITHUB_ORG_MEMBERS,
+                github_org,
+                domain,
+                fetch=fetch,
+                signal_pool=signal_pool,
+                budget=budget,
+            ),
+            _run_content_intelligence(
+                domain,
+                phase_session,
+                phase_fetch,
+                aggressive=aggressive,
+                candidate_paths=candidate_paths,
+                discover_callable=content_intelligence,
+            ),
+            _run_hunter(domain, settings.hunter_io_api_key),
+        ]
+        phase12_results: dict[str, ModuleResult] = {}
+        for fut in asyncio.as_completed(phase12_coroutines):
+            try:
+                outcome = await fut
+            except BaseException as exc:  # noqa: BLE001
+                _LOG.warning("domain_harvest: phase12 task raised: %s", exc)
+                continue
+            if isinstance(outcome, BaseException):
+                _LOG.warning(
+                    "domain_harvest: phase12 task raised: %s", outcome
+                )
+                continue
+            name, result = outcome  # type: ignore[misc]
+            phase12_results[name] = _normalize_module_result(name, result)
+            # MUST-FIX S5: fire callback as soon as this module is final.
+            _emit(name, phase12_results[name])
+
+        # ------------------------------------------------------------------
+        # Phase 3 — pattern_and_verify (depends on employee_name_discovery)
+        # MUST-FIX M3: enable_smtp is threaded via the explicit kwarg.
+        # MUST-FIX S5: emit callback when pattern_and_verify completes too.
+        # ------------------------------------------------------------------
+        employee_result = _normalize_module_result(
+            MODULE_EMPLOYEE_NAMES,
+            phase12_results.get(
+                MODULE_EMPLOYEE_NAMES, ModuleResult(status=ModuleStatus.SKIPPED)
+            ),
         )
-    except Exception as exc:  # noqa: BLE001
-        _LOG.warning("domain_harvest: pattern_and_verify crashed: %s", exc)
-        pattern_result = ModuleResult(
-            status=ModuleStatus.FAILED,
-            errors=[f"{MODULE_PATTERN_VERIFY}: {exc}"],
+        employee_findings = employee_result.findings or []
+        employee_names = _employee_names_from_findings(employee_findings)
+
+        try:
+            pattern_result = await _run_pattern(
+                pattern,
+                domain,
+                employee_names=employee_names,
+                enable_smtp=enable_smtp,
+                signal_pool=signal_pool,
+                budget=budget,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("domain_harvest: pattern_and_verify crashed: %s", exc)
+            pattern_result = ModuleResult(
+                status=ModuleStatus.FAILED,
+                errors=[f"{MODULE_PATTERN_VERIFY}: {exc}"],
+            )
+        pattern_result = _normalize_module_result(MODULE_PATTERN_VERIFY, pattern_result)
+        _emit(MODULE_PATTERN_VERIFY, pattern_result)
+
+        # ------------------------------------------------------------------
+        # Combine all results
+        # ------------------------------------------------------------------
+        module_results: dict[str, ModuleResult] = {
+            **phase12_results,
+            MODULE_PATTERN_VERIFY: pattern_result,
+        }
+
+        unique_emails = _aggregate(domain, module_results, signal_pool=signal_pool)
+        unique_emails.sort(key=_sort_key)
+
+        completed = datetime.now(timezone.utc)
+        completed_iso = completed.isoformat().replace("+00:00", "Z")
+        duration = (completed - started).total_seconds()
+
+        # Phase 1 of 4: HIGH / MEDIUM / LOW counts in the summary are
+        # PERSONAL-only (``is_role=False``).  Role accounts are tracked
+        # separately via ``role_account_count`` and rendered in their own
+        # section.  The previous semantics counted all emails regardless of
+        # role, which inflated the analyst's HIGH/MEDIUM counts with
+        # generic mailbox hits (info@, support@, …).
+        high = sum(
+            1
+            for e in unique_emails
+            if e.confidence_label == "HIGH" and not e.is_role
         )
-    pattern_result = _normalize_module_result(MODULE_PATTERN_VERIFY, pattern_result)
-    _emit(MODULE_PATTERN_VERIFY, pattern_result)
+        medium = sum(
+            1
+            for e in unique_emails
+            if e.confidence_label == "MEDIUM" and not e.is_role
+        )
+        low = sum(
+            1
+            for e in unique_emails
+            if e.confidence_label == "LOW" and not e.is_role
+        )
+        role = sum(1 for e in unique_emails if e.is_role)
+        personal = sum(1 for e in unique_emails if not e.is_role)
 
-    # ------------------------------------------------------------------
-    # Combine all results
-    # ------------------------------------------------------------------
-    module_results: dict[str, ModuleResult] = {
-        **phase12_results,
-        MODULE_PATTERN_VERIFY: pattern_result,
-    }
+        errors: list[str] = []
+        for mod_name, res in module_results.items():
+            for err in res.errors or []:
+                errors.append(f"[{mod_name}] {err}")
 
-    unique_emails = _aggregate(domain, module_results)
-    unique_emails.sort(key=_sort_key)
+        # Catch-all signal: surface from pattern_and_verify metadata.
+        catchall_detected: bool | None = None
+        confirmed_pattern: str | None = None
+        pattern_meta = pattern_result.metadata or {}
+        if isinstance(pattern_meta, dict):
+            if "is_catchall" in pattern_meta:
+                catchall_detected = pattern_meta.get("is_catchall")
+            confirmed_pattern = pattern_meta.get("confirmed_pattern")
+        if confirmed_pattern is None:
+            pool_patterns = signal_pool.get_confirmed_patterns()
+            confirmed_pattern = pool_patterns[0] if pool_patterns else None
 
-    completed = datetime.now(timezone.utc)
-    completed_iso = completed.isoformat().replace("+00:00", "Z")
-    duration = (completed - started).total_seconds()
+        # 0.11.1 Phase 3 cache: snapshot stats before teardown so the
+        # CLI can print hits / misses / evictions at the end of the run.
+        if cache is not None:
+            try:
+                cache_stats = cache.stats()
+            except Exception:  # noqa: BLE001
+                cache_stats = {}
 
-    # Phase 1 of 4: HIGH / MEDIUM / LOW counts in the summary are
-    # PERSONAL-only (``is_role=False``).  Role accounts are tracked
-    # separately via ``role_account_count`` and rendered in their own
-    # section.  The previous semantics counted all emails regardless of
-    # role, which inflated the analyst's HIGH/MEDIUM counts with
-    # generic mailbox hits (info@, support@, …).
-    high = sum(
-        1
-        for e in unique_emails
-        if e.confidence_label == "HIGH" and not e.is_role
-    )
-    medium = sum(
-        1
-        for e in unique_emails
-        if e.confidence_label == "MEDIUM" and not e.is_role
-    )
-    low = sum(
-        1
-        for e in unique_emails
-        if e.confidence_label == "LOW" and not e.is_role
-    )
-    role = sum(1 for e in unique_emails if e.is_role)
-    personal = sum(1 for e in unique_emails if not e.is_role)
-
-    errors: list[str] = []
-    for mod_name, res in module_results.items():
-        for err in res.errors or []:
-            errors.append(f"[{mod_name}] {err}")
-
-    # Catch-all signal: surface from pattern_and_verify metadata.
-    catchall_detected: bool | None = None
-    confirmed_pattern: str | None = None
-    pattern_meta = pattern_result.metadata or {}
-    if isinstance(pattern_meta, dict):
-        if "is_catchall" in pattern_meta:
-            catchall_detected = pattern_meta.get("is_catchall")
-        confirmed_pattern = pattern_meta.get("confirmed_pattern")
-
-    return DomainHarvestResult(
-        domain=domain,
-        started_at=started_iso,
-        completed_at=completed_iso,
-        duration_seconds=round(duration, 3),
-        module_results=module_results,
-        unique_emails=unique_emails,
-        total_unique_emails=len(unique_emails),
-        high_confidence_count=high,
-        medium_confidence_count=medium,
-        low_confidence_count=low,
-        role_account_count=role,
-        personal_email_count=personal,
-        errors=errors,
-        smtp_verification_used=bool(
-            pattern_meta.get("smtp_verification_enabled", False)
-        ),
-        catchall_detected=catchall_detected,
-        confirmed_pattern=confirmed_pattern,
-        employee_names_processed=len(employee_names),
-    )
+        return DomainHarvestResult(
+            domain=domain,
+            started_at=started_iso,
+            completed_at=completed_iso,
+            duration_seconds=round(duration, 3),
+            module_results=module_results,
+            unique_emails=unique_emails,
+            total_unique_emails=len(unique_emails),
+            high_confidence_count=high,
+            medium_confidence_count=medium,
+            low_confidence_count=low,
+            role_account_count=role,
+            personal_email_count=personal,
+            errors=errors,
+            smtp_verification_used=bool(
+                pattern_meta.get("smtp_verification_enabled", False)
+            ),
+            catchall_detected=catchall_detected,
+            confirmed_pattern=confirmed_pattern,
+            employee_names_processed=len(employee_names),
+            fetch_cache_stats=cache_stats or None,
+            metadata={"budget": budget.stats} if budget is not None else {},
+        )
+    finally:
+        # 0.11.1 Phase 3 cache: per-run teardown.  ``aclose`` clears every
+        # map, cancels in-flight futures, and closes the wrapped
+        # StealthSession.  Best-effort — never let teardown noise mask the
+        # real return value above.
+        if cache is not None:
+            with contextlib.suppress(Exception):
+                await cache.aclose()
+        with contextlib.suppress(Exception):
+            await signal_pool.close()

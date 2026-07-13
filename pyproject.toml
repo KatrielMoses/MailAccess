@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mailaccess"
-version = "0.11.3"
+version = "0.12.0"
 description = "Open-source OSINT email intelligence tool"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -53,6 +53,9 @@ Issues = "https://github.com/YOUR_USERNAME/mailaccess/issues"
 harvest = [
     "curl-cffi>=0.7",
 ]
+ml = [
+    "spacy>=3.7,<4.0",
+]
 ghunt = [
     "ghunt>=2.3",
 ]
@@ -76,6 +79,7 @@ packages = ["backend", "cli"]
 "data/disposable_domains.json" = "data/disposable_domains.json"
 "data/fediverse_instances.json" = "data/fediverse_instances.json"
 "data/harvester_sources.json" = "data/harvester_sources.json"
+"data/industry_vocabulary.json" = "data/industry_vocabulary.json"
 "data/mailaccess-extra-sites.json" = "data/mailaccess-extra-sites.json"
 "data/nexfil_sites.json" = "data/nexfil_sites.json"
 "data/reset_signals.json" = "data/reset_signals.json"
@@ -93,6 +97,8 @@ select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["tests"]
+norecursedirs = ["results", "dist", ".git", "node_modules", ".venv", "venv"]
 
 [tool.mypy]
 python_version = "3.11"

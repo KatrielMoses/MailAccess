@@ -13,8 +13,12 @@ ladder of structured-data extractors:
 5. **DOM team card pattern**   (image + heading + title repeat)  — 0.65
 6. **Heading + adjacent title**(h2/h3/h4 followed by title text) — 0.55
 7. **mailto: extraction**      (anchor href="mailto:...")        — 0.70 / 0.40
-8. **Body-text name extraction** (existing pipeline, only with
-   ``aggressive=True``)                                          — 0.30
+8. **LinkedIn URL slug**       (``linkedin.com/in/<slug>``)      — 0.65
+9. **Profile / author links**  (GitHub, Twitter/X, rel=author)  — 0.60
+10. **Heading-only fallback**  (h2/h3/h4 on team pages,
+   NER-classified, only when structured < 2 names)              — 0.45
+11. **Body-text name extraction** (existing pipeline, only with
+    ``aggressive=True``)                                          — 0.30
 
 The function is pure — no HTTP, no global state, no I/O.  It can
 be reused on archive / Wayback content as well as live pages,
@@ -68,6 +72,7 @@ class PersonRecord:
     source_type:
         One of ``"json_ld"``, ``"microdata"``, ``"rdfa"``, ``"hcard"``,
         ``"dom_team_card"``, ``"heading_plus_title"``, ``"mailto"``,
+        ``"linkedin_url_slug"``, ``"heading_fallback"``,
         ``"body_text_aggressive"``.
     confidence:
         0.0–1.0.  See the module docstring for the per-source ladder.
@@ -551,7 +556,12 @@ def extract_people(
     5. DOM team cards (0.65) — only emit on 2+ repetitions
     6. Heading + adjacent title (0.55) — only on *is_team_page*
     7. mailto: (0.70 / 0.40)
-    8. Body-text (0.30) — only when *aggressive*
+    8. LinkedIn URL slug (0.65) — *any* ``linkedin.com/in/<slug>``
+       yields a name.  Domain-agnostic because the slug format is
+       standardized.
+    9. Heading-only fallback (0.45) — only on *is_team_page* with
+       fewer than 2 names found by structured methods.  NER gate.
+    10. Body-text (0.30) — only when *aggressive*
 
     Records are deduplicated by ``(name.lower(), email.lower() if email)``
     and the highest-confidence match wins.
@@ -577,7 +587,29 @@ def extract_people(
     # ----- 7. mailto: -----
     out.extend(_extract_mailto_records(html, page_url, is_team_page))
 
-    # ----- 8. Body-text (aggressive only) -----
+    # ----- 8. LinkedIn URL slug extraction (0.11.8) -----
+    # Domain-agnostic: any site that links to a /in/<slug> gives us
+    # a name.  Slug form is standardized by LinkedIn.
+    seen_names = {(r.name or "").strip().lower() for r in out}
+    for rec in _extract_linkedin_slug_records(html, page_url, seen_names):
+        out.append(rec)
+        seen_names.add(rec.name.strip().lower())
+
+    # ----- 9. Profile / author links -----
+    out.extend(_extract_profile_link_records(html, page_url))
+
+    # ----- 10. Heading-only fallback on confirmed team pages (0.11.8) -----
+    # If structured methods found fewer than 2 unique names on a
+    # confirmed team page, emit h2/h3/h4 text that passes NER
+    # classification.  Title token is NOT required — the NER
+    # classifier is the quality gate.  Low confidence (0.45) keeps
+    # these from triggering pattern generation on their own.
+    if is_team_page and len(seen_names) < 2:
+        for rec in _extract_heading_fallback(html, page_url, seen_names):
+            out.append(rec)
+            seen_names.add(rec.name.strip().lower())
+
+    # ----- 11. Body-text (aggressive only) -----
     if aggressive:
         out.extend(_extract_body_text_names(html, domain, page_url))
 
@@ -1000,6 +1032,24 @@ def _find_mailto_for_heading(
     return None
 
 
+def _has_github_link_for_heading(html: str, heading_text: str) -> bool:
+    """Return whether the heading's local card contains a GitHub link."""
+    if not html or not heading_text:
+        return False
+    pattern = re.compile(
+        r"<h[1-6]\b[^>]*>\s*" + re.escape(heading_text) + r"\s*</h[1-6]\s*>",
+        flags=re.IGNORECASE,
+    )
+    head_match = pattern.search(html)
+    if head_match is None:
+        return False
+    tail = html[head_match.end():]
+    next_head = re.search(r"<h[1-6]\b", tail, flags=re.IGNORECASE)
+    if next_head:
+        tail = tail[: next_head.start()]
+    return bool(re.search(r"https?://(?:www\.)?github\.com/", tail, flags=re.IGNORECASE))
+
+
 def _extract_dom_team_card_records(
     html: str, page_url: str, is_team_page: bool
 ) -> list[PersonRecord]:
@@ -1030,25 +1080,33 @@ def _extract_dom_team_card_records(
     parser.close()
     parser.finalize()
     headings = [h for h in parser.headings if h.get("name")]
-    if len(headings) < 2:
-        # Need at least 2 cards for the pattern to be a "team grid".
+    if len(headings) < 1:
+        # A confirmed team page can legitimately contain one person.
         return []
     out: list[PersonRecord] = []
     seen: set[str] = set()
     candidate_indices = [
         idx
         for idx, h in enumerate(headings)
-        if (h.get("tag") or "").lower() in ("h2", "h3")
+        if (h.get("tag") or "").lower() in ("h2", "h3", "h4")
         and _looks_like_person_heading(h.get("name"))
+        and not (
+            (h.get("tag") or "").lower() == "h4"
+            and _TITLE_TOKEN_RE.search(h.get("name") or "")
+        )
     ]
     for idx, h in enumerate(headings):
         # The heading's *name* attribute holds the display name and
         # *next_text* holds the title pattern.
         tag = (h.get("tag") or "").lower()
-        if tag not in ("h2", "h3"):
+        if tag not in ("h2", "h3", "h4"):
             continue
         name = h.get("name") or ""
         if not _looks_like_person_heading(name):
+            continue
+        # h4 is commonly used for the role beneath an h3/h2 person name.
+        # Allow genuine h4 names, but do not duplicate obvious title text.
+        if tag == "h4" and _TITLE_TOKEN_RE.search(name):
             continue
         title = h.get("next_text") or ""
         # Keep the search within the current card: stop at the next
@@ -1060,28 +1118,28 @@ def _extract_dom_team_card_records(
                 next_person_idx = cand_idx
                 break
         if not _TITLE_TOKEN_RE.search(title):
-            title = ""
+            # Try lookahead for a better title.
             for lookahead in range(idx + 1, next_person_idx):
-                candidate_title = (headings[lookahead].get("name") or "").strip()
-                if _TITLE_TOKEN_RE.search(candidate_title):
-                    title = candidate_title
+                candidate = (headings[lookahead].get("name") or "").strip()
+                if _TITLE_TOKEN_RE.search(candidate):
+                    title = candidate
                     break
-        if not title:
-            continue
-        if not _TITLE_TOKEN_RE.search(title):
-            continue
+            # No title found — still emit the person.  Title is
+            # enrichment, not a gate.  The NER classifier downstream
+            # handles quality.
         key = name.lower()
         if key in seen:
             continue
         seen.add(key)
         # Look for an adjacent mailto link inside the same card.
         email = _find_mailto_for_heading(html, name)
+        contributor_link = _has_github_link_for_heading(html, name)
         out.append(
             PersonRecord(
                 name=name.strip(),
                 email=email,
                 title=title.strip(),
-                source_type="dom_team_card",
+                source_type="github_contributor" if contributor_link else "dom_team_card",
                 confidence=_CONF_DOM_TEAM_CARD,
                 page_url=page_url,
             )
@@ -1108,8 +1166,6 @@ def _extract_heading_title_records(
             continue
         if not is_plausible_person_name(name):
             continue
-        if not _TITLE_TOKEN_RE.search(title):
-            continue
         key = name.lower()
         if key in seen:
             continue
@@ -1121,6 +1177,249 @@ def _extract_heading_title_records(
                 title=title.strip(),
                 source_type="heading_plus_title",
                 confidence=_CONF_HEADING_PLUS_TITLE,
+                page_url=page_url,
+            )
+        )
+    return out
+
+
+# ----------------------------------------------------------------------
+# Profile / author link extraction (0.11.9)
+# ----------------------------------------------------------------------
+_PROFILE_LINK_RE = re.compile(
+    r'<a\b([^>]*\bhref\s*=\s*["\']([^"\']+)["\'][^>]*)>(.*?)</a\s*>',
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_META_TAG_RE = re.compile(r"<meta\b([^>]*?)>", flags=re.IGNORECASE | re.DOTALL)
+_HTML_ATTR_RE = re.compile(
+    r"([:\w-]+)\s*=\s*([\"'])(.*?)\2", flags=re.IGNORECASE | re.DOTALL
+)
+_PROFILE_RESERVED_SEGMENTS = frozenset(
+    {
+        "about", "contact", "company", "discover", "explore", "features",
+        "home", "intent", "login", "marketplace", "messages", "notifications",
+        "orgs", "privacy", "search", "settings", "share", "signup", "topics",
+    }
+)
+
+
+def _clean_link_text(value: str) -> str:
+    value = _HTML_TAG_STRIP_RE.sub(" ", value)
+    value = unescape(value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _name_from_profile_text(text: str, path: str) -> str | None:
+    """Prefer visible anchor text, then a human-readable profile slug."""
+    candidate = _clean_link_text(text)
+    if candidate and is_plausible_person_name(candidate):
+        return candidate
+    parts = [p for p in re.split(r"[-_]+", path.strip("/")) if p]
+    if len(parts) < 2 or any(not re.fullmatch(r"[A-Za-z]+", p) for p in parts):
+        return None
+    candidate = " ".join(p.capitalize() for p in parts)
+    return candidate if is_plausible_person_name(candidate) else None
+
+
+def _extract_profile_link_records(html: str, page_url: str) -> list[PersonRecord]:
+    """Extract person names encoded in public profile and author links."""
+    if not html:
+        return []
+    from backend.core.name_classifier import classify_name
+
+    out: list[PersonRecord] = []
+    seen: set[tuple[str, str]] = set()
+    for attrs_text, href, anchor_text in _PROFILE_LINK_RE.findall(html):
+        parsed = urlparse(unescape(href.strip()))
+        host = (parsed.netloc or "").lower().split(":", 1)[0]
+        segments = [p for p in parsed.path.split("/") if p]
+        rel_match = re.search(r"\brel\s*=\s*[\"']([^\"']+)[\"']", attrs_text, re.I)
+        rel_values = set((rel_match.group(1).lower().split()) if rel_match else ())
+        source_type: str | None = None
+        slug_path = ""
+        if host in {"github.com", "www.github.com"} and segments:
+            source_type, slug_path = "github_profile_link", segments[0]
+        elif host in {"twitter.com", "www.twitter.com", "x.com", "www.x.com"} and segments:
+            source_type, slug_path = "twitter_profile_link", segments[0]
+        elif "author" in rel_values:
+            source_type, slug_path = "author_link", segments[-1] if segments else ""
+        if source_type is None or slug_path.lower() in _PROFILE_RESERVED_SEGMENTS:
+            continue
+        name = _name_from_profile_text(anchor_text, slug_path)
+        if not name:
+            continue
+        classification = classify_name(name)
+        if not classification.is_person:
+            continue
+        key = (source_type, name.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            PersonRecord(
+                name=name,
+                email=None,
+                title=None,
+                source_type=source_type,
+                confidence=0.60,
+                page_url=page_url,
+            )
+        )
+
+    for tag in _META_TAG_RE.findall(html):
+        attrs = {
+            key.lower(): value.strip()
+            for key, _quote, value in _HTML_ATTR_RE.findall(tag)
+        }
+        if attrs.get("name", "").lower() != "author" and attrs.get("property", "").lower() not in {
+            "author", "article:author"
+        }:
+            continue
+        name = _clean_link_text(attrs.get("content", ""))
+        if not name or not is_plausible_person_name(name):
+            continue
+        classification = classify_name(name)
+        if not classification.is_person:
+            continue
+        key = ("meta_author", name.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            PersonRecord(
+                name=name,
+                email=None,
+                title=None,
+                source_type="meta_author",
+                confidence=0.55,
+                page_url=page_url,
+            )
+        )
+    return out
+
+
+# ----------------------------------------------------------------------
+# LinkedIn URL slug extraction (0.11.8)
+# ----------------------------------------------------------------------
+_LINKEDIN_SLUG_RE = re.compile(
+    r"linkedin\.com/in/([\w-]+)",
+    flags=re.IGNORECASE,
+)
+
+
+def _extract_linkedin_slug_records(
+    html: str,
+    page_url: str,
+    seen_names: set[str] | None = None,
+) -> list[PersonRecord]:
+    """Extract person names from LinkedIn profile URLs on the page.
+
+    LinkedIn URL format is standardized: ``/in/first-last`` or
+    ``/in/first-middle-last`` or ``/in/first-last-NNNNNNNNN``.  When a
+    team page links a card to a person's LinkedIn profile, the slug
+    encodes the name — even when no adjacent text gives a clear
+    role.  This is domain-agnostic: any site that links to
+    ``linkedin.com/in/<slug>`` gives us a name for free.
+
+    Each candidate is validated with :func:`classify_name` so a
+    non-person slug (a username with random tokens) does not leak.
+    """
+    if not html:
+        return []
+    # Imported lazily so name_classifier's optional spaCy load does
+    # not block import of this module.
+    from backend.core.name_classifier import classify_name
+
+    out: list[PersonRecord] = []
+    seen_slugs: set[str] = set()
+    for match in _LINKEDIN_SLUG_RE.finditer(html):
+        slug = match.group(1) or ""
+        if not slug:
+            continue
+        # LinkedIn disambiguator suffix: a trailing numeric ID.
+        slug_clean = re.sub(r"-\d+$", "", slug)
+        if not slug_clean or slug_clean in seen_slugs:
+            continue
+        seen_slugs.add(slug_clean)
+        # Build "first-last[-middle]" → "First Last Middle".
+        name = " ".join(
+            part.capitalize()
+            for part in slug_clean.split("-")
+            if part and not part.isdigit()
+        ).strip()
+        if not name:
+            continue
+        if seen_names and name.lower() in seen_names:
+            continue
+        result = classify_name(name)
+        if not result.is_person:
+            continue
+        out.append(
+            PersonRecord(
+                name=name,
+                email=None,
+                title=None,
+                source_type="linkedin_url_slug",
+                confidence=0.65,
+                page_url=page_url,
+            )
+        )
+    return out
+
+
+# ----------------------------------------------------------------------
+# Heading-only fallback (0.11.8)
+# ----------------------------------------------------------------------
+_HEADING_FALLBACK_RE = re.compile(
+    r"<(h[234])\b[^>]*>(.*?)</\1>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_HTML_TAG_STRIP_RE = re.compile(r"<[^>]+>")
+_HTML_ENTITY_FIX_RE = re.compile(r"&(?:#\d+|#x[0-9a-fA-F]+|[a-zA-Z]+);")
+
+
+def _extract_heading_fallback(
+    html: str,
+    page_url: str,
+    seen_names: set[str] | None = None,
+) -> list[PersonRecord]:
+    """On confirmed team pages with few structured records, emit any
+    h2/h3/h4 text that passes NER classification.
+
+    Confidence is intentionally low (0.45) — these candidates appear
+    in the names panel but do not trigger pattern generation unless
+    ``title_or_role`` is also found elsewhere.  The NER gate handles
+    quality.  No stoplist needed because :func:`classify_name` is the
+    filter.
+    """
+    if not html:
+        return []
+    from backend.core.name_classifier import classify_name
+
+    out: list[PersonRecord] = []
+    seen_local: set[str] = set()
+    for match in _HEADING_FALLBACK_RE.finditer(html):
+        raw = match.group(2) or ""
+        text = _HTML_TAG_STRIP_RE.sub(" ", raw)
+        text = _HTML_ENTITY_FIX_RE.sub(" ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text.split()) < 2:
+            continue
+        if seen_names and text.lower() in seen_names:
+            continue
+        if text.lower() in seen_local:
+            continue
+        result = classify_name(text)
+        if not result.is_person:
+            continue
+        seen_local.add(text.lower())
+        out.append(
+            PersonRecord(
+                name=text,
+                email=None,
+                title=None,
+                source_type="heading_fallback",
+                confidence=0.45,
                 page_url=page_url,
             )
         )
@@ -1192,6 +1491,11 @@ def _local_part_to_name(local: str) -> str:
     The result is not validated by :func:`is_plausible_person_name`
     here — the caller decides whether the record is usable.
     """
+    if str(local).casefold() in {
+        "admin", "contact", "hello", "info", "office", "sales",
+        "support", "team", "help", "press", "privacy", "security",
+    }:
+        return ""
     cleaned = re.sub(r"[^A-Za-z0-9._\-]+", " ", local).strip()
     if not cleaned:
         return local
@@ -1318,7 +1622,7 @@ def _dedupe_records(
         )
 
     for new in records:
-        if not (new.name or "").strip():
+        if not (new.name or "").strip() and not (new.email or "").strip():
             continue
         new_name_key, new_email_key = _key_fields(new)
         # Find a colliding existing record.

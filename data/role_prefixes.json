@@ -67,6 +67,8 @@
       "sys-admin",
       "devops",
       "ops",
+      "operations",
+      "noc",
       "it",
       "it-dept",
       "it-department",
@@ -80,6 +82,7 @@
     "abuse_security": [
       "abuse",
       "security",
+      "sirt",
       "sec",
       "soc",
       "infosec",

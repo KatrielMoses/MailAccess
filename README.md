@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.11.2&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.12.0&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -312,6 +312,7 @@ Key flags:
 | `--use-proxies` | Route the proxy-aware harvest modules through the configured ScrapingAnt transport. |
 | `--proxy-fallback-ok` | Allow direct fallback if ScrapingAnt proxy fails. Without this flag, proxy failures raise an error instead of falling back silently. |
 | `--lite` | Faster, fewer dork queries per engine. |
+| `--timeout SECONDS` | Override the profile default harvest duration. |
 | `--export FILE` | Export to JSON, CSV, or NDJSON (inferred from extension). |
 | `--min-confidence {high,medium,low}` | Filter by confidence label. |
 | `--min-confidence-score FLOAT` | Filter by numeric score (0.0–1.5). |
@@ -530,6 +531,53 @@ datacenter proxies. Off by default.
 Sign up: https://scrapingant.com/?ref=mzliyzh
 
 ## Changelog
+
+### 0.12.0
+
+- Optional ML name classifier: `pip install mailaccess[ml]` plus `python -m spacy download en_core_web_md` adds spaCy PERSON NER validation.
+- Hybrid heuristic pre-filter + NER pipeline eliminates page-fragment false positives such as "Going Blue Team" and "Cloud Platform".
+- First-run `harvest-emails` prompt offers ML install when `ML_NAME_CLASSIFIER=ask`.
+- Heuristic fallback is unchanged when ML is absent.
+- `ML_NAME_CLASSIFIER` config supports `ask`, `on`, and `off`.
+
+### 0.11.5
+
+- **Adaptive harvest orchestrator** — signal-driven two-track architecture replaces the fixed module sequence. Track 1
+  runs guaranteed high-signal page work; Track 2 runs opportunistic modules within the remaining budget.
+- **WorkScheduler** — priority queue with dedup and dynamic mid-run work submission shared by both tracks.
+- **TimeBudget** — time-based execution control, soft per-module timeouts, and profile-aware defaults.
+- **Track1Runner** — guaranteed high-signal paths always execute before opportunistic work.
+- **Track2Runner** — opportunistic discovery runs inside the remaining harvest budget.
+- **Pagination expansion** — discovered next-page URLs are added back to Track 1 automatically.
+- **`--timeout` flag** — explicit harvest duration override for live runs.
+- **Budget defaults** — T0=2700s, T1=1200s, T2=600s.
+- **INE-style hydration card detection** — `HydrationDataExtractor` now accepts the `__NEXT_DATA__.props.pageProps.instructorsData.cards[]` shape used by INE.com (and similar training platforms). `title` is treated as the instructor's display name and `subtitle` as their role when `title` passes `is_plausible_person_name`, so the standard ≥2-of-4 person heuristic fires on these inverted-shape cards. LinkedIn/Twitter URLs from each card's `references[]` now surface on `PersonHit.bio_url`.
+- **Hydration extractor bug fix** — `_string_at(node, _TITLE_KEY)` was being called with a bare string where an iterable of key names is expected, so the `title` role-fallback path silently iterated over the characters of the word "title" and never matched. Now wrapped as `_string_at(node, (_TITLE_KEY,))`; the fallback works as designed.
+- **Training vocabulary expansion** — `_TRAINING_RE` in `ContextRouter` extended with cybersecurity-specific signals: `oscp|oswe|osep|giac|pentest(?:ing)?|red\s?team|blue\s?team|cyber\s?range|ctf|capture\s+the\s+flag|dfir|threat\s+hunt|soc\s+analyst|infosec|cybersecurity`. Distinguishes dedicated security training platforms (INE, SANS, TCM Security) from generic e-commerce course sellers.
+- **Training candidate paths** — `training_academic` rule gained `/authors, /instructor, /profiles, /people, /meet-the-team, /learning/instructors` alongside the original `/instructors, /faculty, /teachers`. `data/industry_vocabulary.json` `lms` row updated for production parity.
+- **Deny list guard** — explicit test confirms `/testimonials, /case-studies, /customers` still fire alongside the training expansion so customer testimonials cannot be mis-harvested as employee pages.
+- **Tests** — 6 new tests (`test_ine_style_cards_extracted`, two INE negative guards, `test_cybersec_signals_trigger_training_vertical`, `test_generic_course_vocabulary_still_triggers`, `test_deny_list_still_excludes_testimonials_case_studies_customers`). New fixture: `tests/fixtures/ine_next_data.json`.
+
+### 0.11.4
+
+- Signal pool global wiring: all modules emit signals to shared pool
+- Confirmed email pattern propagates to pattern_and_verify before SMTP probing
+- Cross-module name/email correlation boosts confidence when same person found by multiple sources
+- Pattern inference from confirmed emails: dominant format detected and prioritized
+- HTML entity decode pre-filter (u003e leak fixed)
+- Asset filename false positive filter (.png, .woff etc. no longer classified as emails)
+- Common Crawl strict subdomain filtering
+- Hydration extractor, pagination handler, schema content extractor, sitemap router, industry vocabulary router all wired into live harvest path
+
+### 0.11.3
+
+Maintenance / quality release — the headline change is fixing the BUG-1 cluster of stale tests from the 0.11.1 Phase 3 stealth refactor (the dorker tests that the 0.11.2 entry *intended* to delete, but were rewritten instead). No new modules, no public API changes.
+
+- **BUG-1 dorker test rewrite** — `tests/core/test_bing_dorker.py` (5 stale tests) and `tests/core/test_duckduckgo_dorker.py` (5 stale tests) were asserting against the pre-Phase-4 `_MailAccessClient` / `_RoutedMailAccessClient` wrappers, which the dorkers no longer own. Both files were rewritten to inject a `CachedFetch` facade and assert against `CachedResponse` attributes (status, text, headers). 13 new bing tests and 14 new DDG tests now cover the cache-hit dedup, 202/403/429 CAPTCHA blocks, 5xx pass-through, body-marker CAPTCHA detection, 404 graceful-empty, and transport-error swallowing paths. The pure-HTML parser helpers (`_parse_bing_html`, `_parse_ddg_html`) get their own coverage so a parser regression doesn't get masked by a fetch regression.
+- **email_search_dork fix** — `tests/modules/test_email_search_dork.py` was calling a `build_dork_queries` stub that didn't accept the Phase-4 `aggressive` kwarg, so the test crashed with `TypeError` instead of exercising the routing logic it claimed to cover. Stub now accepts `aggressive`, plus a new test pins that the value actually reaches the dork-query builder.
+- **Shared fetch fixtures** — `tests/_fetch_fixtures.py` is the new home for the `FakeSession` / `make_cached_fetch` / `make_cached_response` / `make_local_fetch` helpers that were previously copy-pasted across the cache, dorker, syndication, sitemap, and pagination test files. `tests/conftest.py` re-exports them as pytest fixtures (`fake_session`, `fetch_cache`, `local_http`, `make_response`). The dorker rewrite is the first consumer; future module tests should request the fixtures rather than rolling their own.
+- **Mock-integrity guard test** — `tests/test_no_live_network.py` runs a small AST scan across the test tree: it fails the suite if a test file imports `aiohttp` or `requests` (no in-process mock equivalent — guaranteed live network), or constructs a bare `httpx.AsyncClient()` without a `transport=` kwarg (the most common "I forgot to mock this" shape). The two pre-existing tests that use the `monkeypatch.setattr(client, "get", _fake)` pattern are in the allowlist with a `TODO(BUG-1 follow-up)` to migrate them to `MockTransport` later — that's a separate task.
+- **Dead-code audit (conservative pass)** — Audited `backend/modules/` for "legacy list-scraping modules superseded by the PaginationHandler and ContextRouter loops". **Zero deletions**: the only module that does manual list pagination (`wordpress_rest.py`, `for page in range(1, _MAX_PAGES + 1)` over `?page=N`) is still actively wired into the orchestrator and tested; replacing its loop with `PaginationHandler` would require special-casing the 401/403/non-JSON stop conditions that the walker doesn't currently understand. Noted in `docs/enhancement-roadmap.md` as a future refactor target rather than ripping it out without a replacement.
 
 ### 0.11.2
 

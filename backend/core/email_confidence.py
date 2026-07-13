@@ -20,6 +20,7 @@ SOURCE_WEIGHTS: dict[str, float] = {
     "search_snippet_bing": 0.25,
     "search_snippet_google_cse": 0.55,  # 0.11.1 Phase 4
     "github_org_member": 0.85,  # 0.11.1 Phase 4
+    "github_profile_email": 0.85,  # Public email on a name-matched GitHub profile
     "hunter_verified": 0.85,  # 0.11.1 Phase 4 — Hunter confidence >= 90
     "hunter_high": 0.70,  # 0.11.1 Phase 4 — Hunter confidence 70-89
     "hunter_low": 0.45,  # 0.11.1 Phase 4 — Hunter confidence < 70
@@ -27,6 +28,15 @@ SOURCE_WEIGHTS: dict[str, float] = {
     "permutation_verified": 0.65,
     "permutation_catchall": 0.10,
     "permutation_unverified": 0.00,
+    # Direct company-owned identity surfaces.  These are strong evidence
+    # of publication, but are kept below cryptographic/developer evidence.
+    "security_txt_contact": 0.75,
+    "structured_page": 0.70,
+    "json_ld": 0.70,
+    "microdata": 0.70,
+    "rdfa": 0.70,
+    "hcard": 0.70,
+    "mailto": 0.70,
 }
 
 VERIFICATION_MULTIPLIER: dict[str, float] = {
@@ -53,6 +63,7 @@ SOURCE_CLASS: dict[str, str] = {
     "search_snippet_bing": "scraping",
     "search_snippet_google_cse": "scraping",  # 0.11.1 Phase 4
     "github_org_member": "developer",  # 0.11.1 Phase 4
+    "github_profile_email": "developer",
     "hunter_verified": "api",
     "hunter_high": "api",
     "hunter_low": "api",
@@ -60,6 +71,13 @@ SOURCE_CLASS: dict[str, str] = {
     "permutation_verified": "verification",
     "permutation_catchall": "verification",
     "permutation_unverified": "verification",
+    "security_txt_contact": "direct",
+    "structured_page": "direct",
+    "json_ld": "direct",
+    "microdata": "direct",
+    "rdfa": "direct",
+    "hcard": "direct",
+    "mailto": "direct",
 }
 
 MAX_SCORE = 1.5

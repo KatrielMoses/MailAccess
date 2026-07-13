@@ -45,7 +45,7 @@ from ..core.company_page_names import (
 from ..core.duckduckgo_dorker import DuckDuckGoDorker
 from ..core.http_client import build_client
 from ..core.linkedin_name_discovery import discover_linkedin_names
-from ..core.name_quality import is_plausible_person_name, name_suspicion_penalty
+from ..core.name_classifier import classify_name
 from ..core.scrapingant import get_active_transport
 from ..core.stealth_client import StealthSession, resolve_timing_profile
 from .base import BaseModule, ModuleResult, ModuleStatus
@@ -147,8 +147,11 @@ class EmployeeNameDiscoveryModule(BaseModule):
         target: str,
         *,
         use_proxies: bool = False,
+        candidate_paths: list[str] | tuple[str, ...] | None = None,
+        signal_pool: Any | None = None,
     ) -> ModuleResult:  # type: ignore[override]
         self._use_proxies = use_proxies
+        self._candidate_paths = tuple(candidate_paths or ())
         # Phase 2: structured-data emails from the company-page
         # pipeline are stashed here by :meth:`_company_pages`.  We
         # default to an empty list so a fresh ``.run()`` call
@@ -241,14 +244,13 @@ class EmployeeNameDiscoveryModule(BaseModule):
 
         def _record(nd: NameDiscovery) -> None:
             cleaned = nd.name.strip()
-            if not is_plausible_person_name(cleaned):
+            result = classify_name(cleaned)
+            if not result.is_person:
                 return
             # Phase 4: apply suspicion penalty before recording.
             # 0.0 penalty means the name was already rejected by
             # name_quality but the caller skipped that check — skip here too.
-            penalty = name_suspicion_penalty(cleaned)
-            if penalty == 0.0:
-                return
+            penalty = result.confidence
             key = cleaned.lower()
             existing = aggregated.get(key)
             if existing is None:
@@ -413,6 +415,7 @@ class EmployeeNameDiscoveryModule(BaseModule):
                 aggressive=aggressive,
                 max_candidates=max_candidates,
                 timeout=timeout,
+                candidate_paths=getattr(self, "_candidate_paths", ()),
             )
 
         records: list[PersonRecord] = []
@@ -473,6 +476,8 @@ class EmployeeNameDiscoveryModule(BaseModule):
         # fragments and should contribute less to pattern generation.
         out: list[NameDiscovery] = []
         for record in records:
+            if record.source_type == "github_contributor":
+                continue
             token_count = len(record.name.split())
             confidence = record.confidence
             if token_count >= 3:
@@ -625,11 +630,10 @@ def discover_names_for_tests(
     aggregated: dict[str, EmployeeNameResult] = {}
     for nd in all_names:
         cleaned = nd.name.strip()
-        if not is_plausible_person_name(cleaned):
+        result = classify_name(cleaned)
+        if not result.is_person:
             continue
-        penalty = name_suspicion_penalty(cleaned)
-        if penalty == 0.0:
-            continue
+        penalty = result.confidence
         key = cleaned.lower()
         existing = aggregated.get(key)
         if existing is None:

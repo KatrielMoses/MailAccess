@@ -98,6 +98,7 @@ class PatternAndVerifyModule(BaseModule):
         employee_names: list[EmployeeNameResult] | None = None,
         *,
         enable_smtp: bool | None = None,
+        signal_pool: Any | None = None,
     ) -> ModuleResult:  # type: ignore[override]
         """Generate email patterns and optionally verify via SMTP.
 
@@ -147,6 +148,10 @@ class PatternAndVerifyModule(BaseModule):
 
         candidates: list[GeneratedPatternResult] = []
         confirmed_pattern: str | None = None
+        if signal_pool is not None and hasattr(signal_pool, "get_confirmed_patterns"):
+            confirmed_patterns = signal_pool.get_confirmed_patterns()
+            if confirmed_patterns:
+                confirmed_pattern = confirmed_patterns[0]
         names_processed_high = 0
         names_processed_medium = 0
         names_skipped_low = 0
@@ -309,7 +314,7 @@ class PatternAndVerifyModule(BaseModule):
 
         def _generate_without_probing() -> None:
             for emp in employee_names:
-                _generate_for_employee(emp)
+                _generate_for_employee(emp, confirmed_template=confirmed_pattern)
 
         if not smtp_enabled:
             _generate_without_probing()
@@ -474,6 +479,12 @@ class PatternAndVerifyModule(BaseModule):
                                         confirmed_pattern = (
                                             pattern.pattern_template
                                         )
+                                        if signal_pool is not None and hasattr(
+                                            signal_pool, "emit_confirmed_pattern"
+                                        ):
+                                            signal_pool.emit_confirmed_pattern(
+                                                confirmed_pattern
+                                            )
                                     # Stop probing patterns for this
                                     # name — we found a working one.
                                     cand_index += len(pats) - pattern_offset

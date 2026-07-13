@@ -73,6 +73,25 @@ TEAM_SIGNALS: frozenset[str] = frozenset(
         "company",
         "organisation",
         "organization",
+        # 0.11.5 — training/education/authoring vocabulary surfaced
+        # by the IndustryVocabularyRouter (e.g. /instructors on a
+        # course marketplace).  Adding them here ensures the signals
+        # are recognised uniformly across sitemap, homepage, and
+        # robots.txt phases — not just the industry-router phase.
+        "instructors",
+        "instructor",
+        "authors",
+        "author",
+        "profiles",
+        "faculty",
+        "teachers",
+        "experts",
+        "trainers",
+        "coaches",
+        "mentors",
+        "contributors",
+        "meet-the-team",
+        "meet the team",
     }
 )
 
@@ -89,8 +108,10 @@ _SITEMAP_PATHS: tuple[str, ...] = (
 # sitemap/homepage/robots fetches.
 _DEFAULT_TIMEOUT_SECONDS: float = 5.0
 # Cap on candidates we will probe after merging all sources.  The
-# prompt asks for 15 (settings.site_discovery_max_candidates).
-_DEFAULT_MAX_CANDIDATES: int = 15
+# prompt asks for 25 (settings.site_discovery_max_candidates).
+# 25 gives enough budget to probe all industry-router paths plus
+# the top universal paths; users can override per-run via settings.
+_DEFAULT_MAX_CANDIDATES: int = 25
 
 
 # ----------------------------------------------------------------------
@@ -534,6 +555,7 @@ async def discover_team_pages(
     *,
     max_candidates: int | None = None,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    candidate_paths: list[str] | tuple[str, ...] | None = None,
 ) -> list[PageCandidate]:
     """Discover team/leadership/people pages on *domain*.
 
@@ -553,10 +575,14 @@ async def discover_team_pages(
         is created internally (auto-closed when done).
     max_candidates:
         Cap on probe results.  Defaults to
-        :data:`_DEFAULT_MAX_CANDIDATES` (15).  Per spec the orchestrator
+        :data:`_DEFAULT_MAX_CANDIDATES` (25).  Per spec the orchestrator
         passes ``settings.site_discovery_max_candidates`` for this.
     timeout:
         Per-request timeout in seconds.  Defaults to 5.
+    candidate_paths:
+        Optional router-provided paths to add to the discovery queue
+        before probing. Used by the domain harvest orchestrator's
+        homepage vocabulary pre-step.
 
     Algorithm
     ---------
@@ -654,6 +680,34 @@ async def discover_team_pages(
             rules = _extract_robots_paths(robots_body)
             robots_candidates = _candidates_from_robots(rules, cleaned)
 
+        # ----- Phase D: orchestrator-provided industry candidates -----
+        routed_candidates: list[PageCandidate] = []
+        for raw_path in candidate_paths or ():
+            if not isinstance(raw_path, str):
+                continue
+            path = raw_path.strip()
+            if not path:
+                continue
+            absolute = _normalise_url(path, base)
+            if not absolute or not _is_same_domain(absolute, cleaned):
+                continue
+            score, hits = _score_url_path(absolute)
+            # 0.11.5 — IndustryVocabularyRouter paths get a 2.0 floor
+            # so they always outrank generic 1.0-scored universal paths
+            # (e.g. /about, /team) in the merged candidate list.  The
+            # router made a deliberate "this path is relevant for THIS
+            # domain" decision — that intelligence should outrank a
+            # generic keyword match.  With the 25-candidate cap, this
+            # guarantees /instructors is never dropped before being
+            # probed on a 15-candidate cap.
+            routed_candidates.append(
+                PageCandidate(
+                    url=absolute,
+                    score=max(score, 2.0),
+                    source="industry_router",
+                )
+            )
+
         # ----- Merge + dedupe by normalised URL -----
         by_url: dict[str, PageCandidate] = {}
         for cand in (
@@ -661,6 +715,7 @@ async def discover_team_pages(
             + homepage_candidates
             + recursive_candidates
             + robots_candidates
+            + routed_candidates
         ):
             existing = by_url.get(cand.url)
             if existing is None or cand.score > existing.score:
@@ -681,6 +736,52 @@ async def discover_team_pages(
                 continue
             if outcome is True:
                 confirmed.append(cand)
+
+        # ----- Expand listing pages through rel=next / Link next -----
+        # Keep this local to discovery so both legacy employee discovery
+        # and the content-intelligence phase receive the same expanded
+        # candidate set without taking a dependency on the CachedFetch
+        # facade.
+        from .concurrent_fetch_cache import CachedResponse
+        from .pagination_handler import PaginationHandler
+
+        class _SinglePageFetch:
+            async def get(self, url: str) -> CachedResponse:
+                status, body = await _get(session, url, timeout=timeout)
+                return CachedResponse(
+                    status_code=status,
+                    content=body.encode("utf-8", errors="replace"),
+                    text=body,
+                    headers={},
+                )
+
+        pagination_handler = PaginationHandler(_SinglePageFetch())
+        seen_confirmed = {c.url for c in confirmed}
+        pagination_expanded: list[PageCandidate] = []
+        for seed in list(confirmed):
+            current_url = seed.url
+            seen_chain = {current_url}
+            for _page_index in range(49):
+                status, body = await _get(session, current_url, timeout=timeout)
+                if status != 200 or not body:
+                    break
+                next_url = pagination_handler.extract_next_url(current_url, body)
+                if not next_url or next_url in seen_chain:
+                    break
+                seen_chain.add(next_url)
+                if next_url not in seen_confirmed:
+                    pagination_expanded.append(
+                        PageCandidate(
+                            url=next_url,
+                            score=seed.score,
+                            source=seed.source,
+                            robots_disallowed=seed.robots_disallowed,
+                            anchor_text=seed.anchor_text,
+                        )
+                    )
+                    seen_confirmed.add(next_url)
+                current_url = next_url
+        confirmed.extend(pagination_expanded)
         return sorted(confirmed, key=lambda c: (-c.score, c.url))
     finally:
         if _own_session is not None:

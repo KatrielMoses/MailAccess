@@ -18,6 +18,8 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,7 +30,12 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
-from .domain_harvest_orchestrator import DomainHarvestResult, HarvestedEmail
+from .domain_harvest_orchestrator import (
+    DomainHarvestResult,
+    HarvestedEmail,
+    _name_matches_email_local,
+)
+from .email_extraction import is_placeholder_domain, validate_email
 
 # --------------------------------------------------------------------------
 # Color palette — mirrors cli/main.py's get_status_color /
@@ -46,6 +53,63 @@ _STATUS_COLORS = {
     "partial": "yellow",
     "skipped": "dim",
 }
+
+_EXPORT_PLACEHOLDER_EMAIL_RE = re.compile(
+    r"^(?:"
+    r"[^@\s]+@(?:example|test)\.com"
+    r"|[a-z0-9._%+\-]{1,8}@\.[a-z]{2,}"
+    r"|email@[^@\s]+\.com"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _is_placeholder_export_email(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+    email = value.strip().lower()
+    if not email:
+        return False
+    if _EXPORT_PLACEHOLDER_EMAIL_RE.fullmatch(email):
+        return True
+    if validate_email(email):
+        _, _, domain = email.partition("@")
+        return is_placeholder_domain(domain)
+    return False
+
+
+def _sanitised_export_emails(emails: list[HarvestedEmail]) -> list[HarvestedEmail]:
+    out: list[HarvestedEmail] = []
+    for entry in emails:
+        if _is_placeholder_export_email(entry.email):
+            continue
+        variants = [
+            variant
+            for variant in entry.subaddress_variants
+            if not _is_placeholder_export_email(variant)
+        ]
+        if variants != entry.subaddress_variants:
+            entry = replace(entry, subaddress_variants=variants)
+        out.append(entry)
+    return out
+
+
+def _export_summary_counts(emails: list[HarvestedEmail]) -> dict[str, int]:
+    personal = [entry for entry in emails if not entry.is_role]
+    return {
+        "total_unique_emails": len(emails),
+        "high_confidence": sum(
+            1 for entry in personal if entry.confidence_label == "HIGH"
+        ),
+        "medium_confidence": sum(
+            1 for entry in personal if entry.confidence_label == "MEDIUM"
+        ),
+        "low_confidence": sum(
+            1 for entry in personal if entry.confidence_label == "LOW"
+        ),
+        "role_accounts": sum(1 for entry in emails if entry.is_role),
+        "personal_emails": len(personal),
+    }
 
 
 def _format_timestamp(value: str | None) -> str:
@@ -77,6 +141,10 @@ def _module_display_name(name: str) -> str:
         "pypi_email": "PyPI Registry",
         "pgp_domain_email": "PGP Keyservers",
         "pattern_and_verify": "Pattern+Verify",
+        "person_email_pivot": "Person Email Pivot",
+        "email_identity_enrichment": "Identity Enrichment",
+        "gravatar_lookup": "Gravatar",
+        "github_commits": "GitHub Commits",
     }
     return mapping.get(name, name.replace("_", " ").title())
 
@@ -113,6 +181,14 @@ def _rationale_chip(entry: HarvestedEmail) -> str:
         "permutation_unverified": "perm",
         "github_commit_author": "gh",
         "github_code_match": "gh-code",
+        "github_profile_email": "gh-profile",
+        "security_txt_contact": "security.txt",
+        "structured_page": "page",
+        "json_ld": "json-ld",
+        "microdata": "microdata",
+        "rdfa": "rdfa",
+        "hcard": "hcard",
+        "mailto": "mailto",
         "press_release": "press",
         "search_snippet_ddg": "ddg",
         "search_snippet_bing": "bing",
@@ -182,6 +258,33 @@ def _is_unverified_permutation(entry: HarvestedEmail) -> bool:
     return False
 
 
+def _subaddress_annotations(entry: HarvestedEmail) -> list[str]:
+    """Explain alternate address forms collapsed by subaddress_key()."""
+    if not entry.subaddress_variants:
+        return []
+    has_plus = "+" in entry.email.split("@", 1)[0] or any(
+        "+" in variant.split("@", 1)[0] for variant in entry.subaddress_variants
+    )
+    source_types: set[str] = set(entry.found_by_modules)
+    for evidence in entry.evidence or []:
+        module = evidence.get("module") if isinstance(evidence, dict) else ""
+        if module == "pgp_domain_email":
+            source_types.add("pgp_uid")
+        meta = evidence.get("metadata") if isinstance(evidence, dict) else {}
+        if isinstance(meta, dict):
+            value = meta.get("source_type")
+            if isinstance(value, str):
+                source_types.add(value)
+            values = meta.get("source_types")
+            if isinstance(values, list):
+                source_types.update(str(item) for item in values)
+    if has_plus and ({"pgp_uid", "pgp_domain_email"} & source_types):
+        return ["PGP key alias"]
+    if has_plus:
+        return ["plus-address alias"]
+    return ["subaddress variant"]
+
+
 def _extract_discovered_names(result: DomainHarvestResult) -> list[dict[str, Any]]:
     """Pull discovered employee names from the ``employee_name_discovery``
     module's findings.
@@ -222,6 +325,8 @@ def _extract_discovered_names(result: DomainHarvestResult) -> list[dict[str, Any
         name = meta.get("name")
         if not name:
             continue
+        if len(str(name).split()) < 2:
+            continue
         row = {
             "name": str(name),
             "sources": list(meta.get("sources") or []),
@@ -254,6 +359,162 @@ def _extract_discovered_names(result: DomainHarvestResult) -> list[dict[str, Any
         )
     )
     return out
+
+
+def _build_people(result: DomainHarvestResult) -> list[dict[str, Any]]:
+    """Build person-centric rows by joining names to email evidence.
+
+    A direct ``metadata.name`` match wins.  When a source only provides an
+    email, the same conservative local-part matcher used by the aggregator
+    provides a secondary link.  The original email list remains authoritative;
+    this is an analyst-facing view over that evidence, not a new confidence
+    scorer.
+    """
+    people: dict[str, dict[str, Any]] = {}
+
+    def ensure(name: str, source: str, *, title: str | None = None,
+               confidence: float = 0.0, urls: list[str] | None = None) -> dict[str, Any] | None:
+        clean = " ".join(str(name or "").split())
+        if not clean:
+            return None
+        key = clean.casefold()
+        row = people.setdefault(
+            key,
+            {
+                "name": clean,
+                "title_or_role": title,
+                "sources": [],
+                "source_urls": [],
+                "confidence_score": 0.0,
+                "emails": {},
+            },
+        )
+        if source and source not in row["sources"]:
+            row["sources"].append(source)
+        if title and not row.get("title_or_role"):
+            row["title_or_role"] = title
+        row["confidence_score"] = max(row["confidence_score"], float(confidence or 0.0))
+        for url in urls or []:
+            if isinstance(url, str) and url and url not in row["source_urls"]:
+                row["source_urls"].append(url)
+        return row
+
+    def attach(row: dict[str, Any], entry: HarvestedEmail, reason: str) -> None:
+        email = entry.email
+        detail = row["emails"].setdefault(
+            email,
+            {
+                "email": email,
+                "confidence_score": entry.confidence_score,
+                "confidence_label": entry.confidence_label,
+                "identity_graph_score": entry.identity_graph_score,
+                "identity_graph_label": entry.identity_graph_label,
+                "identity_graph_flags": entry.identity_graph_flags,
+                "pattern_only": _is_unverified_permutation(entry),
+                "sources": list(entry.found_by_modules),
+                "evidence_urls": list(entry.aggregated_source_urls),
+                "match_reasons": [],
+                "is_role": entry.is_role,
+                "subaddress_variants": list(entry.subaddress_variants),
+                "subaddress_annotations": _subaddress_annotations(entry),
+            },
+        )
+        if reason not in detail["match_reasons"]:
+            detail["match_reasons"].append(reason)
+        for url in entry.aggregated_source_urls:
+            if url not in detail["evidence_urls"]:
+                detail["evidence_urls"].append(url)
+
+    discovered = _extract_discovered_names(result)
+    for name_row in discovered:
+        ensure(
+            name_row["name"],
+            "employee_name_discovery",
+            title=name_row.get("title_or_role"),
+            confidence=name_row.get("confidence_score", 0.0),
+            urls=name_row.get("source_urls") or [],
+        )
+
+    entries = _sanitised_export_emails(result.unique_emails)
+    for entry in entries:
+        if entry.is_role:
+            continue
+        direct_names: list[tuple[str, str]] = []
+        for evidence in entry.evidence or []:
+            meta = evidence.get("metadata") if isinstance(evidence, dict) else {}
+            if not isinstance(meta, dict):
+                continue
+            for key in ("name", "person_name", "source_name", "display_name", "author_name"):
+                value = meta.get(key)
+                if isinstance(value, str) and value.strip():
+                    direct_names.append((value, str(evidence.get("module") or "evidence")))
+                    break
+        linked = False
+        for name, source in direct_names:
+            row = ensure(name, source, confidence=entry.confidence_score)
+            if row is not None:
+                attach(row, entry, "direct_source_name")
+                linked = True
+        for row in people.values():
+            if _name_matches_email_local(row["name"], entry.email.rsplit("@", 1)[0]):
+                attach(row, entry, "email_local_part_match")
+                linked = True
+        if not linked:
+            from ..modules.person_email_pivot import derive_name_from_email
+
+            derived = derive_name_from_email(entry.email)
+            if derived:
+                row = ensure(derived, "email_local_part", confidence=entry.confidence_score)
+                if row is not None:
+                    attach(row, entry, "derived_from_email")
+
+    out: list[dict[str, Any]] = []
+    for row in people.values():
+        emails = sorted(row["emails"].values(), key=lambda item: (-item["confidence_score"], item["email"]))
+        row["emails"] = emails
+        row["email_count"] = len(emails)
+        row["status"] = (
+            "name_only"
+            if not emails
+            else "pattern_only"
+            if all(item.get("pattern_only") for item in emails)
+            else "email_found"
+        )
+        row["confidence_label"] = label_for_score(row["confidence_score"])
+        row["sources"].sort()
+        out.append(row)
+    out.sort(key=lambda item: (-item["email_count"], -item["confidence_score"], item["name"].casefold()))
+    return out
+
+
+def _format_people_panel(people: list[dict[str, Any]], *, max_lines: int = 50) -> Panel | Text:
+    text = Text()
+    if not people:
+        text.append("  No person-to-email links discovered.", style="dim")
+    else:
+        for person in people[:max_lines]:
+            text.append("  * ", style="dim")
+            text.append(person["name"], style=_LABEL_COLORS.get(person["confidence_label"], "white"))
+            text.append(
+                f"  [{person['status']} {person['confidence_label']} "
+                f"{person['confidence_score']:.2f}]")
+            if person["emails"]:
+                text.append("  ")
+                text.append(", ".join(item["email"] for item in person["emails"][:4]), style="cyan")
+            if person["sources"]:
+                text.append(f"  via {','.join(person['sources'][:4])}", style="dim")
+            evidence_urls = sorted({
+                url
+                for email in person["emails"][:4]
+                for url in email.get("evidence_urls", [])[:2]
+                if url
+            })
+            if evidence_urls:
+                text.append("  evidence: " + " | ".join(evidence_urls[:2]), style="blue")
+            text.append("\n")
+        if len(people) > max_lines:
+            text.append(f"  …and {len(people) - max_lines} more\n", style="dim")
+    return Panel(text, title=f"[bold]People → emails ({len(people)})[/bold]", border_style="blue")
 
 
 def _format_discovered_names_panel(
@@ -371,6 +632,28 @@ def _format_emails_block(
         text.append("  ")
         # MUST-FIX S4: rationale chip — kept short, fits in a table row.
         text.append(_rationale_chip(entry), style="cyan")
+        if entry.found_by_modules:
+            text.append("  ", style="dim")
+            text.append(
+                "pivots: " + ", ".join(entry.found_by_modules),
+                style="dim",
+            )
+        if entry.aggregated_source_urls:
+            urls = entry.aggregated_source_urls[:2]
+            text.append("  ", style="dim")
+            text.append("source: " + " | ".join(urls), style="blue")
+        aliases = _subaddress_annotations(entry)
+        if aliases:
+            text.append("  ", style="dim")
+            text.append(f"[{'; '.join(aliases)}]", style="magenta")
+            text.append("  aliases: " + ", ".join(entry.subaddress_variants[:2]), style="dim")
+        if entry.identity_graph_label or entry.identity_graph_score is not None:
+            text.append("  ", style="dim")
+            text.append(
+                f"identity: {entry.identity_graph_label or 'unresolved'} "
+                f"({entry.identity_graph_score or 0.0:.2f})",
+                style="magenta",
+            )
         if entry.is_role:
             text.append("  ")
             text.append("[ROLE]", style="yellow")
@@ -493,8 +776,8 @@ def _build_suggested_next_steps(
     if unverified_permutation_count > 0 and not result.smtp_verification_used:
         hints.append(
             f"-> {unverified_permutation_count} pattern candidates "
-            "suppressed — re-run with --verify-smtp to expand into "
-            "SMTP-verified findings."
+            "generated from discovered names. Run with --verify-smtp "
+            "to confirm which addresses actually exist."
         )
 
     if suppressed_low_count > 0 and not show_low:
@@ -609,8 +892,9 @@ def format_harvest_cli_output(
     # fields, which means downstream tests can construct mock results
     # with arbitrary count fields and the display stays correct.
     # ------------------------------------------------------------------
-    personal_emails = [e for e in result.unique_emails if not e.is_role]
-    role_emails = [e for e in result.unique_emails if e.is_role]
+    export_emails = _sanitised_export_emails(result.unique_emails)
+    personal_emails = [e for e in export_emails if not e.is_role]
+    role_emails = [e for e in export_emails if e.is_role]
 
     unverified_perms = [
         e for e in personal_emails if _is_unverified_permutation(e)
@@ -625,6 +909,11 @@ def format_harvest_cli_output(
         e for e in non_perm_personal if e.confidence_label == "MEDIUM"
     ]
     low = [e for e in non_perm_personal if e.confidence_label == "LOW"]
+    auto_show_unverified_patterns = (
+        bool(unverified_perms)
+        and not show_unverified_patterns
+        and len(high) + len(medium) == 0
+    )
 
     # ------------------------------------------------------------------
     # Phase 1: new summary bar.  Replaces the legacy "Total: N candidates"
@@ -692,7 +981,19 @@ def format_harvest_cli_output(
     # Unverified permutations: always suppressed unless the explicit
     # flag is passed.  Independent of ``show_low`` — even when LOW is
     # shown, unverified patterns stay hidden behind their own flag.
-    if unverified_perms and not show_unverified_patterns:
+    if auto_show_unverified_patterns:
+        console.print(
+            Panel(
+                _format_emails_block(unverified_perms),
+                title="[bold yellow]PATTERN CANDIDATES (unverified)[/bold yellow]",
+                border_style="yellow",
+                subtitle=(
+                    "Generated from discovered names; run with "
+                    "--verify-smtp to confirm."
+                ),
+            )
+        )
+    elif unverified_perms and not show_unverified_patterns:
         console.print(
             f"[dim]Unverified pattern candidates: {len(unverified_perms)} "
             "hidden (score 0.0 — no SMTP verification). "
@@ -765,6 +1066,7 @@ def format_harvest_cli_output(
     # steps, per the audit spec.
     discovered = _extract_discovered_names(result)
     console.print(_format_discovered_names_panel(discovered))
+    console.print(_format_people_panel(_build_people(result)))
 
     # Suggested next steps — now display-aware.
     hints = _build_suggested_next_steps(
@@ -822,7 +1124,8 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
     without bloating the ``evidence`` list.
     """
     emails_out: list[dict[str, Any]] = []
-    for entry in result.unique_emails:
+    export_emails = _sanitised_export_emails(result.unique_emails)
+    for entry in export_emails:
         # MUST-FIX S4: every email in the JSON export MUST carry a
         # non-null confidence_breakdown — downstream tooling relies on
         # the field being present and structured. If the aggregator
@@ -868,9 +1171,13 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
                 "email": entry.email,
                 "on_domain": entry.on_domain,
                 "is_role": entry.is_role,
+                "pattern_only": _is_unverified_permutation(entry),
                 "role_match_type": entry.role_match_type,
                 "confidence_score": entry.confidence_score,
                 "confidence_label": entry.confidence_label,
+                "identity_graph_score": entry.identity_graph_score,
+                "identity_graph_label": entry.identity_graph_label,
+                "identity_graph_flags": entry.identity_graph_flags,
                 "found_by_modules": entry.found_by_modules,
                 "source_count": entry.source_count,
                 "first_seen_timestamp": entry.first_seen_timestamp,
@@ -884,6 +1191,7 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
                 ),
                 "aggregated_source_urls": entry.aggregated_source_urls,
                 "subaddress_variants": entry.subaddress_variants,
+                "subaddress_annotations": _subaddress_annotations(entry),
                 # MUST-FIX S4: full per-email confidence breakdown.
                 # Either the module-provided breakdown (rich — captures
                 # freshness + multiplier math + source_types) or a
@@ -915,21 +1223,20 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
             "metadata": meta,
         }
 
+    summary_counts = _export_summary_counts(export_emails)
+    people = _build_people(result)
     return {
         "domain": result.domain,
         "harvested_at": result.completed_at,
         "duration_seconds": result.duration_seconds,
         "summary": {
-            "total_unique_emails": result.total_unique_emails,
-            "high_confidence": result.high_confidence_count,
-            "medium_confidence": result.medium_confidence_count,
-            "low_confidence": result.low_confidence_count,
-            "role_accounts": result.role_account_count,
-            "personal_emails": result.personal_email_count,
+            **summary_counts,
             "smtp_verification_used": result.smtp_verification_used,
             "catchall_detected": result.catchall_detected,
             "confirmed_pattern": result.confirmed_pattern,
             "employee_names_processed": result.employee_names_processed,
+            "people_count": len(people),
+            "people_with_emails": sum(1 for person in people if person.get("emails")),
             # Phase 1 of 4: signal to downstream tooling that the CLI
             # hid a class of emails by default.  The JSON/CSV/NDJSON
             # exports always carry the FULL email list (hiding is a
@@ -947,6 +1254,7 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
         # analysts and downstream tooling can pivot directly on a name
         # when no email attestation matched.
         "discovered_names": _extract_discovered_names(result),
+        "people": people,
         # MUST-FIX S12: schema version for forward-compatibility. Bump this
         # when the export structure changes in a backward-incompatible
         # way (renaming a top-level key, removing a field, changing a
@@ -990,7 +1298,7 @@ def format_harvest_csv_export(result: DomainHarvestResult) -> str:
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=_CSV_COLUMNS, lineterminator="\n")
     writer.writeheader()
-    for entry in result.unique_emails:
+    for entry in _sanitised_export_emails(result.unique_emails):
         row: dict[str, Any] = {
             "email": entry.email,
             "confidence_label": entry.confidence_label,
@@ -1020,7 +1328,7 @@ def format_harvest_ndjson_export(result: DomainHarvestResult) -> str:
     through ``jq -c`` line by line.
     """
     out_lines: list[str] = []
-    for entry in result.unique_emails:
+    for entry in _sanitised_export_emails(result.unique_emails):
         # MUST-FIX S4: ensure breakdown is non-null for the stream.
         if entry.confidence_breakdown is None:
             entry.confidence_breakdown = {

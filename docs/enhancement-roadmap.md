@@ -793,3 +793,115 @@ If bandwidth is limited, do these in order:
 5. **Phase 3F** (GitHub code search) — ~120 LOC, new data source, zero platform cost
 
 These 5 get you 80% of the benefit with ~650 LOC total.
+
+---
+
+## PHASE 7 — Orchestration Spine (NEW)
+
+**Goal:** Replace the per-phase dict handoff between `InvestigationPhase` runners with a single async-safe pub/sub memory space that any module or enrichment pass can publish to.  Aligns on multiplicative confidence scoring across the harvest pipeline.
+
+**Dependency:** None required.  Composes with Phase 2A (avatar pHash), Phase 2B (bio fuzzy), Phase 4A (engine phase decomposition).  Independent of Phase 2C's `name_consensus` — the pool ships its own stdlib-only normaliser (`normalize_name`, `normalize_slug_or_email`).
+
+**Estimated total:** ~450 LOC across the pool, normaliser, and tests.
+
+---
+
+### Phase 7A — `AsyncSignalPool`
+
+**Files:** New `backend/core/signal_normalize.py`, new `backend/core/signal_pool.py`, new `tests/test_signal_normalize.py`, new `tests/test_signal_pool.py`, integration in `backend/core/__init__.py`.
+
+- [ ] **7A.1** — `backend/core/signal_normalize.py` — pubic surface:
+  - `normalize_name(raw: object) -> str` — NFKC + diacritic strip + lowercase + leading/trailing honorific discard.  Honorific allowlist covers English, professional titles (Dr/Prof/Rev), generational (Jr/Sr/II…), academic post-nominals (PhD/MD/JD/BA…).  `_strip_token_edges()` uses `unicodedata.category()` to keep non-ASCII letters (`Ł`, CJK) intact while trimming real punctuation.
+  - `normalize_slug_or_email(raw: object) -> str | None` — `@`-bearing input takes lowercase localpart then runs the same slug rules; bare input is lowercased, separator-collapsed, alnum-only.  Garbage in → `None` out.
+  - `canonical_key(name, slug_or_email) -> tuple[str | None, str | None]` — `(None, None)` when both inputs are unusable; hashable.
+  - **Deliberate non-features** (documented, not bug): Ł/ø/đ preserved (no `unidecode`); `jane+alias` distinguished from `jane` (no RFC 5322 sub-address folding); Phase 2C owns `unidecode`-aware clustering.
+
+- [ ] **7A.2** — `backend/core/signal_pool.py` — primitives:
+  - `Signal` dataclass (`slots=True`, mutable for `metadata`/flags): `source`, `kind`, `value`, `metadata`, `ts`, `flags`.  `flags` is a `frozenset[str]` from `VALID_BOOST_FLAGS = {"target_domain_match", "worksfor_match", "avatar_phash_match"}`.  Unknown flags raise `ValueError`; unknown kinds fall back to `"other"`.
+  - `CandidatePerson` dataclass: `canonical_key`, `signals`, `score`, `boost_flags`, `first_seen`, `last_seen`.  `recompute_score(base_score: float = 0.1)` is idempotent and multiplicative; `merged_signals()` returns a `dict[source, int]`.
+  - `PoolStats` dataclass: `clusters`, `signals`, `exports`, `dropped` — lock-free telemetry.
+  - `BOOST_MULTIPLIERS` map: `target_domain_match: 2.0`, `worksfor_match: 2.5`, `avatar_phash_match: 1.5`.  Module-level constant; do not mutate.
+
+- [ ] **7A.3** — `backend/core/signal_pool.py` — `AsyncSignalPool`:
+  - `publish(signal)` is **non-blocking** — uses `Queue.put_nowait`.  Drops on full queue, increments `_dropped`.  Publishers from any number of coroutines are safe; the drain task is single-flight, lazily started.
+  - `drain()` consumes the queue under one `asyncio.Lock` per absorbed signal.  Polls with `asyncio.wait_for(timeout=0.05)` so `close()` can wind the loop down cheaply.
+  - `close()` is idempotent, flushes pending items via a sentinel, awaits the drain task.  `publish()` after `close()` counts as a drop.
+  - `all_candidates()` / `export_ready()` snapshots under the lock; `export_ready()` is sorted by score desc, first_seen asc.
+  - `stats()` is non-async and lock-free — appropriate for telemetry.
+
+- [ ] **7A.4** — Threshold and stacking math (same as Phase 2 `IdentityGraph`):
+
+  | Booster combination           | Composite score | Pass 0.5? |
+  |-------------------------------|-----------------|-----------|
+  | (none)                        | 0.10            | no        |
+  | target_domain                 | 0.20            | no        |
+  | worksfor                      | 0.25            | no        |
+  | avatar_phash                  | 0.15            | no        |
+  | target × worksfor             | 0.50            | **yes** (boundary) |
+  | target × avatar               | 0.30            | no        |
+  | worksfor × avatar             | 0.375           | no        |
+  | all three                     | 0.75            | **yes**   |
+
+  Multiplicative stacking is intentional — it guarantees that single-booster hits **never** clear the export threshold.  Identity is asserted only when (a) schema.org `worksFor` matches the target org AND the social URL sits on the target domain, or (b) all three boosters independently corroborate.  **Call out the same stacking caveat that the Phase 2 boost docs do.**
+
+- [ ] **7A.5** — Re-export from `backend/core/__init__.py`:
+  `AsyncSignalPool`, `CandidatePerson`, `Signal`, `PoolStats`, `BOOST_MULTIPLIERS`, `VALID_BOOST_FLAGS`, `VALID_SIGNAL_KINDS`.
+
+- [ ] **7A.6** — Tests:
+  - `tests/test_signal_normalize.py` — 27 tests covering Latin-with-diacritics, CJK pass-through, ł/stroke preservation, multiple honorifics, whitespace collapse, edge punctuation, plus-alias policy.
+  - `tests/test_signal_pool.py` — 33 tests covering: signal validation, score math at every booster combination, multi-source merge, race-free concurrent publishes (50×20 signals into one cluster), queue-full drop counter, idempotent boosters, close-flush semantics, smoke test of 30 signals / 3 clusters / 1 export.
+
+**How to Know When Phase 7A Is Done**
+
+1. `from backend.core import AsyncSignalPool, CandidatePerson, Signal` works without side-effect imports.
+2. `pytest tests/test_signal_normalize.py tests/test_signal_pool.py -v` → 60 passed.
+3. `ruff check` and `ruff format --check` clean on the new files; no new failures in `tests/`.
+4. Async-safety proven by `test_concurrent_publishes_dont_race` (50 producers, 20 signals each, single cluster, 1000 signals absorbed, no `asyncio` warnings).
+5. Stacking math above matches the `recompute_score` docstring; Phase 2 boost-doc gets the same multiplication-call-out for consistency.
+
+**Important Constraints**
+
+- **Stdlib only.**  No `aiostream`, no `unidecode`, no `rapidfuzz`.  Phase 2C owns `unidecode`-aware clustering; the pool is deliberately the lighter dependency-free variant so it can be deployed without dragging the full reasoning layer.
+- **Never block the harvest loop.**  `publish()` is `put_nowait` only — drops are counted, not waited on.  `close()` is the only place that pushes synchronously under back-pressure, and it backs off with `asyncio.sleep(0.01)` if the queue is full.
+- **No engine / phases / modules touched.**  This phase ships a passive pool — phases can adopt it later without forcing this change everywhere.  Wiring `phases.py` to publish into the pool is a *follow-up* sub-phase (7B), not bundled in 7A.
+- **Boosters are flags, not counters.**  Pushing ten `target_domain_match` signals still applies ×2.0 exactly once.  Same rule as `IdentityGraph`.
+- **Alias folding and `unidecode`-style transliteration are out of scope.**  They live in Phase 2C's `name_consensus`; the pool's normaliser is intentionally narrower.
+
+---
+
+## PHASE 8 — Fetch-Layer Cleanup (DONE in 0.11.3)
+
+Maintenance close-out of the 0.11.1 Phase 3 stealth refactor — the dorkers and syndication sweep migrated to `CachedFetch`, but a cluster of tests still wired the old `StealthSession` / `httpx.AsyncClient` shapes and silently degraded (or hit the live network).  Headline change is **test-side**: the production code was already correct.
+
+### Phase 8A — BUG-1 dorker test rewrite (DONE)
+
+**Files:** new `tests/_fetch_fixtures.py`, new `tests/conftest.py`, rewrites of `tests/core/test_bing_dorker.py` and `tests/core/test_duckduckgo_dorker.py`, fix in `tests/modules/test_email_search_dork.py`, new `tests/test_no_live_network.py`.
+
+- [x] **8A.1** — `tests/_fetch_fixtures.py` — shared `FakeSession` (URL → `CachedResponse` lookup with `call_log` + `call_count`), `make_cached_response` factory, `make_cached_fetch` helper that returns the `(fetch, cache, session)` triple tests usually want, `LocalHttpServer` + `make_local_fetch` for the rare end-to-end case.
+- [x] **8A.2** — `tests/conftest.py` — re-exports the fixtures above as `fake_session`, `fetch_cache`, `local_http`, `make_response`.  Sys-path mutation lets us pull `_fetch_fixtures` without `tests/` needing to be a package.
+- [x] **8A.3** — `tests/core/test_bing_dorker.py` — 13 tests replacing the 5 stale ones.  Coverage: cache routes through `fetch.get(url)`, second-search cache hit, 202/403/429 CAPTCHA blocks, 5xx pass-through, body-marker CAPTCHA detection, 404 graceful empty, transport-error swallowing with `_last_error` set, explicit-transport bypasses cache, default construction doesn't eagerly open a session, pure-HTML parser sanity, empty-input parser safety.
+- [x] **8A.4** — `tests/core/test_duckduckgo_dorker.py` — 14 tests with the same shape as 8A.3 plus an extra parser test that the `uddg=` DDG redirect unwraps correctly.
+- [x] **8A.5** — `tests/modules/test_email_search_dork.py` — fixed the stub `build_dork_queries` lambda to accept the Phase-4 `aggressive` kwarg (was raising `TypeError`).  Added a new test that pins the `aggressive` value reaches the dork builder.
+- [x] **8A.6** — `tests/test_no_live_network.py` — AST-based guard test.  Fails the suite if a test imports `aiohttp` or `requests`, or constructs a bare `httpx.AsyncClient()` without `transport=`.  Two pre-existing tests (`test_avatar_hasher`, `test_reset_prober`) use the `monkeypatch.setattr(client, "get", _fake)` pattern — allowlisted with `TODO(BUG-1 follow-up)` markers; migrating them to `MockTransport` is a separate task.
+
+**How to Know When Phase 8A Is Done**
+1. `pytest tests/core/test_bing_dorker.py tests/core/test_duckduckgo_dorker.py tests/modules/test_email_search_dork.py tests/test_no_live_network.py -v` → 45 passed.
+2. `pytest tests/test_syndication_feed_sweeper.py` → 2 passed (unchanged, was already on the new pattern).
+3. `pytest tests/test_concurrent_fetch_cache.py tests/test_pagination_handler.py tests/test_context_router.py` → all green, no regressions.
+4. `ruff check` clean on the four new/modified files.
+
+### Phase 8B — Legacy list-scraper audit (DONE, zero deletions)
+
+**Files:** `docs/enhancement-roadmap.md` (this entry), `CHANGELOG` equivalent in `README.md`.
+
+- [x] **8B.1** — Audited `backend/modules/` for "list-scraping modules superseded by the PaginationHandler + ContextRouter loops".  Conservative pass: **zero deletions**.
+- [x] **8B.2** — Reasoning:
+  - `backend/modules/__init__.py` auto-discovers every BaseModule subclass via `pkgutil.iter_modules`, so the "unused" framing doesn't apply — dropping a file removes its module from the registry, which is a real production change.
+  - `PaginationHandler` is currently only used by `domain_harvest_orchestrator.discover_and_extract_content()` for sitemap content extraction.  `ContextRouter` is only used for homepage routing (one fetch).  Neither is consumed by a "list" module.
+  - The **only** module doing manual list pagination (`wordpress_rest.py`, `for page in range(1, _MAX_PAGES + 1)` over `?page=N`) is still actively wired into the orchestrator and tested.  Replacing its loop with `PaginationHandler` would require special-casing 401/403/non-JSON stop conditions that the walker doesn't currently understand.
+- [ ] **8B.3 — Future work (not 0.11.3)**: refactor `wordpress_rest.py` to use `PaginationHandler` with an `item_counter` callback.  Out of scope for this release because the risk-to-reward is poor (active module, real chance of breaking the signal-extraction path).  Filing as a Phase 8 follow-up so it doesn't get lost.
+
+**How to Know When Phase 8B Is Done**
+1. `git grep "for page in range"` returns only the `pagination_handler.py` line and any future wordpress_rest replacement — nothing else.
+2. Every `backend/modules/*.py` file either registers a BaseModule, is a test helper, or is explicitly removed in the changelog.
+

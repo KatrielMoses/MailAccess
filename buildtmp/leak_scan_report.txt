@@ -1,0 +1,13 @@
+﻿
+=== ine.com (buildtmp/bench_ine.log) ===
+  size: 20032 bytes
+  total email-like strings: 14, unique: 14
+  LEAK [undecoded_entity] (2 hits): ['u003esales@ine.com', 'u003esupport@ine.com']
+  LEAK [logo_filename] (1 hits): ['home-logo_120x@2x.png']
+  LEAK [home_logo_dx] (1 hits): ['home-logo_120x@2x.png']
+  LEAK [off_target] (1 hits): ['home-logo_120x@2x.png']
+
+=== lavellenetworks.com (buildtmp/bench_lavelle.log) ===
+  size: 20464 bytes
+  total email-like strings: 12, unique: 12
+  LEAK [off_target] (3 hits): ['info@flairnetworksystems.com', 'info@presto.co.in', 'salesenquiry@visnet.in']
