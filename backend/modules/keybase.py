@@ -4,6 +4,7 @@ from typing import Any
 
 import httpx
 
+from ..config import settings
 from ..core.http_client import build_client
 from .base import BaseModule, ModuleResult, ModuleStatus
 
@@ -17,6 +18,8 @@ class KeybaseModule(BaseModule):
     requires_key = False
 
     async def run(self, email: str, original_email: str | None = None) -> ModuleResult:
+        if not getattr(settings, "enable_keybase_lookup", True):
+            return ModuleResult(status=ModuleStatus.SKIPPED, metadata={"email": email})
         local_parts: list[str] = []
         if original_email and original_email.lower() != email.lower():
             orig_local = original_email.split("@")[0] if "@" in original_email else original_email

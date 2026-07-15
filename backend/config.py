@@ -203,6 +203,8 @@ class Settings(BaseSettings):
 
     # Fediverse discovery — WebFinger probes across ~50 popular instances
     enable_fediverse_discovery: bool = True
+    enable_keybase_lookup: bool = True
+    enable_hackernews_lookup: bool = True
 
     # User-scanner — probes 205+ platforms via user-scanner (no API key required)
     enable_user_scanner: bool = True
@@ -303,7 +305,10 @@ class Settings(BaseSettings):
     wayback_max_urls: int = 100
     # Syndication feed sweep (domain harvest mode only).
     # Scans homepage feed links and fallback feed endpoints for author data.
-    enable_syndication_feed_sweeper: bool = False
+    enable_syndication_feed_sweeper: bool = True
+    enable_harvest_history_cache: bool = True
+    enable_yield_prediction: bool = True
+    yield_prediction_tail_seconds: float = 15.0
 
     # Search-engine dorking (domain harvest mode only — Phase B1 of 0.10.0).
     # Master kill switch for the search-dork module.  The module is
@@ -315,6 +320,10 @@ class Settings(BaseSettings):
     dork_lite_mode: bool = False
     dork_ddg_delay_seconds: float = 5.0
     dork_bing_delay_seconds: float = 4.0
+    # Supported API-backed search provider. ``auto`` uses Brave when a key
+    # is configured and otherwise keeps legacy HTML as best-effort fallback.
+    search_provider: str = "auto"
+    brave_search_api_key: str | None = None
     google_cse_api_key: str | None = None
     google_cse_cx: str | None = None
 
@@ -355,6 +364,16 @@ class Settings(BaseSettings):
     enable_npm_email: bool = True
     enable_pypi_email: bool = True
     enable_pgp_domain_email: bool = True
+    # Keyless public-surface expansion. All limits are hard caps per run.
+    enable_public_surface_sweeper: bool = True
+    public_surface_max_urls: int = 12
+    enable_public_forge: bool = True
+    public_forge_max_projects: int = 5
+    public_forge_max_commits: int = 10
+    enable_package_ecosystems: bool = True
+    package_ecosystems_max_packages: int = 5
+    enable_subdomain_surface: bool = True
+    subdomain_surface_max_hosts: int = 8
     # ------------------------------------------------------------------
     # SMTP verification — OPT-IN ONLY.  The default is False to keep
     # "just run a domain harvest" safe.  Flipping ENABLE_SMTP_VERIFICATION
@@ -372,6 +391,22 @@ class Settings(BaseSettings):
     # change it to anything that points back at the operator.
     smtp_sender_address: str = "probe@mailaccess.invalid"
     smtp_connect_timeout_seconds: int = 8
+    # Automatic low-confidence email validation during domain harvests.
+    # The validator itself is default-on; the per-run cap limits network probes.
+    enable_low_email_validation: bool = True
+    harvest_validation_max_per_run: int = 25
+    # Keyless XposedOrNot passive breach corroboration.
+    xposed_or_not_enabled: bool = True
+    # Provider-aware verification. M365 is opt-in because the endpoint is
+    # undocumented and tenant privacy/throttle settings affect semantics.
+    enable_m365_email_verification: bool = False
+    m365_verification_delay_seconds: float = 0.1
+    m365_verification_max_checks: int = 50
+    m365_verification_timeout_seconds: float = 10.0
+    enable_yahoo_email_verification: bool = False
+    yahoo_verification_delay_seconds: float = 1.2
+    yahoo_verification_max_checks: int = 25
+    yahoo_verification_timeout_seconds: float = 10.0
 
     # Webhooks
     slack_webhook_url: str | None = None

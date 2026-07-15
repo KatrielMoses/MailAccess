@@ -24,11 +24,12 @@ import httpx
 
 from ..config import settings
 from ..core.bing_dorker import BingDorker
+from ..core.brave_dorker import BraveSearchDorker
 from ..core.concurrent_fetch_cache import CachedFetch
 from ..core.dork_queries import build_dork_queries
 from ..core.duckduckgo_dorker import DuckDuckGoDorker
 from ..core.email_confidence import compute_confidence_breakdown, label_for_score
-from ..core.email_extraction import extract_emails
+from ..core.email_extraction import extract_emails, infer_template_from_local_part
 from ..core.http_client import build_client
 from ..core.role_classifier import classify_email
 from ..core.scrapingant import get_active_transport
@@ -183,6 +184,57 @@ class EmailSearchDorkModule(BaseModule):
         cse_failed = False
 
         cse_available, cse_api_key, cse_cx = await _cse_available()
+        configured_provider = str(getattr(settings, "search_provider", "auto") or "auto").strip().lower()
+        brave_api_key = str(getattr(settings, "brave_search_api_key", "") or "").strip()
+        if configured_provider not in {"auto", "brave", "legacy_html"}:
+            return ModuleResult(
+                status=ModuleStatus.FAILED,
+                errors=[f"email_search_dork: unsupported search provider {configured_provider!r}"],
+                metadata={"domain": domain, "search_provider": configured_provider},
+            )
+        use_brave = configured_provider == "brave" or (
+            configured_provider == "auto" and bool(brave_api_key)
+        )
+        if configured_provider == "brave" and not brave_api_key:
+            return ModuleResult(
+                status=ModuleStatus.PARTIAL,
+                errors=["email_search_dork: SEARCH_PROVIDER=brave requires BRAVE_SEARCH_API_KEY"],
+                metadata={
+                    "domain": domain,
+                    "search_provider": "brave",
+                    "health_category": "configuration",
+                    "failure_categories": ["configuration"],
+                },
+            )
+
+        brave_findings: list[DorkRunSummary] = []
+        brave_blocked = False
+        brave_failed = False
+
+        if use_brave:
+            brave = BraveSearchDorker(brave_api_key)
+            try:
+                async with build_client(timeout=10.0, follow_redirects=True) as brave_client:
+                    for q in queries_for_run:
+                        results, error, blocked = await brave.search(
+                            brave_client, q.query, count=10
+                        )
+                        brave_findings.append(DorkRunSummary(q, results, error))
+                        brave_blocked = brave_blocked or blocked
+                        brave_failed = brave_failed or bool(error)
+                        if blocked:
+                            break
+            except Exception as exc:  # noqa: BLE001
+                brave_failed = True
+                brave_findings.append(
+                    DorkRunSummary(
+                        queries_for_run[0], [], f"Brave Search client failed: {exc}"
+                    )
+                )
+
+            # The legacy engine block below remains responsible for its
+            # normal telemetry, but must not issue duplicate HTML requests.
+            queries_for_run = []
 
         # 0.11.1 Phase 4: build StealthSession for DDG/Bing.
         # 0.11.1 Phase 3 cache: when ``fetch`` is injected by the
@@ -334,10 +386,10 @@ class EmailSearchDorkModule(BaseModule):
                 metadata={"domain": domain},
             )
 
-        if isinstance(outcome_map.get("ddg"), BaseException):
+        if not use_brave and isinstance(outcome_map.get("ddg"), BaseException):
             ddg_failed = True
             _LOG.warning("email_search_dork: DDG task crashed: %s", outcome_map["ddg"])
-        if isinstance(outcome_map.get("bing"), BaseException):
+        if not use_brave and isinstance(outcome_map.get("bing"), BaseException):
             bing_failed = True
             _LOG.warning("email_search_dork: Bing task crashed: %s", outcome_map["bing"])
 
@@ -350,6 +402,14 @@ class EmailSearchDorkModule(BaseModule):
         # }
         aggregated: dict[str, dict[str, Any]] = {}
 
+        # P4: search-snippet → confirmed-pattern feedback.  Track
+        # templates inferred from the on-domain personal emails we
+        # see in the snippets so we can emit each one (once) to the
+        # signal pool after the per-engine loop.  We de-dupe by
+        # template string so a single dork page with 5 hits on the
+        # same template does not flood the pool.
+        inferred_templates: set[str] = set()
+
         def _ingest(engine: str, summary: DorkRunSummary) -> None:
             for result in summary.results:
                 combined = f"{result.title}\n{result.snippet}"
@@ -360,6 +420,7 @@ class EmailSearchDorkModule(BaseModule):
                             "ddg": False,
                             "bing": False,
                             "cse": False,
+                            "brave": False,
                             "queries": [],
                             "snippets": [],
                             "on_domain": False,
@@ -373,6 +434,27 @@ class EmailSearchDorkModule(BaseModule):
                         bucket["snippets"].append(  # type: ignore[index]
                             extracted.source_text_snippet
                         )
+                    # P4: feed the inferred template back to the
+                    # signal pool so pattern generation can use it
+                    # for the *current* run, not the next one.  We
+                    # only emit for ON-DOMAIN PERSONAL addresses —
+                    # role accounts (``info@``, ``support@``) have a
+                    # local-part shape (``info``, ``support``) that
+                    # does NOT match any of our shape patterns, so
+                    # ``infer_template_from_local_part`` returns
+                    # ``None`` and the role account is naturally
+                    # filtered out.
+                    if extracted.on_domain:
+                        local_part = (
+                            extracted.email.split("@", 1)[0]
+                            if "@" in extracted.email
+                            else ""
+                        )
+                        template = infer_template_from_local_part(
+                            local_part, domain
+                        )
+                        if template:
+                            inferred_templates.add(template)
 
         for summary in ddg_findings:
             _ingest("ddg", summary)
@@ -380,6 +462,25 @@ class EmailSearchDorkModule(BaseModule):
             _ingest("bing", summary)
         for summary in cse_findings:
             _ingest("cse", summary)
+        for summary in brave_findings:
+            _ingest("brave", summary)
+
+        # P4: emit the inferred templates to the signal pool so
+        # pattern_and_verify picks them up as confirmed patterns
+        # in the SAME run.  Order is unspecified (set iteration);
+        # pattern_and_verify uses the first confirmed pattern as
+        # the priority template, so we sort for determinism.
+        if signal_pool is not None and inferred_templates:
+            emit = getattr(signal_pool, "emit_confirmed_pattern", None)
+            if callable(emit):
+                for template in sorted(inferred_templates):
+                    try:
+                        emit(template)
+                    except Exception:  # noqa: BLE001 - never crash the dork run
+                        _LOG.debug(
+                            "email_search_dork: emit_confirmed_pattern failed for %r",
+                            template,
+                        )
 
         # ------------------------------------------------------------------
         # Build findings
@@ -398,6 +499,8 @@ class EmailSearchDorkModule(BaseModule):
                 source_types.append("search_snippet_bing")
             if data["cse"]:
                 source_types.append("search_snippet_google_cse")
+            if data.get("brave"):
+                source_types.append("search_snippet_brave")
 
             confidence_info = compute_confidence_breakdown(
                 source_types=source_types,
@@ -410,7 +513,7 @@ class EmailSearchDorkModule(BaseModule):
             if data["on_domain"]:
                 on_domain_count += 1
 
-            active_engines = sum(1 for k in ("ddg", "bing", "cse") if data.get(k))
+            active_engines = sum(1 for k in ("ddg", "bing", "cse", "brave") if data.get(k))
             if active_engines >= 2:
                 dual_engine_confirmed += 1
 
@@ -429,6 +532,7 @@ class EmailSearchDorkModule(BaseModule):
                         "found_via_ddg": bool(data["ddg"]),
                         "found_via_bing": bool(data["bing"]),
                         "found_via_cse": bool(data["cse"]),
+                        "found_via_brave": bool(data.get("brave")),
                         "matching_queries": sorted(set(data["queries"]))[:8],
                         "is_role": classification.is_role,
                         "role_match_type": classification.match_type,
@@ -452,13 +556,15 @@ class EmailSearchDorkModule(BaseModule):
         ddg_has_error = any(s.error for s in ddg_findings)
         bing_has_error = any(s.error for s in bing_findings)
         cse_has_error = any(s.error for s in cse_findings)
+        brave_has_error = any(s.error for s in brave_findings)
         ddg_all_empty = ddg_findings and all(not s.results for s in ddg_findings)
         bing_all_empty = bing_findings and all(not s.results for s in bing_findings)
         cse_all_empty = cse_findings and all(not s.results for s in cse_findings)
+        brave_all_empty = brave_findings and all(not s.results for s in brave_findings)
 
         # Collect active blocked/failed flags.
-        any_blocked = ddg_blocked or bing_blocked or cse_blocked
-        any_failed = ddg_failed or bing_failed or cse_failed
+        any_blocked = ddg_blocked or bing_blocked or cse_blocked or brave_blocked
+        any_failed = ddg_failed or bing_failed or cse_failed or brave_failed
 
         if (any_failed and not cse_available) or (ddg_failed and bing_failed and cse_failed):
             status = ModuleStatus.FAILED
@@ -468,6 +574,7 @@ class EmailSearchDorkModule(BaseModule):
             or (ddg_all_empty and ddg_has_error)
             or (bing_all_empty and bing_has_error)
             or (cse_available and cse_all_empty and cse_has_error)
+            or (use_brave and brave_all_empty and brave_has_error)
         ):
             status = ModuleStatus.PARTIAL
         else:
@@ -483,6 +590,17 @@ class EmailSearchDorkModule(BaseModule):
         for s in cse_findings:
             if s.error:
                 errors.append(f"[Google CSE] {s.error}")
+        for s in brave_findings:
+            if s.error:
+                errors.append(f"[Brave] {s.error}")
+
+        failure_categories: list[str] = []
+        if ddg_blocked or bing_blocked or cse_blocked:
+            failure_categories.append("blocked_or_rate_limited")
+        if ddg_failed or bing_failed or cse_failed:
+            failure_categories.append("transport_or_provider_failure")
+        if any("timeout" in error.lower() for error in errors):
+            failure_categories.append("timeout")
 
         return ModuleResult(
             status=status,
@@ -502,6 +620,15 @@ class EmailSearchDorkModule(BaseModule):
                 "ddg_failed": ddg_failed,
                 "bing_failed": bing_failed,
                 "cse_failed": cse_failed,
+                "brave_queries_run": len(brave_findings),
+                "brave_results_collected": sum(len(s.results) for s in brave_findings),
+                "brave_blocked": brave_blocked,
+                "brave_failed": brave_failed,
+                "search_provider": "brave" if use_brave else "legacy_html",
+                "failure_categories": failure_categories,
+                "health_category": failure_categories[0] if failure_categories else (
+                    "success_empty" if not findings else "ok"
+                ),
                 "cse_available": cse_available,
                 "total_emails_found": len(aggregated),
                 "on_domain_emails": on_domain_count,
@@ -514,6 +641,14 @@ class EmailSearchDorkModule(BaseModule):
                 "active_scrapingant_transport": get_active_transport()
                 if use_proxies
                 else None,
+                # P4: surface how many templates we fed back to the
+                # signal pool so the report layer can show
+                # "X snippet-derived patterns confirmed".  The
+                # actual template strings are kept on the
+                # confirmed_patterns list in the signal pool; this
+                # is the count, not the list, to keep metadata
+                # cheap.
+                "inferred_patterns_emitted": len(inferred_templates),
             },
         )
 

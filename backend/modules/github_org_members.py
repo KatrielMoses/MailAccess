@@ -315,10 +315,13 @@ class GitHubOrgMembersModule(BaseModule):
             return ModuleResult(
                 status=ModuleStatus.PARTIAL,
                 findings=[],
+                errors=["github_org_members: rate_limited"],
                 metadata={
                     "domain": domain,
                     "org": org_slug,
                     "skip_reason": "rate_limited",
+                    "failure_categories": ["blocked_or_rate_limited"],
+                    "health_category": "blocked_or_rate_limited",
                 },
             )
 
@@ -400,5 +403,9 @@ class GitHubOrgMembersModule(BaseModule):
                 "members_found": len(members),
                 "members_with_email": sum(1 for m in members if m["has_email"]),
                 "rate_limited": rate_limited,
+                "failure_categories": ["blocked_or_rate_limited"] if rate_limited else [],
+                "health_category": "blocked_or_rate_limited" if rate_limited else (
+                    "success_empty" if not members else "ok"
+                ),
             },
         )

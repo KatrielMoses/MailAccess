@@ -27,7 +27,45 @@ SOURCE_WEIGHTS: dict[str, float] = {
     "github_code_match": 0.45,
     "permutation_verified": 0.65,
     "permutation_catchall": 0.10,
-    "permutation_unverified": 0.00,
+    # P6: passive priors for generated name patterns. These rank
+    # candidates but do not claim that a mailbox currently exists.
+    "permutation_unverified_{first}_{last}": 0.15,
+    "permutation_unverified_{first}": 0.13,
+    "permutation_unverified_{f}{last}": 0.12,
+    "permutation_unverified_{first}{last}": 0.09,
+    "permutation_unverified_{last}": 0.07,
+    "permutation_unverified_{last}_{first}": 0.05,
+    "permutation_unverified_other": 0.03,
+    # P6: pattern-generation boosters.  These are added to a
+    # candidate's source-type list when the corresponding
+    # corroboration is true:
+    #   * ``permutation_format_match`` — the candidate's template
+    #     matches a confirmed format (Hunter, SMTP-verified, or
+    #     snippet-derived).  ``0.20`` keeps it under the
+    #     developer-evidence threshold so it does not accidentally
+    #     outrank a github_commit_author hit.
+    #   * ``permutation_name_match`` — the candidate's local part
+    #     contains the discoverer's name tokens.  ``0.25`` is
+    #     intentionally higher than ``permutation_format_match``
+    #     because a name match is direct evidence; a format match
+    #     is a prior.
+    #   * ``permutation_unverified_{first}_tier1`` — the
+    #     ``{first}@`` candidate for a top-tier (executive) name
+    #     with a confirmed ``{first}@`` pattern.  ``0.55`` is
+    #     strong enough to clear the new LIKELY threshold (0.70)
+    #     once the multi_source multiplier is applied.
+    "permutation_format_match": 0.20,
+    "permutation_name_match": 0.25,
+    "permutation_unverified_{first}_tier1": 0.55,
+    # Native syntax + DNS evidence. This is stronger than an untested
+    # permutation, but intentionally below SMTP mailbox verification.
+    "permutation_mx_valid": 0.30,
+    "permutation_verified_m365": 0.85,
+    "permutation_verified_yahoo": 0.80,
+    "permutation_gravatar_hit": 0.30,
+    "permutation_breach_hit": 0.15,
+    "breach_recent": 0.20,
+    "breach_historical": 0.10,
     # Direct company-owned identity surfaces.  These are strong evidence
     # of publication, but are kept below cryptographic/developer evidence.
     "security_txt_contact": 0.75,
@@ -70,7 +108,26 @@ SOURCE_CLASS: dict[str, str] = {
     "press_release": "press",
     "permutation_verified": "verification",
     "permutation_catchall": "verification",
-    "permutation_unverified": "verification",
+    "permutation_unverified_{first}_{last}": "verification",
+    "permutation_unverified_{first}": "verification",
+    "permutation_unverified_{f}{last}": "verification",
+    "permutation_unverified_{first}{last}": "verification",
+    "permutation_unverified_{last}": "verification",
+    "permutation_unverified_{last}_{first}": "verification",
+    "permutation_unverified_other": "verification",
+    # P6: pattern-generation boosters carry the same source
+    # family as the unverified permutations — they live or die
+    # with their parent template's evidence.
+    "permutation_format_match": "verification",
+    "permutation_name_match": "verification",
+    "permutation_unverified_{first}_tier1": "verification",
+    "permutation_mx_valid": "verification",
+    "permutation_verified_m365": "verification",
+    "permutation_verified_yahoo": "verification",
+    "permutation_gravatar_hit": "corroboration",
+    "permutation_breach_hit": "corroboration",
+    "breach_recent": "corroboration",
+    "breach_historical": "corroboration",
     "security_txt_contact": "direct",
     "structured_page": "direct",
     "json_ld": "direct",
@@ -81,8 +138,37 @@ SOURCE_CLASS: dict[str, str] = {
 }
 
 MAX_SCORE = 1.5
-HIGH_THRESHOLD = 0.85
-MEDIUM_THRESHOLD = 0.55
+
+# P7: 4-tier label system.  The legacy 3-tier thresholds
+# (HIGH ≥ 0.85, MEDIUM ≥ 0.55, LOW < 0.55) collapsed two
+# qualitatively different evidence bands into a single "MEDIUM"
+# bucket — a real SMTP-confirmed-but-stale CC hit and a weak
+# passive inference both landed in the same tier.  The new
+# 4-tier split makes the analyst's per-tier counts directly
+# actionable:
+#
+#   CONFIRMED  ≥ 0.85   cryptographic or SMTP-verified
+#   LIKELY     ≥ 0.70   strong passive inference (Hunter high,
+#                       format+name match, etc.)
+#   MEDIUM     ≥ 0.50   weak corroboration (single source, CC,
+#                       dork snippet, etc.)
+#   LOW        <  0.50  speculative (unverified permutations,
+#                       stale data, etc.)
+#
+# The 0.70 LIKELY band is the new "should I pivot on this"
+# threshold — the old 0.55 was too lax and produced
+# LIKELY-or-better counts that included everything that wasn't
+# outright noise.
+CONFIRMED_THRESHOLD = 0.85
+LIKELY_THRESHOLD = 0.70
+MEDIUM_THRESHOLD = 0.50
+
+#: All valid label strings, in tier order (highest first).
+LABEL_TIERS: tuple[str, ...] = ("CONFIRMED", "LIKELY", "MEDIUM", "LOW")
+LOW_LABEL = "LOW"
+MEDIUM_LABEL = "MEDIUM"
+LIKELY_LABEL = "LIKELY"
+CONFIRMED_LABEL = "CONFIRMED"
 
 
 @dataclass
@@ -92,13 +178,43 @@ class ConfidenceLabel:
     breakdown: dict[str, float | str | list[str]]
 
 
-def freshness_factor(timestamp: str | None) -> float:
-    """Return the freshness multiplier for the newest supporting hit."""
+def unverified_source_type_for_template(template: str | None) -> str:
+    """Map a generated template to its passive confidence source key."""
+    known = {
+        "{first}.{last}@{domain}": "permutation_unverified_{first}_{last}",
+        "{first}@{domain}": "permutation_unverified_{first}",
+        "{f}{last}@{domain}": "permutation_unverified_{f}{last}",
+        "{first}{last}@{domain}": "permutation_unverified_{first}{last}",
+        "{last}@{domain}": "permutation_unverified_{last}",
+        "{last}.{first}@{domain}": "permutation_unverified_{last}_{first}",
+    }
+    return known.get(template or "", "permutation_unverified_other")
+
+
+def freshness_factor(timestamp: str | None, source: str | None = None) -> float:
+    """Return the freshness multiplier for the newest supporting hit.
+
+    P2: when *timestamp* is ``None`` AND *source* is a permutation
+    type, return ``1.0`` instead of the default ``0.50``.  Generated
+    patterns have no observation age — the template is a present-
+    tense inference, not a stale data point.  The penalty was
+    silently halving the score of every unverified permutation,
+    which is a categorically different artifact from a real email
+    whose timestamp is missing.
+
+    The ``source`` check is opt-in: callers that pass ``source=None``
+    get the legacy behaviour.  Pattern candidates and any source
+    starting with ``"permutation_"`` opt in to the relaxed rule.
+    """
     if not timestamp:
+        if source and str(source).startswith("permutation_"):
+            return 1.0
         return 0.50
 
     cleaned = str(timestamp).strip()
     if not cleaned:
+        if source and str(source).startswith("permutation_"):
+            return 1.0
         return 0.50
 
     parsed: datetime | None = None
@@ -139,11 +255,15 @@ def _source_family(source_type: str) -> str:
 
 
 def _label(final: float) -> str:
-    if final >= HIGH_THRESHOLD:
-        return "HIGH"
+    # P7: 4-tier label system.  See :data:`CONFIRMED_THRESHOLD`
+    # and the surrounding tier constants for the rationale.
+    if final >= CONFIRMED_THRESHOLD:
+        return CONFIRMED_LABEL
+    if final >= LIKELY_THRESHOLD:
+        return LIKELY_LABEL
     if final >= MEDIUM_THRESHOLD:
-        return "MEDIUM"
-    return "LOW"
+        return MEDIUM_LABEL
+    return LOW_LABEL
 
 
 def _select_verification_multiplier(
@@ -201,7 +321,18 @@ def compute_confidence(
         is_smtp_verified=is_smtp_verified,
         is_pgp_or_ca=pgp_or_ca,
     )
-    freshness = freshness_factor(last_seen_timestamp or oldest_timestamp)
+    # P2: pass the *first* permutation source (if any) so
+    # ``freshness_factor`` knows to return 1.0 on missing
+    # timestamps.  We pick the lexicographically first permutation
+    # key for determinism — the actual base_score is unaffected.
+    perm_source = next(
+        (st for st in unique_types if str(st).startswith("permutation_")),
+        None,
+    )
+    freshness = freshness_factor(
+        last_seen_timestamp or oldest_timestamp,
+        source=perm_source,
+    )
     final = min(max(base_score * multiplier * freshness, 0.0), MAX_SCORE)
     return final, _label(final)
 
@@ -227,7 +358,16 @@ def compute_confidence_breakdown(
         is_smtp_verified=is_smtp_verified,
         is_pgp_or_ca=pgp_or_ca,
     )
-    freshness = freshness_factor(last_seen_timestamp or oldest_timestamp)
+    # P2: same permutation-aware freshness rule as the scalar
+    # :func:`compute_confidence`.  See the comment there.
+    perm_source = next(
+        (st for st in unique_types if str(st).startswith("permutation_")),
+        None,
+    )
+    freshness = freshness_factor(
+        last_seen_timestamp or oldest_timestamp,
+        source=perm_source,
+    )
     final = min(max(base_score * multiplier * freshness, 0.0), MAX_SCORE)
     breakdown = {
         "base_score": round(base_score, 4),

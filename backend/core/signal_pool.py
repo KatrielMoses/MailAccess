@@ -434,6 +434,27 @@ class AsyncSignalPool:
         if cleaned and cleaned not in self._confirmed_patterns:
             self._confirmed_patterns.append(cleaned)
 
+    def emit_hunter_pattern(self, pattern_template: str | None) -> None:
+        """Record the Hunter ``data.pattern``-derived template (P1).
+
+        Hunter reports a single most-common template per domain —
+        e.g. ``"{first}.{last}"`` → ``"{first}.{last}@{domain}"`` —
+        which is a *prior*, not an SMTP verification.  It is kept
+        in a dedicated slot so :mod:`pattern_and_verify` can
+        distinguish it from the SMTP-confirmed pattern and apply
+        the asymmetric +0.30 / -0.12 boost correctly.
+
+        A ``None`` or empty value CLEARS the slot — the operator
+        can undo a prior Hunter pattern without restarting the
+        process.
+        """
+        cleaned = (pattern_template or "").strip()
+        self._hunter_pattern_template = cleaned or None
+
+    def get_hunter_pattern(self) -> str | None:
+        """Return the Hunter-derived pattern template (or ``None``)."""
+        return getattr(self, "_hunter_pattern_template", None)
+
     def get_confirmed_patterns(self) -> list[str]:
         """Return confirmed templates in first-seen priority order."""
         return list(self._confirmed_patterns)

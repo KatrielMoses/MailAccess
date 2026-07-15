@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.12.0&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.12.2&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -531,6 +531,26 @@ datacenter proxies. Off by default.
 Sign up: https://scrapingant.com/?ref=mzliyzh
 
 ## Changelog
+
+### 0.12.2
+
+Audit-preparation release for controlled comparison against Blackbird, Holehe,
+Maigret, Sherlock, and theHarvester.
+
+- Calibrated active email-existence probes for Spotify, Eventbrite, Chess.com,
+  Adobe, and El Mundo against current live response markers.
+- Added same-status hit/miss handling for JSON existence APIs.
+- Disabled sources that are currently WAF-blocked, stale, or unreliable rather
+  than allowing them to generate noisy findings.
+- Added explicit audit guidance and result-comparison criteria in
+  `docs/release-0.12.2-audit.md`.
+- PDF generation is outside the scope of this release.
+
+### 0.12.1
+
+- Added optional cookie/CSRF pre-check negotiation for platform probes.
+- Added nine Blackbird email-existence platform definitions.
+- PDF exports now include an authorized-research disclaimer and inline avatar thumbnails with failure-safe placeholders.
 
 ### 0.12.0
 

@@ -1,6 +1,6 @@
 """Domain Email Harvest orchestrator — Phase C3 (final) + W5 + 0.11.1 Phase 3.
 
-Ties the nine domain-mode modules together:
+Ties the domain-mode modules together:
 
     commoncrawl_email         ─┐
     wayback_domain_harvest    ─┤  ← 0.11.1 Phase 3 (CC + Wayback are the
@@ -31,7 +31,7 @@ commoncrawl_email and code_and_cert_email and run via
   person extraction, and emits findings tagged
   ``is_historical=True``.
 
-This module does NOT modify any of the nine sub-modules.  It only
+This module does NOT modify the individual source modules.  It only
 wires them together, performs cross-module deduplication and
 confidence aggregation, and returns a single
 :class:`DomainHarvestResult` for the report layer to consume.
@@ -69,13 +69,36 @@ from ..modules.pattern_and_verify import (
 )
 from .concurrent_fetch_cache import CachedFetch, ConcurrentFetchCache
 from .context_router import IndustryVocabularyResult, IndustryVocabularyRouter
-from .email_confidence import compute_confidence, compute_confidence_breakdown, label_for_score
+from .email_confidence import (
+    MAX_SCORE,
+    compute_confidence,
+    compute_confidence_breakdown,
+    label_for_score,
+)
 from .email_extraction import subaddress_key
+from .email_validator import validate_email_batch
+from .hunter_client import (
+    HUNTER_MONTHLY_CAP,
+    hunter_circuit_open,
+)
+from .hunter_client import (
+    search_domain as hunter_search,
+)
+from .m365_tenant import get_user_realm
+from .m365_verifier import M365Verifier
+from .mail_provider import MailProvider, detect_provider_from_mx
+from .mx_resolver import resolve_mx
 from .role_classifier import classify_email
-from .hunter_client import search_domain as hunter_search
 from .signal_pool import AsyncSignalPool
+from .smtp_verifier import (
+    DEFAULT_PROBE_DELAY,
+    DEFAULT_SENDER,
+    MAX_PROBES_HARD_CAP,
+    SMTPVerifier,
+)
 from .stealth_client import StealthSession, resolve_timing_profile
 from .time_budget import TimeBudget, budget_for_profile
+from .yahoo_verifier import YahooVerifier
 
 _LOG = logging.getLogger(__name__)
 
@@ -93,6 +116,7 @@ MODULE_SYNDICATION_FEED_SWEEPER = "syndication_feed_sweeper"
 MODULE_CONTENT_INTELLIGENCE = "content_intelligence"
 MODULE_PATTERN_VERIFY = "pattern_and_verify"
 MODULE_GITHUB_ORG_MEMBERS = "github_org_members"  # 0.11.1 Phase 4
+MODULE_GITHUB_DOMAIN_COMMITS = "github_domain_commits"
 _PROXY_AWARE_MODULES = {
     MODULE_EMAIL_DORK,
     MODULE_EMPLOYEE_NAMES,
@@ -121,6 +145,7 @@ class HarvestedEmail:
     first_seen_timestamp: str | None = None
     last_seen_timestamp: str | None = None
     is_smtp_verified: bool = False
+    is_provider_verified: bool = False
     is_ca_attested: bool = False
     is_pgp_or_ca: bool = False
     # MUST-FIX M4: how many raw findings contributed to this email
@@ -169,7 +194,14 @@ class DomainHarvestResult:
     module_results: dict[str, ModuleResult]
     unique_emails: list[HarvestedEmail]
     total_unique_emails: int
+    # P7: 4-tier counts.  ``high_confidence_count`` now counts
+    # the CONFIRMED tier; ``medium_confidence_count`` is the
+    # historical "anything above LOW" band (LIKELY + MEDIUM);
+    # ``low_confidence_count`` is the LOW tier.  The new
+    # ``likely_confidence_count`` field exposes the LIKELY
+    # tier on its own for downstream consumers.
     high_confidence_count: int
+    likely_confidence_count: int
     medium_confidence_count: int
     low_confidence_count: int
     role_account_count: int
@@ -347,6 +379,21 @@ def _extract_source_types(finding: dict[str, Any]) -> list[str]:
             out.append(val.strip())
         elif isinstance(val, list):
             out.extend(str(v).strip() for v in val if str(v).strip())
+    platform = str(finding.get("platform") or "").lower()
+    if "gravatar" in platform and "permutation_gravatar_hit" not in out:
+        out.append("permutation_gravatar_hit")
+    metadata = finding.get("metadata") or {}
+    source_type_value = metadata.get("source_type") if isinstance(metadata, dict) else None
+    if isinstance(metadata, dict) and not (
+        isinstance(source_type_value, str)
+        and source_type_value.startswith(("breach_recent", "breach_historical"))
+    ) and (
+        metadata.get("breach_date")
+        or metadata.get("breach_name")
+        or "breach" in platform
+        or "pwned" in platform
+    ) and "permutation_breach_hit" not in out:
+        out.append("permutation_breach_hit")
     return out
 
 
@@ -411,12 +458,23 @@ def _infer_confirmed_pattern_from_emails(
     emails: list[HarvestedEmail],
     signal_pool: Any | None,
 ) -> str | None:
-    """Infer and publish the dominant on-domain HIGH/MEDIUM template."""
+    """Infer and publish the dominant on-domain template.
+
+    P7: 4-tier label filter.  The legacy 3-tier filter was
+    ``{"HIGH", "MEDIUM"}`` (anything above LOW).  The 4-tier
+    equivalent is "anything above LOW" — same intent, just
+    expressed in the new vocabulary.  Legacy ``HIGH`` is kept
+    as a backward-compat alias for any out-of-band label.
+    """
     if signal_pool is None or not hasattr(signal_pool, "emit_confirmed_pattern"):
         return None
     counts: dict[str, int] = {}
     for entry in emails:
-        if not entry.on_domain or entry.confidence_label not in {"HIGH", "MEDIUM"}:
+        # P7: 4-tier set.  LOW is excluded; everything else
+        # (CONFIRMED / LIKELY / MEDIUM, plus the legacy ``HIGH``
+        # alias) is included so the inference keeps working
+        # for callers that still emit the legacy vocabulary.
+        if not entry.on_domain or entry.confidence_label in {"LOW", None}:
             continue
         shape = _pattern_shape_for_email(entry.email)
         if shape is not None:
@@ -442,6 +500,134 @@ def _name_matches_email_local(name: str, local_part: str) -> bool:
     )
 
 
+def _pattern_metadata(entry: HarvestedEmail) -> dict[str, Any] | None:
+    for evidence in entry.evidence:
+        metadata = evidence.get("metadata") or {}
+        if isinstance(metadata, dict) and metadata.get("pattern_template"):
+            return metadata
+    return None
+
+
+def _pattern_source_types(entry: HarvestedEmail) -> set[str]:
+    source_types: set[str] = set()
+    for evidence in entry.evidence:
+        metadata = evidence.get("metadata") or {}
+        if isinstance(metadata, dict) and isinstance(metadata.get("source_type"), str):
+            source_types.add(str(metadata["source_type"]))
+    return source_types
+
+
+def _pattern_shape_for_email(email: str, name: str | None = None) -> str | None:
+    """Infer a supported email template, using the source name when known."""
+    local = email.rsplit("@", 1)[0].lower()
+    if name:
+        tokens = [token.lower() for token in re.findall(r"[a-zA-Z]+", name)]
+        if len(tokens) >= 2:
+            first, last = tokens[0], tokens[-1]
+            by_local = {
+                f"{first}.{last}": "{first}.{last}@{domain}",
+                first: "{first}@{domain}",
+                f"{first[:1]}{last}": "{f}{last}@{domain}",
+                f"{first}{last}": "{first}{last}@{domain}",
+                last: "{last}@{domain}",
+                f"{last}.{first}": "{last}.{first}@{domain}",
+            }
+            if local in by_local:
+                return by_local[local]
+    if re.fullmatch(r"[a-z]+\.[a-z]+", local):
+        return "{first}.{last}@{domain}"
+    if re.fullmatch(r"[a-z]+", local):
+        return "{first}@{domain}"
+    return None
+
+
+def _confirmed_format_counts(
+    emails: list[HarvestedEmail],
+    module_results: dict[str, ModuleResult] | None = None,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for entry in emails:
+        # P7: 4-tier label set.  The legacy 3-tier aliases
+        # (HIGH / MEDIUM) are accepted for backward compatibility
+        # but the authoritative filter is "anything above LOW".
+        if not entry.on_domain or entry.confidence_label in {"LOW", None}:
+            continue
+        metadata = _pattern_metadata(entry)
+        if metadata is not None and metadata.get("verification_status") != "verified":
+            continue
+        name = str(metadata.get("source_name") or "") if metadata else None
+        shape = _pattern_shape_for_email(entry.email, name)
+        if shape:
+            counts[shape] = counts.get(shape, 0) + 1
+    if module_results:
+        xposed_result = module_results.get("xposed_or_not")
+        xposed_meta = xposed_result.metadata if xposed_result else {}
+        if isinstance(xposed_meta, dict):
+            template = xposed_meta.get("format_template")
+            count = int(xposed_meta.get("format_count") or 0)
+            if isinstance(template, str) and count >= 10:
+                counts[template] = max(counts.get(template, 0), count)
+    return counts
+
+
+def _apply_passive_pattern_signals(
+    emails: list[HarvestedEmail],
+    module_results: dict[str, ModuleResult],
+) -> None:
+    """Apply Phase A's additive, mutually-exclusive pattern signals."""
+    pattern_result = module_results.get(MODULE_PATTERN_VERIFY)
+    pattern_meta = pattern_result.metadata if pattern_result else {}
+    if isinstance(pattern_meta, dict):
+        catchall = pattern_meta.get("is_catchall", pattern_meta.get("catch_all_detected"))
+    else:
+        catchall = None
+    catchall_factor = 0.0 if catchall is True else 1.0 if catchall is False else 0.5
+
+    format_counts = _confirmed_format_counts(emails, module_results)
+    dominant_format = max(format_counts, key=format_counts.get) if format_counts else None
+    dominant_count = format_counts.get(dominant_format, 0) if dominant_format else 0
+
+    for entry in emails:
+        metadata = _pattern_metadata(entry)
+        if metadata is None or not entry.on_domain:
+            continue
+
+        name = str(metadata.get("source_name") or "")
+        name_tokens = [token.lower() for token in re.findall(r"[a-zA-Z]+", name)]
+        name_tokens = name_tokens[:2]
+        compact_local = re.sub(r"[^a-z0-9]", "", entry.email.rsplit("@", 1)[0].lower())
+        positions = [compact_local.find(token) for token in name_tokens]
+        strong = bool(name_tokens) and len(name_tokens) == 2 and all(
+            position >= 0 for position in positions
+        ) and positions[0] <= positions[1]
+        weak = len(name_tokens) == 2 and any(token in compact_local for token in name_tokens)
+        name_boost = 0.25 if strong else 0.10 if weak else 0.0
+
+        format_boost = 0.0
+        if dominant_format and metadata.get("pattern_template") == dominant_format:
+            format_boost = 0.30 if dominant_count >= 3 else 0.20
+
+        boost = max(name_boost, format_boost) * catchall_factor
+        if boost <= 0:
+            continue
+
+        base_score, _ = compute_confidence(
+            source_count=len(entry.found_by_modules),
+            source_types=sorted(_pattern_source_types(entry)),
+            is_smtp_verified=entry.is_smtp_verified or entry.is_provider_verified,
+            is_ca_attested=entry.is_ca_attested,
+            is_pgp_or_ca=entry.is_pgp_or_ca,
+            last_seen_timestamp=entry.last_seen_timestamp,
+        )
+        entry.confidence_score = round(min(base_score + boost, MAX_SCORE), 4)
+        entry.confidence_label = label_for_score(entry.confidence_score)
+        if entry.confidence_breakdown is not None:
+            entry.confidence_breakdown["passive_signal_boost"] = round(boost, 4)
+            entry.confidence_breakdown["passive_signal_kind"] = (
+                "name_email" if name_boost >= format_boost else "confirmed_format"
+            )
+
+
 def _apply_signal_pool_correlation(
     emails: list[HarvestedEmail],
     signal_pool: Any | None,
@@ -450,6 +636,10 @@ def _apply_signal_pool_correlation(
     if signal_pool is None or not hasattr(signal_pool, "get_names_for_domain"):
         return
     for entry in emails:
+        # Pattern candidates use the Phase A additive path; applying the old
+        # multiplicative identity boost here would double count the name.
+        if _pattern_metadata(entry) is not None:
+            continue
         if "@" not in entry.email:
             continue
         if entry.is_role:
@@ -610,8 +800,12 @@ def _aggregate(
                     entry.last_seen_timestamp = last_ts
 
             # SMTP-verified flag (only set by pattern_and_verify).
-            if meta.get("verification_status") == "verified":
+            if meta.get("verification_status") == "verified" or meta.get(
+                "smtp_verification_status"
+            ) == "verified":
                 entry.is_smtp_verified = True
+            if meta.get("provider_verification_status") == "verified":
+                entry.is_provider_verified = True
             if meta.get("source_type") in ("ca_attested",):
                 entry.is_ca_attested = True
             if meta.get("source_type") in ("ca_attested", "pgp_uid"):
@@ -703,7 +897,7 @@ def _aggregate(
         score, label = compute_confidence(
             source_count=len(unique_modules),
             source_types=all_source_types,
-            is_smtp_verified=entry.is_smtp_verified,
+            is_smtp_verified=entry.is_smtp_verified or entry.is_provider_verified,
             is_ca_attested=entry.is_ca_attested,
             is_pgp_or_ca=entry.is_pgp_or_ca,
             last_seen_timestamp=entry.last_seen_timestamp,
@@ -720,7 +914,7 @@ def _aggregate(
         # is uniform across emails.
         current_breakdown = compute_confidence_breakdown(
             source_types=all_source_types,
-            is_smtp_verified=entry.is_smtp_verified,
+            is_smtp_verified=entry.is_smtp_verified or entry.is_provider_verified,
             is_ca_attested=entry.is_ca_attested,
             is_pgp_or_ca=entry.is_pgp_or_ca,
             last_seen_timestamp=entry.last_seen_timestamp,
@@ -733,10 +927,763 @@ def _aggregate(
             entry.confidence_breakdown = current_breakdown
         final.append(entry)
 
+    _apply_passive_pattern_signals(final, module_results)
     _apply_signal_pool_correlation(final, signal_pool)
     _apply_identity_cluster_snapshot(final, identity_clusters)
     _infer_confirmed_pattern_from_emails(final, signal_pool)
     return final
+
+
+def _select_verifier_for_provider(provider: MailProvider) -> str:
+    """Return the automatic low-email-validation path for a provider.
+
+    This is intentionally pure routing logic. Provider-specific I/O remains
+    in the existing verifier implementations and will be wired in a later
+    phase.
+    """
+    if provider is MailProvider.M365:
+        return "m365"
+    if provider is MailProvider.YAHOO:
+        return "yahoo"
+    if provider in {
+        MailProvider.GOOGLE,
+        MailProvider.PROTON,
+        MailProvider.ZOHO,
+        MailProvider.FASTMAIL,
+    }:
+        return "gravatar_only"
+    return "smtp"
+
+
+async def resolve_domain_email_dns_signals(domain: str) -> dict[str, bool]:
+    """Resolve the domain-level SPF and DMARC passive signals once."""
+    try:
+        import dns.asyncresolver  # type: ignore[import]
+    except ImportError:
+        return {"spf_present": False, "dmarc_strict": False}
+
+    async def txt_records(name: str) -> list[str]:
+        try:
+            answers = await dns.asyncresolver.resolve(name, "TXT")
+        except Exception:  # noqa: BLE001
+            return []
+        records: list[str] = []
+        for answer in answers:
+            strings = getattr(answer, "strings", None)
+            if strings is not None:
+                parts = []
+                for part in strings:
+                    parts.append(
+                        part.decode("utf-8", errors="replace")
+                        if isinstance(part, bytes)
+                        else str(part)
+                    )
+                records.append("".join(parts))
+            else:
+                records.append(str(answer).strip('"'))
+        return records
+
+    spf_records, dmarc_records = await asyncio.gather(
+        txt_records(domain.strip().lower()),
+        txt_records(f"_dmarc.{domain.strip().lower()}"),
+    )
+    spf_present = any(record.strip().lower().startswith("v=spf1") for record in spf_records)
+    dmarc_strict = any(
+        record.strip().lower().startswith("v=dmarc1")
+        and re.search(r"(?:^|;)\s*p\s*=\s*reject(?:\s*;|$)", record, re.IGNORECASE)
+        for record in dmarc_records
+    )
+    return {"spf_present": spf_present, "dmarc_strict": dmarc_strict}
+
+
+def apply_domain_email_dns_signals(
+    emails: list[HarvestedEmail],
+    signals: dict[str, bool],
+) -> None:
+    """Add SPF/DMARC evidence to all on-domain pattern candidates."""
+    dns_boost = (0.02 if signals.get("spf_present") else 0.0) + (
+        0.05 if signals.get("dmarc_strict") else 0.0
+    )
+    if dns_boost <= 0:
+        return
+    for entry in emails:
+        metadata = _pattern_metadata(entry)
+        if metadata is None or not entry.on_domain:
+            continue
+        source_types = sorted(_pattern_source_types(entry))
+        base_score, _ = compute_confidence(
+            source_count=len(entry.found_by_modules),
+            source_types=source_types,
+            is_smtp_verified=entry.is_smtp_verified or entry.is_provider_verified,
+            is_ca_attested=entry.is_ca_attested,
+            is_pgp_or_ca=entry.is_pgp_or_ca,
+            last_seen_timestamp=entry.last_seen_timestamp,
+        )
+        passive_boost = 0.0
+        if entry.confidence_breakdown is not None:
+            passive_boost = float(entry.confidence_breakdown.get("passive_signal_boost") or 0.0)
+            entry.confidence_breakdown["dns_passive_boost"] = round(dns_boost, 4)
+            entry.confidence_breakdown["spf_present"] = bool(signals.get("spf_present"))
+            entry.confidence_breakdown["dmarc_strict"] = bool(signals.get("dmarc_strict"))
+        entry.confidence_score = round(min(base_score + passive_boost + dns_boost, MAX_SCORE), 4)
+        entry.confidence_label = label_for_score(entry.confidence_score)
+
+
+def _select_low_email_validation_candidates(
+    harvest_domain: str,
+    module_results: dict[str, ModuleResult],
+    unique_emails: list[HarvestedEmail],
+    *,
+    max_candidates: int | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Select capped LOW-confidence personal emails for auto-validation.
+
+    Selection is based on the post-aggregation ``HarvestedEmail`` records so
+    role, domain, confidence, and prior-verification decisions reflect all
+    contributing findings. The returned mapping keeps every raw finding for
+    each selected canonical email so a later validation phase can attach
+    evidence and promotion metadata at the existing aggregation boundary.
+    """
+    cap = (
+        int(settings.harvest_validation_max_per_run)
+        if max_candidates is None
+        else int(max_candidates)
+    )
+    if cap <= 0:
+        return {}
+
+    eligible: dict[str, HarvestedEmail] = {}
+    for email in unique_emails:
+        if (
+            email.on_domain
+            and not email.is_role
+            and email.confidence_label == "LOW"
+            and not email.is_smtp_verified
+            and not email.is_provider_verified
+        ):
+            eligible[subaddress_key(email.email)] = email
+
+    findings_by_key: dict[str, list[dict[str, Any]]] = {}
+    for result in module_results.values():
+        for finding in result.findings or []:
+            email = _extract_email(finding)
+            if not email or not _extract_on_domain(finding, email, harvest_domain):
+                continue
+            key = subaddress_key(email)
+            if key in eligible:
+                findings_by_key.setdefault(key, []).append(finding)
+
+    ranked: list[tuple[int, str, str]] = []
+    selected_findings: dict[str, list[dict[str, Any]]] = {}
+    for key, findings in findings_by_key.items():
+        if not findings:
+            continue
+        already_verified = False
+        disposable = False
+        pattern_candidate = False
+        for finding in findings:
+            metadata = finding.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            source_types = _extract_source_types(finding)
+            pattern_candidate = pattern_candidate or any(
+                source_type.startswith("permutation_unverified_")
+                for source_type in source_types
+            )
+            status = str(
+                metadata.get("verification_status")
+                or metadata.get("smtp_verification_status")
+                or metadata.get("provider_verification_status")
+                or ""
+            ).lower()
+            already_verified = already_verified or status == "verified"
+            disposable = disposable or bool(
+                metadata.get("disposable")
+                or metadata.get("is_disposable")
+                or status == "disposable"
+            )
+            native = metadata.get("native_email_validation")
+            if isinstance(native, dict):
+                disposable = disposable or native.get("status") == "disposable"
+
+        if already_verified or disposable:
+            continue
+        email = eligible[key].email
+        ranked.append((0 if pattern_candidate else 1, email, key))
+        selected_findings[key] = findings
+
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    selected_keys = {key for _, _, key in ranked[:cap]}
+    return {
+        eligible[key].email: selected_findings[key]
+        for _, _, key in ranked[:cap]
+        if key in selected_keys
+    }
+
+
+async def _run_low_email_validation(
+    domain: str,
+    candidates: dict[str, list[dict[str, Any]]],
+    verifier_key: str,
+    *,
+    provider: MailProvider | None = None,
+) -> dict[str, Any]:
+    """Execute one provider-specific verifier against selected candidates.
+
+    The existing provider verifiers own their request pacing, hard limits,
+    throttling semantics, and SMTP catch-all/blocked-probe safeguards. This
+    adapter only normalizes their result objects and records raw validation
+    evidence on the selected findings for the promotion phase.
+    """
+    emails = list(candidates)
+    summary: dict[str, Any] = {
+        "method": verifier_key,
+        "checked": len(emails),
+        "candidates": len(emails),
+        "results": [],
+    }
+    if not emails:
+        summary["status"] = "no_candidates"
+        return summary
+    if verifier_key == "gravatar_only":
+        summary["checked"] = 0
+        summary["status"] = "provider_verification_unavailable"
+        return summary
+
+    result_objects: list[Any]
+    shared_hosting = provider is MailProvider.SHARED_HOSTING
+    if verifier_key == "m365":
+        verifier = M365Verifier(
+            delay_seconds=settings.m365_verification_delay_seconds,
+            timeout_seconds=settings.m365_verification_timeout_seconds,
+            max_checks=settings.m365_verification_max_checks,
+        )
+        result_objects = await verifier.verify_batch(emails)
+    elif verifier_key == "yahoo":
+        verifier = YahooVerifier(
+            delay_seconds=settings.yahoo_verification_delay_seconds,
+            timeout_seconds=settings.yahoo_verification_timeout_seconds,
+            max_checks=settings.yahoo_verification_max_checks,
+        )
+        result_objects = await verifier.verify_batch(emails)
+    elif verifier_key == "smtp":
+        mx_records = await resolve_mx(domain)
+        if not mx_records:
+            summary["status"] = "no_mx_records"
+            return summary
+        async with SMTPVerifier(
+            mx_records=mx_records,
+            sender_address=settings.smtp_sender_address or DEFAULT_SENDER,
+            probe_delay_seconds=float(settings.smtp_probe_delay_seconds) or DEFAULT_PROBE_DELAY,
+            connect_timeout_seconds=float(settings.smtp_connect_timeout_seconds),
+        ) as verifier:
+            batch = await verifier.verify_batch(
+                domain,
+                emails,
+                max_probes=min(int(settings.smtp_max_probes_per_domain), MAX_PROBES_HARD_CAP),
+            )
+        summary.update(
+            {
+                "probes_attempted": batch.probes_attempted,
+                "is_catchall": None if shared_hosting else batch.is_catchall,
+                "catchall_reliable": not shared_hosting,
+                "stopped_early": batch.stopped_early,
+                "stop_reason": batch.stop_reason,
+                "error": batch.error,
+            }
+        )
+        result_objects = batch.results
+    else:
+        summary["status"] = "unsupported_verifier"
+        return summary
+
+    for result in result_objects:
+        if verifier_key == "smtp":
+            status = str(getattr(result, "verification_status", "inconclusive"))
+            payload = {
+                "method": verifier_key,
+                "status": status,
+                "exists": getattr(result, "exists", None),
+                "response_code": getattr(result, "response_code", None),
+                "blocked_signal": getattr(result, "blocked_signal", False),
+                "mx_host": getattr(result, "mx_host", None),
+                "transport_error": getattr(result, "transport_error", None),
+                "is_catchall": summary.get("is_catchall"),
+                "catchall_reliable": not shared_hosting,
+            }
+        else:
+            status = str(getattr(result, "status", "inconclusive"))
+            payload = {
+                "method": verifier_key,
+                "status": status,
+                "http_status": getattr(result, "http_status", None),
+                "error": getattr(result, "error", None),
+            }
+            for field_name in (
+                "if_exists_result",
+                "is_unmanaged",
+                "throttle_status",
+            ):
+                if hasattr(result, field_name):
+                    payload[field_name] = getattr(result, field_name)
+
+        email = str(getattr(result, "email", "")).strip().lower()
+        payload["inconclusive"] = status in {
+            "inconclusive",
+            "throttled",
+            "not_attempted",
+            "temporary_failure",
+            "blocked",
+        }
+        summary["results"].append({"email": email, **payload})
+        for finding in candidates.get(email, []):
+            metadata = finding.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+                finding["metadata"] = metadata
+            metadata["low_email_validation"] = payload
+
+    for item in summary["results"]:
+        status = item["status"]
+        summary[status] = int(summary.get(status, 0)) + 1
+    if summary.get("status") is None:
+        summary["status"] = "completed"
+    return summary
+
+
+async def _run_xposed_or_not_validation(
+    domain: str,
+    candidates: dict[str, list[dict[str, Any]]],
+    *,
+    max_checks: int,
+    delay_seconds: float = 1.0,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Attach keyless breach evidence and return domain-format metadata."""
+    from .xposed_or_not import check_emails, infer_domain_format
+
+    emails = list(candidates)[: max(0, int(max_checks))]
+    results = await check_emails(
+        emails,
+        max_checks=len(emails),
+        delay_seconds=delay_seconds,
+    )
+    attached = 0
+    for result in results:
+        if result.source_type not in {"breach_recent", "breach_historical"}:
+            continue
+        attached += 1
+        for finding in candidates.get(result.email, []):
+            metadata = finding.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+                finding["metadata"] = metadata
+            existing_types: list[str] = []
+            existing = metadata.get("source_types")
+            if isinstance(existing, str):
+                existing_types.append(existing)
+            elif isinstance(existing, list):
+                existing_types.extend(str(item) for item in existing if str(item))
+            current = metadata.get("source_type")
+            if isinstance(current, str) and current:
+                existing_types.append(current)
+            existing_types.append(result.source_type)
+            metadata["source_types"] = sorted(set(existing_types))
+            metadata["breach_dates"] = list(result.breach_dates)
+            metadata["breach_names"] = list(result.breaches)
+            metadata["xposed_or_not"] = {
+                "status": "breach_hit",
+                "source_type": result.source_type,
+                "breach_dates": list(result.breach_dates),
+                "breaches": list(result.breaches),
+            }
+    format_metadata = await infer_domain_format(domain)
+    return (
+        {
+            "method": "xposed_or_not",
+            "checked": len(emails),
+            "hits": attached,
+            "results": [
+                {
+                    "email": result.email,
+                    "source_type": result.source_type,
+                    "breach_dates": list(result.breach_dates),
+                    "breaches": list(result.breaches),
+                }
+                for result in results
+            ],
+        },
+        format_metadata,
+    )
+
+
+def _apply_low_email_validation_results(
+    candidates: dict[str, list[dict[str, Any]]],
+    validation_summary: dict[str, Any],
+    unique_emails: list[HarvestedEmail] | None = None,
+) -> dict[str, int]:
+    """Promote only confirmed mailbox results from automatic validation.
+
+    ``not_found`` results remain visible and LOW, while throttled and other
+    inconclusive results leave confidence and provenance unchanged. Existing
+    findings are mutated in place; no synthetic finding is created.
+    """
+    method = str(validation_summary.get("method") or "")
+    verified_source = {
+        "m365": "permutation_verified_m365",
+        "yahoo": "permutation_verified_yahoo",
+        "smtp": "permutation_verified",
+    }.get(method)
+    counts = {"promoted": 0, "not_found": 0, "inconclusive": 0}
+    promoted_emails: set[str] = set()
+
+    for result in validation_summary.get("results") or []:
+        if not isinstance(result, dict):
+            continue
+        email = str(result.get("email") or "").strip().lower()
+        status = str(result.get("status") or "inconclusive").lower()
+        findings = candidates.get(email, [])
+        if status == "verified" and verified_source:
+            promoted_emails.add(email)
+            counts["promoted"] += 1
+            for finding in findings:
+                metadata = finding.setdefault("metadata", {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                    finding["metadata"] = metadata
+                metadata["source_type"] = verified_source
+                metadata["verification_status"] = "verified"
+                if method in {"m365", "yahoo"}:
+                    metadata["provider_verification_status"] = "verified"
+                    metadata["provider_verification_provider"] = method
+                else:
+                    metadata["smtp_verification_status"] = "verified"
+                metadata["validation_evidence"] = {
+                    "method": method,
+                    "status": "verified",
+                    "reason": f"automatic_low_email_validation:{method}",
+                }
+                validation = metadata.get("low_email_validation")
+                if isinstance(validation, dict):
+                    validation["promoted"] = True
+        elif status == "not_found":
+            counts["not_found"] += 1
+            for finding in findings:
+                metadata = finding.setdefault("metadata", {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                    finding["metadata"] = metadata
+                metadata["verification_status"] = "not_found"
+                metadata["validation_evidence"] = {
+                    "method": method,
+                    "status": "not_found",
+                    "reason": f"automatic_low_email_validation:{method}",
+                }
+        else:
+            counts["inconclusive"] += 1
+
+    if unique_emails and promoted_emails:
+        for email in unique_emails:
+            if email.email.strip().lower() not in promoted_emails:
+                continue
+            email.is_provider_verified = method in {"m365", "yahoo"}
+            email.is_smtp_verified = method == "smtp"
+            source_types: list[str] = []
+            for evidence in email.evidence:
+                metadata = evidence.get("metadata") or {}
+                if isinstance(metadata, dict):
+                    source_types.extend(_extract_source_types({"metadata": metadata}))
+                    if metadata.get("verification_status") == "verified":
+                        source_types.append(
+                            verified_source or "permutation_verified"
+                        )
+            score, label = compute_confidence(
+                source_count=email.source_count,
+                source_types=source_types,
+                is_smtp_verified=email.is_smtp_verified or email.is_provider_verified,
+                is_ca_attested=email.is_ca_attested,
+                is_pgp_or_ca=email.is_pgp_or_ca,
+                last_seen_timestamp=email.last_seen_timestamp,
+            )
+            email.confidence_score = round(score, 4)
+            email.confidence_label = label
+            email.confidence_breakdown = compute_confidence_breakdown(
+                source_types=source_types,
+                is_smtp_verified=email.is_smtp_verified or email.is_provider_verified,
+                is_ca_attested=email.is_ca_attested,
+                is_pgp_or_ca=email.is_pgp_or_ca,
+                last_seen_timestamp=email.last_seen_timestamp,
+            ).breakdown
+
+    return counts
+
+
+async def _attach_native_email_validation(
+    domain: str,
+    module_results: dict[str, ModuleResult],
+) -> dict[str, int | str]:
+    """Attach native validation evidence to every discovered email.
+
+    This is intentionally additive: it never replaces stronger source
+    evidence and never marks a mailbox as existing. MX is resolved once per
+    harvest, then the result is copied into each finding's metadata.
+    """
+    findings_by_email: dict[str, list[dict[str, Any]]] = {}
+    for result in module_results.values():
+        for finding in result.findings or []:
+            email = _extract_email(finding)
+            if email:
+                findings_by_email.setdefault(email.strip().lower(), []).append(finding)
+    if not findings_by_email:
+        return {"checked": 0}
+
+    try:
+        mx_records = await resolve_mx(domain)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.debug("native email validation MX lookup failed: %s", exc)
+        mx_records = []
+    results = await validate_email_batch(
+        list(findings_by_email),
+        mx_records=mx_records,
+    )
+    counts: dict[str, int | str] = {
+        "checked": len(results),
+        "mx_records": len(mx_records),
+    }
+    for validation in results:
+        counts[validation.status] = int(counts.get(validation.status, 0)) + 1
+        payload = {
+            "status": validation.status,
+            "syntax_valid": validation.syntax_valid,
+            "mx_valid": validation.mx_valid,
+            "disposable": validation.disposable,
+            "is_role": validation.is_role,
+            "role_match_type": validation.role_match_type,
+            "reasons": list(validation.reasons),
+        }
+        for finding in findings_by_email.get(validation.email, []):
+            metadata = finding.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+                finding["metadata"] = metadata
+            metadata["native_email_validation"] = payload
+            # The adaptive runner can generate pattern findings directly,
+            # bypassing PatternAndVerifyModule. Promote those candidates at
+            # this shared boundary so MX evidence cannot be lost on that path.
+            if (
+                validation.status == "mx_valid"
+                and metadata.get("verification_status") in (None, "unverified")
+                and metadata.get("pattern_template")
+            ):
+                metadata["verification_status"] = "mx_valid"
+                metadata["source_type"] = "permutation_mx_valid"
+                metadata["confidence_score"] = max(
+                    float(metadata.get("confidence_score") or 0.0),
+                    0.30,
+                )
+    return counts
+
+
+async def _attach_smtp_email_verification(
+    domain: str,
+    module_results: dict[str, ModuleResult],
+) -> dict[str, int | str | bool | None]:
+    """Probe every valid on-domain email through one guarded SMTP batch."""
+    findings_by_email: dict[str, list[dict[str, Any]]] = {}
+    for result in module_results.values():
+        for finding in result.findings or []:
+            email = _extract_email(finding)
+            if not email or "@" not in email:
+                continue
+            normalized = email.strip().lower()
+            if normalized.rsplit("@", 1)[-1] != domain.strip().lower():
+                continue
+            metadata = finding.get("metadata") or {}
+            native = metadata.get("native_email_validation") if isinstance(metadata, dict) else None
+            if isinstance(native, dict) and native.get("status") in {"invalid", "disposable", "mx_missing"}:
+                continue
+            findings_by_email.setdefault(normalized, []).append(finding)
+
+    if not findings_by_email:
+        return {"checked": 0, "is_catchall": None}
+
+    mx_records = await resolve_mx(domain)
+    if not mx_records:
+        return {"checked": len(findings_by_email), "status": "no_mx_records"}
+
+    provider_detection = detect_provider_from_mx(mx_records, target_domain=domain)
+    shared_hosting = provider_detection.provider is MailProvider.SHARED_HOSTING
+
+    async with SMTPVerifier(
+        mx_records=mx_records,
+        sender_address=settings.smtp_sender_address or DEFAULT_SENDER,
+        probe_delay_seconds=float(settings.smtp_probe_delay_seconds) or DEFAULT_PROBE_DELAY,
+        connect_timeout_seconds=float(settings.smtp_connect_timeout_seconds),
+    ) as verifier:
+        batch = await verifier.verify_batch(
+            domain,
+            list(findings_by_email),
+            max_probes=min(int(settings.smtp_max_probes_per_domain), MAX_PROBES_HARD_CAP),
+        )
+
+    counts: dict[str, int | str | bool | None] = {
+        "checked": len(findings_by_email),
+        "probes_attempted": batch.probes_attempted,
+        "is_catchall": None if shared_hosting else batch.is_catchall,
+        "catchall_reliable": not shared_hosting,
+        "stopped_early": batch.stopped_early,
+    }
+    for result in batch.results:
+        status = result.verification_status
+        counts[status] = int(counts.get(status, 0)) + 1
+        payload = {
+            "status": status,
+            "exists": result.exists,
+            "response_code": result.response_code,
+            "blocked_signal": result.blocked_signal,
+            "mx_host": result.mx_host,
+            "transport_error": result.transport_error,
+            "is_catchall": None if shared_hosting else batch.is_catchall,
+            "catchall_reliable": not shared_hosting,
+        }
+        for finding in findings_by_email.get(result.email.lower(), []):
+            metadata = finding.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+                finding["metadata"] = metadata
+            metadata["smtp_verification_status"] = status
+            metadata["smtp_validation"] = payload
+            if result.exists is True:
+                metadata["verification_status"] = "verified"
+                if metadata.get("pattern_template"):
+                    metadata["source_type"] = "permutation_verified"
+    if batch.error:
+        counts["error"] = batch.error
+    return counts
+
+
+async def _attach_m365_email_verification(
+    domain: str,
+    module_results: dict[str, ModuleResult],
+) -> dict[str, Any]:
+    """Run the opt-in M365 signal for valid on-domain candidates."""
+    findings_by_email: dict[str, list[dict[str, Any]]] = {}
+    for result in module_results.values():
+        for finding in result.findings or []:
+            email = _extract_email(finding)
+            if not email or "@" not in email:
+                continue
+            normalized = email.strip().lower()
+            if normalized.rsplit("@", 1)[-1] == domain.strip().lower():
+                findings_by_email.setdefault(normalized, []).append(finding)
+    if not findings_by_email:
+        return {"checked": 0, "status": "no_candidates"}
+    mx_records = await resolve_mx(domain)
+    detection = detect_provider_from_mx(mx_records, target_domain=domain)
+    summary: dict[str, Any] = {
+        "provider": detection.provider.value,
+        "primary_mx": detection.primary_mx,
+        "matched_mx_hosts": list(detection.matched_mx_hosts),
+        "checked": 0,
+    }
+    if detection.provider is not MailProvider.M365:
+        summary["status"] = "provider_not_m365"
+        return summary
+    verifier = M365Verifier(
+        delay_seconds=settings.m365_verification_delay_seconds,
+        timeout_seconds=settings.m365_verification_timeout_seconds,
+        max_checks=settings.m365_verification_max_checks,
+    )
+    realm = await get_user_realm(
+        domain,
+        timeout_seconds=settings.m365_verification_timeout_seconds,
+    )
+    summary["realm"] = {
+        "status": realm.status,
+        "namespace_type": realm.namespace_type,
+        "auth_url": realm.auth_url,
+        "federation_brand_name": realm.federation_brand_name,
+        "cloud_instance_name": realm.cloud_instance_name,
+        "http_status": realm.http_status,
+        "error": realm.error,
+    }
+    results = await verifier.verify_batch(list(findings_by_email))
+    summary["checked"] = len(results)
+    for verification in results:
+        summary[verification.status] = int(summary.get(verification.status, 0)) + 1
+        payload = {
+            "status": verification.status,
+            "if_exists_result": verification.if_exists_result,
+            "is_unmanaged": verification.is_unmanaged,
+            "throttle_status": verification.throttle_status,
+            "http_status": verification.http_status,
+            "error": verification.error,
+            "provider": detection.provider.value,
+        }
+        for finding in findings_by_email.get(verification.email, []):
+            metadata = finding.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+                finding["metadata"] = metadata
+            metadata["provider_detection"] = {
+                "provider": detection.provider.value,
+                "primary_mx": detection.primary_mx,
+                "matched_mx_hosts": list(detection.matched_mx_hosts),
+            }
+            metadata["m365_verification"] = payload
+            metadata["m365_realm"] = summary["realm"]
+            metadata["provider_verification_status"] = verification.status
+            if verification.status == "verified":
+                metadata["verification_status"] = "verified"
+                if metadata.get("pattern_template"):
+                    metadata["source_type"] = "permutation_verified_m365"
+    return summary
+
+
+async def _attach_yahoo_email_verification(
+    domain: str,
+    module_results: dict[str, ModuleResult],
+) -> dict[str, Any]:
+    findings_by_email: dict[str, list[dict[str, Any]]] = {}
+    for result in module_results.values():
+        for finding in result.findings or []:
+            email = _extract_email(finding)
+            if email and "@" in email and email.rsplit("@", 1)[-1].lower() == domain.lower():
+                findings_by_email.setdefault(email.strip().lower(), []).append(finding)
+    if not findings_by_email:
+        return {"checked": 0, "status": "no_candidates"}
+    detection = detect_provider_from_mx(await resolve_mx(domain), target_domain=domain)
+    summary: dict[str, Any] = {"provider": detection.provider.value, "checked": 0}
+    if detection.provider is not MailProvider.YAHOO:
+        summary["status"] = "provider_not_yahoo"
+        return summary
+    verifier = YahooVerifier(
+        delay_seconds=settings.yahoo_verification_delay_seconds,
+        timeout_seconds=settings.yahoo_verification_timeout_seconds,
+        max_checks=settings.yahoo_verification_max_checks,
+    )
+    results = await verifier.verify_batch(list(findings_by_email))
+    summary["checked"] = len(results)
+    for verification in results:
+        summary[verification.status] = int(summary.get(verification.status, 0)) + 1
+        payload = {
+            "status": verification.status,
+            "http_status": verification.http_status,
+            "error": verification.error,
+            "provider": detection.provider.value,
+        }
+        for finding in findings_by_email.get(verification.email, []):
+            metadata = finding.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+                finding["metadata"] = metadata
+            metadata["yahoo_verification"] = payload
+            metadata["provider_verification_provider"] = detection.provider.value
+            metadata["provider_verification_status"] = verification.status
+            if verification.status == "verified":
+                metadata["verification_status"] = "verified"
+                if metadata.get("pattern_template"):
+                    metadata["source_type"] = "permutation_verified_yahoo"
+    return summary
 
 
 def _apply_identity_cluster_snapshot(
@@ -777,10 +1724,20 @@ def _apply_identity_cluster_snapshot(
 
 
 # ---------------------------------------------------------------------
-# Sort: HIGH → MEDIUM → LOW; within tier, on-domain personal → role →
-# off-domain personal.
+# Sort: CONFIRMED → LIKELY → MEDIUM → LOW; within tier,
+# on-domain personal → role → off-domain personal.
+# P7: the legacy 3-tier mapping (``HIGH``/``MEDIUM``/``LOW``)
+# is preserved as a fallback so any out-of-band label
+# (e.g. from a third-party module that has not yet migrated)
+# still sorts predictably.
 # ---------------------------------------------------------------------
-_LABEL_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+_LABEL_ORDER = {
+    "CONFIRMED": 0,
+    "HIGH": 0,
+    "LIKELY": 1,
+    "MEDIUM": 2,
+    "LOW": 3,
+}
 
 
 def _sort_key(email: HarvestedEmail) -> tuple[int, int, int]:
@@ -1280,6 +2237,8 @@ async def _run_content_intelligence(
 async def run_domain_harvest(
     domain: str,
     enable_smtp: bool = False,
+    enable_m365: bool = False,
+    enable_yahoo: bool = False,
     *,
     cc_module: Any | None = None,
     wayback_module: Any | None = None,
@@ -1302,6 +2261,7 @@ async def run_domain_harvest(
     on_module_complete: Any | None = None,
     timeout_seconds: float | None = None,
     enable_email_identity_enrichment: bool | None = None,
+    skip_modules: tuple[str, ...] | list[str] | None = None,
 ) -> DomainHarvestResult:
     """Run all nine harvest modules in the recommended sequence.
 
@@ -1389,10 +2349,44 @@ async def run_domain_harvest(
     if enable_email_identity_enrichment is None:
         enable_email_identity_enrichment = not bool(module_overrides)
 
+    # An injected-module run is a deterministic test/embedder seam. Do not
+    # launch real network modules that were not explicitly supplied; that
+    # makes a one-finding fixture acquire unrelated live results and defeats
+    # the purpose of module injection.
+    effective_skip_modules = set(str(name).strip() for name in (skip_modules or ()) if str(name).strip())
+    if module_overrides:
+        all_injected_capable = {
+            MODULE_COMMONCRAWL,
+            MODULE_WAYBACK_DOMAIN,
+            MODULE_CODE_CERT,
+            MODULE_EMAIL_DORK,
+            MODULE_EMPLOYEE_NAMES,
+            MODULE_NPM_EMAIL,
+            MODULE_PYPI_EMAIL,
+            MODULE_PGP_DOMAIN_EMAIL,
+            MODULE_SYNDICATION_FEED_SWEEPER,
+            MODULE_GITHUB_ORG_MEMBERS,
+            MODULE_GITHUB_DOMAIN_COMMITS,
+            MODULE_PATTERN_VERIFY,
+            "public_surface_sweeper",
+            "public_forge",
+            "package_ecosystems",
+            "subdomain_surface",
+            "wordpress_rest",
+            "security_txt",
+            "name_to_github_profile",
+            "person_email_pivot",
+            "email_identity_enrichment",
+            "hunter",
+        }
+        effective_skip_modules.update(all_injected_capable - set(module_overrides))
+
     return await run_adaptive_harvest(
         domain=domain,
         timeout_seconds=total,
         enable_smtp=enable_smtp,
+        enable_m365=enable_m365,
+        enable_yahoo=enable_yahoo,
         use_proxies=use_proxies,
         aggressive=aggressive,
         timing_profile=profile,
@@ -1403,12 +2397,14 @@ async def run_domain_harvest(
         cc_max_collections=cc_max_collections,
         proxy_fallback_ok=proxy_fallback_ok,
         enable_email_identity_enrichment=enable_email_identity_enrichment,
+        skip_modules=tuple(sorted(effective_skip_modules)),
     )
 
 
 async def _run_hunter(
     domain: str,
     api_key: str | None,
+    signal_pool: Any | None = None,
 ) -> tuple[str, ModuleResult]:
     """Run Hunter.io domain search as a Phase 1 inline source.
 
@@ -1416,6 +2412,14 @@ async def _run_hunter(
     sources.  It is not a BaseModule subclass; this function wraps
     the raw ``hunter_search`` call in a ModuleResult so it slots
     into the same aggregation pipeline.
+
+    P1 (Phase 3 workstream): when Hunter returns ``data.pattern``,
+    it is emitted as a confirmed pattern through the signal pool
+    so the pattern-generation phase (Phase 3) can boost matching
+    candidates by +0.30 and demote non-matching ones by -0.12.
+    The circuit breaker in :mod:`backend.core.hunter_client` is
+    applied inside :func:`search_domain` itself; we just consume
+    the empty result when the cap is reached.
     """
     if not api_key:
         return "hunter", ModuleResult(
@@ -1436,11 +2440,43 @@ async def _run_hunter(
         )
 
     if not results:
+        # The empty-list branch covers two cases: the API returned no
+        # results, OR the monthly circuit breaker fired.  Surface the
+        # latter explicitly so the CLI hint can show a useful message.
+        breaker_open = hunter_circuit_open()
         return "hunter", ModuleResult(
             status=ModuleStatus.PARTIAL,
             findings=[],
-            metadata={"domain": domain, "hunter_results": 0},
+            metadata={
+                "domain": domain,
+                "hunter_results": 0,
+                "circuit_breaker_open": breaker_open,
+                "monthly_cap": HUNTER_MONTHLY_CAP,
+            },
         )
+
+    # P1: surface Hunter's data.pattern as a confirmed pattern.
+    # All results in a single response share the same pattern, so
+    # we only need to emit once.  We emit only when the pattern
+    # actually maps to one of our templates — unrecognised patterns
+    # are kept in the metadata for audit but do not influence
+    # pattern generation.
+    hunter_pattern: str | None = None
+    hunter_pattern_template: str | None = None
+    for r in results:
+        if r.pattern_template:
+            hunter_pattern_template = r.pattern_template
+            hunter_pattern = r.pattern
+            break
+    if (
+        hunter_pattern_template is not None
+        and signal_pool is not None
+        and hasattr(signal_pool, "emit_confirmed_pattern")
+    ):
+        # Emit ONLY the mapped full template.  The raw Hunter
+        # short form (e.g. ``{first}.{last}``) is preserved in
+        # the metadata for traceability.
+        signal_pool.emit_confirmed_pattern(hunter_pattern_template)
 
     findings: list[dict[str, Any]] = []
     for r in results:
@@ -1474,6 +2510,13 @@ async def _run_hunter(
                     "source_type": source_type,
                     "confidence_score": round(ci.score, 4),
                     "confidence_breakdown": ci.breakdown,
+                    # P1: surface the pattern on each finding so
+                    # downstream consumers can show WHY a Hunter hit
+                    # was chosen.  ``hunter_pattern`` is the raw
+                    # short form (or None); ``hunter_pattern_template``
+                    # is the mapped full template (or None).
+                    "hunter_pattern": r.pattern,
+                    "hunter_pattern_template": r.pattern_template,
                 },
             }
         )
@@ -1487,6 +2530,10 @@ async def _run_hunter(
             "hunter_verified": sum(1 for r in results if r.confidence >= 90),
             "hunter_high": sum(1 for r in results if 70 <= r.confidence < 90),
             "hunter_low": sum(1 for r in results if r.confidence < 70),
+            "hunter_pattern": hunter_pattern,
+            "hunter_pattern_template": hunter_pattern_template,
+            "circuit_breaker_open": False,
+            "monthly_cap": HUNTER_MONTHLY_CAP,
         },
     )
 
@@ -1520,7 +2567,7 @@ async def _orchestrate(
     """Inner orchestration — runs the 9 modules in sequence.
 
     Sequence:
-        Phase 1+2 — all eight data modules run concurrently
+        Phase 1+2 — the domain data modules run concurrently
                     (``asyncio.as_completed`` so each callback fires
                     as soon as its module finishes).  W5 adds three
                     modules to this phase (npm_email, pypi_email,
@@ -1743,7 +2790,7 @@ async def _orchestrate(
                 candidate_paths=candidate_paths,
                 discover_callable=content_intelligence,
             ),
-            _run_hunter(domain, settings.hunter_io_api_key),
+            _run_hunter(domain, settings.hunter_io_api_key, signal_pool=signal_pool),
         ]
         phase12_results: dict[str, ModuleResult] = {}
         for fut in asyncio.as_completed(phase12_coroutines):
@@ -1809,21 +2856,32 @@ async def _orchestrate(
         completed_iso = completed.isoformat().replace("+00:00", "Z")
         duration = (completed - started).total_seconds()
 
-        # Phase 1 of 4: HIGH / MEDIUM / LOW counts in the summary are
-        # PERSONAL-only (``is_role=False``).  Role accounts are tracked
-        # separately via ``role_account_count`` and rendered in their own
-        # section.  The previous semantics counted all emails regardless of
-        # role, which inflated the analyst's HIGH/MEDIUM counts with
-        # generic mailbox hits (info@, support@, …).
+        # P7: 4-tier counts in the summary are PERSONAL-only
+        # (``is_role=False``).  Role accounts are tracked separately
+        # via ``role_account_count`` and rendered in their own
+        # section.  The previous 3-tier semantics inflated the
+        # analyst's HIGH/MEDIUM counts with weak passive
+        # inferences; the new CONFIRMED / LIKELY / MEDIUM split
+        # keeps the "above the noise floor" hits grouped under
+        # LIKELY, the truly-verified hits in CONFIRMED, and the
+        # weak-corroboration hits in MEDIUM.
         high = sum(
             1
             for e in unique_emails
-            if e.confidence_label == "HIGH" and not e.is_role
+            if e.confidence_label == "CONFIRMED" and not e.is_role
         )
+        likely = sum(
+            1
+            for e in unique_emails
+            if e.confidence_label == "LIKELY" and not e.is_role
+        )
+        # ``medium`` is the historical "anything above LOW" band —
+        # LIKELY + MEDIUM.  Field name kept for backward
+        # compatibility with downstream tooling.
         medium = sum(
             1
             for e in unique_emails
-            if e.confidence_label == "MEDIUM" and not e.is_role
+            if e.confidence_label in {"LIKELY", "MEDIUM"} and not e.is_role
         )
         low = sum(
             1
@@ -1867,6 +2925,7 @@ async def _orchestrate(
             unique_emails=unique_emails,
             total_unique_emails=len(unique_emails),
             high_confidence_count=high,
+            likely_confidence_count=likely,
             medium_confidence_count=medium,
             low_confidence_count=low,
             role_account_count=role,

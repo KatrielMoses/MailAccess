@@ -8,6 +8,7 @@ import httpx
 from ..config import settings
 from ..core.bio_analyzer import analyze_bio, is_aggregator_url
 from ..core.bio_link_extractor import extract_from_aggregator
+from ..core.email_confidence import compute_confidence_breakdown, label_for_score
 from ..core.http_client import build_client
 from ..core.rate_limiter import rate_limiter
 from .base import BaseModule, ModuleResult, ModuleStatus
@@ -203,6 +204,7 @@ class GitHubCommitsModule(BaseModule):
                 }
             )
         return findings, [], False
+
 
     async def _enrich_commit_repos(
         self,
@@ -482,3 +484,125 @@ def _aggregator_findings(
                 }
             )
     return out
+
+
+class GitHubDomainCommitsModule(BaseModule):
+    """DOMAIN-mode GitHub commit search independent of discovered repos."""
+
+    name = "github_domain_commits"
+    description = "Search public GitHub commit history for target-domain authors."
+    requires_key = False
+
+    async def run(self, target: str, **_kwargs: Any) -> ModuleResult:  # type: ignore[override]
+        domain = (target or "").strip().lower()
+        if not domain or "@" in domain or "." not in domain:
+            return ModuleResult(status=ModuleStatus.SKIPPED, errors=["github_domain_commits: invalid domain"], metadata={"skip_reason": "invalid_domain"})
+        token = settings.github_token
+        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        query = f"author-email:@{domain}"
+        signal_pool = _kwargs.get("signal_pool")
+        candidate_names: list[str] = []
+        if signal_pool is not None and hasattr(signal_pool, "get_names_for_domain"):
+            try:
+                for payload in signal_pool.get_names_for_domain(domain) or []:
+                    name = str(payload.get("name") or "").strip() if isinstance(payload, dict) else ""
+                    key = name.casefold()
+                    if len(name.split()) >= 2 and key not in {item.casefold() for item in candidate_names}:
+                        candidate_names.append(name)
+                    if len(candidate_names) >= 5:
+                        break
+            except Exception:
+                candidate_names = []
+        try:
+            async with build_client(base_url=_GITHUB_API, timeout=10.0) as client:
+                response = await client.get("/search/commits", params={"q": query, "sort": "author-date", "order": "desc", "per_page": "100"}, headers=headers)
+        except httpx.TimeoutException:
+            return ModuleResult(status=ModuleStatus.PARTIAL, errors=["GitHub domain commit search timed out"], metadata={"health_category": "timeout", "query": query})
+        except Exception as exc:
+            return ModuleResult(status=ModuleStatus.PARTIAL, errors=[f"GitHub domain commit search failed: {exc}"], metadata={"health_category": "transport_or_provider_failure", "query": query})
+        if _is_rate_limited(response):
+            return ModuleResult(status=ModuleStatus.PARTIAL, errors=["GitHub API rate limit reached during domain commit search"], metadata={"health_category": "blocked_or_rate_limited", "query": query, "rate_limited": True})
+        if response.status_code in (403, 422) and not token:
+            return ModuleResult(status=ModuleStatus.PARTIAL, errors=["GitHub domain commit search requires GITHUB_TOKEN"], metadata={"health_category": "configuration", "query": query, "requires_token": True})
+        if response.status_code != 200:
+            return ModuleResult(status=ModuleStatus.PARTIAL, errors=[f"GitHub domain commit search returned {response.status_code}"], metadata={"health_category": "provider_failure", "query": query, "http_status": response.status_code})
+        try:
+            items = response.json().get("items") or []
+        except Exception:
+            return ModuleResult(status=ModuleStatus.PARTIAL, errors=["GitHub domain commit search returned unparseable JSON"], metadata={"health_category": "provider_failure", "query": query})
+
+        queries = [query]
+        if not items:
+            fallback_query = f"@{domain}"
+            try:
+                async with build_client(base_url=_GITHUB_API, timeout=10.0) as client:
+                    fallback_response = await client.get("/search/commits", params={"q": fallback_query, "sort": "author-date", "order": "desc", "per_page": "100"}, headers=headers)
+                if _is_rate_limited(fallback_response):
+                    return ModuleResult(status=ModuleStatus.PARTIAL, errors=["GitHub API rate limit reached during domain commit fallback search"], metadata={"health_category": "blocked_or_rate_limited", "queries": [query, fallback_query], "rate_limited": True})
+                if fallback_response.status_code == 200:
+                    items = fallback_response.json().get("items") or []
+                    queries.append(fallback_query)
+            except Exception:
+                pass
+
+        def has_matching_email(rows: list[Any]) -> bool:
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                commit = row.get("commit") if isinstance(row.get("commit"), dict) else {}
+                author = commit.get("author") if isinstance(commit.get("author"), dict) else {}
+                email = str(author.get("email") or "").strip().lower()
+                if email.rsplit("@", 1)[-1] == domain and "@" in email:
+                    return True
+            return False
+
+        name_queries: list[str] = []
+        name_query_errors: list[str] = []
+        if candidate_names and not has_matching_email(items):
+            try:
+                async with build_client(base_url=_GITHUB_API, timeout=10.0) as client:
+                    for name in candidate_names:
+                        name_query = f'author:"{name}"'
+                        name_response = await client.get(
+                            "/search/commits",
+                            params={"q": name_query, "sort": "author-date", "order": "desc", "per_page": "100"},
+                            headers=headers,
+                        )
+                        name_queries.append(name_query)
+                        if _is_rate_limited(name_response):
+                            name_query_errors.append(f"GitHub API rate limit reached during name pivot: {name}")
+                            break
+                        if name_response.status_code != 200:
+                            name_query_errors.append(f"GitHub name pivot returned {name_response.status_code}: {name}")
+                            continue
+                        try:
+                            items.extend(name_response.json().get("items") or [])
+                        except Exception:
+                            name_query_errors.append(f"GitHub name pivot returned unparseable JSON: {name}")
+            except httpx.TimeoutException:
+                name_query_errors.append("GitHub name pivot search timed out")
+            except Exception as exc:
+                name_query_errors.append(f"GitHub name pivot search failed: {exc}")
+
+        findings: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            commit = item.get("commit") if isinstance(item.get("commit"), dict) else {}
+            author = commit.get("author") if isinstance(commit.get("author"), dict) else {}
+            email = str(author.get("email") or "").strip().lower()
+            if "@" not in email or email.rsplit("@", 1)[-1] != domain or email in seen:
+                continue
+            seen.add(email)
+            repository = item.get("repository") if isinstance(item.get("repository"), dict) else {}
+            breakdown = compute_confidence_breakdown(source_types=["github_commit_author"], is_smtp_verified=False, is_ca_attested=False)
+            findings.append({"platform": "github_domain_commit", "profile_url": str(item.get("html_url") or ""), "username": email.split("@", 1)[0], "confidence": label_for_score(breakdown.score).lower(), "metadata": {"email": email, "on_domain": True, "source_type": "github_commit_author", "author_name": str(author.get("name") or ""), "commit_sha": str(item.get("sha") or "")[:7], "commit_date": str(author.get("date") or ""), "repo": str(repository.get("full_name") or ""), "repo_url": str(repository.get("html_url") or ""), "html_url": str(item.get("html_url") or ""), "confidence_score": round(breakdown.score, 4), "confidence_breakdown": breakdown.breakdown}})
+        metadata = {"query": query, "queries": queries, "name_queries": name_queries, "names_considered": len(candidate_names), "raw_items": len(items), "accepted_emails": len(findings), "health_category": "ok" if findings else "success_empty"}
+        if name_query_errors:
+            metadata["name_query_errors"] = name_query_errors
+        status = ModuleStatus.PARTIAL if name_query_errors and not findings else ModuleStatus.SUCCESS
+        errors = name_query_errors
+        return ModuleResult(status=status, findings=findings, errors=errors, metadata=metadata)

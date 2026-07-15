@@ -220,7 +220,8 @@ class MaigretPlatformsModule(BaseModule):
                 wave = 2
             if wave == 2 and not include_wave2:
                 continue
-            for variant in variants:
+            probe_variants = [email] if defn.get("is_email_only") else variants
+            for variant in probe_variants:
                 key = (name, variant)
                 if key in queued:
                     continue

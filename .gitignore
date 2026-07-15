@@ -43,6 +43,7 @@ data/*
 !data/nexfil_sites.json
 !data/subdomain_wordlist.txt
 !data/wmn_sites.json
+!data/harvest_benchmark_domains.json
 maltego/*.mtz
 
 # IDE
@@ -74,6 +75,23 @@ test_*.py
 !tests/test_breach_corpus.py
 !tests/test_breach_deep.py
 !tests/test_proxy.py
+!tests/test_github_domain_commits.py
+!tests/test_harvest_pivot_boundaries.py
+!tests/test_brave_dorker.py
+!tests/test_public_surface_batch.py
+!tests/test_subdomain_surface.py
+!tests/test_historical_diff.py
+!tests/test_wayback_historical_selection.py
+!tests/test_identity_enrichment_batch.py
+!tests/test_shadow_profile_harvest_report.py
+!tests/test_harvest_diff.py
+!tests/test_harvest_history.py
+!tests/test_harvest_runtime_controls.py
+!tests/test_yield_prediction.py
+!tests/test_harvest_telemetry.py
+!tests/test_concurrent_fetch_cache_cancellation.py
+!tests/test_cache_exception_consumption.py
+!tests/test_low_email_validator.py
 !tests/test_aggregator.py
 !tests/test_no_live_network.py
 verify_*.py

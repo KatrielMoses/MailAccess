@@ -14,9 +14,8 @@ Design notes:
   list has the same TTL — both refresh together when forced.
 - Every method degrades gracefully — network failures return empty data
   and log a warning rather than raising.
-- ``query_multi_collection`` sweeps up to N collections *in parallel*
-  via ``asyncio.gather`` while honouring the per-collection
-  politeness budget so we never hammer the index.
+- ``query_multi_collection`` sweeps up to N collections sequentially while
+  honouring the per-request politeness budget so we do not hammer the index.
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -35,6 +35,10 @@ from ..config import APP_VERSION, settings
 _LOG = logging.getLogger(__name__)
 
 _INDEX_BASE = "https://index.commoncrawl.org"
+_INDEX_BASES = (
+    _INDEX_BASE,
+    "https://test-index.commoncrawl.org",
+)
 _COLLINFO_URL = f"{_INDEX_BASE}/collinfo.json"
 _CDX_BASE = f"{_INDEX_BASE}/cdx-by-index"
 _CC_UA = (
@@ -45,6 +49,7 @@ _DEFAULT_TIMEOUT = 10.0
 _CDX_TIMEOUT = 15.0
 _CACHE_TTL_SECONDS = 24 * 60 * 60
 _CC_REQUEST_INTERVAL = 2.0
+_COLLECTION_CACHE_PATH = Path.home() / ".mailaccess" / "cache" / "commoncrawl_collections.json"
 
 # Regex syntax used by Common Crawl to match high-signal URL paths
 # (about / team / contact / leadership / people / staff / board /
@@ -116,6 +121,7 @@ class CommonCrawlClient:
         # caches use the same TTL — refreshing ``get_available_collections``
         # also brings ``get_latest_index_name`` up to date.
         self._cached_collections: _CollInfo | None = None
+        self._load_persisted_collections()
 
     async def aclose(self) -> None:
         """Close the underlying client if this instance owns it."""
@@ -152,6 +158,7 @@ class CommonCrawlClient:
                     url,
                     params=params,
                     headers={"User-Agent": _CC_UA},
+                    follow_redirects=True,
                 )
                 return response
             except (httpx.TimeoutException, httpx.ConnectError) as exc:
@@ -162,6 +169,40 @@ class CommonCrawlClient:
             except Exception as exc:  # pragma: no cover - defensive
                 _LOG.warning("Common Crawl unexpected error: %s", exc)
                 return None
+        return None
+
+    def _load_persisted_collections(self) -> None:
+        """Load the last known collection list for upstream outage fallback."""
+        try:
+            payload = json.loads(_COLLECTION_CACHE_PATH.read_text(encoding="utf-8"))
+            ids = payload.get("ids") if isinstance(payload, dict) else None
+            if not isinstance(ids, list) or not ids:
+                return
+            valid_ids = tuple(item for item in ids if isinstance(item, str) and item.startswith("CC-MAIN-"))
+            if valid_ids:
+                latest = payload.get("latest") if isinstance(payload.get("latest"), str) else valid_ids[0]
+                self._cached_collections = _CollInfo(valid_ids, latest, time.monotonic())
+                self._cached_index = latest
+                self._cached_at = time.monotonic()
+        except (OSError, ValueError, TypeError):
+            return
+
+    def _persist_collections(self, info: _CollInfo) -> None:
+        try:
+            _COLLECTION_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _COLLECTION_CACHE_PATH.write_text(
+                json.dumps({"ids": list(info.ids), "latest": info.latest}),
+                encoding="utf-8",
+            )
+        except OSError:
+            _LOG.debug("Unable to persist Common Crawl collection cache", exc_info=True)
+
+    async def _get_collinfo(self) -> httpx.Response | None:
+        """Try the primary and documented test index hosts in order."""
+        for base in _INDEX_BASES:
+            response = await self._get(f"{base}/collinfo.json")
+            if response is not None and response.status_code == 200:
+                return response
         return None
 
     # ------------------------------------------------------------------
@@ -181,7 +222,7 @@ class CommonCrawlClient:
             ):
                 return self._cached_index
 
-            response = await self._get(_COLLINFO_URL)
+            response = await self._get_collinfo()
             if response is None or response.status_code != 200:
                 _LOG.warning("Common Crawl collinfo.json unavailable (latest index)")
                 return self._cached_index
@@ -199,6 +240,7 @@ class CommonCrawlClient:
             self._cached_collections = info
             self._cached_index = info.latest
             self._cached_at = now
+            self._persist_collections(info)
             return info.latest
 
     async def invalidate_index_cache(self) -> None:
@@ -231,7 +273,7 @@ class CommonCrawlClient:
             ):
                 return list(self._cached_collections.ids)
 
-            response = await self._get(_COLLINFO_URL)
+            response = await self._get_collinfo()
             if response is None or response.status_code != 200:
                 _LOG.warning("Common Crawl collinfo.json unavailable (list)")
                 return list(self._cached_collections.ids) if self._cached_collections else []
@@ -253,6 +295,7 @@ class CommonCrawlClient:
             self._cached_collections = info
             self._cached_index = info.latest
             self._cached_at = now
+            self._persist_collections(info)
             return list(info.ids)
 
     async def query_multi_collection(
@@ -347,16 +390,15 @@ class CommonCrawlClient:
                 record.collection = coll
             return combined
 
-        per_collection = await asyncio.gather(
-            *(_sweep_one(coll) for coll in collection_ids),
-            return_exceptions=True,
-        )
-
         flat: list[CCRecord] = []
-        for outcome in per_collection:
-            if isinstance(outcome, BaseException):
-                continue
-            flat.extend(outcome)
+        # Common Crawl asks clients not to run multiple CDX requests at once.
+        # Keep collection order deterministic and let _get enforce the
+        # courtesy interval between requests.
+        for coll in collection_ids:
+            try:
+                flat.extend(await _sweep_one(coll))
+            except Exception:  # pragma: no cover - defensive per-collection guard
+                _LOG.debug("query_multi_collection: collection %s sweep failed", coll, exc_info=True)
 
         return self._dedupe_across_collections(flat)
 
@@ -410,7 +452,6 @@ class CommonCrawlClient:
         *within* a single collection.  Cross-collection dedup happens
         in :meth:`_dedupe_across_collections`.
         """
-        url = f"{_INDEX_BASE}/{collection}-index"
         params: dict[str, Any] = {
             "url": url_pattern,
             "output": "json",
@@ -420,18 +461,14 @@ class CommonCrawlClient:
         if limit is not None and int(limit) > 0:
             params["limit"] = str(int(limit))
 
-        response = await self._get(url, params=params)
+        response: httpx.Response | None = None
+        for base in _INDEX_BASES:
+            candidate = await self._get(f"{base}/{collection}-index", params=params)
+            if candidate is not None and candidate.status_code == 200:
+                response = candidate
+                break
         if response is None:
-            _LOG.debug(
-                "Common Crawl CDX query unreachable for collection %s", collection
-            )
-            return []
-        if response.status_code != 200:
-            _LOG.debug(
-                "Common Crawl CDX returned HTTP %s for collection %s",
-                response.status_code,
-                collection,
-            )
+            _LOG.debug("Common Crawl CDX query unreachable for collection %s", collection)
             return []
 
         records = self._parse_jsonl(response.text)

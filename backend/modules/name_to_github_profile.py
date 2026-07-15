@@ -151,7 +151,7 @@ class NameToGitHubProfileModule(BaseModule):
                 blog = profile.get("blog") or ""
                 html_url = profile.get("html_url") or ""
 
-                if email and "@" in email:
+                if email and "@" in email and email.casefold().endswith("@" + str(domain).casefold()):
                     findings.append({
                         "platform": "github_profile",
                         "profile_url": html_url,
@@ -165,6 +165,7 @@ class NameToGitHubProfileModule(BaseModule):
                             "confidence_score": 0.85,
                             "source_type": "github_profile_email",
                             "name": name,
+                            "on_domain": True,
                         },
                     })
 

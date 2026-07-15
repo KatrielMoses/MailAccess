@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from .pre_check import apply_pre_check_values, cookie_header, run_pre_check
 from .sherlock_detector import _USER_AGENT, _WAF, WAFDetector, interpolate_string
 
 
@@ -59,11 +60,19 @@ async def probe_blackbird_site(
 
     async with sem:
         try:
+            precheck = await run_pre_check(client, defn, timeout)
+            cookies = precheck["cookies"]
+            csrf_token = precheck["csrf_token"]
+            headers = apply_pre_check_values(headers, cookies, csrf_token)
+            request_body = apply_pre_check_values(request_body, cookies, csrf_token)
+            if cookies and "Cookie" not in headers:
+                headers["Cookie"] = cookie_header(cookies) or ""
             response = await client.request(
                 method,
                 probe_url,
                 headers=headers,
                 content=request_body,
+                cookies=cookies or None,
                 timeout=timeout,
                 follow_redirects=True,
             )

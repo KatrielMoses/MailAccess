@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import subprocess
 import sys
@@ -57,6 +58,8 @@ from backend.core.domain_harvest_report import (
     serialise_harvest_for_export,
 )
 from backend.core.email_extraction import validate_domain
+from backend.core.harvest_diff import compare_harvest_exports
+from backend.core.harvest_history import load_latest, save_latest
 from backend.core.name_classifier import is_ml_available
 
 _ML_PREF_VALUES = {"ask", "on", "off"}
@@ -161,15 +164,35 @@ def _confidence_label_passes(min_confidence: str, label: str) -> bool:
     """Return True if *label* meets the *min_confidence* threshold.
 
     MUST-FIX S8: filtering helper. Order from laxest to strictest:
-        low < medium < high
+        low < medium < likely < confirmed
     A filter of ``"low"`` is a no-op (passes everything). A filter of
-    ``"high"`` passes only HIGH-confidence emails. Unknown labels
-    default to "low" (defensive — never silently drop unknown).
+    ``"confirmed"`` passes only the top tier. Unknown labels default
+    to ``"low"`` (defensive — never silently drop unknown).
+
+    P7: the legacy ``"high"`` and ``"medium"`` tokens are still
+    accepted for backward compatibility — ``"high"`` is a synonym
+    for the new ``"confirmed"`` (the most conservative mapping —
+    the legacy 3-tier HIGH bucket = the 4-tier CONFIRMED bucket);
+    ``"medium"`` is a synonym for the new ``"likely"`` (any
+    actionable-but-not-confirmed hit).
     """
-    order = {"low": 0, "medium": 1, "high": 2}
-    return order.get(str(label).lower(), 0) >= order.get(
-        min_confidence.lower(), 0
-    )
+    # Tier order, highest first.  Legacy aliases are mapped to
+    # their new-tier equivalents BEFORE the order lookup so the
+    # rest of the function never has to think about the old
+    # vocabulary.
+    legacy_aliases = {
+        "high": "confirmed",
+        "medium": "likely",
+    }
+    resolved_min = legacy_aliases.get(min_confidence.lower(), min_confidence.lower())
+    resolved_label = legacy_aliases.get(str(label).lower(), str(label).lower())
+    order = {
+        "low": 0,
+        "medium": 1,
+        "likely": 2,
+        "confirmed": 3,
+    }
+    return order.get(resolved_label, 0) >= order.get(resolved_min, 0)
 
 
 def _confidence_score_passes(min_score: float, score: float) -> bool:
@@ -263,7 +286,7 @@ def _apply_filters(
     # Construct a copy with the filtered emails and recomputed counts.
     # We re-use the same module_results so the per-module status table
     # in the CLI output still reflects what actually ran — only the
-    # emails tier (HIGH / MEDIUM / LOW) is filtered.
+    # emails tier (CONFIRMED / LIKELY / MEDIUM / LOW) is filtered.
     return type(result)(
         domain=result.domain,
         started_at=result.started_at,
@@ -272,18 +295,28 @@ def _apply_filters(
         module_results=result.module_results,
         unique_emails=filtered_emails,
         total_unique_emails=len(filtered_emails),
-        # Phase 1 of 4: tier counts are PERSONAL-only — match the
+        # P7: tier counts are PERSONAL-only — match the
         # orchestrator's semantics so the filtered summary stays
-        # consistent with the unfiltered one.
+        # consistent with the unfiltered one.  We use the 4-tier
+        # label set here; the *-confidence_count field names are
+        # kept for backward compatibility with the
+        # DomainHarvestResult dataclass — the new
+        # ``likely_confidence_count`` field gives downstream
+        # consumers the LIKELY-tier count.
         high_confidence_count=sum(
             1
             for e in filtered_emails
-            if e.confidence_label == "HIGH" and not e.is_role
+            if e.confidence_label == "CONFIRMED" and not e.is_role
+        ),
+        likely_confidence_count=sum(
+            1
+            for e in filtered_emails
+            if e.confidence_label == "LIKELY" and not e.is_role
         ),
         medium_confidence_count=sum(
             1
             for e in filtered_emails
-            if e.confidence_label == "MEDIUM" and not e.is_role
+            if e.confidence_label in {"LIKELY", "MEDIUM"} and not e.is_role
         ),
         low_confidence_count=sum(
             1
@@ -307,10 +340,14 @@ def _apply_filters(
 def run_harvest_emails(
     domain: str,
     verify_smtp: bool = False,
+    verify_m365: bool = False,
+    verify_yahoo: bool = False,
     use_proxies: bool = False,
     proxy_fallback_ok: bool = False,
     lite: bool = False,
     export: str | None = None,
+    compare_to: str | None = None,
+    skip_modules: tuple[str, ...] = (),
     max_cc_records: int | None = None,
     cc_max_collections: int | None = None,
     console: Console | None = None,
@@ -417,6 +454,7 @@ def run_harvest_emails(
         "npm_email": ("queued", []),
         "pypi_email": ("queued", []),
         "pgp_domain_email": ("queued", []),
+        "github_domain_commits": ("queued", []),
         "pattern_and_verify": ("queued", []),
     }
 
@@ -448,6 +486,8 @@ def run_harvest_emails(
         return await run_domain_harvest(
             cleaned_domain,
             enable_smtp=verify_smtp,
+            enable_m365=verify_m365,
+            enable_yahoo=verify_yahoo,
             use_proxies=use_proxies,
             proxy_fallback_ok=proxy_fallback_ok,
             dork_lite_mode=cli_dork_lite_mode,
@@ -455,6 +495,7 @@ def run_harvest_emails(
             cc_max_collections=cli_cc_max_collections,
             on_module_complete=_on_module_complete,
             timeout_seconds=timeout_seconds,
+            skip_modules=skip_modules,
         )
 
     try:
@@ -528,15 +569,46 @@ def run_harvest_emails(
     #    schema_version lives inside the JSON (S12) and inside each
     #    NDJSON row (S12).
     # ------------------------------------------------------------------
+    comparison: dict[str, Any] | None = None
+    previous_payload: dict[str, Any] | None = None
+    if compare_to:
+        try:
+            previous = json.loads(Path(compare_to).read_text(encoding="utf-8"))
+            previous_payload = previous if isinstance(previous, dict) else None
+        except Exception as exc:
+            console.print(f"[yellow]Harvest comparison skipped:[/] {exc}")
+    elif getattr(settings, "enable_harvest_history_cache", True):
+        previous_payload = load_latest(cleaned_domain)
+
+    if previous_payload:
+        try:
+            current = json.loads(serialise_harvest_for_export(result, "comparison.json")[0])
+            comparison = compare_harvest_exports(previous_payload, current)
+            console.print(
+                f"[cyan]Harvest diff:[/] +{len(comparison['emails']['new'])} new emails, "
+                f"-{len(comparison['emails']['removed'])} removed, "
+                f"{comparison['emails']['unchanged']} unchanged"
+            )
+        except Exception as exc:
+            console.print(f"[yellow]Harvest comparison skipped:[/] {exc}")
+
     if export:
         export_path = _resolve_export_path(export)
         export_path.parent.mkdir(parents=True, exist_ok=True)
 
-        text, err = serialise_harvest_for_export(result, export_path)
+        text, err = serialise_harvest_for_export(result, export_path, comparison=comparison)
         if err is not None:
             console.print(f"[red]Error:[/] {err}")
             return 4
         export_path.write_text(text, encoding="utf-8")
         console.print(f"[green]✓ Exported harvest to:[/] {export_path}")
+
+    if getattr(settings, "enable_harvest_history_cache", True):
+        try:
+            latest = json.loads(serialise_harvest_for_export(result, "history.json")[0])
+            if save_latest(cleaned_domain, latest):
+                console.print("[dim]Saved latest harvest baseline.[/dim]")
+        except Exception as exc:
+            console.print(f"[dim]Harvest history cache unavailable: {exc}[/dim]")
 
     return 0

@@ -147,6 +147,8 @@ class SMTPVerificationResult:
     response_code: int | None = 0
     blocked_signal: bool = False
     verification_status: str = "not_attempted"
+    mx_host: str | None = None
+    transport_error: str | None = None
     # "verified" / "not_found" / "inconclusive" / "blocked" /
     # "not_attempted" / "temporary_failure"
 
@@ -283,10 +285,29 @@ class SMTPVerifier:
             await asyncio.sleep(self._probe_delay)
 
         # Try the host with the lowest (best) priority first.
+        errors: list[str] = []
+        last_result: SMTPVerificationResult | None = None
+        last_mx_host: str | None = None
         for mx in self._mx_records:
+            last_mx_host = mx.host
             try:
-                return await self._smtp_rcpt(mx, email)
+                result = await self._smtp_rcpt(mx, email)
+                result.mx_host = mx.host
+                last_result = result
+                # Definitive answers and explicit blocks should not be
+                # contradicted by a lower-priority MX host. Continue only
+                # for ambiguous/inconclusive responses.
+                if (
+                    result.exists is not None
+                    or result.blocked_signal
+                    or result.verification_status in {"temporary_failure", "blocked"}
+                ):
+                    return result
+                errors.append(
+                    f"{mx.host}: response {result.response_code or 'none'}"
+                )
             except Exception as exc:  # noqa: BLE001 - defensive
+                errors.append(f"{mx.host}: {type(exc).__name__}: {exc or 'no response'}")
                 _LOG.warning(
                     "smtp_verifier: transport error to %s for %s: %s",
                     mx.host,
@@ -299,6 +320,8 @@ class SMTPVerifier:
             exists=None,
             response_code=None,
             verification_status="inconclusive",
+            mx_host=last_result.mx_host if last_result else last_mx_host,
+            transport_error="; ".join(errors) or "no_mx_response",
         )
 
     async def _smtp_rcpt(self, mx: MXRecord, email: str) -> SMTPVerificationResult:
@@ -580,7 +603,7 @@ class _AsyncioSMTPTransport(_SMTPTransport):
             try:
                 writer.write(b"QUIT\r\n")
                 await writer.drain()
-                await writer.wait_closed()
+                await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
             except Exception:  # noqa: BLE001
                 pass
         self._connections.clear()

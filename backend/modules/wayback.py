@@ -236,6 +236,34 @@ def _score_and_rank(
     return scored[: max(0, int(cap))]
 
 
+def _select_historical_rows(
+    ranked: list[tuple[dict[str, str], float]], *, cap: int
+) -> list[tuple[dict[str, str], float]]:
+    """Keep recent and old evidence for the same URL when budget permits.
+
+    Ranking alone can spend the entire cap on recent snapshots of the same
+    page. This selector reserves a second slot for the oldest snapshot of
+    each URL, improving timeline coverage without increasing the fetch cap.
+    """
+    if cap <= 0:
+        return []
+    grouped: dict[str, list[tuple[dict[str, str], float]]] = {}
+    for row, score in ranked:
+        grouped.setdefault(row.get("original", ""), []).append((row, score))
+
+    selected: list[tuple[dict[str, str], float]] = []
+    selected_keys: set[tuple[str, str]] = set()
+    for url, rows in grouped.items():
+        rows.sort(key=lambda pair: pair[0].get("timestamp", ""), reverse=True)
+        for pair in (rows[0], rows[-1]):
+            key = (url, pair[0].get("timestamp", ""))
+            if key not in selected_keys:
+                selected.append(pair)
+                selected_keys.add(key)
+    selected.sort(key=lambda pair: (-pair[1], -(int(pair[0].get("timestamp", "0") or "0") or 0)))
+    return selected[:cap]
+
+
 # ----------------------------------------------------------------------
 # Wayback fetch layer (used by harvest_domain_emails)
 # ----------------------------------------------------------------------
@@ -519,7 +547,10 @@ async def harvest_domain_emails(
         return []
 
     # 2. Rank.
-    ranked = _score_and_rank(rows, cap=cap)
+    ranked = _select_historical_rows(
+        _score_and_rank(rows, cap=max(cap * 2, cap + 1)),
+        cap=cap,
+    )
     if not ranked:
         return []
 

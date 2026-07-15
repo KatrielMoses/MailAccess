@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .pre_check import apply_pre_check_values, cookie_header, run_pre_check
+
 
 def _as_list(value: Any) -> list[str]:
     if isinstance(value, list):
@@ -43,7 +45,16 @@ def detect_hit(defn: dict[str, Any], body: str, status: int, final_url: str) -> 
     """Classify a Maigret probe result as hit, miss, or inconclusive."""
     body = html.unescape(body)
 
-    for marker in (defn.get("errors") or {}):
+    if "e_code" in defn and "m_code" in defn:
+        hit = status == defn.get("e_code") and str(defn.get("e_string") or "") in body
+        miss = status == defn.get("m_code") and str(defn.get("m_string") or "") in body
+        if hit:
+            return "hit"
+        if miss:
+            return "miss"
+        return "inconclusive"
+
+    for marker in defn.get("errors") or {}:
         if str(marker) in body:
             return "inconclusive"
 
@@ -92,6 +103,11 @@ def detect_hit(defn: dict[str, Any], body: str, status: int, final_url: str) -> 
 
 def prepare_platform_defn(defn: dict[str, Any], username: str) -> dict[str, Any]:
     prepared = dict(defn)
+    if prepared.get("is_email_only") and prepared.get("uri_check"):
+        prepared.setdefault("urlProbe", prepared["uri_check"])
+        prepared.setdefault("requestMethod", prepared.get("method", "GET"))
+        if "data" in prepared and "requestPayload" not in prepared:
+            prepared["requestPayload"] = prepared["data"]
     if prepared.get("engine") == "Discourse" and not prepared.get("url"):
         main = str(prepared.get("urlMain") or "").rstrip("/")
         prepared["urlProbe"] = f"{main}/u/{{username}}.json"
@@ -150,12 +166,19 @@ async def probe_platform(
 
     async with sem:
         try:
+            precheck = await run_pre_check(client, prepared, timeout)
+            cookies = precheck["cookies"]
+            headers = apply_pre_check_values(headers, cookies, precheck["csrf_token"])
+            payload = apply_pre_check_values(payload, cookies, precheck["csrf_token"])
+            if cookies and "Cookie" not in headers:
+                headers["Cookie"] = cookie_header(cookies) or ""
             response = await client.request(
                 method,
                 probe_url,
                 headers=headers,
-                json=payload if isinstance(payload, (dict, list)) else None,
-                data=payload if payload and not isinstance(payload, (dict, list)) else None,
+                json=payload if isinstance(payload, dict | list) else None,
+                data=payload if payload and not isinstance(payload, dict | list) else None,
+                cookies=cookies or None,
                 timeout=timeout,
                 follow_redirects=True,
             )

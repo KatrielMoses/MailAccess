@@ -23,12 +23,14 @@ from ..config import settings
 from ..core.email_confidence import (
     compute_confidence_breakdown,
     label_for_score,
+    unverified_source_type_for_template,
 )
 from ..core.email_pattern_generator import (
     GeneratedEmail,
     confirmed_pattern_priority,
     generate_patterns,
 )
+from ..core.email_validator import validate_email_batch
 from ..core.mx_resolver import MXRecord, resolve_mx
 from ..core.role_classifier import classify_email
 from ..core.smtp_verifier import (
@@ -46,12 +48,22 @@ _LOG = logging.getLogger(__name__)
 # standard pipeline.
 _SOURCE_TYPE_VERIFIED = "permutation_verified"
 _SOURCE_TYPE_CATCHALL = "permutation_catchall"
-_SOURCE_TYPE_UNVERIFIED = "permutation_unverified"
+_SOURCE_TYPE_UNVERIFIED = "permutation_unverified_other"
+_SOURCE_TYPE_MX_VALID = "permutation_mx_valid"
 _TOP_THREE_TEMPLATES = [
     "{first}.{last}@{domain}",
     "{first}@{domain}",
     "{f}{last}@{domain}",
 ]
+
+# P1: Hunter pattern boost / penalty.  When Hunter's
+# ``data.pattern`` is available, candidates matching the
+# pattern get +0.30 (Hunter observed the format) and candidates
+# NOT matching get -0.12 (Hunter tells us the format is
+# different).  These constants are module-level so tests can
+# override them with ``monkeypatch.setattr``.
+HUNTER_PATTERN_BOOST: float = 0.30
+HUNTER_PATTERN_PENALTY: float = -0.12
 
 
 @dataclass
@@ -98,6 +110,7 @@ class PatternAndVerifyModule(BaseModule):
         employee_names: list[EmployeeNameResult] | None = None,
         *,
         enable_smtp: bool | None = None,
+        enable_native_validation: bool = True,
         signal_pool: Any | None = None,
     ) -> ModuleResult:  # type: ignore[override]
         """Generate email patterns and optionally verify via SMTP.
@@ -152,6 +165,13 @@ class PatternAndVerifyModule(BaseModule):
             confirmed_patterns = signal_pool.get_confirmed_patterns()
             if confirmed_patterns:
                 confirmed_pattern = confirmed_patterns[0]
+        # P1: pull the Hunter-derived pattern template (if any) from
+        # the signal pool.  It is stored in a separate slot from
+        # ``confirmed_pattern`` because the boost is asymmetric —
+        # matching candidates get +0.30, non-matching get -0.12.
+        hunter_pattern_template: str | None = None
+        if signal_pool is not None and hasattr(signal_pool, "get_hunter_pattern"):
+            hunter_pattern_template = signal_pool.get_hunter_pattern()
         names_processed_high = 0
         names_processed_medium = 0
         names_skipped_low = 0
@@ -253,7 +273,28 @@ class PatternAndVerifyModule(BaseModule):
                 names_processed_medium += 1
                 patterns_generated_medium += len(patterns)
             for pattern in patterns:
-                candidates.append(_to_result(pattern, _SOURCE_TYPE_UNVERIFIED))
+                # P1: apply the Hunter pattern boost/penalty.  When
+                # Hunter told us the domain uses ``{first}.{last}``,
+                # that template is the most likely real address —
+                # boost it.  Any other template is *less* likely
+                # than the un-prioritised baseline — apply the
+                # penalty.  The default confidence baseline is 0.05
+                # (see :func:`_to_result`); the boost lands candidates
+                # in the 0.05–0.35 range, the penalty in the
+                # 0.00–0.05 range.
+                hunter_adjustment = 0.0
+                if hunter_pattern_template:
+                    if pattern.pattern_template == hunter_pattern_template:
+                        hunter_adjustment = HUNTER_PATTERN_BOOST
+                    else:
+                        hunter_adjustment = HUNTER_PATTERN_PENALTY
+                candidates.append(
+                    _to_result(
+                        pattern,
+                        unverified_source_type_for_template(pattern.pattern_template),
+                        confidence=max(0.0, 0.05 + hunter_adjustment),
+                    )
+                )
             pattern_generation_by_name.append(
                 {
                     "name": emp.name,
@@ -318,6 +359,38 @@ class PatternAndVerifyModule(BaseModule):
 
         if not smtp_enabled:
             _generate_without_probing()
+
+        # Native validation is safe by default: no SMTP connection is made.
+        # It prevents all generated candidates from remaining in the zero-
+        # weight ``unverified`` bucket while keeping mailbox existence claims
+        # reserved for the explicit SMTP path below.
+        native_validation_meta: dict[str, Any] = {}
+        if enable_native_validation and candidates:
+            mx_for_validation: list[MXRecord] = []
+            try:
+                mx_for_validation = await resolve_mx(cleaned_domain)
+            except Exception as exc:  # noqa: BLE001
+                native_validation_meta["error"] = str(exc)
+            validation_results = await validate_email_batch(
+                [candidate.email for candidate in candidates],
+                mx_records=mx_for_validation,
+            )
+            counts: dict[str, int] = {}
+            for candidate, validation in zip(candidates, validation_results):
+                counts[validation.status] = counts.get(validation.status, 0) + 1
+                candidate.verification_status = validation.status
+                candidate.is_role = validation.is_role
+                candidate.role_match_type = validation.role_match_type
+                if validation.status == "mx_valid":
+                    candidate.source_type = _SOURCE_TYPE_MX_VALID
+                    candidate.confidence_score = max(candidate.confidence_score, 0.30)
+                elif validation.status in ("role", "disposable", "mx_missing"):
+                    candidate.source_type = unverified_source_type_for_template(
+                        candidate.pattern_template
+                    )
+                    candidate.confidence_score = max(candidate.confidence_score, 0.02)
+            native_validation_meta["counts"] = counts
+            native_validation_meta["mx_records"] = len(mx_for_validation)
 
         if smtp_enabled:
             # MUST-FIX M2: open ONE SMTPVerifier for the whole batch.
@@ -499,7 +572,7 @@ class PatternAndVerifyModule(BaseModule):
         # ------------------------------------------------------------------
         if batch_meta.get("is_catchall") is True:
             for cand in candidates:
-                if cand.verification_status == "unverified":
+                if cand.verification_status in ("unverified", "mx_valid"):
                     cand.source_type = _SOURCE_TYPE_CATCHALL
                     cand.confidence_score = 0.2 * 0.7  # conservative
 
@@ -509,6 +582,8 @@ class PatternAndVerifyModule(BaseModule):
         # ------------------------------------------------------------------
         findings: list[dict[str, Any]] = []
         verified_count = 0
+        hunter_match_count = 0
+        hunter_mismatch_count = 0
         for cand in candidates:
             classification = classify_email(cand.email)
             if classification.is_role:
@@ -525,22 +600,41 @@ class PatternAndVerifyModule(BaseModule):
                 cand.confidence_score, float(breakdown.score)
             )
             label = label_for_score(final_score)
+            # P1: compute the hunter adjustment at emission time so
+            # the breakdown carries the exact delta.  We recompute
+            # here (not from ``cand.confidence_score``) so the
+            # value matches the per-template rule regardless of
+            # intermediate clamps (e.g. ``max(0.0, …)``).
+            hunter_adjustment: float | None = None
+            if hunter_pattern_template is not None:
+                if cand.pattern_template == hunter_pattern_template:
+                    hunter_adjustment = HUNTER_PATTERN_BOOST
+                    hunter_match_count += 1
+                else:
+                    hunter_adjustment = HUNTER_PATTERN_PENALTY
+                    hunter_mismatch_count += 1
+            finding_metadata: dict[str, Any] = {
+                "email": cand.email,
+                "source_name": cand.source_name,
+                "pattern_template": cand.pattern_template,
+                "verification_status": cand.verification_status,
+                "confidence_score": round(final_score, 4),
+                "confidence_breakdown": breakdown.breakdown,
+                "is_role": classification.is_role,
+                "role_match_type": classification.match_type,
+                "source_type": cand.source_type,
+            }
+            if hunter_adjustment is not None:
+                finding_metadata["hunter_pattern"] = hunter_pattern_template
+                finding_metadata["hunter_pattern_adjustment"] = round(
+                    hunter_adjustment, 4
+                )
             findings.append(
                 {
                     "platform": "pattern_and_verify",
                     "profile_url": cand.email,
                     "confidence": label,
-                    "metadata": {
-                        "email": cand.email,
-                        "source_name": cand.source_name,
-                        "pattern_template": cand.pattern_template,
-                        "verification_status": cand.verification_status,
-                        "confidence_score": round(final_score, 4),
-                        "confidence_breakdown": breakdown.breakdown,
-                        "is_role": classification.is_role,
-                        "role_match_type": classification.match_type,
-                        "source_type": cand.source_type,
-                    },
+                    "metadata": finding_metadata,
                 }
             )
             if cand.source_type == _SOURCE_TYPE_VERIFIED:
@@ -560,6 +654,8 @@ class PatternAndVerifyModule(BaseModule):
                 "employee_names_processed": len(employee_names),
                 "total_patterns_generated": len(candidates),
                 "smtp_verification_enabled": smtp_enabled,
+                "native_validation_enabled": bool(enable_native_validation),
+                "native_validation": native_validation_meta,
                 "smtp_probes_used": probes_used_total,
                 "is_catchall": batch_meta.get("is_catchall"),
                 "confirmed_pattern": confirmed_pattern,
@@ -576,6 +672,14 @@ class PatternAndVerifyModule(BaseModule):
                 "pattern_generation_by_name": pattern_generation_by_name,
                 "pattern_high_confidence_threshold": high_threshold,
                 "pattern_medium_confidence_threshold": medium_threshold,
+                # P1: surface the Hunter-derived pattern + per-batch
+                # boost/penalty counters so the report layer can
+                # show "Hunter told us {first}.{last}; 7 candidates
+                # boosted, 24 candidates demoted" without having to
+                # recompute the per-finding count.
+                "hunter_pattern_template": hunter_pattern_template,
+                "hunter_pattern_match_count": hunter_match_count,
+                "hunter_pattern_mismatch_count": hunter_mismatch_count,
             },
         )
 

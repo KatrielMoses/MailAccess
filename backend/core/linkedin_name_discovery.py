@@ -17,13 +17,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .bing_dorker import BingDorker
 from .bing_dorker import SearchResult as BingResult
 from .duckduckgo_dorker import DuckDuckGoDorker
 from .duckduckgo_dorker import SearchResult as DDGResult
+from .email_extraction import extract_emails
 from .name_quality import is_plausible_person_name, matches_domain
 
 _LOG = logging.getLogger(__name__)
@@ -51,6 +52,13 @@ class NameDiscovery:
     source_url: str | None
     title_or_role: str | None
     confidence: float
+    # P5: emails surfaced in the same SERP snippet that produced
+    # this name.  Often the snippet is the only place the email
+    # actually appears ("John Smith — jsmith@example.com — Senior
+    # Engineer — LinkedIn"), so we capture the addresses inline
+    # instead of forcing the caller to re-query the search engine.
+    # Empty list when the snippet had no email-looking text.
+    snippet_emails: list[str] = field(default_factory=list)
 
 
 # ----------------------------------------------------------------------
@@ -100,6 +108,26 @@ def _extract_slug(url: str) -> str | None:
         return None
     match = _LINKEDIN_PROFILE_RE.search(url)
     return match.group(1) if match else None
+
+
+def _emails_in_snippet(snippet: str | None) -> list[str]:
+    """Return the deduped, lowercased emails found in *snippet*.
+
+    P5: the snippet text often contains the person's actual email
+    ("John Smith — jsmith@example.com — Senior Engineer — LinkedIn").
+    We previously discarded this signal entirely.  Now we extract
+    it so the orchestrator can correlate name + email in a single
+    SERP hit, dramatically reducing the work the downstream email
+    pattern generator needs to do.
+
+    Returns an empty list when the snippet is empty/None or has
+    no email-shaped text.  The list is in ``extract_emails``'s
+    natural sorted order so callers can rely on the ordering.
+    """
+    if not snippet:
+        return []
+    extracted = extract_emails(snippet, target_domain=None)
+    return [item.email for item in extracted]
 
 
 # ----------------------------------------------------------------------
@@ -153,6 +181,13 @@ async def discover_linkedin_names(
                 name, role = parsed
                 if not _is_profile_url(r.url):
                     continue
+                # P5: pull emails from the same snippet that gave us
+                # the name.  We do NOT filter by ``on_domain`` here
+                # — the parent caller (employee_name_discovery) can
+                # decide whether to use off-domain personal emails
+                # (e.g. a personal Gmail on a "Sr. Engineer at X"
+                # profile) as a corroboration signal.
+                snippet_emails = _emails_in_snippet(r.snippet)
                 items.append(
                     NameDiscovery(
                         name=name,
@@ -160,6 +195,7 @@ async def discover_linkedin_names(
                         source_url=r.url,
                         title_or_role=role,
                         confidence=_LINKEDIN_CONFIDENCE,
+                        snippet_emails=snippet_emails,
                     )
                 )
 
@@ -180,6 +216,11 @@ async def discover_linkedin_names(
                 name, role = parsed
                 if not _is_profile_url(r.url):
                     continue
+                # P5: same extraction as the DDG branch — see the
+                # comment above.  Keeping both branches in sync
+                # matters because tests parameterise over both
+                # engines.
+                snippet_emails = _emails_in_snippet(r.snippet)
                 items.append(
                     NameDiscovery(
                         name=name,
@@ -187,6 +228,7 @@ async def discover_linkedin_names(
                         source_url=r.url,
                         title_or_role=role,
                         confidence=_LINKEDIN_CONFIDENCE,
+                        snippet_emails=snippet_emails,
                     )
                 )
 
@@ -225,6 +267,11 @@ def discover_names_for_tests(
                 source_url=result.url,
                 title_or_role=role,
                 confidence=_LINKEDIN_CONFIDENCE,
+                # P5: include snippet emails in the test helper so
+                # downstream tests can exercise the new field
+                # without rebuilding the dorker flow.  We reuse
+                # the same helper as the production code path.
+                snippet_emails=_emails_in_snippet(result.snippet),
             )
         )
     return out

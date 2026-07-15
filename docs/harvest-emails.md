@@ -1,7 +1,7 @@
 # `mailaccess harvest-emails`
 
 Domain-centric email discovery for OSINT, pentest, and analyst workflows.
-Given a target domain, this command fans out across eight independent
+Given a target domain, this command fans out across 13 independent
 structured sources in parallel, deduplicates the results, scores every
 candidate, and renders a triage-ready report.
 
@@ -14,7 +14,7 @@ candidate, and renders a triage-ready report.
 |---|---|---|
 | Input | One email address | One domain |
 | Output | Profile / breach / contact profile for that address | Every email we can find at that domain, scored by confidence |
-| Sources | Account-existence probes + breach correlation + identity graph | Eight structured data sources run in parallel against the domain |
+| Sources | Account-existence probes + breach correlation + identity graph | 13 domain sources plus reactive name/email identity pivots |
 | When to use | You already know an email and want to know who / where | You know an organisation and want a list of who's there |
 
 If you want both — start from a domain, get a list of emails, then drill
@@ -48,6 +48,14 @@ mailaccess harvest-emails --domain example.com --export acme.csv
 mailaccess harvest-emails --domain example.com --export acme.ndjson
 ```
 
+Use `--skip-module MODULE` to disable a source for one run without changing
+configuration. Repeat the option for multiple modules; skipped modules remain
+visible in the status and export metadata. Module timings are recorded in
+each module's metadata for benchmark analysis.
+
+JSON benchmark exports also include per-domain telemetry: the five slowest
+modules and any modules deferred by runtime policy or yield prediction.
+
 Format is inferred from the extension. Bare filenames (no path) are
 routed to `./results/`.
 
@@ -57,6 +65,8 @@ routed to `./results/`.
 |---|---|---|
 | `--domain`, `-d` | (required) | Target domain, e.g. `example.com`. Free providers (gmail.com etc.) are rejected. |
 | `--verify-smtp` | `false` | **OPT-IN.** Enables SMTP RCPT TO probing for the discovered pattern candidates. Off by default — the only path that turns it on. |
+| `--verify-m365` | `false` | **OPT-IN.** Uses MX provider detection and Microsoft Entra credential-type evidence for M365-routed domains. |
+| `--verify-yahoo` | `false` | **OPT-IN.** Uses the Yahoo signup-flow signal for Yahoo-routed domains; CAPTCHA and parse failures remain inconclusive. |
 | `--use-proxies` | `false` | Route the proxy-aware harvest modules through the configured ScrapingAnt transport. |
 | `--lite` | `false` | Reduces the search-dork module's query count for a faster (lower-yield) run. |
 | `--max-cc-records N` | `100` | Overrides the Common Crawl module's per-harvest record cap. |
@@ -65,6 +75,13 @@ routed to `./results/`.
 | `--exclude-domain DOMAIN` | (none) | Hide emails from this domain. Repeatable. Example: `--exclude-domain gmail.com --exclude-domain yahoo.com`. |
 | `--on-domain-only` | `false` | Hide third-party mentions. Show only emails whose domain equals the target. |
 | `--export FILE` | (none) | Export to JSON / CSV / NDJSON (inferred from extension). |
+
+Search-provider configuration is controlled through the environment. Set
+`SEARCH_PROVIDER=brave` with `BRAVE_SEARCH_API_KEY` to use the supported
+JSON API path. `SEARCH_PROVIDER=auto` uses Brave when the key is present and
+otherwise keeps DDG/Bing HTML as a best-effort legacy fallback. Use
+`SEARCH_PROVIDER=legacy_html` only when you explicitly accept provider
+blocking and timeout risk.
 
 When `--use-proxies` is set, only `email_search_dork` and
 `employee_name_discovery` are routed through the configured ScrapingAnt
@@ -90,16 +107,22 @@ and HIGH).
 
 ## Source modules
 
-Eight modules run. Seven run **in parallel** as Phase 1+2 of the
-harvest; one (pattern_and_verify) runs after the employee-name
-discovery module completes because it consumes those names.
+Seventeen domain modules run across the guaranteed and opportunistic
+tracks. `pattern_and_verify` runs after employee-name discovery because
+it consumes those names. Additional reactive pivots can run as names and
+emails arrive: GitHub profile lookup, person-to-email search, Gravatar,
+Keybase, Hacker News, Fediverse, email identity enrichment, and GitHub
+domain commit search.
 
 ### `commoncrawl_email` — Common Crawl
 
 Queries the Common Crawl URL Index for pages mentioning the target
 domain, fetches the matching pages, and extracts every email found.
 This is typically the highest-yield source for medium/large orgs.
-URLs are capped per harvest (`--max-cc-records`).
+URLs are capped per harvest (`--max-cc-records`). Index access uses the
+primary Common Crawl host with a secondary host fallback, persists the last
+known collection list for temporary upstream outages, and spaces collection
+queries to respect Common Crawl's rate limits.
 
 ### `code_and_cert_email` — GitHub + Certificate Transparency
 
@@ -115,10 +138,10 @@ Three sub-sources:
 
 ### `email_search_dork` — Search-engine dorking
 
-Runs pre-built dork queries (e.g. `"@example.com"`) against DuckDuckGo
-and Bing, parses snippets for emails. `--lite` cuts the query count in
-half. Be aware: search engines can rate-limit or CAPTCHA sustained
-heavy use.
+Runs pre-built dork queries (e.g. `"@example.com"`) against the configured
+search provider and parses structured snippets for emails. Brave is the
+supported API-backed provider; DDG/Bing HTML are retained only as a
+best-effort fallback. `--lite` cuts the query count in half.
 
 ### `employee_name_discovery` — Employee / executive names
 
@@ -145,6 +168,32 @@ that publish internal packages.
 Same shape as npm_email, against `pypi.org`. Uses the deprecated but
 still-working XML-RPC search endpoint plus the JSON API direct-lookup
 fallback. Strict domain filter applied.
+
+### `public_surface_sweeper` — public contact surfaces
+
+Runs a bounded, parallel sweep of `security.txt`, `humans.txt`, `llms.txt`,
+contact/about/team/support/press pages, `robots.txt`, and `sitemap.xml`.
+Only exact target-domain emails are retained. It requires no key and is kept
+on the guaranteed track because the requests are capped and independent.
+
+### `public_forge` — GitLab public commits
+
+Searches a small number of GitLab public projects by the domain keyword and
+checks recent commit author metadata. It is deliberately capped and exact
+domain-filtered; no GitLab token is required for public data.
+
+### `package_ecosystems` — RubyGems and Packagist
+
+Searches public package metadata on RubyGems and Packagist using the domain
+keyword, then accepts only maintainer/author emails whose domain exactly
+matches the target. Both sources are keyless and bounded per harvest.
+
+### `subdomain_surface` — certificate-backed host expansion
+
+Uses crt.sh and Cert Spotter to discover target-owned hosts, then checks a
+small bounded set of those hosts for exact target-domain emails. Hostnames
+are retained with their discovery sources so certificate corroboration is
+visible in provenance.
 
 ### `pgp_domain_email` — PGP keyserver UIDs
 
@@ -195,7 +244,8 @@ Every email gets a numeric `confidence_score` (0.0–1.5) and a label
 | DuckDuckGo search snippet | 0.5 |
 | Bing search snippet | 0.4 |
 | Permutation on a catch-all domain | 0.2 |
-| Permutation unverified | 0.05 |
+| Permutation unverified | 0.00 |
+| Permutation MX validated | 0.30 |
 
 ### Multipliers
 
@@ -305,6 +355,8 @@ without SMTP, or **2–5min** with SMTP enabled.
       "found_by_modules": ["commoncrawl_email", "npm_email"],
       "confidence_breakdown": { "base_score": 1.2, "multiplier": 1.2, ... },
       "rationale_chip": "(cc*+npm multi-source)",
+      "native_validation_status": "mx_valid",
+      "smtp_verification_status": "verified",
       "evidence": [...]
     }
   ],
@@ -318,11 +370,10 @@ floor check in your downstream tool when bumping past 1.
 
 ### `.csv` — flat, spreadsheet-friendly
 
-Columns: `email, confidence_label, confidence_score, is_role,
-on_domain, is_smtp_verified, is_ca_attested, found_by_modules,
-source_count, first_seen_timestamp, subaddress_variants,
-rationale_chip`. `found_by_modules` and `subaddress_variants` are
-comma-joined.
+Columns also include `native_validation_status`, `native_mx_valid`,
+`smtp_verification_status`, `smtp_exists`, `smtp_mx_host`,
+`smtp_transport_error`, and `smtp_catchall`. `found_by_modules` and
+`subaddress_variants` are comma-joined.
 
 ### `.ndjson` — one email per line
 
@@ -345,8 +396,16 @@ Same per-email structure as the JSON `emails` array, with a synthetic
   generates candidates from the discovered names. If the org uses an
   unusual pattern (e.g. nickname-based instead of legal-name-based),
   the candidates will miss real addresses.
-* **SMTP verification is opt-in.** With it off, permutation candidates
-  appear but unverified; with it on, you accept the operational risk.
+* **M365 verification is separately opt-in.** `--verify-m365` only runs when
+  the primary MX is classified as M365. Unmanaged, throttled, ambiguous, and
+  transport-error responses remain inconclusive.
+  The export also records one-per-domain tenant realm metadata (`Managed`,
+  `Federated`, or `inconclusive`) separately from mailbox evidence.
+* **Native validation runs by default.** Generated candidates receive local
+  syntax, role/disposable, and MX checks; an `mx_valid` result proves that the
+  domain advertises mail service, not that the mailbox exists. SMTP RCPT TO
+  verification remains opt-in and is the only status that claims mailbox
+  existence.
 
 ## Suggested workflow for a typical pentest / OSINT engagement
 

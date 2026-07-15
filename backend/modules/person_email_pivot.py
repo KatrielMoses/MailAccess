@@ -157,7 +157,10 @@ class PersonEmailPivotModule(BaseModule):
                     email = str(profile.get("email") or "").strip()
                     if "@" not in email or email.casefold().endswith("@users.noreply.github.com"):
                         continue
-                    if email.casefold().endswith("@" + domain) or _local_matches_name(name, email.split("@", 1)[0]):
+                    # Harvest output is target-domain scoped.  A matching
+                    # local part on Gmail/another domain is identity context,
+                    # not an address at the organization being harvested.
+                    if email.casefold().endswith("@" + domain):
                         findings.append(self._finding(email, name, profile.get("html_url") or url, "github_profile_email", 0.85, login))
                 if findings:
                     break

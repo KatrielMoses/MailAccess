@@ -1,11 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import copy
 import html as _html
+import io
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from .base import BaseExporter
+
+_LOG = logging.getLogger(__name__)
+_PLACEHOLDER = (
+    "data:image/svg+xml;base64,"
+    + base64.b64encode(
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 35 35">'
+        b'<rect width="35" height="35" rx="4" fill="#374151"/>'
+        b'<circle cx="17.5" cy="12" r="6" fill="#9ca3af"/>'
+        b'<path d="M7 31c1-8 5-12 10.5-12S27 23 28 31" fill="#9ca3af"/>'
+        b"</svg>"
+    ).decode()
+)
 
 _RISK_CLASS = {
     "low": "risk-low",
@@ -41,8 +57,69 @@ class PdfExporter(BaseExporter):
         raise NotImplementedError("Use generate() for PDF export")
 
     async def generate(self, investigation_id: str, data: dict[str, Any]) -> bytes:
-        html_content = self._build_html(investigation_id, data)
+        prepared = copy.deepcopy(data)
+        await self._embed_avatars(prepared)
+        html_content = self._build_html(investigation_id, prepared)
         return await asyncio.to_thread(self._render_pdf, html_content)
+
+    async def _embed_avatars(self, data: dict[str, Any]) -> None:
+        """Fetch and resize finding avatars without making export fail."""
+        from ..core.http_client import build_client
+
+        findings_by_module = data.get("findings_by_module", {})
+        if not isinstance(findings_by_module, dict):
+            return
+        targets: list[tuple[dict[str, Any], str]] = []
+        for findings in findings_by_module.values():
+            if not isinstance(findings, list):
+                continue
+            for finding in findings:
+                if not isinstance(finding, dict):
+                    continue
+                url = self._avatar_url(finding)
+                if url:
+                    targets.append((finding, url))
+        if not targets:
+            return
+        try:
+            async with build_client(timeout=5.0) as client:
+                for finding, url in targets:
+                    try:
+                        response = await client.get(url, timeout=5.0)
+                        response.raise_for_status()
+                        from PIL import Image
+
+                        image = Image.open(io.BytesIO(response.content)).convert("RGBA")
+                        image.thumbnail((35, 35), Image.Resampling.LANCZOS)
+                        canvas = Image.new("RGBA", (35, 35), (55, 65, 81, 255))
+                        canvas.paste(
+                            image, ((35 - image.width) // 2, (35 - image.height) // 2), image
+                        )
+                        output = io.BytesIO()
+                        canvas.save(output, format="PNG")
+                        finding["_pdf_avatar"] = (
+                            "data:image/png;base64," + base64.b64encode(output.getvalue()).decode()
+                        )
+                    except Exception as exc:
+                        _LOG.debug("Avatar omitted from PDF for %s: %s", url, exc)
+                        finding["_pdf_avatar"] = _PLACEHOLDER
+        except Exception as exc:
+            _LOG.debug("Avatar client unavailable during PDF export: %s", exc)
+            for finding, _ in targets:
+                finding["_pdf_avatar"] = _PLACEHOLDER
+
+    @staticmethod
+    def _avatar_url(finding: dict[str, Any]) -> str | None:
+        candidates = [finding.get("avatar_url"), finding.get("photo_url"), finding.get("image_url")]
+        metadata = finding.get("metadata")
+        if isinstance(metadata, dict):
+            candidates.extend(
+                metadata.get(key) for key in ("avatar_url", "photo_url", "image_url", "avatar")
+            )
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.startswith(("http://", "https://")):
+                return candidate
+        return None
 
     def _render_pdf(self, html_content: str) -> bytes:
         from weasyprint import HTML  # type: ignore[import-untyped]
@@ -63,8 +140,7 @@ class PdfExporter(BaseExporter):
         breach_count = sum(
             1
             for finding in findings
-            if finding.get("module_name", "").lower()
-            in ("hibp", "haveibeenpwned", "xposedornot")
+            if finding.get("module_name", "").lower() in ("hibp", "haveibeenpwned", "xposedornot")
         )
 
         runs = data.get("module_runs", [])
@@ -85,14 +161,12 @@ class PdfExporter(BaseExporter):
         metadata_html = self._metadata_table_html(findings)
         log_html = self._module_log_html(runs, findings_by_module)
         timeline_html = self._timeline_html(data.get("timeline"))
-        
+
         alt_emails = [
-            f.get("data", f)
-            for f in findings
-            if f.get("module_name") == "alternate_email"
+            f.get("data", f) for f in findings if f.get("module_name") == "alternate_email"
         ]
         alt_emails_html = self._alt_emails_html(alt_emails)
-        
+
         driver_html = self._string_list_html(
             score_drivers, empty="No credential risk drivers recorded."
         )
@@ -116,6 +190,13 @@ class PdfExporter(BaseExporter):
     <div style="font-size:7pt">ID&nbsp;{_e(investigation_id)}</div>
   </div>
 </header>
+
+<aside class="disclaimer">
+  <strong>&#9888; DISCLAIMER</strong>
+  <span>This report was generated by MailAccess for authorized security research and OSINT
+  investigation only. Results may contain errors. The author bears no responsibility for misuse.
+  Verify all findings independently before taking action.</span>
+</aside>
 
 <section class="summary-card">
   <div class="score-row">
@@ -185,23 +266,24 @@ class PdfExporter(BaseExporter):
             severity = str(finding.get("severity") or "").lower()
             finding_html += f"""
 <div class="brief-finding">
-  <div><strong>{_e(finding.get('title', ''))}</strong> <span class="brief-severity">{_e(severity.upper())}</span></div>
-  <div>{_e(finding.get('detail', ''))}</div>
-  <div class="brief-action">{_e(finding.get('remediation', ''))}</div>
+  <div><strong>{_e(finding.get("title", ""))}</strong>
+    <span class="brief-severity">{_e(severity.upper())}</span></div>
+  <div>{_e(finding.get("detail", ""))}</div>
+  <div class="brief-action">{_e(finding.get("remediation", ""))}</div>
 </div>"""
         return f"""
 <section class="brief-section">
   <h2>Defender's Brief</h2>
-  <div class="brief-risk">Risk: <strong>{_e(brief.get('risk_level', 'UNKNOWN'))}</strong></div>
-  <p>{_e(brief.get('risk_summary', ''))}</p>
+  <div class="brief-risk">Risk: <strong>{_e(brief.get("risk_level", "UNKNOWN"))}</strong></div>
+  <p>{_e(brief.get("risk_summary", ""))}</p>
   {finding_html}
-  <p class="brief-next"><strong>Next action:</strong> {_e(brief.get('next_action', ''))}</p>
+  <p class="brief-next"><strong>Next action:</strong> {_e(brief.get("next_action", ""))}</p>
 </section>"""
 
     def _alt_emails_html(self, alt_emails: list[dict[str, Any]]) -> str:
         if not alt_emails:
             return ""
-        
+
         cards = ""
         for f in alt_emails:
             meta = f.get("metadata", {})
@@ -211,13 +293,17 @@ class PdfExporter(BaseExporter):
             source = meta.get("source", "unknown")
             source_detail = meta.get("source_detail", "")
             reason = meta.get("reason", "")
-            
+
             source_str = source
             if source_detail:
                 source_str += f" ({source_detail})"
-            
-            reason_html = f'<div style="font-size: 8pt; color: #a0aec0; margin-top: 4px;">"{_e(reason)}"</div>' if reason else ""
-            
+
+            reason_html = (
+                f'<div style="font-size: 8pt; color: #a0aec0; margin-top: 4px;">"{_e(reason)}"</div>'  # noqa: E501
+                if reason
+                else ""
+            )
+
             cards += f"""
 <div class="finding-card">
   <div class="finding-header">
@@ -227,8 +313,8 @@ class PdfExporter(BaseExporter):
   <div style="font-size: 8.5pt; color: #cbd5e1;">Source: {_e(source_str)}</div>
   {reason_html}
 </div>"""
-        
-        return f"<h2>Alternate Emails</h2>\n<div class=\"module-section\">\n{cards}\n</div>"
+
+        return f'<h2>Alternate Emails</h2>\n<div class="module-section">\n{cards}\n</div>'
 
     def _identity_html(self, data: dict[str, Any]) -> str:
         confirmed_name = data.get("confirmed_name")
@@ -236,7 +322,9 @@ class PdfExporter(BaseExporter):
         if not confirmed_name or confidence == "unknown":
             return ""
         sources = data.get("name_sources")
-        source_text = ", ".join(str(source) for source in sources) if isinstance(sources, list) else ""
+        source_text = (
+            ", ".join(str(source) for source in sources) if isinstance(sources, list) else ""
+        )
         return (
             '<div class="credential-pill">'
             f"Identity: <strong>{_e(confirmed_name)}</strong> {_e(confidence.upper())}"
@@ -252,7 +340,10 @@ class PdfExporter(BaseExporter):
             for key, value in credibility.items()
             if value is not None and value != ""
         )
-        return f'<table><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>{rows}</tbody></table>'
+        return (
+            f"<table><thead><tr><th>Field</th><th>Value</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>"
+        )
 
     def _timeline_html(self, timeline: Any) -> str:
         if not isinstance(timeline, dict):
@@ -277,7 +368,7 @@ class PdfExporter(BaseExporter):
             active_text = "active risk" if active else ""
             active_class = "timeline-active" if active else ""
             rows += (
-                f"<tr class=\"{active_class}\">"
+                f'<tr class="{active_class}">'
                 f"<td>{_e(event.get('date', ''))}</td>"
                 f"<td>{_e(event.get('event_type', ''))}</td>"
                 f"<td>{_e(event.get('title', ''))}</td>"
@@ -325,10 +416,9 @@ class PdfExporter(BaseExporter):
         confidence = str(f_data.get("confidence", "")).lower()
         conf_class = _CONF_CLASS.get(confidence, "conf-unknown")
         metadata = f_data.get("metadata") or {}
+        avatar_src = f_data.get("_pdf_avatar") or _PLACEHOLDER
 
-        url_html = (
-            f'<div class="profile-url">{_e(profile_url)}</div>' if profile_url else ""
-        )
+        url_html = f'<div class="profile-url">{_e(profile_url)}</div>' if profile_url else ""
         conf_html = (
             f'<span class="confidence-badge {conf_class}">{_e(confidence)}</span>'
             if confidence
@@ -336,20 +426,18 @@ class PdfExporter(BaseExporter):
         )
 
         meta_rows = "".join(
-            f'<tr><td class="meta-key">{_e(key)}</td>'
-            f'<td class="meta-val">{_e(value)}</td></tr>'
+            f'<tr><td class="meta-key">{_e(key)}</td><td class="meta-val">{_e(value)}</td></tr>'
             for key, value in metadata.items()
             if value is not None and value != ""
         )
         meta_html = (
-            f'<table class="meta-table"><tbody>{meta_rows}</tbody></table>'
-            if meta_rows
-            else ""
+            f'<table class="meta-table"><tbody>{meta_rows}</tbody></table>' if meta_rows else ""
         )
 
         return f"""
 <div class="finding-card">
   <div class="finding-header">
+    <img class="finding-avatar" src="{_e(avatar_src)}" alt="Avatar" />
     <span class="platform-name">{_e(platform)}</span>
     {conf_html}
   </div>
@@ -386,7 +474,7 @@ class PdfExporter(BaseExporter):
                 )
                 if data_type is None:
                     continue
-                for item in (value if isinstance(value, list) else [value]):
+                for item in value if isinstance(value, list) else [value]:
                     value_str = str(item).strip()
                     if not value_str:
                         continue
@@ -501,6 +589,20 @@ body {
   line-height: 1.7;
 }
 .header-email { color: #e2e8f0; font-weight: 600; font-size: 9pt; }
+
+.disclaimer {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  background: #78350f;
+  border: 1px solid #f59e0b;
+  border-left: 5px solid #fbbf24;
+  color: #fef3c7;
+  padding: 9px 11px;
+  margin-bottom: 18px;
+  font-size: 8.5pt;
+}
+.disclaimer strong { color: #fbbf24; white-space: nowrap; }
 
 .summary-card {
   background: #1a1d27;
@@ -669,6 +771,14 @@ h2 {
   padding: 8px 10px;
   margin-bottom: 6px;
   page-break-inside: avoid;
+}
+.finding-avatar {
+  width: 35px;
+  height: 35px;
+  border-radius: 4px;
+  object-fit: cover;
+  vertical-align: middle;
+  margin-right: 7px;
 }
 
 .finding-header {

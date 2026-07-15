@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -57,6 +58,76 @@ from .press_intel import PressIntelModule
 from .sec_edgar import SecEdgarModule
 
 _LOG = logging.getLogger(__name__)
+
+# P3: role-aware format inference.  Titles cluster into two
+# real-world behavioural buckets: executives and seniors.  Each
+# bucket correlates with a different expected email template —
+# founders/presidents tend to use ``{first}@`` (short, brand-
+# forward), senior ICs and managers tend to use ``{first}.{last}@``
+# (formal).  The regexes are intentionally loose and word-
+# bounded so a title like ``"Co-founder & CTO"`` matches both
+# ``founder`` AND ``cto`` in the same regex pass.
+_EXECUTIVE_RE: re.Pattern[str] = re.compile(
+    r"\b(?:"
+    r"founder|co[\s\-]?founder|founding|"
+    r"ceo|cto|cfo|coo|cmo|cio|cpo|"
+    r"president|owner|chairman|chairwoman|chair"
+    r")\b",
+    re.IGNORECASE,
+)
+_SENIOR_RE: re.Pattern[str] = re.compile(
+    r"\b(?:"
+    r"lead|principal|staff|senior|manager|head(?:[\s\-]of)?|"
+    r"director|vp|vice[\s\-]?president"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# P3: the per-bucket × per-template adjustments.  Negative
+# values demote, positive values boost.  These match the
+# spec: executives on ``{first}@`` get +0.20; on ``{first}.{last}@``
+# get -0.10; seniors on ``{first}.{last}@`` get +0.10.
+_ROLE_FORMAT_DELTAS: dict[tuple[str, str], float] = {
+    ("executive", "{first}@{domain}"): 0.20,
+    ("executive", "{first}.{last}@{domain}"): -0.10,
+    ("senior", "{first}.{last}@{domain}"): 0.10,
+}
+
+
+def classify_role_bucket(title: str | None) -> str | None:
+    """Return ``"executive"`` / ``"senior"`` / ``None`` for *title*.
+
+    Executive wins over senior when a title matches both
+    (e.g. ``"Co-founder & CEO"`` is an executive, not a
+    senior — founders/CTOs/CEOs have higher signal weight).
+    Senior is the fallback bucket for ICs and managers.
+    Unknown titles return ``None`` so the caller knows not
+    to apply any role-format delta.
+    """
+    if not title:
+        return None
+    if _EXECUTIVE_RE.search(title):
+        return "executive"
+    if _SENIOR_RE.search(title):
+        return "senior"
+    return None
+
+
+def role_format_delta(bucket: str | None, confirmed_template: str | None) -> float:
+    """Return the per-bucket × per-template confidence delta.
+
+    Returns ``0.0`` when no rule applies.  The mapping is a
+    small fixed table — see :data:`_ROLE_FORMAT_DELTAS`.
+    """
+    if not bucket:
+        return 0.0
+    if not confirmed_template:
+        if bucket == "executive":
+            return 0.10
+        if bucket == "senior":
+            return 0.05
+        return 0.0
+    return _ROLE_FORMAT_DELTAS.get((bucket, confirmed_template), 0.0)
 
 
 def _try_build_stealth_session() -> StealthSession | None:
@@ -240,7 +311,23 @@ class EmployeeNameDiscoveryModule(BaseModule):
         # ------------------------------------------------------------------
         # Aggregate + boost + dedupe
         # ------------------------------------------------------------------
+        # P3: pull the confirmed pattern from the signal pool so
+        # role-aware format deltas can target the right template.
+        # When no confirmed pattern is available yet (e.g. Hunter has
+        # not run), the delta is 0.0 and the existing multi-source
+        # logic is preserved verbatim.
+        confirmed_template: str | None = None
+        if signal_pool is not None and hasattr(signal_pool, "get_confirmed_patterns"):
+            try:
+                confirmed = signal_pool.get_confirmed_patterns()
+                if confirmed:
+                    confirmed_template = confirmed[0]
+            except Exception:  # noqa: BLE001 - defensive
+                confirmed_template = None
         aggregated: dict[str, EmployeeNameResult] = {}
+        # Track which names received a role-format delta so the
+        # report layer can surface "3 executives +{first} boost" etc.
+        role_delta_counts: dict[str, int] = {"executive": 0, "senior": 0, "none": 0}
 
         def _record(nd: NameDiscovery) -> None:
             cleaned = nd.name.strip()
@@ -254,12 +341,19 @@ class EmployeeNameDiscoveryModule(BaseModule):
             key = cleaned.lower()
             existing = aggregated.get(key)
             if existing is None:
+                # P3: classify the role bucket for the title we have
+                # at record time.  When the same name is later seen
+                # with a different title, the bucket can move — we
+                # re-resolve on the finalised EmployeeNameResult
+                # below.
+                role_bucket = classify_role_bucket(nd.title_or_role)
+                role_delta = role_format_delta(role_bucket, confirmed_template)
                 aggregated[key] = EmployeeNameResult(
                     name=cleaned,
                     sources=[nd.source],
                     source_count=1,
                     title_or_role=nd.title_or_role,
-                    confidence=round(nd.confidence * penalty, 4),
+                    confidence=round(nd.confidence * penalty + role_delta, 4),
                     source_urls=[nd.source_url] if nd.source_url else [],
                 )
                 return
@@ -281,10 +375,50 @@ class EmployeeNameDiscoveryModule(BaseModule):
         for nd in all_names:
             _record(nd)
 
+        # P3: post-aggregation pass — re-resolve the role bucket
+        # against the FINAL ``title_or_role`` on the
+        # EmployeeNameResult.  This way a name that arrived first
+        # from a low-fidelity source (no title) and then from a
+        # higher-fidelity source (with title) still gets the
+        # correct bucket.  We then (a) re-apply the delta to
+        # the already-multi-source-boosted confidence and (b) cap
+        # the result so it never exceeds ``1.5`` (the existing
+        # MAX_SCORE ceiling for the rest of the pipeline).
+        for agg in aggregated.values():
+            bucket = classify_role_bucket(agg.title_or_role)
+            delta = role_format_delta(bucket, confirmed_template)
+            if delta != 0.0:
+                agg.confidence = round(min(agg.confidence + delta, 1.5), 4)
+                role_delta_counts[bucket or "none"] += 1
+            else:
+                role_delta_counts["none"] += 1
+
         # ------------------------------------------------------------------
         # Wrap into BaseModule's FindingItem shape so Phase C2's
         # orchestrator can consume via the standard findings pipeline.
         # ------------------------------------------------------------------
+        # P5: index snippet emails by name so the per-finding
+        # metadata can include them.  We take the FIRST name
+        # discovery that carries a non-empty ``snippet_emails``
+        # list per name — the multi-source dedupe has already
+        # collapsed duplicates, so this is deterministic.
+        #
+        # We use ``getattr`` with a default empty list so the
+        # loop also works for any third-party ``NameDiscovery``
+        # class that has not yet adopted the P5 ``snippet_emails``
+        # field.  The two ``NameDiscovery`` classes (one in
+        # ``backend.core.linkedin_name_discovery`` for SERP
+        # results, one in this module for non-LinkedIn sources)
+        # are kept separate to avoid an import cycle.
+        snippet_emails_by_name: dict[str, list[str]] = {}
+        for nd in all_names:
+            snippet_emails = getattr(nd, "snippet_emails", None) or []
+            if not snippet_emails:
+                continue
+            key = nd.name.strip().lower()
+            existing = snippet_emails_by_name.get(key)
+            if not existing:
+                snippet_emails_by_name[key] = list(snippet_emails)
         findings: list[dict[str, Any]] = []
         multi_source_count = 0
 
@@ -293,20 +427,28 @@ class EmployeeNameDiscoveryModule(BaseModule):
             if agg.source_count >= 2:
                 multi_source_count += 1
             label = _label_for_score(agg.confidence)
+            finding_metadata: dict[str, Any] = {
+                "name": agg.name,
+                "sources": sorted(agg.sources),
+                "source_count": agg.source_count,
+                "title_or_role": agg.title_or_role,
+                "confidence_score": round(agg.confidence, 4),
+                "source_urls": agg.source_urls,
+            }
+            # P5: surface snippet-emails on the finding so the
+            # report layer can show the analyst the exact email
+            # we already saw, alongside the name.  Empty when no
+            # SERP snippet for this name contained an email.
+            snippet_emails = snippet_emails_by_name.get(agg.name.strip().lower())
+            if snippet_emails:
+                finding_metadata["snippet_emails"] = list(snippet_emails)
             findings.append(
                 {
                     "platform": "employee_name_discovery",
                     "profile_url": agg.source_urls[0] if agg.source_urls else "",
                     "username": agg.name.replace(" ", "."),
                     "confidence": label,
-                    "metadata": {
-                        "name": agg.name,
-                        "sources": sorted(agg.sources),
-                        "source_count": agg.source_count,
-                        "title_or_role": agg.title_or_role,
-                        "confidence_score": round(agg.confidence, 4),
-                        "source_urls": agg.source_urls,
-                    },
+                    "metadata": finding_metadata,
                 }
             )
 
@@ -345,6 +487,20 @@ class EmployeeNameDiscoveryModule(BaseModule):
                 "active_scrapingant_transport": get_active_transport()
                 if use_proxies
                 else None,
+                # P3: surface the role-aware format delta summary so
+                # the report layer can show "N executives +0.20,
+                # M seniors +0.10" without re-deriving the regex
+                # match.  Counts only the names that actually got
+                # a non-zero delta.
+                "role_format_delta_counts": role_delta_counts,
+                "confirmed_template": confirmed_template,
+                # P5: count of unique names that came with at least
+                # one email in the SERP snippet.  The actual email
+                # strings live on each finding's
+                # ``metadata.snippet_emails``.
+                "snippet_emails_name_count": sum(
+                    1 for emails in snippet_emails_by_name.values() if emails
+                ),
             },
         )
 

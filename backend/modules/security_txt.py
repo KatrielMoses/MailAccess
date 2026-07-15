@@ -67,8 +67,10 @@ def _parse_security_txt(text: str, domain: str) -> list[str]:
                 value = line[len(field):].strip()
                 if value.startswith("mailto:"):
                     value = value[7:]
-                if "@" in value and domain in value:
-                    emails.append(value.lower())
+                if "@" in value:
+                    candidate = value.lower().strip()
+                    if candidate.rsplit("@", 1)[-1] == domain.lower():
+                        emails.append(candidate)
     return list(dict.fromkeys(emails))
 
 def _to_finding(email: str, url: str) -> dict[str, Any]:

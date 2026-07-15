@@ -106,6 +106,7 @@ Every setting is optional unless marked required.
 | `ENABLE_COMMONCRAWL_EMAIL` | `true` | Master kill switch for the Common Crawl email module (domain harvest mode only). |
 | `CC_MAX_RECORDS` | `100` | Maximum Common Crawl URL Index records fetched per harvest run. |
 | `CC_FETCH_CONCURRENCY` | `10` | Concurrent page fetches (WARC range + direct GET). Keeps well under S3 and target-site limits. |
+| `~/.mailaccess/cache/commoncrawl_collections.json` | _(automatic)_ | Last known Common Crawl collection list used when the public index service is temporarily unavailable. |
 | `ENABLE_EMAIL_SEARCH_DORK` | `true` | Master kill switch for the search-engine dork module (DuckDuckGo + Bing, domain harvest mode only). |
 | `DORK_MAX_QUERIES_PER_ENGINE` | `5` | Maximum dork queries per engine per harvest. 5 covers all core patterns while staying below CAPTCHA thresholds. |
 | `DORK_LITE_MODE` | `false` | Lite mode runs only the first two dork patterns per engine. Faster, lower yield. |

@@ -231,6 +231,11 @@ class SyndicationFeedSweeper(BaseModule):
         if not getattr(settings, "enable_syndication_feed_sweeper", False):
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
+                metadata={
+                    "skip_reason": "disabled_by_configuration",
+                    "failure_categories": ["configuration"],
+                    "health_category": "configuration",
+                },
                 errors=[
                     "syndication_feed_sweeper disabled â€” set "
                     "ENABLE_SYNDICATION_FEED_SWEEPER=true to enable"

@@ -836,6 +836,19 @@ def harvest_emails_command(
             "or config default can silently turn this on."
         ),
     ),
+    verify_m365: bool = typer.Option(
+        False,
+        "--verify-m365",
+        help=(
+            "OPT-IN: use Microsoft Entra GetCredentialType as a provider-aware "
+            "email existence signal. Results remain tenant-dependent."
+        ),
+    ),
+    verify_yahoo: bool = typer.Option(
+        False,
+        "--verify-yahoo",
+        help="OPT-IN: use the Yahoo signup-flow existence signal for Yahoo-routed domains.",
+    ),
     use_proxies: bool = typer.Option(
         False,
         "--use-proxies",
@@ -858,6 +871,16 @@ def harvest_emails_command(
         None,
         "--export",
         help="Export full harvest to JSON. Bare names route to ./results/.",
+    ),
+    compare_to: Optional[str] = typer.Option(
+        None,
+        "--compare-to",
+        help="Compare this harvest with a previous JSON harvest export.",
+    ),
+    skip_module: list[str] = typer.Option(
+        [],
+        "--skip-module",
+        help="Skip a harvest module for this run. Repeat for multiple modules.",
     ),
     max_cc_records: Optional[int] = typer.Option(
         None,
@@ -1048,10 +1071,14 @@ def harvest_emails_command(
             exit_code = run_harvest_emails(
                 domain=domain,
                 verify_smtp=verify_smtp,
+                verify_m365=verify_m365,
+                verify_yahoo=verify_yahoo,
                 use_proxies=use_proxies,
                 proxy_fallback_ok=proxy_fallback_ok,
                 lite=lite,
                 export=export,
+                compare_to=compare_to,
+                skip_modules=tuple(skip_module),
                 max_cc_records=max_cc_records,
                 cc_max_collections=cc_max_collections,
                 console=console,
@@ -1084,6 +1111,8 @@ def harvest_emails_command(
             exit_code = run_harvest_emails(
                 domain=domain,
                 verify_smtp=verify_smtp,
+                verify_m365=verify_m365,
+                verify_yahoo=verify_yahoo,
                 use_proxies=use_proxies,
                 proxy_fallback_ok=proxy_fallback_ok,
                 lite=lite,

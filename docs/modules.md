@@ -2448,8 +2448,9 @@ is 1–5%. The hits that DO appear are extremely high-confidence.
 
 Consumes the names from `employee_name_discovery`, generates up to 11
 standard email pattern candidates per name (`first.last@`, `flast@`,
-`firstl@`, etc.), and optionally probes the MX for each candidate via
-SMTP RCPT TO when `--verify-smtp` is passed.
+`firstl@`, etc.). Native validation runs by default for syntax, role/
+disposable classification, and MX presence. It optionally probes the MX for
+each candidate via SMTP RCPT TO when `--verify-smtp` is passed.
 
 **Pattern propagation:** once ONE pattern is confirmed for the target
 domain (e.g. `first.last@`), that pattern is tried first for all
@@ -2461,7 +2462,7 @@ propagation, every name would consume probes on every pattern.
 | **Mode** | Domain harvest only |
 | **Requires key** | None |
 | **Default** | On (SMTP verification opt-in separately via `--verify-smtp`) |
-| **Source weight** | 0.5 (SMTP verified) / 0.2 (catch-all) / 0.05 (unverified) |
+| **Source weight** | 0.65 (SMTP verified) / 0.10 (catch-all) / 0.30 (MX valid) / 0.00 (unverified) |
 | **Safety** | Mandatory catch-all detection before any probe; hard cap 100 probes/domain |
 | **Status** | Implemented |
 

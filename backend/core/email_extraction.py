@@ -493,3 +493,63 @@ def extract_emails(text: str, target_domain: str | None = None) -> list[Extracte
 
     # Stable order: alphabetical by email.
     return [dedup[email] for email in sorted(dedup)]
+
+
+# P4: template inference for the search-snippet → confirmed-pattern
+# feedback loop.  When the dork module finds a personal on-domain
+# email in a SERP snippet, we want to feed the *shape* of that
+# local-part back into pattern generation as a confirmed pattern.
+# We do NOT try to recover the person's name — that would require
+# NLP-grade snippet parsing.  We just identify the *shape* (e.g.
+# ``jane.doe`` → ``{first}.{last}``) so subsequent candidate
+# generation can prioritise that template.
+
+#: Recognised local-part shapes and the template they imply.
+#: Order matters: more-specific patterns are tried first.
+#: ``{first}`` is tried BEFORE ``{f}{last}`` because a single
+#: 2+ char token like "jane" is more often a first name than
+#: an initial-plus-rare-lastname like "j" + "ane".  This
+#: ordering keeps the common case (`jane@`, `info@`) mapping
+#: to ``{first}@`` rather than the less-common ``{f}{last}@``.
+_LOCAL_PART_SHAPES: tuple[tuple[re.Pattern[str], str], ...] = (
+    # ``{first}.{last}`` — jane.doe  (most common; 2+ chars per half)
+    (re.compile(r"^[a-zA-Z0-9]{2,}\.[a-zA-Z0-9]{2,}$"), "{first}.{last}@{domain}"),
+    # ``{first}_{last}`` — jane_doe
+    (re.compile(r"^[a-zA-Z0-9]{2,}_[a-zA-Z0-9]{2,}$"), "{first}_{last}@{domain}"),
+    # ``{first}-{last}`` — jane-doe
+    (re.compile(r"^[a-zA-Z0-9]{2,}-[a-zA-Z0-9]{2,}$"), "{first}-{last}@{domain}"),
+    # ``{f}.{last}`` — j.doe  (1-char initial, dot, then 2+)
+    (re.compile(r"^[a-zA-Z0-9]\.[a-zA-Z0-9]{2,}$"), "{f}.{last}@{domain}"),
+    # ``{first}`` — jane  (single token, 2+ chars)
+    (re.compile(r"^[a-zA-Z0-9]{2,}$"), "{first}@{domain}"),
+    # ``{f}{last}`` — jdoe  (1+2+ chars total, no separator;
+    # last because most single tokens are first names, not
+    # initial+last combinations).
+    (re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9]{2,}$"), "{f}{last}@{domain}"),
+)
+
+
+def infer_template_from_local_part(
+    local_part: str, domain: str | None
+) -> str | None:
+    """Infer a MailAccess template from a local-part shape.
+
+    Returns the full template (``{first}.{last}@{domain}`` etc.)
+    or ``None`` when the local part does not match any known
+    shape — in that case the caller should not emit a confirmed
+    pattern (we'd be confirming noise).
+
+    The inference is shape-only: we do not look up the person's
+    name.  A shape match means "this address LOOKS like a real
+    personal email" — that's the level of certainty the
+    confirmed-pattern feedback loop needs.
+    """
+    if not local_part or not domain:
+        return None
+    cleaned = local_part.strip().lower()
+    if not cleaned:
+        return None
+    for pattern, template in _LOCAL_PART_SHAPES:
+        if pattern.match(cleaned):
+            return template.replace("{domain}", domain.strip().lower())
+    return None

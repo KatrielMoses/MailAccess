@@ -14,11 +14,14 @@ from typing import Any
 from .base import BaseModule, ModuleResult, ModuleStatus
 from .github_commits import GitHubCommitsModule
 from .gravatar_lookup import GravatarLookupModule
+from .hackernews import HackerNewsModule
+from .keybase import KeybaseModule
+from .fediverse_discovery import FediverseDiscoveryModule
 
 
 class EmailIdentityEnrichmentModule(BaseModule):
     name = "email_identity_enrichment"
-    description = "Enrich discovered emails with Gravatar and GitHub commit identity evidence"
+    description = "Enrich discovered emails with public identity, social, and commit evidence"
     requires_key = False
 
     async def run(self, email: str) -> ModuleResult:
@@ -35,15 +38,24 @@ class EmailIdentityEnrichmentModule(BaseModule):
             return ModuleResult(status=ModuleStatus.SKIPPED, metadata={"email": email})
 
         original_email = str(payload.get("original_email") or email).strip().lower()
-        gravatar, github = await asyncio.gather(
+        gravatar, github, keybase, hackernews, fediverse = await asyncio.gather(
             GravatarLookupModule().run(email),
             GitHubCommitsModule().run(email, original_email=original_email),
+            KeybaseModule().run(email, original_email=original_email),
+            HackerNewsModule().run(email),
+            FediverseDiscoveryModule().run(email),
             return_exceptions=True,
         )
         findings: list[dict[str, Any]] = []
         errors: list[str] = []
         statuses: dict[str, str] = {}
-        for source, result in (("gravatar", gravatar), ("github_commits", github)):
+        for source, result in (
+            ("gravatar", gravatar),
+            ("github_commits", github),
+            ("keybase", keybase),
+            ("hackernews", hackernews),
+            ("fediverse", fediverse),
+        ):
             if isinstance(result, Exception):
                 errors.append(f"{source}: {result}")
                 statuses[source] = "failed"

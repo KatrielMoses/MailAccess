@@ -36,13 +36,24 @@ from .domain_harvest_orchestrator import (
     _name_matches_email_local,
 )
 from .email_extraction import is_placeholder_domain, validate_email
+from .enrichment.shadow_profiles import ShadowProfileDetector
+from .harvest_quality import build_metrics
 
 # --------------------------------------------------------------------------
 # Color palette — mirrors cli/main.py's get_status_color /
 # get_risk_color so the harvest command blends with the rest of the
 # CLI's aesthetic.
 # --------------------------------------------------------------------------
-_LABEL_COLORS = {"HIGH": "green", "MEDIUM": "yellow", "LOW": "dim"}
+# P7: 4-tier color palette.  CONFIRMED and LIKELY are both
+# "actionable" tiers so they share the green hue family;
+# MEDIUM is the soft-yellow cautionary tier; LOW is the
+# dim "speculative" tier.
+_LABEL_COLORS = {
+    "CONFIRMED": "green",
+    "LIKELY": "bright_green",
+    "MEDIUM": "yellow",
+    "LOW": "dim",
+}
 
 _STATUS_COLORS = {
     "success": "green",
@@ -78,6 +89,31 @@ def _is_placeholder_export_email(value: str | None) -> bool:
     return False
 
 
+def _build_shadow_profiles(result: DomainHarvestResult) -> list[dict[str, Any]]:
+    """Expose same-name/different-email identity pairs in harvest output."""
+    findings: list[dict[str, Any]] = []
+    for module_name, module_result in result.module_results.items():
+        for finding in module_result.findings or []:
+            if not isinstance(finding, dict):
+                continue
+            item = dict(finding)
+            item["module_name"] = module_name
+            findings.append(item)
+    return ShadowProfileDetector().find_shadow_pairs(findings)
+
+
+def _build_subdomains(result: DomainHarvestResult) -> list[str]:
+    values: set[str] = set()
+    for module_result in result.module_results.values():
+        for finding in module_result.findings or []:
+            if not isinstance(finding, dict):
+                continue
+            subdomain = (finding.get("metadata") or {}).get("subdomain")
+            if isinstance(subdomain, str) and subdomain.strip():
+                values.add(subdomain.strip().lower())
+    return sorted(values)
+
+
 def _sanitised_export_emails(emails: list[HarvestedEmail]) -> list[HarvestedEmail]:
     out: list[HarvestedEmail] = []
     for entry in emails:
@@ -96,19 +132,82 @@ def _sanitised_export_emails(emails: list[HarvestedEmail]) -> list[HarvestedEmai
 
 def _export_summary_counts(emails: list[HarvestedEmail]) -> dict[str, int]:
     personal = [entry for entry in emails if not entry.is_role]
+    smtp_statuses: list[str] = []
+    for entry in emails:
+        for evidence in entry.evidence or []:
+            metadata = evidence.get("metadata") if isinstance(evidence, dict) else None
+            if isinstance(metadata, dict):
+                status = metadata.get("smtp_verification_status")
+                if isinstance(status, str) and status:
+                    smtp_statuses.append(status)
+                    break
     return {
         "total_unique_emails": len(emails),
+        # P7: 4-tier count fields.  We keep the legacy
+        # ``high_confidence`` / ``medium_confidence`` /
+        # ``low_confidence`` keys for backward compatibility
+        # (downstream tooling depends on them) and add the new
+        # ``likely_confidence`` field.  ``high_confidence`` now
+        # counts the CONFIRMED tier; ``medium_confidence``
+        # counts BOTH LIKELY and MEDIUM (the historical
+        # "anything above low" band); ``low_confidence``
+        # counts the LOW tier.
         "high_confidence": sum(
-            1 for entry in personal if entry.confidence_label == "HIGH"
+            1 for entry in personal if entry.confidence_label == "CONFIRMED"
+        ),
+        "likely_confidence": sum(
+            1 for entry in personal if entry.confidence_label == "LIKELY"
         ),
         "medium_confidence": sum(
-            1 for entry in personal if entry.confidence_label == "MEDIUM"
+            1
+            for entry in personal
+            if entry.confidence_label in {"LIKELY", "MEDIUM"}
         ),
         "low_confidence": sum(
             1 for entry in personal if entry.confidence_label == "LOW"
         ),
         "role_accounts": sum(1 for entry in emails if entry.is_role),
         "personal_emails": len(personal),
+        "smtp_verified_emails": smtp_statuses.count("verified"),
+        "smtp_not_found_emails": smtp_statuses.count("not_found"),
+        "smtp_inconclusive_emails": sum(
+            1 for status in smtp_statuses
+            if status in {"inconclusive", "temporary_failure", "blocked", "verification_timeout"}
+        ),
+        "smtp_not_attempted_emails": smtp_statuses.count("not_attempted"),
+    }
+
+
+def _email_validation_summary(entry: HarvestedEmail) -> dict[str, Any]:
+    """Flatten native and SMTP evidence for tabular/streaming exports."""
+    native: dict[str, Any] = {}
+    smtp: dict[str, Any] = {}
+    m365: dict[str, Any] = {}
+    for evidence in entry.evidence or []:
+        metadata = evidence.get("metadata") if isinstance(evidence, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        if not native and isinstance(metadata.get("native_email_validation"), dict):
+            native = metadata["native_email_validation"]
+        if not smtp and isinstance(metadata.get("smtp_validation"), dict):
+            smtp = metadata["smtp_validation"]
+        if not smtp and metadata.get("smtp_verification_status"):
+            smtp = {"status": metadata["smtp_verification_status"]}
+        if not m365 and isinstance(metadata.get("m365_verification"), dict):
+            m365 = metadata["m365_verification"]
+        if not m365 and isinstance(metadata.get("yahoo_verification"), dict):
+            m365 = metadata["yahoo_verification"]
+    return {
+        "native_validation_status": native.get("status", ""),
+        "native_mx_valid": native.get("mx_valid", ""),
+        "smtp_verification_status": smtp.get("status", ""),
+        "smtp_exists": smtp.get("exists", ""),
+        "smtp_mx_host": smtp.get("mx_host", ""),
+        "smtp_transport_error": smtp.get("transport_error", ""),
+        "smtp_catchall": smtp.get("is_catchall", ""),
+        "provider_verification_status": m365.get("status", ""),
+        "provider_verification_provider": m365.get("provider", ""),
+        "m365_if_exists_result": m365.get("if_exists_result", ""),
     }
 
 
@@ -178,7 +277,19 @@ def _rationale_chip(entry: HarvestedEmail) -> str:
         "smtp_verified": "smtp",
         "permutation_verified": "smtp",
         "permutation_catchall": "catchall",
+        "permutation_mx_valid": "mx",
+        "permutation_verified_m365": "m365",
+        "permutation_verified_yahoo": "yahoo",
+        "permutation_gravatar_hit": "gravatar",
+        "permutation_breach_hit": "breach",
         "permutation_unverified": "perm",
+        "permutation_unverified_{first}_{last}": "perm:first.last",
+        "permutation_unverified_{first}": "perm:first",
+        "permutation_unverified_{f}{last}": "perm:flast",
+        "permutation_unverified_{first}{last}": "perm:firstlast",
+        "permutation_unverified_{last}": "perm:last",
+        "permutation_unverified_{last}_{first}": "perm:last.first",
+        "permutation_unverified_other": "perm:other",
         "github_commit_author": "gh",
         "github_code_match": "gh-code",
         "github_profile_email": "gh-profile",
@@ -202,6 +313,22 @@ def _rationale_chip(entry: HarvestedEmail) -> str:
         label = compact_map.get(st)
         if label and label not in chips:
             chips.append(label)
+    smtp_status: str | None = None
+    catchall_limited = False
+    for evidence in entry.evidence or []:
+        metadata = evidence.get("metadata") if isinstance(evidence, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        candidate_status = metadata.get("smtp_verification_status")
+        if isinstance(candidate_status, str):
+            smtp_status = candidate_status
+        validation = metadata.get("smtp_validation")
+        if isinstance(validation, dict) and validation.get("is_catchall") is True:
+            catchall_limited = True
+    if smtp_status == "verified" and "smtp" not in chips:
+        chips.insert(0, "smtp")
+    elif catchall_limited and smtp_status == "not_attempted" and "catchall" not in chips:
+        chips.insert(0, "catchall")
     multiplier_label = breakdown.get("multiplier_label") or ""
     # Tighten "smtp_verified" → "smtp", collapse synonyms
     if "smtp" in chips and multiplier_label in ("smtp_verified", "pgp_or_ca"):
@@ -495,8 +622,18 @@ def _format_people_panel(people: list[dict[str, Any]], *, max_lines: int = 50) -
         for person in people[:max_lines]:
             text.append("  * ", style="dim")
             text.append(person["name"], style=_LABEL_COLORS.get(person["confidence_label"], "white"))
+            # P7: short label for the people row.  The 3-letter
+            # codes keep the row compact (legacy "MED" stays
+            # "MED"; "HIGH" is now "CONF" or "LKLY" depending
+            # on the actual tier).
+            short_label = {
+                "CONFIRMED": "CONF",
+                "LIKELY": "LKLY",
+                "MEDIUM": "MED",
+                "LOW": "LOW",
+            }.get(person["confidence_label"], person["confidence_label"])
             text.append(
-                f"  [{person['status']} {person['confidence_label']} "
+                f"  [{person['status']} {short_label} "
                 f"{person['confidence_score']:.2f}]")
             if person["emails"]:
                 text.append("  ")
@@ -536,7 +673,22 @@ def _format_discovered_names_panel(
             label = str(entry.get("pattern_tier") or "").upper()
             if not label:
                 label = label_for_score(entry["confidence_score"])
-            display_label = "MED" if label == "MEDIUM" else label
+            # P7: short display labels for the name panel.  The
+            # ``pattern_tier`` field is internal (always lowercase:
+            # ``high``/``medium``/``low``); the 4-tier label
+            # system uses the new ``CONFIRMED``/``LIKELY``/
+            # ``MEDIUM``/``LOW`` strings.  We map both into the
+            # compact 3-letter codes so the analyst sees the
+            # same visual length regardless of which label
+            # vocabulary the underlying code uses.
+            short_label = {
+                "HIGH": "HIGH",
+                "CONFIRMED": "HIGH",
+                "LIKELY": "HIGH",
+                "MEDIUM": "MED",
+                "MED": "MED",
+                "LOW": "LOW",
+            }.get(label, label)
             color = _LABEL_COLORS.get(label, "white")
             text.append("  * ", style="dim")
             text.append(entry["name"], style=color)
@@ -548,7 +700,7 @@ def _format_discovered_names_panel(
             )
             if entry.get("pattern_tier"):
                 text.append("  ")
-                text.append(display_label, style=color)
+                text.append(short_label, style=color)
                 text.append(" -> ", style="dim")
                 if entry.get("pattern_skipped"):
                     text.append("skipped", style="dim")
@@ -586,10 +738,16 @@ def _format_discovered_names_panel(
                 for n in tiered
                 if n.get("pattern_tier") == "medium"
             )
+            # P7: keep the in-panel "Pattern generation:" footer
+            # using the legacy 3-tier vocabulary — ``high`` /
+            # ``medium`` / ``low`` are the *pattern-generation*
+            # tier names, NOT the email confidence tiers.  They
+            # were always lowercase and never collided with
+            # ``HIGH`` / ``MEDIUM`` / ``LOW`` confidence labels.
             text.append(
-                f"  Pattern generation: {high_count} HIGH names -> "
-                f"{high_patterns} patterns · {med_count} MED names -> "
-                f"{med_patterns} patterns · {low_count} LOW names skipped "
+                f"  Pattern generation: {high_count} high-tier names -> "
+                f"{high_patterns} patterns · {med_count} medium-tier names -> "
+                f"{med_patterns} patterns · {low_count} low-tier names skipped "
                 f"(confidence < {medium_threshold:.2f})\n",
                 style="dim",
             )
@@ -811,7 +969,7 @@ def _build_suggested_next_steps(
 
     if result.total_unique_emails > 0 and result.high_confidence_count == 0:
         hints.append(
-            "No HIGH-confidence hits.  Consider: enabling --verify-smtp, "
+            "No CONFIRMED-tier hits.  Consider: enabling --verify-smtp, "
             "checking related domains, or pivoting through discovered names."
         )
 
@@ -821,7 +979,7 @@ def _build_suggested_next_steps(
 
     if not hints:
         hints.append(
-            "All set — review HIGH-confidence candidates above and "
+            "All set — review CONFIRMED-tier candidates above and "
             "pivot on confirmed names if you need broader coverage."
         )
     return hints
@@ -903,12 +1061,23 @@ def format_harvest_cli_output(
         e for e in personal_emails if not _is_unverified_permutation(e)
     ]
 
-    # HIGH / MEDIUM / LOW — personal, excluding unverified permutations.
-    high = [e for e in non_perm_personal if e.confidence_label == "HIGH"]
+    # P7: 4-tier personal bucket split.  CONFIRMED and LIKELY
+    # are the new "actionable" tiers (analyst should pivot
+    # on these).  MEDIUM is the soft "weak corroboration"
+    # tier (visible by default, single-source CC, dork
+    # snippet, etc.).  LOW stays hidden by default.
+    confirmed = [
+        e for e in non_perm_personal if e.confidence_label == "CONFIRMED"
+    ]
+    likely = [e for e in non_perm_personal if e.confidence_label == "LIKELY"]
     medium = [
         e for e in non_perm_personal if e.confidence_label == "MEDIUM"
     ]
     low = [e for e in non_perm_personal if e.confidence_label == "LOW"]
+    # Backward-compat alias for the rest of the function —
+    # ``high`` was the 3-tier HIGH bucket, now it means
+    # "anything in the actionable tiers (CONFIRMED + LIKELY)".
+    high = confirmed + likely
     auto_show_unverified_patterns = (
         bool(unverified_perms)
         and not show_unverified_patterns
@@ -922,7 +1091,8 @@ def format_harvest_cli_output(
     # ------------------------------------------------------------------
     suppressed_total = len(low) + len(unverified_perms)
     summary_parts: list[str] = [
-        f"[bold green]{len(high)} HIGH[/bold green]",
+        f"[bold green]{len(confirmed)} CONFIRMED[/bold green]",
+        f"[bold bright_green]{len(likely)} LIKELY[/bold bright_green]",
         f"[bold yellow]{len(medium)} MEDIUM[/bold yellow] personal emails",
     ]
     if role_emails:
@@ -932,17 +1102,52 @@ def format_harvest_cli_output(
             f"{suppressed_total:,} suppressed (LOW + unverified patterns)"
         )
     console.print("\n[bold]Actionable:[/bold] " + " · ".join(summary_parts))
+    validation_summary = (result.metadata or {}).get("low_email_validation")
+    if isinstance(validation_summary, dict):
+        promotion = validation_summary.get("promotion") or {}
+        method = validation_summary.get("method") or "unknown"
+        provider = validation_summary.get("provider")
+        if validation_summary.get("status") == "disabled":
+            console.print("[dim]Low-email validation: disabled.[/dim]")
+        elif validation_summary.get("status") == "provider_verification_unavailable":
+            console.print(
+                f"[dim]Low-email validation skipped: {provider or method} has no "
+                "provider-specific verification path.[/dim]"
+            )
+        elif validation_summary.get("status") not in {
+            "no_candidates",
+            "skipped_injected_modules",
+        }:
+            checked = int(validation_summary.get("checked") or 0)
+            confirmed_promoted = int(promotion.get("promoted") or 0)
+            eliminated = int(promotion.get("not_found") or 0)
+            inconclusive = int(promotion.get("inconclusive") or 0)
+            route = f"{provider}/{method}" if provider else str(method)
+            console.print(
+                f"[dim]Low-email validation: validated {checked} LOW emails; "
+                f"{confirmed_promoted} confirmed, {eliminated} eliminated, "
+                f"{inconclusive} inconclusive ({route}).[/dim]"
+            )
     console.print(
         "[dim]Run with --full to show everything.[/dim]\n"
     )
 
     # ------------------------------------------------------------------
-    # HIGH / MEDIUM / LOW panels.
+    # P7: CONFIRMED / LIKELY / MEDIUM panels.  LOW panel is
+    # hidden by default and surfaced by ``--show-low``.  We
+    # render CONFIRMED and LIKELY in a single green panel to
+    # keep the CLI output compact — both are "actionable" in
+    # the spec — and split them inside the panel for analyst
+    # clarity.
     # ------------------------------------------------------------------
+    actionable_block = _format_emails_block(confirmed + likely)
     console.print(
         Panel(
-            _format_emails_block(high),
-            title=f"[bold green]HIGH CONFIDENCE ({len(high)})[/bold green]",
+            actionable_block,
+            title=(
+                f"[bold green]CONFIRMED + LIKELY "
+                f"({len(confirmed)} + {len(likely)})[/bold green]"
+            ),
             border_style="green",
         )
     )
@@ -1183,6 +1388,8 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
                 "first_seen_timestamp": entry.first_seen_timestamp,
                 "last_seen_timestamp": entry.last_seen_timestamp,
                 "is_smtp_verified": entry.is_smtp_verified,
+                "is_provider_verified": entry.is_provider_verified,
+                **_email_validation_summary(entry),
                 "is_ca_attested": entry.is_ca_attested,
                 "evidence": entry.evidence,
                 "total_finding_count": entry.total_finding_count,
@@ -1225,6 +1432,19 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
 
     summary_counts = _export_summary_counts(export_emails)
     people = _build_people(result)
+    quality_metrics = build_metrics(result, emails_out)
+    shadow_profiles = _build_shadow_profiles(result)
+    subdomains = _build_subdomains(result)
+    module_timings = {
+        name: float((mod.metadata or {}).get("duration_seconds"))
+        for name, mod in result.module_results.items()
+        if isinstance((mod.metadata or {}).get("duration_seconds"), (int, float))
+    }
+    module_skip_reasons = {
+        name: str((mod.metadata or {}).get("skip_reason"))
+        for name, mod in result.module_results.items()
+        if (mod.metadata or {}).get("skip_reason")
+    }
     return {
         "domain": result.domain,
         "harvested_at": result.completed_at,
@@ -1233,6 +1453,21 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
             **summary_counts,
             "smtp_verification_used": result.smtp_verification_used,
             "catchall_detected": result.catchall_detected,
+            "native_email_validation": (result.metadata or {}).get(
+                "native_email_validation", {}
+            ),
+            "smtp_email_verification": (result.metadata or {}).get(
+                "smtp_email_verification", {}
+            ),
+            "m365_email_verification": (result.metadata or {}).get(
+                "m365_email_verification", {}
+            ),
+            "yahoo_email_verification": (result.metadata or {}).get(
+                "yahoo_email_verification", {}
+            ),
+            "low_email_validation": (result.metadata or {}).get(
+                "low_email_validation", {}
+            ),
             "confirmed_pattern": result.confirmed_pattern,
             "employee_names_processed": result.employee_names_processed,
             "people_count": len(people),
@@ -1246,6 +1481,10 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
             #     "all"               — no filter applied (legacy)
             #     "medium_and_above"  — LOW + unverified patterns hidden
             "display_filter": "medium_and_above",
+            "p0_p1_metrics": quality_metrics,
+            "shadow_profile_count": len(shadow_profiles),
+            "module_timings": module_timings,
+            "module_skip_reasons": module_skip_reasons,
         },
         "emails": emails_out,
         "module_metadata": module_metadata,
@@ -1255,6 +1494,8 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
         # when no email attestation matched.
         "discovered_names": _extract_discovered_names(result),
         "people": people,
+        "shadow_profiles": shadow_profiles,
+        "subdomains": subdomains,
         # MUST-FIX S12: schema version for forward-compatibility. Bump this
         # when the export structure changes in a backward-incompatible
         # way (renaming a top-level key, removing a field, changing a
@@ -1278,6 +1519,17 @@ _CSV_COLUMNS = [
     "is_role",
     "on_domain",
     "is_smtp_verified",
+    "is_provider_verified",
+    "native_validation_status",
+    "native_mx_valid",
+    "smtp_verification_status",
+    "smtp_exists",
+    "smtp_mx_host",
+    "smtp_transport_error",
+    "smtp_catchall",
+    "provider_verification_status",
+    "provider_verification_provider",
+    "m365_if_exists_result",
     "is_ca_attested",
     "found_by_modules",
     "source_count",
@@ -1299,6 +1551,7 @@ def format_harvest_csv_export(result: DomainHarvestResult) -> str:
     writer = csv.DictWriter(buf, fieldnames=_CSV_COLUMNS, lineterminator="\n")
     writer.writeheader()
     for entry in _sanitised_export_emails(result.unique_emails):
+        validation = _email_validation_summary(entry)
         row: dict[str, Any] = {
             "email": entry.email,
             "confidence_label": entry.confidence_label,
@@ -1306,6 +1559,8 @@ def format_harvest_csv_export(result: DomainHarvestResult) -> str:
             "is_role": entry.is_role,
             "on_domain": entry.on_domain,
             "is_smtp_verified": entry.is_smtp_verified,
+            "is_provider_verified": entry.is_provider_verified,
+            **validation,
             "is_ca_attested": entry.is_ca_attested,
             "found_by_modules": ",".join(entry.found_by_modules or []),
             "source_count": entry.source_count,
@@ -1329,6 +1584,7 @@ def format_harvest_ndjson_export(result: DomainHarvestResult) -> str:
     """
     out_lines: list[str] = []
     for entry in _sanitised_export_emails(result.unique_emails):
+        validation = _email_validation_summary(entry)
         # MUST-FIX S4: ensure breakdown is non-null for the stream.
         if entry.confidence_breakdown is None:
             entry.confidence_breakdown = {
@@ -1363,6 +1619,8 @@ def format_harvest_ndjson_export(result: DomainHarvestResult) -> str:
             "first_seen_timestamp": entry.first_seen_timestamp,
             "last_seen_timestamp": entry.last_seen_timestamp,
             "is_smtp_verified": entry.is_smtp_verified,
+            "is_provider_verified": entry.is_provider_verified,
+            **validation,
             "is_ca_attested": entry.is_ca_attested,
             "total_finding_count": entry.total_finding_count,
             "occurrence_count_per_module": dict(
@@ -1386,7 +1644,7 @@ def format_harvest_ndjson_export(result: DomainHarvestResult) -> str:
 # export filename extension. Returns (text, error). ``error`` is None on
 # success; non-None describes the unknown-extension condition.
 def serialise_harvest_for_export(
-    result: DomainHarvestResult, export_path: str | Path
+    result: DomainHarvestResult, export_path: str | Path, *, comparison: dict[str, Any] | None = None
 ) -> tuple[str, str | None]:
     """Pick CSV / NDJSON / JSON based on filename extension.
 
@@ -1402,10 +1660,11 @@ def serialise_harvest_for_export(
         return format_harvest_ndjson_export(result), None
     if p.endswith(".json"):
         # MUST-FIX S12: include ``schema_version``.
+        payload = format_harvest_json_export(result)
+        if comparison is not None:
+            payload["comparison"] = comparison
         return (
-            json.dumps(
-                format_harvest_json_export(result), indent=2, default=str
-            ),
+            json.dumps(payload, indent=2, default=str),
             None,
         )
     return (

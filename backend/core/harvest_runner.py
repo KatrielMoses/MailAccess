@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -16,11 +17,16 @@ from ..modules.code_and_cert_email import CodeAndCertEmailModule
 from ..modules.commoncrawl_email import CommonCrawlEmailModule
 from ..modules.email_search_dork import EmailSearchDorkModule
 from ..modules.employee_name_discovery import EmployeeNameDiscoveryModule
+from ..modules.github_commits import GitHubDomainCommitsModule
 from ..modules.github_org_members import GitHubOrgMembersModule
 from ..modules.npm_email import NpmEmailModule
+from ..modules.package_ecosystems import PackageEcosystemsModule
 from ..modules.pattern_and_verify import PatternAndVerifyModule
 from ..modules.pgp_domain_email import PgpDomainEmailModule
+from ..modules.public_forge import PublicForgeModule
+from ..modules.public_surface_sweeper import PublicSurfaceSweeper
 from ..modules.pypi_email import PyPIEmailModule
+from ..modules.subdomain_surface import SubdomainSurfaceModule
 from ..modules.syndication_feed_sweeper import SyndicationFeedSweeper
 from ..modules.wayback import WaybackDomainHarvestModule
 from ..modules.wordpress_rest import WordPressRestModule
@@ -30,6 +36,7 @@ from .email_extraction import extract_emails
 from .pagination_handler import PaginationHandler
 from .signal_pool import AsyncSignalPool
 from .stealth_client import StealthSession, resolve_timing_profile
+from .structured_data_extractor import extract_people
 from .time_budget import TimeBudget
 from .work_scheduler import (
     PRIORITY_ARCHIVE,
@@ -54,8 +61,13 @@ MODULE_CODE_CERT = "code_and_cert_email"
 MODULE_EMAIL_DORK = "email_search_dork"
 MODULE_NPM_EMAIL = "npm_email"
 MODULE_PYPI_EMAIL = "pypi_email"
+MODULE_PUBLIC_SURFACE = "public_surface_sweeper"
+MODULE_PUBLIC_FORGE = "public_forge"
+MODULE_PACKAGE_ECOSYSTEMS = "package_ecosystems"
+MODULE_SUBDOMAIN_SURFACE = "subdomain_surface"
 MODULE_PGP_DOMAIN_EMAIL = "pgp_domain_email"
 MODULE_GITHUB_ORG_MEMBERS = "github_org_members"
+MODULE_GITHUB_DOMAIN_COMMITS = "github_domain_commits"
 MODULE_EMPLOYEE_NAMES = "employee_name_discovery"
 MODULE_PATTERN_VERIFY = "pattern_and_verify"
 MODULE_PERSON_EMAIL_PIVOT = "person_email_pivot"
@@ -66,6 +78,10 @@ MODULE_HUNTER = "hunter"
 _PERSON_PIVOT_MODULES = frozenset(
     {MODULE_EMPLOYEE_NAMES, MODULE_PATTERN_VERIFY, MODULE_PERSON_EMAIL_PIVOT, MODULE_EMAIL_IDENTITY_ENRICHMENT, "name_to_github_profile"}
 )
+_ACCUMULATING_MODULES = frozenset(
+    {MODULE_PERSON_EMAIL_PIVOT, MODULE_EMAIL_IDENTITY_ENRICHMENT, "name_to_github_profile"}
+)
+_YIELD_PREDICTION_CANDIDATES = frozenset({MODULE_NPM_EMAIL, MODULE_PYPI_EMAIL, MODULE_PACKAGE_ECOSYSTEMS, MODULE_PGP_DOMAIN_EMAIL, MODULE_SYNDICATION_FEED_SWEEPER})
 
 
 @dataclass(frozen=True)
@@ -78,6 +94,8 @@ class WorkerContext:
     stealth_session: StealthSession
     settings: Settings
     enable_smtp: bool = False
+    enable_m365: bool = False
+    enable_yahoo: bool = False
     use_proxies: bool = False
     aggressive: bool = False
     module_results: dict[str, ModuleResult] | None = None
@@ -87,12 +105,15 @@ class WorkerContext:
     cc_max_records: int | None = None
     cc_max_collections: int | None = None
     proxy_fallback_ok: bool = False
+    skip_modules: frozenset[str] = frozenset()
 
 
 async def run_adaptive_harvest(
     domain: str,
     timeout_seconds: float,
     enable_smtp: bool = False,
+    enable_m365: bool = False,
+    enable_yahoo: bool = False,
     use_proxies: bool = False,
     aggressive: bool = False,
     timing_profile: str = "t2",
@@ -104,6 +125,7 @@ async def run_adaptive_harvest(
     cc_max_collections: int | None = None,
     proxy_fallback_ok: bool = False,
     enable_email_identity_enrichment: bool = True,
+    skip_modules: tuple[str, ...] | list[str] | None = None,
 ) -> Any:
     from .domain_harvest_orchestrator import (
         DomainHarvestResult,
@@ -132,6 +154,8 @@ async def run_adaptive_harvest(
         stealth_session=session,
         settings=settings,
         enable_smtp=enable_smtp,
+        enable_m365=enable_m365,
+        enable_yahoo=enable_yahoo,
         use_proxies=use_proxies,
         aggressive=aggressive,
         module_results=module_results,
@@ -141,7 +165,27 @@ async def run_adaptive_harvest(
         cc_max_records=cc_max_records,
         cc_max_collections=cc_max_collections,
         proxy_fallback_ok=proxy_fallback_ok,
+        skip_modules=frozenset(str(name).strip() for name in (skip_modules or ()) if str(name).strip()),
     )
+
+    # Preserve a truthful per-run module inventory even when the budget is
+    # exhausted before a queued item starts. A missing key used to look like
+    # a configuration bug and made benchmark comparisons non-deterministic.
+    seeded_module_names = (
+        MODULE_COMMONCRAWL, MODULE_WAYBACK_DOMAIN, MODULE_CODE_CERT,
+        MODULE_EMAIL_DORK, MODULE_NPM_EMAIL, MODULE_PYPI_EMAIL,
+        MODULE_PUBLIC_SURFACE, MODULE_PUBLIC_FORGE, MODULE_PACKAGE_ECOSYSTEMS,
+        MODULE_SUBDOMAIN_SURFACE,
+        MODULE_PGP_DOMAIN_EMAIL, MODULE_GITHUB_ORG_MEMBERS,
+        MODULE_GITHUB_DOMAIN_COMMITS, MODULE_EMPLOYEE_NAMES,
+        MODULE_WORDPRESS_REST, MODULE_SYNDICATION_FEED_SWEEPER,
+        MODULE_PATTERN_VERIFY, "security_txt",
+    )
+    for module_name in seeded_module_names:
+        module_results[module_name] = ModuleResult(
+            status=ModuleStatus.SKIPPED,
+            metadata={"domain": cleaned, "skip_reason": "not_started"},
+        )
 
     await _seed_scheduler(ctx)
 
@@ -162,32 +206,217 @@ async def run_adaptive_harvest(
     except TimeoutError:
         budget.mark_exhausted()
         logger.info("Budget exhausted - returning partial results")
+    except asyncio.CancelledError:
+        # ``wait_for`` can surface cancellation from a child track on very
+        # short budgets instead of translating it to TimeoutError. Preserve
+        # the partial-result contract once the configured budget is spent.
+        if budget.is_expired():
+            budget.mark_exhausted()
+            logger.info("Budget exhausted during track cancellation")
+        else:
+            raise
     except Exception as exc:  # noqa: BLE001
         logger.error("Track failure: %s", exc)
 
     try:
         # Flush subscriber work before taking the identity-cluster snapshot.
         await signal_pool.close()
+        from .domain_harvest_orchestrator import (
+            _attach_native_email_validation,
+            _attach_smtp_email_verification,
+        )
+        from .historical_diff import annotate_historical_diff
+        historical_metrics = annotate_historical_diff(module_results)
         identity_clusters = await signal_pool.all_candidates()
+        if ctx.module_overrides:
+            # Injected modules are deterministic unit-test/embedder paths;
+            # do not introduce live DNS into them.
+            native_validation = {
+                "checked": 0,
+                "skipped": "injected_modules",
+            }
+        else:
+            native_validation = await _attach_native_email_validation(
+                cleaned,
+                module_results,
+            )
+        if ctx.enable_smtp and not ctx.module_overrides:
+            try:
+                # SMTP is deliberately given its own bounded tail. A target
+                # MX can accept TCP and then stop answering; never let that
+                # make the whole harvest hang past its result boundary.
+                smtp_validation = await asyncio.wait_for(
+                    _attach_smtp_email_verification(cleaned, module_results),
+                    timeout=45.0,
+                )
+            except asyncio.TimeoutError:
+                for result in module_results.values():
+                    for finding in result.findings or []:
+                        metadata = finding.setdefault("metadata", {})
+                        if not isinstance(metadata, dict):
+                            metadata = {}
+                            finding["metadata"] = metadata
+                        native_meta = metadata.get("native_email_validation") or {}
+                        if not isinstance(native_meta, dict):
+                            native_meta = {}
+                        if native_meta.get("status") not in {
+                            "invalid",
+                            "disposable",
+                            "mx_missing",
+                        }:
+                            metadata["smtp_verification_status"] = "verification_timeout"
+                smtp_validation = {
+                    "checked": 0,
+                    "status": "verification_timeout",
+                }
+        else:
+            smtp_validation = {"checked": 0, "skipped": "smtp_disabled"}
+        if ctx.enable_m365 and not ctx.module_overrides:
+            from .domain_harvest_orchestrator import _attach_m365_email_verification
+            m365_validation = await _attach_m365_email_verification(cleaned, module_results)
+        else:
+            m365_validation = {"checked": 0, "status": "m365_disabled"}
+        if ctx.enable_yahoo and not ctx.module_overrides:
+            from .domain_harvest_orchestrator import _attach_yahoo_email_verification
+            yahoo_validation = await _attach_yahoo_email_verification(cleaned, module_results)
+        else:
+            yahoo_validation = {"checked": 0, "status": "yahoo_disabled"}
         unique_emails = _aggregate(
             cleaned,
             module_results,
             signal_pool=signal_pool,
             identity_clusters=identity_clusters,
         )
+        dns_signals = {"spf_present": False, "dmarc_strict": False}
+        has_pattern_candidates = any(
+            isinstance(finding.get("metadata"), dict)
+            and finding["metadata"].get("pattern_template")
+            for result in module_results.values()
+            for finding in result.findings or []
+        )
+        if has_pattern_candidates and not ctx.module_overrides:
+            from .domain_harvest_orchestrator import (
+                apply_domain_email_dns_signals,
+                resolve_domain_email_dns_signals,
+            )
+
+            dns_signals = await resolve_domain_email_dns_signals(cleaned)
+            apply_domain_email_dns_signals(unique_emails, dns_signals)
         unique_emails.sort(key=_sort_key)
+        low_email_validation: dict[str, Any]
+        if ctx.module_overrides:
+            low_email_validation = {"checked": 0, "status": "skipped_injected_modules"}
+        elif not settings.enable_low_email_validation:
+            low_email_validation = {"checked": 0, "status": "disabled"}
+        else:
+            from .domain_harvest_orchestrator import (
+                _apply_low_email_validation_results,
+                _run_low_email_validation,
+                _select_low_email_validation_candidates,
+                _select_verifier_for_provider,
+            )
+            from .mail_provider import detect_provider_from_mx
+            from .mx_resolver import resolve_mx
+
+            candidates = _select_low_email_validation_candidates(
+                cleaned, module_results, unique_emails
+            )
+            if not candidates:
+                low_email_validation = {"checked": 0, "status": "no_candidates"}
+            else:
+                try:
+                    detection = detect_provider_from_mx(
+                        await resolve_mx(cleaned), target_domain=cleaned
+                    )
+                    method = _select_verifier_for_provider(detection.provider)
+                    low_email_validation = await _run_low_email_validation(
+                        cleaned, candidates, method, provider=detection.provider
+                    )
+                    low_email_validation["provider"] = detection.provider.value
+                    low_email_validation["promotion"] = _apply_low_email_validation_results(
+                        candidates, low_email_validation, unique_emails
+                    )
+                    unique_emails = _aggregate(
+                        cleaned,
+                        module_results,
+                        signal_pool=signal_pool,
+                        identity_clusters=identity_clusters,
+                    )
+                    from .domain_harvest_orchestrator import apply_domain_email_dns_signals
+
+                    apply_domain_email_dns_signals(unique_emails, dns_signals)
+                    unique_emails.sort(key=_sort_key)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Automatic low-email validation failed: %s", exc)
+                    low_email_validation = {
+                        "checked": len(candidates),
+                        "status": "validation_error",
+                        "error": str(exc),
+                    }
+            if settings.xposed_or_not_enabled and not ctx.module_overrides:
+                from .domain_harvest_orchestrator import (
+                    _run_xposed_or_not_validation,
+                    _select_low_email_validation_candidates,
+                )
+
+                primary_checked = int(low_email_validation.get("checked") or 0)
+                shared_cap = min(25, int(settings.harvest_validation_max_per_run))
+                xposed_budget = max(0, shared_cap - primary_checked)
+                xposed_candidates = _select_low_email_validation_candidates(
+                    cleaned,
+                    module_results,
+                    unique_emails,
+                    max_candidates=xposed_budget,
+                )
+                try:
+                    xposed_summary, format_metadata = await _run_xposed_or_not_validation(
+                        cleaned,
+                        xposed_candidates,
+                        max_checks=xposed_budget,
+                        delay_seconds=1.0,
+                    )
+                    low_email_validation["xposed_or_not"] = xposed_summary
+                    module_results["xposed_or_not"] = ModuleResult(
+                        status=ModuleStatus.SUCCESS,
+                        findings=[],
+                        metadata=format_metadata,
+                    )
+                    unique_emails = _aggregate(
+                        cleaned,
+                        module_results,
+                        signal_pool=signal_pool,
+                        identity_clusters=identity_clusters,
+                    )
+                    from .domain_harvest_orchestrator import apply_domain_email_dns_signals
+
+                    apply_domain_email_dns_signals(unique_emails, dns_signals)
+                    unique_emails.sort(key=_sort_key)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("XposedOrNot passive validation skipped: %s", exc)
+                    low_email_validation["xposed_or_not"] = {
+                        "checked": 0,
+                        "status": "skipped",
+                    }
         completed = datetime.now(timezone.utc)
         completed_iso = completed.isoformat().replace("+00:00", "Z")
         duration = (completed - started).total_seconds()
         high = sum(
             1
             for e in unique_emails
-            if e.confidence_label == "HIGH" and not e.is_role
+            if e.confidence_label in {"CONFIRMED", "HIGH"} and not e.is_role
         )
+        likely = sum(
+            1
+            for e in unique_emails
+            if e.confidence_label == "LIKELY" and not e.is_role
+        )
+        # ``medium`` is the historical "anything above LOW" band
+        # (LIKELY + MEDIUM) for backward compatibility with
+        # downstream tooling.
         medium = sum(
             1
             for e in unique_emails
-            if e.confidence_label == "MEDIUM" and not e.is_role
+            if e.confidence_label in {"LIKELY", "MEDIUM"} and not e.is_role
         )
         low = sum(
             1
@@ -217,6 +446,12 @@ async def run_adaptive_harvest(
                 }
                 for cluster in identity_clusters
             ],
+            "historical_diff": historical_metrics,
+            "native_email_validation": native_validation,
+            "smtp_email_verification": smtp_validation,
+            "m365_email_verification": m365_validation,
+            "yahoo_email_verification": yahoo_validation,
+            "low_email_validation": low_email_validation,
         }
         return DomainHarvestResult(
             domain=cleaned,
@@ -227,15 +462,18 @@ async def run_adaptive_harvest(
             unique_emails=unique_emails,
             total_unique_emails=len(unique_emails),
             high_confidence_count=high,
+            likely_confidence_count=likely,
             medium_confidence_count=medium,
             low_confidence_count=low,
             role_account_count=role,
             personal_email_count=len(unique_emails) - role,
             errors=errors,
-            smtp_verification_used=bool(
-                pattern_meta.get("smtp_verification_enabled", False)
+            smtp_verification_used=bool(ctx.enable_smtp),
+            catchall_detected=(
+                pattern_meta.get("is_catchall")
+                if pattern_meta.get("is_catchall") is not None
+                else smtp_validation.get("is_catchall")
             ),
-            catchall_detected=pattern_meta.get("is_catchall"),
             confirmed_pattern=pattern_meta.get("confirmed_pattern")
             or (confirmed_patterns[0] if confirmed_patterns else None),
             employee_names_processed=_employee_name_count(module_results),
@@ -279,8 +517,13 @@ async def _seed_scheduler(ctx: WorkerContext) -> None:
         (MODULE_EMAIL_DORK, PRIORITY_SEARCH),
         (MODULE_NPM_EMAIL, PRIORITY_REGISTRY),
         (MODULE_PYPI_EMAIL, PRIORITY_REGISTRY),
+        (MODULE_PUBLIC_SURFACE, PRIORITY_GUARANTEED),
+        (MODULE_SUBDOMAIN_SURFACE, PRIORITY_HIGH_SIGNAL),
+        (MODULE_PUBLIC_FORGE, PRIORITY_HIGH_SIGNAL),
+        (MODULE_PACKAGE_ECOSYSTEMS, PRIORITY_REGISTRY),
         (MODULE_PGP_DOMAIN_EMAIL, PRIORITY_REGISTRY),
         (MODULE_GITHUB_ORG_MEMBERS, PRIORITY_HIGH_SIGNAL),
+        (MODULE_GITHUB_DOMAIN_COMMITS, PRIORITY_HIGH_SIGNAL),
         (MODULE_EMPLOYEE_NAMES, PRIORITY_UNIVERSAL),
         (MODULE_WORDPRESS_REST, PRIORITY_HIGH_SIGNAL),
         (MODULE_SYNDICATION_FEED_SWEEPER, PRIORITY_UNIVERSAL),
@@ -290,12 +533,19 @@ async def _seed_scheduler(ctx: WorkerContext) -> None:
         (MODULE_PATTERN_VERIFY, PRIORITY_UNIVERSAL),
     )
     for module_name, priority in seeds:
+        if module_name in ctx.skip_modules:
+            continue
+        seed_track = (
+            TRACK_GUARANTEED
+            if module_name in {MODULE_PUBLIC_SURFACE}
+            else TRACK_OPPORTUNISTIC
+        )
         await ctx.scheduler.submit(
             WorkItem(
                 kind="run_module",
                 module_name=module_name,
                 priority=priority,
-                track=TRACK_OPPORTUNISTIC,
+                track=seed_track,
                 source="legacy_module",
             )
         )
@@ -327,7 +577,10 @@ async def _run_tracks(ctx: WorkerContext) -> None:
         asyncio.create_task(_track2_loop(ctx, concurrency=5)),
     ]
     try:
-        await asyncio.gather(*tracks)
+        outcomes = await asyncio.gather(*tracks, return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                logger.error("Harvest track failed: %r", outcome)
     finally:
         progress.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -429,6 +682,15 @@ async def _execute_item(item: WorkItem, ctx: WorkerContext) -> WorkResult:
         # the pre-fraction budget interface.
         soft_timeout = ctx.budget.soft_timeout_for_module()
     try:
+        if item.module_name and item.module_name in ctx.skip_modules:
+            return WorkResult(item=item, success=True, findings=[], new_items=[], errors=["skipped by runtime policy"], duration_seconds=0.0)
+        if item.module_name and _should_defer_for_yield(ctx, item.module_name):
+            if ctx.module_results is not None:
+                ctx.module_results[item.module_name] = ModuleResult(
+                    status=ModuleStatus.SKIPPED,
+                    metadata={"domain": ctx.domain, "skip_reason": "yield_prediction"},
+                )
+            return WorkResult(item=item, success=True, findings=[], new_items=[], errors=["deferred by yield prediction"], duration_seconds=0.0)
         if item.kind == "fetch_page" and item.url:
             findings, new_items = await _fetch_and_extract(item.url, ctx)
         elif item.kind == "run_module" and item.module_name:
@@ -472,6 +734,28 @@ async def _execute_item(item: WorkItem, ctx: WorkerContext) -> WorkResult:
         )
 
 
+def _should_defer_for_yield(ctx: WorkerContext, module_name: str) -> bool:
+    """Defer only low-yield candidates in the final budget tail.
+
+    At least two earlier registry/archive sources must have completed with no
+    findings. High-signal and guaranteed modules are never deferred here.
+    """
+    if module_name not in _YIELD_PREDICTION_CANDIDATES:
+        return False
+    if not getattr(ctx.settings, "enable_yield_prediction", True):
+        return False
+    tail = float(getattr(ctx.settings, "yield_prediction_tail_seconds", 15.0) or 15.0)
+    if ctx.budget.remaining() > tail:
+        return False
+    results = ctx.module_results or {}
+    observed = [
+        results.get(name)
+        for name in (MODULE_COMMONCRAWL, MODULE_WAYBACK_DOMAIN, MODULE_NPM_EMAIL, MODULE_PYPI_EMAIL, MODULE_PGP_DOMAIN_EMAIL)
+    ]
+    completed = [item for item in observed if item is not None and item.status in {ModuleStatus.SUCCESS, ModuleStatus.PARTIAL}]
+    return len(completed) >= 2 and sum(len(item.findings or []) for item in completed) == 0
+
+
 async def _fetch_and_extract(
     url: str,
     ctx: WorkerContext,
@@ -504,6 +788,37 @@ async def _fetch_and_extract(
             }
         )
 
+    # Blog/profile pages use the same full person extractor as the normal
+    # site-intelligence fetch path. This preserves names and direct emails
+    # discovered in JSON-LD, hCards, mailto links, LinkedIn slugs, and other
+    # structured page surfaces.
+    for person in extract_people(
+        html,
+        url,
+        ctx.domain,
+        aggressive=ctx.aggressive,
+    ):
+        metadata = {
+            "name": person.name,
+            "person_name": person.name,
+            "title_or_role": person.title,
+            "source_type": person.source_type,
+            "confidence_score": person.confidence,
+            "source_url": person.page_url,
+            "on_domain": bool(person.email and person.email.lower().endswith("@" + ctx.domain.lower())),
+        }
+        if person.email:
+            metadata["email"] = person.email
+        findings.append(
+            {
+                "platform": "structured_page",
+                "profile_url": url,
+                "username": person.email.split("@", 1)[0] if person.email else person.name,
+                "confidence": "high" if person.confidence >= 0.7 else "medium",
+                "metadata": metadata,
+            }
+        )
+
     next_url = PaginationHandler(ctx.page_cache).extract_next_url(url, html)
     new_items = []
     if next_url:
@@ -525,6 +840,7 @@ async def _run_module(
     soft_timeout: float,
 ) -> tuple[list[dict[str, Any]], list[WorkItem]]:
     module = _get_module_instance(module_name, ctx)
+    started = time.perf_counter()
     try:
         result = await asyncio.wait_for(
             _run_module_instance(module_name, module, ctx, soft_timeout),
@@ -533,8 +849,8 @@ async def _run_module(
     except asyncio.TimeoutError:
         return [], []
 
-    if ctx.module_results is not None:
-        ctx.module_results[module_name] = result
+    _record_module_result(ctx, module_name, result)
+    result.metadata.setdefault("duration_seconds", round(time.perf_counter() - started, 3))
     _emit_module_complete(ctx, module_name, result)
     for finding in result.findings or []:
         _emit_finding(ctx.signal_pool, module_name, finding, ctx.domain)
@@ -594,8 +910,7 @@ async def _run_module_with_payload(
     except asyncio.TimeoutError:
         return [], []
 
-    if ctx.module_results is not None:
-        ctx.module_results[module_name] = result
+    _record_module_result(ctx, module_name, result)
     _emit_module_complete(ctx, module_name, result)
     for finding in result.findings or []:
         _emit_finding(ctx.signal_pool, module_name, finding, ctx.domain)
@@ -603,6 +918,48 @@ async def _run_module_with_payload(
     out_findings = [dict(f) for f in (result.findings or []) if isinstance(f, dict)]
     new_items = result.new_items if hasattr(result, "new_items") else []
     return out_findings, new_items
+
+
+def _record_module_result(
+    ctx: WorkerContext, module_name: str, result: ModuleResult
+) -> None:
+    """Store results without discarding earlier reactive pivot findings."""
+    if ctx.module_results is None:
+        return
+    if module_name not in _ACCUMULATING_MODULES:
+        ctx.module_results[module_name] = result
+        return
+
+    previous = ctx.module_results.get(module_name)
+    if previous is None:
+        ctx.module_results[module_name] = result
+        return
+
+    previous_findings = [item for item in (previous.findings or []) if isinstance(item, dict)]
+    current_findings = [item for item in (result.findings or []) if isinstance(item, dict)]
+    metadata = dict(previous.metadata or {})
+    for key, value in (result.metadata or {}).items():
+        if key in {"per_person", "sources"} and isinstance(value, list):
+            existing = metadata.get(key)
+            metadata[key] = [*(existing if isinstance(existing, list) else []), *value]
+        elif key.endswith("_found") or key.endswith("_attempted") or key.endswith("_checked") or key == "findings_count":
+            try:
+                metadata[key] = int(metadata.get(key, 0)) + int(value)
+            except (TypeError, ValueError):
+                metadata[key] = value
+        else:
+            metadata[key] = value
+    status = ModuleStatus.SUCCESS if previous_findings or current_findings else (
+        ModuleStatus.PARTIAL
+        if previous.status == ModuleStatus.PARTIAL or result.status == ModuleStatus.PARTIAL
+        else result.status
+    )
+    ctx.module_results[module_name] = ModuleResult(
+        status=status,
+        findings=[*previous_findings, *current_findings],
+        errors=[*(previous.errors or []), *(result.errors or [])],
+        metadata=metadata,
+    )
 
 async def _run_pattern_for_name(
     payload: dict,
@@ -675,6 +1032,7 @@ async def _on_name_found(
 ) -> list[WorkItem]:
     from backend.core.email_pattern_generator import _PATTERN_TEMPLATES
     from backend.core.name_classifier import classify_name
+    from backend.modules.employee_name_discovery import classify_role_bucket
 
     confidence = float(metadata.get(
         "confidence_score", 0.5
@@ -693,14 +1051,23 @@ async def _on_name_found(
     # speculative permutations.
     if confidence < medium_threshold:
         return []
-    has_title = bool(str(metadata.get("title_or_role", "")).strip())
-    templates = None if has_title else _PATTERN_TEMPLATES[:3]
+    title_or_role = str(metadata.get("title_or_role", "")).strip()
+    has_title = bool(title_or_role)
+    role_bucket = classify_role_bucket(title_or_role)
+    if role_bucket == "executive":
+        first_template = "{first}@{domain}"
+        templates = [
+            first_template,
+            *[template for template in _PATTERN_TEMPLATES if template != first_template],
+        ]
+    else:
+        templates = None if has_title else _PATTERN_TEMPLATES[:3]
     return [WorkItem(
         kind="generate_patterns",
         module_name=MODULE_PATTERN_VERIFY,
         payload={
             "name": name,
-            "title": metadata.get("title_or_role", ""),
+            "title": title_or_role,
             "confidence": confidence,
             "has_title": has_title,
             "templates": templates,
@@ -796,17 +1163,22 @@ def _get_module_instance(module_name: str, ctx: WorkerContext) -> Any:
         MODULE_EMAIL_DORK: EmailSearchDorkModule,
         MODULE_NPM_EMAIL: NpmEmailModule,
         MODULE_PYPI_EMAIL: PyPIEmailModule,
+        MODULE_PUBLIC_SURFACE: PublicSurfaceSweeper,
+        MODULE_PUBLIC_FORGE: PublicForgeModule,
+        MODULE_PACKAGE_ECOSYSTEMS: PackageEcosystemsModule,
+        MODULE_SUBDOMAIN_SURFACE: SubdomainSurfaceModule,
         MODULE_PGP_DOMAIN_EMAIL: PgpDomainEmailModule,
         MODULE_GITHUB_ORG_MEMBERS: GitHubOrgMembersModule,
+        MODULE_GITHUB_DOMAIN_COMMITS: GitHubDomainCommitsModule,
         MODULE_EMPLOYEE_NAMES: EmployeeNameDiscoveryModule,
         MODULE_PATTERN_VERIFY: PatternAndVerifyModule,
         MODULE_WORDPRESS_REST: WordPressRestModule,
         MODULE_SYNDICATION_FEED_SWEEPER: SyndicationFeedSweeper,
     }
     
+    from ..modules.email_identity_enrichment import EmailIdentityEnrichmentModule
     from ..modules.name_to_github_profile import NameToGitHubProfileModule
     from ..modules.person_email_pivot import PersonEmailPivotModule
-    from ..modules.email_identity_enrichment import EmailIdentityEnrichmentModule
     from ..modules.security_txt import SecurityTxtModule
     
     factories["security_txt"] = SecurityTxtModule
@@ -849,7 +1221,7 @@ async def _read_homepage_for_router(ctx: WorkerContext) -> str:
 
 def _write_to_signal_pool(result: WorkResult, signal_pool: AsyncSignalPool) -> None:
     source = result.item.module_name or result.item.source or result.item.kind
-    for finding in result.findings:
+    for finding in result.findings or []:
         _emit_finding(signal_pool, source, finding, "")
 
 
@@ -900,6 +1272,7 @@ def _emit_finding(
             confidence=confidence_value,
             domain=domain or meta.get("domain"),
             email=email if isinstance(email, str) else None,
+            title_or_role=meta.get("title_or_role"),
         )
 
 

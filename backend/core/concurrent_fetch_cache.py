@@ -69,6 +69,16 @@ DEFAULT_MAX_BYTES: int = 200 * 1024 * 1024
 _DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
 
 
+def _consume_future_exception(future: asyncio.Future[Any]) -> None:
+    """Mark shared future exceptions retrieved without hiding awaiter errors."""
+    if future.cancelled():
+        return
+    try:
+        future.exception()
+    except (asyncio.CancelledError, Exception):
+        return
+
+
 # ---------------------------------------------------------------------------
 # URL normalisation
 # ---------------------------------------------------------------------------
@@ -269,6 +279,7 @@ class ConcurrentFetchCache:
                     if not existing.cancelled():
                         existing.exception()
                     future = asyncio.get_event_loop().create_future()
+                    future.add_done_callback(_consume_future_exception)
                     self._in_flight[key] = future
                     self._misses += 1
                     need_fetch = True
@@ -282,6 +293,7 @@ class ConcurrentFetchCache:
                 # record it, and we'll do the fetch ourselves after
                 # releasing the lock.
                 future = asyncio.get_event_loop().create_future()
+                future.add_done_callback(_consume_future_exception)
                 self._in_flight[key] = future
                 self._misses += 1
                 need_fetch = True
@@ -304,7 +316,16 @@ class ConcurrentFetchCache:
             async with self._lock:
                 self._errors += 1
                 if not future.done():
-                    future.set_exception(exc)
+                    # asyncio.CancelledError is control flow, not a normal
+                    # exception. Storing it with set_exception() creates an
+                    # unobserved Future exception when the winning caller is
+                    # cancelled before any waiter attaches. Cancel the
+                    # shared future instead; waiters still receive the
+                    # cancellation and Python emits no warning.
+                    if isinstance(exc, asyncio.CancelledError):
+                        future.cancel()
+                    else:
+                        future.set_exception(exc)
             raise
 
         async with self._lock:

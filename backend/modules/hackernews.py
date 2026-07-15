@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from ..config import settings
 from ..core.bio_analyzer import analyze_bio
 from ..core.http_client import build_client
 from ..core.rate_limiter import rate_limiter
@@ -32,6 +33,8 @@ class HackerNewsModule(BaseModule):
     default_enabled = True
 
     async def run(self, email: str) -> ModuleResult:
+        if not getattr(settings, "enable_hackernews_lookup", True):
+            return ModuleResult(status=ModuleStatus.SKIPPED, metadata={"email": email})
         rate_limiter.set_delay("hacker-news.firebaseio.com", 1.0)
         rate_limiter.set_delay("hn.algolia.com", 1.0)
 
