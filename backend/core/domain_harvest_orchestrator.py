@@ -1835,6 +1835,7 @@ async def _safe_phase12_run(
     enable_scraping: bool = True,
     context_vertical: tuple[str, ...] | list[str] | str | None = None,
     scrape_session: Any | None = None,
+    progress_callback: Any | None = None,
 ) -> tuple[str, ModuleResult]:
     """Run a Phase 1+2 module with its optional kwargs.
 
@@ -1887,6 +1888,8 @@ async def _safe_phase12_run(
         kwargs["candidate_paths"] = candidate_paths
     if signal_pool is not None:
         kwargs["signal_pool"] = signal_pool
+    if progress_callback is not None:
+        kwargs["progress_callback"] = progress_callback
     if name == "subdomain_intel":
         kwargs["with_subdomains"] = with_subdomains
         kwargs["subdomain_deep"] = subdomain_deep
@@ -1932,11 +1935,6 @@ async def _safe_phase12_run(
         )
 
 
-def _consume_background_module_result(task: asyncio.Task[Any]) -> None:
-    with contextlib.suppress(BaseException):
-        task.result()
-
-
 async def _run_with_soft_timeout(
     module_name: str,
     awaitable: Any,
@@ -1950,9 +1948,8 @@ async def _run_with_soft_timeout(
         return await awaitable
     task = asyncio.create_task(awaitable)
     try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=soft_timeout)
+        return await asyncio.wait_for(task, timeout=soft_timeout)
     except asyncio.TimeoutError:
-        task.add_done_callback(_consume_background_module_result)
         _LOG.warning(
             "Module %s exceeded soft timeout %.1fs - returning empty result",
             module_name,

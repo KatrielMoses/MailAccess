@@ -21,6 +21,7 @@ orchestrator wires it up via :func:`run_domain_harvest`.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
@@ -154,13 +155,21 @@ class CommonCrawlEmailModule(BaseModule):
                 )
 
                 try:
-                    records = await client.query_multi_collection(
-                        domain=domain,
-                        max_collections=eff_max_collections,
-                        max_records_per_collection=eff_max_records_per,
-                        aggressive=effective_aggressive,
-                        progress_callback=progress_callback,
-                    )
+                    query_kwargs: dict[str, Any] = {
+                        "domain": domain,
+                        "max_collections": eff_max_collections,
+                        "max_records_per_collection": eff_max_records_per,
+                        "aggressive": effective_aggressive,
+                    }
+                    parameters = inspect.signature(
+                        client.query_multi_collection
+                    ).parameters
+                    if "progress_callback" in parameters or any(
+                        parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in parameters.values()
+                    ):
+                        query_kwargs["progress_callback"] = progress_callback
+                    records = await client.query_multi_collection(**query_kwargs)
                     collections_swept = sorted({r.collection for r in records if r.collection})
                     if progress_callback:
                         progress_callback(

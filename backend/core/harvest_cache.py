@@ -26,11 +26,11 @@ def _parse_timestamp(value: str) -> datetime:
 def _json_safe(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if isinstance(value, list | tuple | set | frozenset):
         return [_json_safe(item) for item in value]
     if hasattr(value, "value"):
         return _json_safe(value.value)
-    if isinstance(value, (str, int, float, bool)) or value is None:
+    if isinstance(value, str | int | float | bool) or value is None:
         return value
     return str(value)
 
@@ -163,13 +163,49 @@ class HarvestCache:
     def invalidate_all(self) -> None:
         if not self.cache_dir.exists():
             return
-        for path in self.cache_dir.iterdir():
-            if path.is_file():
+        for path in self.cache_dir.glob("*.json"):
+            if self._is_harvest_cache_file(path):
                 path.unlink(missing_ok=True)
+
+    def list_domains(self) -> list[str]:
+        """Return only domains represented by valid harvest-cache envelopes."""
+        if not self.cache_dir.exists():
+            return []
+        domains: set[str] = set()
+        for path in self.cache_dir.glob("*.json"):
+            envelope = self._read_path(path)
+            if not self._is_harvest_envelope(envelope):
+                continue
+            domain = str(envelope.get("domain") or "").strip().lower()
+            if domain:
+                domains.add(domain)
+        return sorted(domains)
 
     def is_stale(self, domain: str) -> bool:
         envelope = self._read_envelope(domain)
         return envelope is None or self._envelope_is_stale(envelope)
+
+    @staticmethod
+    def _read_path(path: Path) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @classmethod
+    def _is_harvest_cache_file(cls, path: Path) -> bool:
+        return cls._is_harvest_envelope(cls._read_path(path))
+
+    @staticmethod
+    def _is_harvest_envelope(envelope: dict[str, Any] | None) -> bool:
+        return bool(
+            isinstance(envelope, dict)
+            and isinstance(envelope.get("domain"), str)
+            and isinstance(envelope.get("cached_at"), str)
+            and isinstance(envelope.get("mailaccess_version"), str)
+            and isinstance(envelope.get("result"), dict)
+        )
 
     @staticmethod
     def _envelope_is_stale(envelope: dict[str, Any]) -> bool:

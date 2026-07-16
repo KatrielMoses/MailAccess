@@ -191,6 +191,22 @@ def _http_fallback_for_subdomain(sub: str) -> str:
 def _subdomains_with_port_80_open(result: Any) -> set[str]:
     """Return the set of subdomains for which Shodan InternetDB confirmed port 80."""
     open_set: set[str] = set()
+    # Production subdomain enrichment stores InternetDB data on each
+    # infrastructure IP row. Map those IPs back to their discovered hosts.
+    infrastructure = _build_infrastructure(result)
+    for ip_row in infrastructure.get("ips", []):
+        if not isinstance(ip_row, dict):
+            continue
+        shodan_data = ip_row.get("shodan_data")
+        if not isinstance(shodan_data, dict) or 80 not in (shodan_data.get("ports") or []):
+            continue
+        for host in ip_row.get("subdomains") or []:
+            cleaned = str(host).strip().lower()
+            if cleaned:
+                open_set.add(cleaned)
+
+    # Retain compatibility with callers that publish the older host-oriented
+    # metadata shape directly.
     for module_result in result.module_results.values():
         metadata = module_result.metadata if module_result else {}
         if not isinstance(metadata, dict):
@@ -382,14 +398,15 @@ def _build_markdown_report(result: Any) -> str:
     # Infrastructure table
     lines.append("## Infrastructure")
     if asns:
-        lines.append("| ASN | Org | IPs | CIDRs |")
-        lines.append("|-----|-----|-----|-------|")
+        lines.append("| ASN | Org | IPs | CIDR Prefixes |")
+        lines.append("|-----|-----|-----|---------------|")
         for record in asns:
             asn = record.get("asn")
             org = record.get("name") or "Unknown"
             ip_count = len(record.get("ips") or [])
-            cidr_count = len(record.get("prefixes") or record.get("cidrs") or [])
-            lines.append(f"| AS{asn} | {org} | {ip_count} | {cidr_count} |")
+            prefixes = record.get("prefixes") or record.get("cidrs") or []
+            cidr_text = ", ".join(str(prefix) for prefix in prefixes) or "—"
+            lines.append(f"| AS{asn} | {org} | {ip_count} | {cidr_text} |")
     else:
         lines.append("_No ASN data resolved._")
     lines.append("")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 from typing import Any
@@ -57,7 +58,12 @@ class HackerTargetHostsModule(BaseModule):
             return ModuleResult(ModuleStatus.SKIPPED, errors=["invalid domain"])
         try:
             if fetch is not None:
-                response = await fetch.get(f"{_ENDPOINT}?q={quote(target)}", timeout=10.0)
+                # CachedFetch deliberately rejects per-request kwargs because
+                # they cannot be represented safely in its URL-only cache key.
+                response = await asyncio.wait_for(
+                    fetch.get(f"{_ENDPOINT}?q={quote(target)}"),
+                    timeout=10.0,
+                )
             else:
                 async with build_client(timeout=10.0) as client:
                     response = await client.get(_ENDPOINT, params={"q": target})

@@ -130,3 +130,7 @@ results/
 !tests/test_parallel_sources.py
 !tests/test_new_sources.py
 !tests/test_doctor_command.py
+!tests/test_auto_export.py
+!tests/test_live_log.py
+!tests/test_keys_test_command.py
+!tests/test_toolchain_output.py

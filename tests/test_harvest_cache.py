@@ -1,9 +1,13 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from io import StringIO
+
+from rich.console import Console
 
 from backend.core.domain_harvest_orchestrator import DomainHarvestResult, run_domain_harvest
 from backend.core.harvest_cache import HarvestCache
+from cli import harvest_emails as command
 
 
 def _result(domain: str = "example.com") -> DomainHarvestResult:
@@ -85,7 +89,8 @@ def test_cache_written_after_harvest(monkeypatch, tmp_path):
 def test_atomic_write_no_partial_reads(tmp_path):
     cache = HarvestCache(tmp_path)
     cache.set("example.com", _result())
-    assert json.loads((tmp_path / "example.com.json").read_text())["result"]["domain"] == "example.com"
+    payload = json.loads((tmp_path / "example.com.json").read_text())
+    assert payload["result"]["domain"] == "example.com"
     assert not list(tmp_path.glob("*.tmp"))
 
 
@@ -104,11 +109,24 @@ def test_clear_all_cache_removes_all_files(tmp_path):
     assert not list(tmp_path.glob("*.json"))
 
 
-def test_cached_result_shows_cache_banner(monkeypatch, tmp_path):
-    from cli import harvest_emails as command
-    from rich.console import Console
-    from io import StringIO
+def test_clear_all_cache_preserves_non_harvest_cache_files(tmp_path):
+    cache = HarvestCache(tmp_path)
+    cache.set("example.com", _result())
+    internal = tmp_path / "commoncrawl_collections.json"
+    internal.write_text('{"ids":["CC-MAIN-2026-30"]}', encoding="utf-8")
+    cache.invalidate_all()
+    assert not (tmp_path / "example.com.json").exists()
+    assert internal.exists()
 
+
+def test_list_domains_ignores_non_harvest_cache_files(tmp_path):
+    cache = HarvestCache(tmp_path)
+    cache.set("example.com", _result())
+    (tmp_path / "maigret-data.json").write_text("{}", encoding="utf-8")
+    assert cache.list_domains() == ["example.com"]
+
+
+def test_cached_result_shows_cache_banner(monkeypatch, tmp_path):
     cached = _result()
     cached.from_cache = True
     cached.cache_age_seconds = 120
@@ -121,5 +139,9 @@ def test_cached_result_shows_cache_banner(monkeypatch, tmp_path):
     monkeypatch.setattr(command, "_write_cidr_file", lambda *args: tmp_path / "cidrs.txt")
     monkeypatch.setattr(command, "format_harvest_cli_output", lambda *args, **kwargs: "done")
     stream = StringIO()
-    code = command.run_harvest_emails("example.com", no_verify=True, console=Console(file=stream, force_terminal=False))
+    code = command.run_harvest_emails(
+        "example.com",
+        no_verify=True,
+        console=Console(file=stream, force_terminal=False),
+    )
     assert code == 0 and "Cached result (2 minutes ago)" in stream.getvalue()

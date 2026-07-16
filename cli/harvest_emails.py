@@ -236,7 +236,11 @@ class LiveHarvestDisplay:
         state["action"] = action
         if module not in self._module_started_at:
             self._module_started_at[module] = time.monotonic()
-        self._log("MODULE", f"{module} started")
+            # Preserve the pre-0.12.7 action-oriented log substring while
+            # also emitting the required explicit module-start marker.
+            self._log("MODULE", f"{action}; {module} started")
+        else:
+            self._log("MODULE", f"{module}: {action}")
 
     def complete(self, module: str, status: str, errors: list[str] | None = None) -> None:
         state = self.states.setdefault(
@@ -258,6 +262,8 @@ class LiveHarvestDisplay:
             "MODULE",
             f"{module} completed ({count} items, {duration_text})",
         )
+        if errors:
+            self._log("WARN", f"{module}: {'; '.join(str(error) for error in errors)}")
 
     def signal(self, signal: Any) -> None:
         kind = str(getattr(signal, "kind", "finding"))
@@ -687,7 +693,8 @@ def run_harvest_emails(
         "START",
         f"harvest-emails --domain {cleaned_domain} v{_APP_VERSION}",
     )
-    console.print(f"[dim]Live log: {live_log}[/dim]")
+    if not no_export:
+        console.print(f"[dim]Live log: {live_log}[/dim]")
     effective_skip_modules = tuple(skip_modules) + (("subdomain_intel",) if no_subdomains else ())
 
     def _on_module_complete(
@@ -768,10 +775,6 @@ def run_harvest_emails(
     # the per-email smtp_validation metadata out of the module's
     # result; if SMTP was disabled, we emit a single [SMTP] disabled
     # line so analysts can see the gate decision in the log.
-    try:
-        smtp_meta = ((result.module_results or {}).get("pattern_and_verify") or _Empty()).metadata
-    except Exception:
-        smtp_meta = None
     if not enable_smtp:
         display.log_event("SMTP", "disabled (--no-verify)")
     else:
@@ -792,7 +795,11 @@ def run_harvest_emails(
                 if not isinstance(smtp_validation, dict):
                     continue
                 probe_count += 1
-                email = str(smtp_validation.get("email") or finding.get("metadata", {}).get("email") or "").strip().lower()
+                email = str(
+                    smtp_validation.get("email")
+                    or finding.get("metadata", {}).get("email")
+                    or ""
+                ).strip().lower()
                 code = smtp_validation.get("response_code") or "?"
                 status = smtp_validation.get("status") or "inconclusive"
                 if email:
@@ -893,7 +900,7 @@ def run_harvest_emails(
 
     # Resolve the explicit --export target (when provided).
     extra_export_path: Path | None = None
-    if export:
+    if export and not no_export:
         extra_export_path = _resolve_export_path(export)
         text, err = serialise_harvest_for_export(result, extra_export_path, comparison=comparison)
         if err is not None:
@@ -914,7 +921,10 @@ def run_harvest_emails(
                 timestamp=timestamp,
                 no_export=False,
                 no_extras=no_extras,
-                extra_export_path=extra_export_path,
+                # The explicit export was written above with comparison
+                # metadata included. Do not overwrite it with the default
+                # payload while writing the canonical result file.
+                extra_export_path=None,
             )
         )
         # 0.12.7 — print every written file.  The legacy
@@ -962,17 +972,6 @@ def run_harvest_emails(
             console.print(f"[dim]Harvest history cache unavailable: {exc}[/dim]")
 
     return 0
-
-
-class _Empty:
-    """Sentinel object whose ``metadata`` is an empty dict.
-
-    Used as the fallback when a module is missing from
-    ``result.module_results`` so the SMTP-log loop does not have to
-    branch on ``None``.
-    """
-
-    metadata: dict[str, Any] = {}
 
 
 # The default-JSON + supplementary export + END-event emission is

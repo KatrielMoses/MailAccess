@@ -280,7 +280,10 @@ async def run_adaptive_harvest(
 
     try:
         # Flush subscriber work before taking the identity-cluster snapshot.
-        await signal_pool.close()
+        try:
+            await asyncio.wait_for(signal_pool.close(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Signal-pool shutdown exceeded 5s; continuing with snapshot")
         from .domain_harvest_orchestrator import (
             _attach_native_email_validation,
             _attach_smtp_email_verification,
@@ -294,6 +297,11 @@ async def run_adaptive_harvest(
             native_validation = {
                 "checked": 0,
                 "skipped": "injected_modules",
+            }
+        elif budget.is_expired():
+            native_validation = {
+                "checked": 0,
+                "skipped": "budget_exhausted",
             }
         else:
             native_validation = await _attach_native_email_validation(
@@ -354,7 +362,7 @@ async def run_adaptive_harvest(
             for result in module_results.values()
             for finding in result.findings or []
         )
-        if has_pattern_candidates and not ctx.module_overrides:
+        if has_pattern_candidates and not ctx.module_overrides and not budget.is_expired():
             from .domain_harvest_orchestrator import (
                 apply_domain_email_dns_signals,
                 resolve_domain_email_dns_signals,
@@ -366,6 +374,8 @@ async def run_adaptive_harvest(
         low_email_validation: dict[str, Any]
         if ctx.module_overrides:
             low_email_validation = {"checked": 0, "status": "skipped_injected_modules"}
+        elif budget.is_expired():
+            low_email_validation = {"checked": 0, "status": "budget_exhausted"}
         elif not settings.enable_low_email_validation:
             low_email_validation = {"checked": 0, "status": "disabled"}
         else:
@@ -656,6 +666,7 @@ async def _track1_loop(ctx: WorkerContext, concurrency: int = 3) -> None:
     async def _run_one(item: WorkItem) -> None:
         async with sem:
             result = await _execute_item(item, ctx)
+            _record_work_failure(ctx, result)
             for new_item in result.new_items:
                 await ctx.scheduler.submit(new_item)
             _write_to_signal_pool(result, ctx.signal_pool)
@@ -677,7 +688,10 @@ async def _track1_loop(ctx: WorkerContext, concurrency: int = 3) -> None:
         running.add(task)
 
     if running:
-        await asyncio.gather(*running, return_exceptions=True)
+        outcomes = await asyncio.gather(*running, return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                logger.error("Guaranteed harvest task failed: %r", outcome)
     ctx.budget.mark_track1_closed()
 
 
@@ -688,6 +702,7 @@ async def _track2_loop(ctx: WorkerContext, concurrency: int = 5) -> None:
     async def _run_one(item: WorkItem) -> None:
         async with sem:
             result = await _execute_item(item, ctx)
+            _record_work_failure(ctx, result)
             for new_item in result.new_items:
                 if new_item.track == TRACK_GUARANTEED:
                     new_item.track = TRACK_OPPORTUNISTIC
@@ -725,7 +740,10 @@ async def _track2_loop(ctx: WorkerContext, concurrency: int = 5) -> None:
         running.add(task)
 
     if running:
-        await asyncio.gather(*running, return_exceptions=True)
+        outcomes = await asyncio.gather(*running, return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                logger.error("Opportunistic harvest task failed: %r", outcome)
 
 
 async def _execute_item(item: WorkItem, ctx: WorkerContext) -> WorkResult:
@@ -905,12 +923,25 @@ async def _run_module(
 ) -> tuple[list[dict[str, Any]], list[WorkItem]]:
     module = _get_module_instance(module_name, ctx)
     started = time.perf_counter()
+    if ctx.progress_callback is not None:
+        ctx.progress_callback(module_name, "Starting module...")
     try:
         result = await asyncio.wait_for(
             _run_module_instance(module_name, module, ctx, soft_timeout),
-            timeout=soft_timeout,
+            # _run_module_instance applies the same soft timeout internally
+            # and returns a PARTIAL result. A small grace window prevents the
+            # outer guard from cancelling that result at the exact deadline.
+            timeout=soft_timeout + 1.0,
         )
     except asyncio.TimeoutError:
+        elapsed = round(time.perf_counter() - started, 3)
+        result = ModuleResult(
+            status=ModuleStatus.FAILED,
+            errors=[f"module timed out after {soft_timeout:.1f}s"],
+            metadata={"domain": ctx.domain, "duration_seconds": elapsed},
+        )
+        _record_module_result(ctx, module_name, result)
+        _emit_module_complete(ctx, module_name, result)
         return [], []
 
     _record_module_result(ctx, module_name, result)
@@ -950,6 +981,9 @@ async def _run_module_with_payload(
     ctx: WorkerContext,
     soft_timeout: float,
 ) -> tuple[list[dict[str, Any]], list[WorkItem]]:
+    started = time.perf_counter()
+    if ctx.progress_callback is not None:
+        ctx.progress_callback(module_name, "Starting module...")
     try:
         # Person-keyed pivots must use the same per-run cache/session as the
         # rest of harvest.  Passing it explicitly also keeps the module
@@ -984,8 +1018,17 @@ async def _run_module_with_payload(
             timeout=soft_timeout,
         )
     except asyncio.TimeoutError:
+        elapsed = round(time.perf_counter() - started, 3)
+        result = ModuleResult(
+            status=ModuleStatus.FAILED,
+            errors=[f"module timed out after {soft_timeout:.1f}s"],
+            metadata={"domain": ctx.domain, "duration_seconds": elapsed},
+        )
+        _record_module_result(ctx, module_name, result)
+        _emit_module_complete(ctx, module_name, result)
         return [], []
 
+    result.metadata.setdefault("duration_seconds", round(time.perf_counter() - started, 3))
     _record_module_result(ctx, module_name, result)
     _emit_module_complete(ctx, module_name, result)
     for finding in result.findings or []:
@@ -1414,8 +1457,6 @@ def _emit_module_complete(
     module_name: str,
     result: ModuleResult,
 ) -> None:
-    if ctx.on_module_complete is None:
-        return
     status_value = result.status.value if hasattr(result.status, "value") else str(result.status)
     errors = list(result.errors or [])
     # 0.12.7: persist a per-source health row so the `mailaccess
@@ -1430,8 +1471,12 @@ def _emit_module_complete(
         duration = getattr(result, "duration_seconds", None) or 0.0
         if not duration:
             meta = getattr(result, "metadata", {}) or {}
-            if isinstance(meta, dict) and "elapsed_seconds" in meta:
-                duration = float(meta["elapsed_seconds"] or 0.0)
+            if isinstance(meta, dict):
+                duration = float(
+                    meta.get("duration_seconds")
+                    or meta.get("elapsed_seconds")
+                    or 0.0
+                )
         health_db.record_module_run(
             module_name=module_name,
             domain=ctx.domain if hasattr(ctx, "domain") else None,
@@ -1440,6 +1485,8 @@ def _emit_module_complete(
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("platform_health: record_module_run failed: %s", exc)
+    if ctx.on_module_complete is None:
+        return
     try:
         ctx.on_module_complete(module_name, status_value, errors)
     except TypeError:
@@ -1456,10 +1503,34 @@ def _employee_name_count(module_results: dict[str, ModuleResult]) -> int:
     return len(result.findings or [])
 
 
+def _record_work_failure(ctx: WorkerContext, work: WorkResult) -> None:
+    """Surface worker exceptions in module results, health, and live progress."""
+    module_name = work.item.module_name
+    if work.success or not module_name:
+        return
+    result = ModuleResult(
+        status=ModuleStatus.FAILED,
+        errors=list(work.errors or ["module worker failed"]),
+        metadata={
+            "domain": ctx.domain,
+            "duration_seconds": round(float(work.duration_seconds or 0.0), 3),
+        },
+    )
+    _record_module_result(ctx, module_name, result)
+    _emit_module_complete(ctx, module_name, result)
+    logger.error("Harvest module %s failed: %s", module_name, "; ".join(result.errors))
+
+
 def _prune_done(tasks: set[asyncio.Task[None]]) -> None:
     done = {task for task in tasks if task.done()}
     for task in done:
         tasks.remove(task)
+        if task.cancelled():
+            logger.warning("Harvest task was cancelled before completion")
+            continue
+        error = task.exception()
+        if error is not None:
+            logger.error("Harvest task failed: %r", error)
 
 
 __all__ = [

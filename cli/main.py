@@ -1238,8 +1238,13 @@ class DoctorCheck:
     severity: str = "warning"
 
 
+_doctor_source_health_table: Table | None = None
+
+
 async def _collect_doctor_checks() -> list[DoctorCheck]:
     """Run bounded installation, configuration, API, and network checks."""
+    global _doctor_source_health_table
+    _doctor_source_health_table = None
     from backend.config import settings
     from backend.core.harvest_cache import HarvestCache
 
@@ -1306,8 +1311,8 @@ async def _collect_doctor_checks() -> list[DoctorCheck]:
             )
         )
         cache = HarvestCache()
-        cache_files = sorted(cache.cache_dir.glob("*.json")) if cache.cache_dir.exists() else []
-        cache_names = ", ".join(path.stem for path in cache_files[:8]) or "none"
+        cache_domains = cache.list_domains()
+        cache_names = ", ".join(cache_domains[:8]) or "none"
         checks.append(
             DoctorCheck(
                 "Configuration",
@@ -1414,7 +1419,7 @@ async def _collect_doctor_checks() -> list[DoctorCheck]:
     checks.append(
         DoctorCheck(
             "Cache",
-            f"{len(cache_files)} cached domains",
+            f"{len(cache_domains)} cached domains",
             True,
             cache_names,
             "use mailaccess harvest-emails --domain example.com --clear-all-cache to reset",
@@ -1494,10 +1499,10 @@ async def _collect_doctor_checks() -> list[DoctorCheck]:
                     if name == "email_search_dork" and rate < 0.5:
                         notes = "DDG/Bing blocking"
                 table.add_row(icon, name, avg_text, rate_text, notes)
-            console.print(table)
-    except Exception as exc:  # noqa: BLE001
+            _doctor_source_health_table = table
+    except Exception:  # noqa: BLE001
         # Never let the doctor command crash on a health-DB error.
-        _LOG.debug("doctor: source-health section failed: %s", exc) if False else None
+        pass
 
     return checks
 
@@ -1523,6 +1528,8 @@ def doctor_command() -> None:
         if not check.ok:
             table.add_row("", "", f"[dim]→ {check.fix}[/dim]")
     console.print(table)
+    if _doctor_source_health_table is not None:
+        console.print(_doctor_source_health_table)
     errors = [check for check in checks if not check.ok and check.severity == "error"]
     warnings = [check for check in checks if not check.ok and check.severity != "error"]
     console.print(Rule())
@@ -2306,8 +2313,6 @@ async def _investigate(
             credential_score = _get_credential_score(rep)
             credential_band = _get_credential_band(rep)
             cred = _cred_meta(rep)
-            findings_count = len(rep.get("findings", []))
-
             module_runs = rep.get("module_runs", [])
             total_modules = len(module_runs)
             skipped_count = sum(
