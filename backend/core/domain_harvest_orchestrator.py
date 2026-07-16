@@ -2466,6 +2466,7 @@ async def run_domain_harvest(
             "package_ecosystems",
             "subdomain_intel",
             "hackertarget_hosts",
+            "ripe_stat_asn",
             "wordpress_rest",
             "security_txt",
             "name_to_github_profile",

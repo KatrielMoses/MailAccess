@@ -27,6 +27,7 @@ from ..modules.pgp_domain_email import PgpDomainEmailModule
 from ..modules.public_forge import PublicForgeModule
 from ..modules.public_surface_sweeper import PublicSurfaceSweeper
 from ..modules.pypi_email import PyPIEmailModule
+from ..modules.ripe_stat_asn import RIPEStatASNModule
 from ..modules.subdomain_intel import SubdomainIntelModule
 from ..modules.syndication_feed_sweeper import SyndicationFeedSweeper
 from ..modules.wayback import WaybackDomainHarvestModule
@@ -81,6 +82,7 @@ MODULE_WORDPRESS_REST = "wordpress_rest"
 MODULE_SYNDICATION_FEED_SWEEPER = "syndication_feed_sweeper"
 MODULE_HUNTER = "hunter"
 MODULE_HACKERTARGET = "hackertarget_hosts"
+MODULE_RIPE_STAT_ASN = "ripe_stat_asn"
 _PERSON_PIVOT_MODULES = frozenset(
     {
         MODULE_EMPLOYEE_NAMES,
@@ -251,6 +253,7 @@ async def run_adaptive_harvest(
         MODULE_WORDPRESS_REST, MODULE_SYNDICATION_FEED_SWEEPER,
         MODULE_PATTERN_VERIFY, "security_txt",
         MODULE_HACKERTARGET,
+        MODULE_RIPE_STAT_ASN,
     )
     for module_name in seeded_module_names:
         skip_reason = (
@@ -1048,6 +1051,16 @@ async def _run_module(
     assert result is not None
     out_findings = [dict(f) for f in (result.findings or []) if isinstance(f, dict)]
     new_items = result.new_items if hasattr(result, "new_items") else []
+    if module_name == MODULE_HACKERTARGET and MODULE_RIPE_STAT_ASN not in ctx.skip_modules:
+        new_items.append(
+            WorkItem(
+                kind="run_module",
+                module_name=MODULE_RIPE_STAT_ASN,
+                priority=PRIORITY_HIGH_SIGNAL,
+                track=TRACK_GUARANTEED,
+                source="hackertarget_hosts_complete",
+            )
+        )
     if module_name == MODULE_EMPLOYEE_NAMES:
         names = [
             {
@@ -1405,6 +1418,16 @@ async def _run_module_instance(
                 if ctx.progress_callback is not None else None
             ),
         )
+    if module_name == MODULE_RIPE_STAT_ASN:
+        hackertarget = (ctx.module_results or {}).get(MODULE_HACKERTARGET)
+        infrastructure = (hackertarget.metadata or {}).get("infrastructure", {}) if hackertarget else {}
+        ip_rows = infrastructure.get("ips", []) if isinstance(infrastructure, dict) else []
+        resolved_ips = [
+            str(row.get("ip"))
+            for row in ip_rows
+            if isinstance(row, dict) and row.get("ip")
+        ]
+        return await module.run(ctx.domain, resolved_ips=resolved_ips)
     name, result = await _safe_phase12_run(
         module_name,
         module,
@@ -1455,6 +1478,7 @@ def _get_module_instance(module_name: str, ctx: WorkerContext) -> Any:
         MODULE_WORDPRESS_REST: WordPressRestModule,
         MODULE_SYNDICATION_FEED_SWEEPER: SyndicationFeedSweeper,
         MODULE_HACKERTARGET: HackerTargetHostsModule,
+        MODULE_RIPE_STAT_ASN: RIPEStatASNModule,
     }
     
     from ..modules.email_identity_enrichment import EmailIdentityEnrichmentModule

@@ -1,7 +1,20 @@
 import asyncio
+from unittest.mock import AsyncMock
 
-from backend.modules.base import ModuleStatus
-from backend.modules.hackertarget_hosts import HackerTargetHostsModule, parse_hackertarget_response
+from rich.console import Console
+
+from backend.core.domain_harvest_orchestrator import DomainHarvestResult
+from backend.core.domain_harvest_report import (
+    _build_infrastructure,
+    _format_infrastructure_panel,
+    format_harvest_json_export,
+)
+from backend.core.harvest_results import _write_cidr_file as write_cidr_file
+from backend.modules.base import ModuleResult, ModuleStatus
+from backend.modules.hackertarget_hosts import (
+    HackerTargetHostsModule,
+    parse_hackertarget_response,
+)
 from backend.modules.ripe_stat_asn import RIPEStatASNModule, parse_ripe_stat
 from backend.modules.shodan_internetdb import ShodanInternetDBModule, parse_internetdb
 from cli.harvest_emails import _write_cidr_file
@@ -25,8 +38,20 @@ class _Client:
 
 
 def test_hackertarget_parses_response_correctly():
-    rows = parse_hackertarget_response("www.example.com,1.2.3.4\nevil.com,5.6.7.8", "example.com")
-    assert rows == [{"subdomain": "www.example.com", "addresses": ["1.2.3.4"], "resolved_ips": ["1.2.3.4"], "discovery_method": ["hackertarget"], "score": 0.0, "tier": "LOW", "scraped": []}]
+    rows = parse_hackertarget_response(
+        "www.example.com,1.2.3.4\nevil.com,5.6.7.8", "example.com"
+    )
+    assert rows == [
+        {
+            "subdomain": "www.example.com",
+            "addresses": ["1.2.3.4"],
+            "resolved_ips": ["1.2.3.4"],
+            "discovery_method": ["hackertarget"],
+            "score": 0.0,
+            "tier": "LOW",
+            "scraped": [],
+        }
+    ]
 
 
 def test_hackertarget_429_returns_partial():
@@ -62,7 +87,13 @@ def test_cidr_file_written_to_results_dir(monkeypatch, tmp_path):
         domain = "example.com"
 
     monkeypatch.setattr(command.Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(command, "format_harvest_json_export", lambda result: {"infrastructure": {"asns": [{"prefixes": ["192.0.2.0/24"]}]}})
+    monkeypatch.setattr(
+        command,
+        "format_harvest_json_export",
+        lambda result: {
+            "infrastructure": {"asns": [{"prefixes": ["192.0.2.0/24"]}]}
+        },
+    )
     path = _write_cidr_file(Result(), "20260716_100000")
     assert path.read_text() == "192.0.2.0/24\n"
 
@@ -75,3 +106,111 @@ def test_ripe_stat_cap_20_asns(monkeypatch):
     rows = [{"asn": 64000 + i, "name": "Example"} for i in range(25)]
     records = asyncio.run(RIPEStatASNModule().enrich(rows, client=client))
     assert len(client.calls) == len(records) == 20
+
+
+def _asn_result() -> DomainHarvestResult:
+    return DomainHarvestResult(
+        domain="example.com",
+        started_at="2026-07-16T00:00:00Z",
+        completed_at="2026-07-16T00:00:01Z",
+        duration_seconds=1.0,
+        module_results={
+            "hackertarget_hosts": ModuleResult(
+                status=ModuleStatus.SUCCESS,
+                metadata={
+                    "infrastructure": {
+                        "ips": [
+                            {
+                                "ip": "192.0.2.1",
+                                "subdomains": ["www.example.com"],
+                                "sources": ["hackertarget"],
+                            }
+                        ],
+                        "asns": [],
+                    }
+                },
+            ),
+            "ripe_stat_asn": ModuleResult(
+                status=ModuleStatus.SUCCESS,
+                metadata={
+                    "infrastructure": {
+                        "ips": [
+                            {
+                                "ip": "192.0.2.1",
+                                "asn": 64500,
+                                "sources": ["hackertarget", "ripe_stat"],
+                            }
+                        ],
+                        "asns": [
+                            {
+                                "asn": 64500,
+                                "name": "Example Networks",
+                                "ips": ["192.0.2.1"],
+                                "prefixes": ["192.0.2.0/24"],
+                                "cidrs": ["192.0.2.0/24"],
+                                "sources": ["ripe_stat"],
+                            }
+                        ],
+                    }
+                },
+            ),
+        },
+        unique_emails=[],
+        total_unique_emails=0,
+        high_confidence_count=0,
+        likely_confidence_count=0,
+        medium_confidence_count=0,
+        low_confidence_count=0,
+        role_account_count=0,
+        personal_email_count=0,
+    )
+
+
+def test_ripe_stat_run_calls_enrich_with_resolved_ips() -> None:
+    module = RIPEStatASNModule()
+    module.enrich = AsyncMock(
+        return_value={
+            64500: {
+                "asn": 64500,
+                "name": "Example Networks",
+                "org_name": "Example Networks",
+                "ips": ["192.0.2.1"],
+                "prefixes": ["192.0.2.0/24"],
+                "cidrs": ["192.0.2.0/24"],
+                "sources": ["ripe_stat"],
+            }
+        }
+    )
+
+    result = asyncio.run(
+        module.run("example.com", resolved_ips=["192.0.2.1", "192.0.2.1"])
+    )
+
+    module.enrich.assert_awaited_once_with(["192.0.2.1"])
+    assert result.status is ModuleStatus.SUCCESS
+    assert result.metadata["infrastructure"]["asns"][0]["asn"] == 64500
+
+
+def test_asn_appears_in_infrastructure_json() -> None:
+    payload = format_harvest_json_export(_asn_result())
+
+    assert payload["infrastructure"]["asns"][0]["asn"] == 64500
+    assert payload["infrastructure"]["asns"][0]["prefixes"] == [
+        "192.0.2.0/24"
+    ]
+
+
+def test_cidrs_txt_written_with_real_prefixes(tmp_path) -> None:
+    path = write_cidr_file(tmp_path / "cidrs.txt", _asn_result())
+
+    assert path is not None
+    assert path.read_text(encoding="utf-8") == "192.0.2.0/24\n"
+
+
+def test_asn_panel_not_empty_when_ips_resolved() -> None:
+    console = Console(record=True)
+    console.print(_format_infrastructure_panel(_build_infrastructure(_asn_result())))
+    output = console.export_text()
+
+    assert "AS64500 Example Networks" in output
+    assert "No ASN data resolved" not in output
