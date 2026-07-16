@@ -15,7 +15,7 @@ them are unit-tested (see tests/test_smtp_verifier.py):
    "valid SMTP, but every address accepts" servers from generating
    a flood of false-positive ``exists=True`` results.
 
-2. **Hard probe cap of 100 per domain per run.**  Callable can
+2. **Hard probe cap of 10 per domain per run.**  Callable can
    pass any ``max_probes`` it likes, but
    :meth:`SMTPVerifier.verify_batch` clamps it down.  Configurable
    downward via settings, never upward past the constant
@@ -38,7 +38,7 @@ SECONDARY SAFETY
   5xx) → STOP IMMEDIATELY, mark the rest of the batch as
   ``not_attempted``.
 * Temporary failures (450/451/452, greylisting) get ONE retry
-  after a 3-second sleep; second temp failure becomes
+  after a configurable 30-second sleep; second temp failure becomes
   ``inconclusive``.
 """
 
@@ -56,10 +56,10 @@ _LOG = logging.getLogger(__name__)
 
 
 #: Absolute upper bound on probes per domain, per run.  Settings can
-#: lower this via ``smtp_max_probes_per_domain`` but cannot raise
+#: lower this via ``smtp_verify_max_probes`` but cannot raise
 #: it past this constant — enforced inside
 #: :meth:`SMTPVerifier.verify_batch`.
-MAX_PROBES_HARD_CAP = 100
+MAX_PROBES_HARD_CAP = 10
 
 #: Anonymous sender address used in MAIL FROM.  Override only via
 #: the constructor ``sender_address`` parameter.
@@ -69,7 +69,8 @@ DEFAULT_SENDER = "probe@mailaccess.invalid"
 DEFAULT_PROBE_DELAY = 2.5
 
 #: Default SMTP connect timeout (seconds).
-DEFAULT_CONNECT_TIMEOUT = 8.0
+DEFAULT_CONNECT_TIMEOUT = 10.0
+DEFAULT_GREYLIST_RETRY_DELAY = 30.0
 
 #: SMTP response codes that imply "this mailbox exists".
 #: Per RFC 5321: 250 is the canonical "accepted"; 251/252 are
@@ -93,6 +94,7 @@ _BLOCK_CODES: frozenset[int] = frozenset(
     {500, 501, 502, 503, 504, 521, 523, 524, 530, 531, 532, 534, 535,
      541, 542, 543, 544, 545, 546, 547, 550, 551, 552, 553, 554, 555}
 )
+SERVICE_UNAVAILABLE_CODES: frozenset[int] = frozenset({421})
 _BLOCK_CODE_5_7_1 = frozenset({551})  # already covered; spec calls 551 out
 
 
@@ -199,12 +201,14 @@ class SMTPVerifier:
         sender_address: str = DEFAULT_SENDER,
         probe_delay_seconds: float = DEFAULT_PROBE_DELAY,
         connect_timeout_seconds: float = DEFAULT_CONNECT_TIMEOUT,
+        greylist_retry_delay: float = DEFAULT_GREYLIST_RETRY_DELAY,
         transport: _SMTPTransport | None = None,
     ) -> None:
         self._mx_records = list(mx_records)
         self._sender = (sender_address or DEFAULT_SENDER).strip() or DEFAULT_SENDER
         self._probe_delay = max(float(probe_delay_seconds), 0.0)
         self._connect_timeout = max(float(connect_timeout_seconds), 0.0)
+        self._greylist_retry_delay = max(float(greylist_retry_delay), 0.0)
         self._owns_transport = transport is None
         self._transport: _SMTPTransport = transport or _AsyncioSMTPTransport(
             self._sender, self._connect_timeout
@@ -237,7 +241,7 @@ class SMTPVerifier:
         if not self._mx_records:
             return None
 
-        random_local = f"nonexistent-{uuid.uuid4().hex[:12]}"
+        random_local = f"probe-{uuid.uuid4().hex[:8]}"
         probe = f"{random_local}@{domain}"
         result = await self._probe_once(probe)
         if result.blocked_signal:
@@ -272,10 +276,12 @@ class SMTPVerifier:
                     last_result.response_code in TEMP_FAILURE_CODES
                     and attempt == 1
                 ):
-                    # Greylisting / temporary — sleep 3s and retry
-                    await asyncio.sleep(3.0)
+                    # Greylisting / temporary failure: one bounded retry.
+                    await asyncio.sleep(self._greylist_retry_delay)
                     continue
             break
+        if last_result.response_code in TEMP_FAILURE_CODES:
+            last_result.verification_status = "inconclusive"
         return last_result
 
     async def _deliver_probe(self, email: str) -> SMTPVerificationResult:
@@ -305,6 +311,15 @@ class SMTPVerifier:
                     return result
                 errors.append(
                     f"{mx.host}: response {result.response_code or 'none'}"
+                )
+            except (asyncio.TimeoutError, TimeoutError) as exc:
+                return SMTPVerificationResult(
+                    email=email,
+                    exists=None,
+                    response_code=None,
+                    verification_status="smtp_timeout",
+                    mx_host=mx.host,
+                    transport_error=str(exc) or "timeout",
                 )
             except Exception as exc:  # noqa: BLE001 - defensive
                 errors.append(f"{mx.host}: {type(exc).__name__}: {exc or 'no response'}")
@@ -400,6 +415,14 @@ class SMTPVerifier:
                     exists=None,
                     response_code=rcpt_code,
                     verification_status="temporary_failure",
+                )
+            if rcpt_code in SERVICE_UNAVAILABLE_CODES:
+                return SMTPVerificationResult(
+                    email=email,
+                    exists=None,
+                    response_code=rcpt_code,
+                    blocked_signal=True,
+                    verification_status="service_unavailable",
                 )
             if rcpt_code in _BLOCK_CODES:
                 return SMTPVerificationResult(

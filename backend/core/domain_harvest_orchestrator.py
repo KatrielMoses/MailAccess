@@ -216,6 +216,9 @@ class DomainHarvestResult:
     # disabled (e.g. curl-cffi unavailable in the test environment).
     fetch_cache_stats: dict[str, int] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    from_cache: bool = False
+    cache_age_seconds: float = 0.0
+    cached_at: str | None = None
 
 
 def _normalize_module_result(
@@ -1511,6 +1514,12 @@ async def _attach_smtp_email_verification(
         return {"checked": len(findings_by_email), "status": "no_mx_records"}
 
     provider_detection = detect_provider_from_mx(mx_records, target_domain=domain)
+    if provider_detection.provider in {MailProvider.GOOGLE, MailProvider.M365}:
+        return {
+            "checked": 0,
+            "provider": provider_detection.provider.value,
+            "skipped": "provider_specific_verifier",
+        }
     shared_hosting = provider_detection.provider is MailProvider.SHARED_HOSTING
 
     async with SMTPVerifier(
@@ -1962,6 +1971,7 @@ async def _run_pattern(
     *,
     employee_names: list[EmployeeNameResult],
     enable_smtp: bool | None = None,
+    progress_callback: Any | None = None,
     signal_pool: Any | None = None,
     budget: TimeBudget | None = None,
 ) -> ModuleResult:
@@ -1981,6 +1991,10 @@ async def _run_pattern(
         and (pattern_accepted is None or "enable_smtp" in pattern_accepted)
     ):
         pattern_kwargs["enable_smtp"] = enable_smtp
+    if progress_callback is not None and (
+        pattern_accepted is None or "progress_callback" in pattern_accepted
+    ):
+        pattern_kwargs["progress_callback"] = progress_callback
     if signal_pool is not None and (
         pattern_accepted is None or "signal_pool" in pattern_accepted
     ):
@@ -2247,7 +2261,7 @@ async def _run_content_intelligence(
 # ---------------------------------------------------------------------
 async def run_domain_harvest(
     domain: str,
-    enable_smtp: bool = False,
+    enable_smtp: bool | None = None,
     enable_m365: bool = False,
     enable_yahoo: bool = False,
     *,
@@ -2276,6 +2290,9 @@ async def run_domain_harvest(
     with_subdomains: bool = False,
     subdomain_deep: bool = False,
     subdomain_calibrate: bool = False,
+    progress_callback: Any | None = None,
+    display_subscriber: Any | None = None,
+    force: bool = False,
 ) -> DomainHarvestResult:
     """Run all nine harvest modules in the recommended sequence.
 
@@ -2289,8 +2306,9 @@ async def run_domain_harvest(
         A corporate domain (e.g. ``"example.com"``).  Free-provider
         domains (gmail.com, yahoo.com, …) are rejected.
     enable_smtp:
-        Explicit opt-in for SMTP RCPT TO verification.  Default ``False``.
-        MUST-FIX M3: this is the *only* path that can enable SMTP.
+        Explicit per-run override for SMTP RCPT TO verification. ``None``
+        uses the default-on ``smtp_verify_default`` setting; the CLI's
+        ``--no-verify`` passes ``False``.
         The orchestrator does NOT mutate ``settings.enable_smtp_verification``
         — it threads the value down to ``pattern_and_verify.run`` via the
         ``enable_smtp`` keyword argument. Previously this function
@@ -2336,6 +2354,10 @@ async def run_domain_harvest(
         Defaults to a real :class:`WaybackDomainHarvestModule`.
     """
     from .harvest_runner import run_adaptive_harvest
+    from .harvest_cache import HarvestCache
+
+    if enable_smtp is None:
+        enable_smtp = bool(getattr(settings, "smtp_verify_default", True))
 
     profile = getattr(settings, "harvest_timing_profile", "t2")
     total = timeout_seconds or budget_for_profile(profile)
@@ -2356,6 +2378,17 @@ async def run_domain_harvest(
         }.items()
         if module is not None
     }
+
+    # Explicit module injection is the deterministic test/embedder seam. It
+    # must not consume or overwrite a user's normal on-disk harvest cache.
+    cache = HarvestCache()
+    cache_enabled = bool(getattr(settings, "harvest_cache_enabled", True)) and not bool(
+        module_overrides
+    )
+    if cache_enabled and not force and not cache.is_stale(domain):
+        cached = cache.get(domain)
+        if cached is not None:
+            return cached
 
     # Injected modules are the isolated/mock path used by the orchestrator
     # tests and embedders. Disable network-heavy identity enrichment there by
@@ -2386,6 +2419,7 @@ async def run_domain_harvest(
             "public_forge",
             "package_ecosystems",
             "subdomain_intel",
+            "hackertarget_hosts",
             "wordpress_rest",
             "security_txt",
             "name_to_github_profile",
@@ -2395,7 +2429,7 @@ async def run_domain_harvest(
         }
         effective_skip_modules.update(all_injected_capable - set(module_overrides))
 
-    return await run_adaptive_harvest(
+    result = await run_adaptive_harvest(
         domain=domain,
         timeout_seconds=total,
         enable_smtp=enable_smtp,
@@ -2415,7 +2449,12 @@ async def run_domain_harvest(
         with_subdomains=with_subdomains,
         subdomain_deep=subdomain_deep,
         subdomain_calibrate=subdomain_calibrate,
+        progress_callback=progress_callback,
+        display_subscriber=display_subscriber,
     )
+    if cache_enabled:
+        cache.set(domain, result)
+    return result
 
 
 async def _run_hunter(

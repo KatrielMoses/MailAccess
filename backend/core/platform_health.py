@@ -51,6 +51,26 @@ _CREATE_INDEX = """\
 CREATE INDEX IF NOT EXISTS idx_probe_log_platform_time
     ON probe_log(platform, probed_at)"""
 
+# 0.12.7 — Per-source health from harvest module runs.
+# One row per (module_name, started_at) — ``status`` is one of
+# ``success``/``partial``/``failed``/``skipped`` (mirrors ModuleStatus
+# values).  ``duration_seconds`` is the wall-clock time the module
+# spent running; ``probed_at`` is the moment the row was inserted.
+_CREATE_MODULE_RUNS_TABLE = """\
+CREATE TABLE IF NOT EXISTS module_runs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    module_name      TEXT NOT NULL,
+    domain           TEXT,
+    status           TEXT NOT NULL,
+    duration_seconds REAL,
+    started_at       TEXT,
+    probed_at        TEXT NOT NULL
+)"""
+
+_CREATE_MODULE_RUNS_INDEX = """\
+CREATE INDEX IF NOT EXISTS idx_module_runs_module_time
+    ON module_runs(module_name, probed_at)"""
+
 
 def _cutoff_ts(window_days: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
@@ -72,6 +92,8 @@ class PlatformHealthDB:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(_CREATE_TABLE)
         self._conn.execute(_CREATE_INDEX)
+        self._conn.execute(_CREATE_MODULE_RUNS_TABLE)
+        self._conn.execute(_CREATE_MODULE_RUNS_INDEX)
         self._conn.commit()
         atexit.register(self.close)
 
@@ -102,6 +124,101 @@ class PlatformHealthDB:
         with _LOCK:
             self._conn.execute("DELETE FROM probe_log WHERE platform = ?", (platform,))
             self._conn.commit()
+
+    # ── 0.12.7 module-level health tracking ───────────────────────────────────
+
+    def record_module_run(
+        self,
+        module_name: str,
+        domain: str | None,
+        status: str,
+        duration_seconds: float | None,
+        started_at: str | None = None,
+    ) -> None:
+        """Record one harvest-module execution for the per-source health view.
+
+        ``status`` should be a ModuleStatus value (or any lowercase
+        token — the column has no CHECK constraint).  ``duration_seconds``
+        is the wall-clock time the module spent running; ``None`` is
+        permitted for runtimes that don't know how long they took
+        (e.g. crashes before the timer started).  ``started_at`` is
+        the ISO 8601 string the caller used to start the timer (stored
+        for cross-referencing with the JSON export); ``probed_at`` is
+        the moment the row was actually inserted.
+        """
+        ts = datetime.now(timezone.utc).isoformat()
+        try:
+            with _LOCK:
+                self._conn.execute(
+                    "INSERT INTO module_runs"
+                    " (module_name, domain, status, duration_seconds, started_at, probed_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        str(module_name),
+                        str(domain) if domain is not None else None,
+                        str(status),
+                        float(duration_seconds) if duration_seconds is not None else None,
+                        str(started_at) if started_at is not None else None,
+                        ts,
+                    ),
+                )
+                self._conn.commit()
+        except sqlite3.Error as exc:
+            _LOG.warning("platform_health: record_module_run failed: %s", exc)
+
+    def get_module_health(
+        self,
+        module_name: str,
+        *,
+        window_hours: int = 24,
+    ) -> dict[str, Any]:
+        """Return the rolling-window health snapshot for one module.
+
+        Returns a dict with ``module_name``, ``total_runs``,
+        ``avg_duration_seconds`` (``None`` when no data), ``success_rate``
+        (a float in ``[0.0, 1.0]``), ``last_status``, and ``last_run_at``.
+        A module is considered "successful" when ``status`` is in
+        ``{"success", "complete"}`` (the canonical ModuleStatus values
+        for a clean run); partial / failed / skipped are all "not
+        successful" for this metric.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=window_hours)
+        ).isoformat()
+        with _LOCK:
+            rows = self._conn.execute(
+                "SELECT status, duration_seconds, probed_at FROM module_runs"
+                " WHERE module_name = ? AND probed_at >= ?"
+                " ORDER BY probed_at DESC, id DESC",
+                (module_name, cutoff),
+            ).fetchall()
+        total = len(rows)
+        successes = sum(1 for r in rows if str(r["status"]).lower() in {"success", "complete"})
+        durations = [
+            float(r["duration_seconds"])
+            for r in rows
+            if r["duration_seconds"] is not None
+        ]
+        avg_duration = round(sum(durations) / len(durations), 2) if durations else None
+        success_rate = round(successes / total, 3) if total else 0.0
+        last_status = str(rows[0]["status"]) if rows else None
+        last_run_at = str(rows[0]["probed_at"]) if rows else None
+        return {
+            "module_name": module_name,
+            "total_runs": total,
+            "avg_duration_seconds": avg_duration,
+            "success_rate": success_rate,
+            "last_status": last_status,
+            "last_run_at": last_run_at,
+        }
+
+    def get_all_module_names(self) -> list[str]:
+        """Distinct module names that have at least one record."""
+        with _LOCK:
+            rows = self._conn.execute(
+                "SELECT DISTINCT module_name FROM module_runs ORDER BY module_name"
+            ).fetchall()
+        return [str(r["module_name"]) for r in rows]
 
     # ── reads ─────────────────────────────────────────────────────────────────
 

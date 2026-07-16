@@ -19,6 +19,7 @@ from ..modules.email_search_dork import EmailSearchDorkModule
 from ..modules.employee_name_discovery import EmployeeNameDiscoveryModule
 from ..modules.github_commits import GitHubDomainCommitsModule
 from ..modules.github_org_members import GitHubOrgMembersModule
+from ..modules.hackertarget_hosts import HackerTargetHostsModule
 from ..modules.npm_email import NpmEmailModule
 from ..modules.package_ecosystems import PackageEcosystemsModule
 from ..modules.pattern_and_verify import PatternAndVerifyModule
@@ -74,15 +75,17 @@ MODULE_GITHUB_DOMAIN_COMMITS = "github_domain_commits"
 MODULE_EMPLOYEE_NAMES = "employee_name_discovery"
 MODULE_PATTERN_VERIFY = "pattern_and_verify"
 MODULE_PERSON_EMAIL_PIVOT = "person_email_pivot"
+MODULE_PERSONA_EMAIL_PIVOT = "persona_email_pivot"
 MODULE_EMAIL_IDENTITY_ENRICHMENT = "email_identity_enrichment"
 MODULE_WORDPRESS_REST = "wordpress_rest"
 MODULE_SYNDICATION_FEED_SWEEPER = "syndication_feed_sweeper"
 MODULE_HUNTER = "hunter"
+MODULE_HACKERTARGET = "hackertarget_hosts"
 _PERSON_PIVOT_MODULES = frozenset(
-    {MODULE_EMPLOYEE_NAMES, MODULE_PATTERN_VERIFY, MODULE_PERSON_EMAIL_PIVOT, MODULE_EMAIL_IDENTITY_ENRICHMENT, "name_to_github_profile"}
+    {MODULE_EMPLOYEE_NAMES, MODULE_PATTERN_VERIFY, MODULE_PERSON_EMAIL_PIVOT, MODULE_PERSONA_EMAIL_PIVOT, MODULE_EMAIL_IDENTITY_ENRICHMENT, "name_to_github_profile"}
 )
 _ACCUMULATING_MODULES = frozenset(
-    {MODULE_PERSON_EMAIL_PIVOT, MODULE_EMAIL_IDENTITY_ENRICHMENT, "name_to_github_profile"}
+    {MODULE_PERSON_EMAIL_PIVOT, MODULE_PERSONA_EMAIL_PIVOT, MODULE_EMAIL_IDENTITY_ENRICHMENT, "name_to_github_profile"}
 )
 _YIELD_PREDICTION_CANDIDATES = frozenset({MODULE_NPM_EMAIL, MODULE_PYPI_EMAIL, MODULE_PACKAGE_ECOSYSTEMS, MODULE_PGP_DOMAIN_EMAIL, MODULE_SYNDICATION_FEED_SWEEPER})
 _PAGE_HEADING_TOKENS = frozenset(
@@ -126,6 +129,7 @@ class WorkerContext:
     subdomain_deep: bool = False
     subdomain_calibrate: bool = False
     context_vertical: tuple[str, ...] = ()
+    progress_callback: Any | None = None
 
 
 def _is_obvious_non_person_name(name: str) -> bool:
@@ -142,7 +146,7 @@ def _is_obvious_non_person_name(name: str) -> bool:
 async def run_adaptive_harvest(
     domain: str,
     timeout_seconds: float,
-    enable_smtp: bool = False,
+    enable_smtp: bool | None = None,
     enable_m365: bool = False,
     enable_yahoo: bool = False,
     use_proxies: bool = False,
@@ -160,6 +164,8 @@ async def run_adaptive_harvest(
     with_subdomains: bool = False,
     subdomain_deep: bool = False,
     subdomain_calibrate: bool = False,
+    progress_callback: Any | None = None,
+    display_subscriber: Any | None = None,
 ) -> Any:
     from .domain_harvest_orchestrator import (
         DomainHarvestResult,
@@ -169,6 +175,8 @@ async def run_adaptive_harvest(
     )
 
     cleaned = _validate_domain(domain)
+    if enable_smtp is None:
+        enable_smtp = bool(getattr(settings, "smtp_verify_default", True))
     started = datetime.now(timezone.utc)
     started_iso = started.isoformat().replace("+00:00", "Z")
     scheduler = WorkScheduler()
@@ -208,6 +216,7 @@ async def run_adaptive_harvest(
         with_subdomains=with_subdomains,
         subdomain_deep=subdomain_deep,
         subdomain_calibrate=subdomain_calibrate,
+        progress_callback=progress_callback,
     )
 
     # Preserve a truthful per-run module inventory even when the budget is
@@ -222,6 +231,7 @@ async def run_adaptive_harvest(
         MODULE_GITHUB_DOMAIN_COMMITS, MODULE_EMPLOYEE_NAMES,
         MODULE_WORDPRESS_REST, MODULE_SYNDICATION_FEED_SWEEPER,
         MODULE_PATTERN_VERIFY, "security_txt",
+        MODULE_HACKERTARGET,
     )
     for module_name in seeded_module_names:
         module_results[module_name] = ModuleResult(
@@ -235,6 +245,14 @@ async def run_adaptive_harvest(
     
     signal_pool.register_name_subscriber(_on_name_found)
     signal_pool.register_name_subscriber(_github_name_pivot)
+    persona_seen: set[str] = set()
+    signal_pool.register_name_subscriber(
+        lambda name, source, metadata: _on_name_found_persona_pivot(
+            name, source, metadata, persona_seen
+        )
+    )
+    if display_subscriber is not None:
+        signal_pool.register_display_subscriber(display_subscriber)
     if enable_email_identity_enrichment:
         enrichment_seen: set[str] = set()
         signal_pool.register_email_subscriber(
@@ -562,6 +580,7 @@ async def _seed_scheduler(ctx: WorkerContext) -> None:
         (MODULE_PYPI_EMAIL, PRIORITY_REGISTRY),
         (MODULE_PUBLIC_SURFACE, PRIORITY_GUARANTEED),
         (MODULE_SUBDOMAIN_SURFACE, PRIORITY_HIGH_SIGNAL),
+        (MODULE_HACKERTARGET, PRIORITY_HIGH_SIGNAL),
         (MODULE_PUBLIC_FORGE, PRIORITY_HIGH_SIGNAL),
         (MODULE_PACKAGE_ECOSYSTEMS, PRIORITY_REGISTRY),
         (MODULE_PGP_DOMAIN_EMAIL, PRIORITY_REGISTRY),
@@ -580,7 +599,7 @@ async def _seed_scheduler(ctx: WorkerContext) -> None:
             continue
         seed_track = (
             TRACK_GUARANTEED
-            if module_name in {MODULE_PUBLIC_SURFACE}
+            if module_name in {MODULE_PUBLIC_SURFACE, MODULE_HACKERTARGET}
             else TRACK_OPPORTUNISTIC
         )
         await ctx.scheduler.submit(
@@ -948,6 +967,18 @@ async def _run_module_with_payload(
             # signature; pass the new keyword and let the module decide.
             accepts_fetch = True
         kwargs = {"fetch": ctx.page_cache} if accepts_fetch else {}
+        if ctx.progress_callback is not None:
+            try:
+                accepts_progress = "progress_callback" in parameters or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                )
+            except UnboundLocalError:
+                accepts_progress = True
+            if accepts_progress:
+                kwargs["progress_callback"] = (
+                    lambda action: ctx.progress_callback(module_name, action)
+                )
         result = await asyncio.wait_for(
             run_with_payload(payload, **kwargs),
             timeout=soft_timeout,
@@ -1158,6 +1189,38 @@ async def _on_email_found(
         source=f"email_subscriber:{source}",
     )]
 
+
+async def _on_name_found_persona_pivot(
+    name: str,
+    source: str,
+    metadata: dict[str, Any],
+    seen: set[str] | None = None,
+) -> list[WorkItem]:
+    """Schedule at most one public-email pivot for a qualified person."""
+    confidence = float(metadata.get("confidence_score", metadata.get("confidence", 0.0)))
+    cleaned = " ".join(str(name).split())
+    if confidence < 0.50 or len(cleaned.split()) < 2:
+        return []
+    if not bool(getattr(settings, "persona_pivot_enabled", True)):
+        return []
+    if seen is not None:
+        key = cleaned.casefold()
+        if key in seen or len(seen) >= int(getattr(settings, "persona_pivot_max_names", 10)):
+            return []
+        seen.add(key)
+    return [WorkItem(
+        kind="run_module",
+        module_name=MODULE_PERSONA_EMAIL_PIVOT,
+        payload={
+            "name": cleaned,
+            "domain": metadata.get("domain", ""),
+            "title": metadata.get("title_or_role", ""),
+        },
+        priority=PRIORITY_HIGH_SIGNAL,
+        track=TRACK_OPPORTUNISTIC,
+        source="name_subscriber:persona_pivot",
+    )]
+
 async def _run_module_instance(
     module_name: str,
     module: Any,
@@ -1187,6 +1250,10 @@ async def _run_module_instance(
             enable_smtp=ctx.enable_smtp,
             signal_pool=ctx.signal_pool,
             budget=ctx.budget,
+            progress_callback=(
+                (lambda action: ctx.progress_callback(module_name, action))
+                if ctx.progress_callback is not None else None
+            ),
         )
     name, result = await _safe_phase12_run(
         module_name,
@@ -1207,6 +1274,10 @@ async def _run_module_instance(
         enable_scraping=not ctx.subdomain_calibrate,
         context_vertical=ctx.context_vertical,
         scrape_session=ctx.stealth_session,
+        progress_callback=(
+            (lambda action: ctx.progress_callback(module_name, action))
+            if ctx.progress_callback is not None else None
+        ),
     )
     return _normalize_module_result(name, result)
 
@@ -1233,16 +1304,19 @@ def _get_module_instance(module_name: str, ctx: WorkerContext) -> Any:
         MODULE_PATTERN_VERIFY: PatternAndVerifyModule,
         MODULE_WORDPRESS_REST: WordPressRestModule,
         MODULE_SYNDICATION_FEED_SWEEPER: SyndicationFeedSweeper,
+        MODULE_HACKERTARGET: HackerTargetHostsModule,
     }
     
     from ..modules.email_identity_enrichment import EmailIdentityEnrichmentModule
     from ..modules.name_to_github_profile import NameToGitHubProfileModule
     from ..modules.person_email_pivot import PersonEmailPivotModule
+    from ..modules.persona_email_pivot import PersonaEmailPivotModule
     from ..modules.security_txt import SecurityTxtModule
     
     factories["security_txt"] = SecurityTxtModule
     factories["name_to_github_profile"] = NameToGitHubProfileModule
     factories[MODULE_PERSON_EMAIL_PIVOT] = PersonEmailPivotModule
+    factories[MODULE_PERSONA_EMAIL_PIVOT] = PersonaEmailPivotModule
     factories[MODULE_EMAIL_IDENTITY_ENRICHMENT] = EmailIdentityEnrichmentModule
 
     try:
@@ -1344,6 +1418,28 @@ def _emit_module_complete(
         return
     status_value = result.status.value if hasattr(result.status, "value") else str(result.status)
     errors = list(result.errors or [])
+    # 0.12.7: persist a per-source health row so the `mailaccess
+    # doctor` command can surface success rate + average duration
+    # over the last 24h.  Done BEFORE invoking the callback so a
+    # misbehaving callback never silently blocks the health
+    # record from being written.
+    try:
+        from .platform_health import get_health_db
+
+        health_db = get_health_db()
+        duration = getattr(result, "duration_seconds", None) or 0.0
+        if not duration:
+            meta = getattr(result, "metadata", {}) or {}
+            if isinstance(meta, dict) and "elapsed_seconds" in meta:
+                duration = float(meta["elapsed_seconds"] or 0.0)
+        health_db.record_module_run(
+            module_name=module_name,
+            domain=ctx.domain if hasattr(ctx, "domain") else None,
+            status=status_value,
+            duration_seconds=duration if duration else None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("platform_health: record_module_run failed: %s", exc)
     try:
         ctx.on_module_complete(module_name, status_value, errors)
     except TypeError:

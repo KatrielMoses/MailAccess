@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,10 +42,7 @@ _INDEX_BASES = (
 )
 _COLLINFO_URL = f"{_INDEX_BASE}/collinfo.json"
 _CDX_BASE = f"{_INDEX_BASE}/cdx-by-index"
-_CC_UA = (
-    f"MailAccess/{APP_VERSION} "
-    "(+https://github.com/KatrielMoses/MailAccess)"
-)
+_CC_UA = f"MailAccess/{APP_VERSION} (+https://github.com/KatrielMoses/MailAccess)"
 _DEFAULT_TIMEOUT = 10.0
 _CDX_TIMEOUT = 15.0
 _CACHE_TTL_SECONDS = 24 * 60 * 60
@@ -55,9 +53,7 @@ _COLLECTION_CACHE_PATH = Path.home() / ".mailaccess" / "cache" / "commoncrawl_co
 # (about / team / contact / leadership / people / staff / board /
 # press / news).  ``( )`` groups are alternations the index treats
 # as "match any of these path segments".
-_HIGH_SIGNAL_PATH_REGEX = (
-    "(team|about|contact|leadership|people|staff|board|press|news)"
-)
+_HIGH_SIGNAL_PATH_REGEX = "(team|about|contact|leadership|people|staff|board|press|news)"
 
 
 @dataclass
@@ -178,9 +174,15 @@ class CommonCrawlClient:
             ids = payload.get("ids") if isinstance(payload, dict) else None
             if not isinstance(ids, list) or not ids:
                 return
-            valid_ids = tuple(item for item in ids if isinstance(item, str) and item.startswith("CC-MAIN-"))
+            valid_ids = tuple(
+                item for item in ids if isinstance(item, str) and item.startswith("CC-MAIN-")
+            )
             if valid_ids:
-                latest = payload.get("latest") if isinstance(payload.get("latest"), str) else valid_ids[0]
+                latest = (
+                    payload.get("latest")
+                    if isinstance(payload.get("latest"), str)
+                    else valid_ids[0]
+                )
                 self._cached_collections = _CollInfo(valid_ids, latest, time.monotonic())
                 self._cached_index = latest
                 self._cached_at = time.monotonic()
@@ -282,15 +284,11 @@ class CommonCrawlClient:
                 payload = response.json()
             except json.JSONDecodeError:
                 _LOG.warning("Common Crawl collinfo.json returned invalid JSON (list)")
-                return (
-                    list(self._cached_collections.ids) if self._cached_collections else []
-                )
+                return list(self._cached_collections.ids) if self._cached_collections else []
 
             info = self._parse_collinfo(payload)
             if info is None:
-                return (
-                    list(self._cached_collections.ids) if self._cached_collections else []
-                )
+                return list(self._cached_collections.ids) if self._cached_collections else []
 
             self._cached_collections = info
             self._cached_index = info.latest
@@ -304,6 +302,7 @@ class CommonCrawlClient:
         max_collections: int = 6,
         max_records_per_collection: int = 250,
         aggressive: bool = False,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> list[CCRecord]:
         """Sweep multiple Common Crawl collections for *domain*.
 
@@ -391,14 +390,30 @@ class CommonCrawlClient:
             return combined
 
         flat: list[CCRecord] = []
-        # Common Crawl asks clients not to run multiple CDX requests at once.
-        # Keep collection order deterministic and let _get enforce the
-        # courtesy interval between requests.
-        for coll in collection_ids:
-            try:
-                flat.extend(await _sweep_one(coll))
-            except Exception:  # pragma: no cover - defensive per-collection guard
-                _LOG.debug("query_multi_collection: collection %s sweep failed", coll, exc_info=True)
+        total_collections = len(collection_ids)
+        for offset in range(0, total_collections, 3):
+            batch = collection_ids[offset : offset + 3]
+            for index, _coll in enumerate(batch, offset + 1):
+                if progress_callback is not None:
+                    progress_callback(
+                        f"Fetching collection {index} of {total_collections}..."
+                    )
+            results = await asyncio.gather(
+                *(
+                    asyncio.wait_for(_sweep_one(coll), timeout=15.0)
+                    for coll in batch
+                ),
+                return_exceptions=True,
+            )
+            for coll, value in zip(batch, results):
+                if isinstance(value, BaseException):
+                    _LOG.warning(
+                        "query_multi_collection: collection %s timed out or failed: %s",
+                        coll,
+                        value,
+                    )
+                    continue
+                flat.extend(value)
 
         return self._dedupe_across_collections(flat)
 

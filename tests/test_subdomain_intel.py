@@ -122,7 +122,9 @@ async def test_passive_sources_are_ordered_and_deduplicated(monkeypatch):
     monkeypatch.setenv("CERTSPOTTER_API_KEY", "present")
 
     result = await SubdomainIntelModule().run("example.com", client=Client({}), enable_scraping=False)
-    assert calls == ["axfr", "crt.sh", "subdomain.center", "wayback", "certspotter"]
+    assert calls[0] == "axfr"
+    assert set(calls[1:3]) == {"crt.sh", "certspotter"}
+    assert calls[3:] == ["subdomain.center", "wayback"]
     assert {item["subdomain"] for item in result.findings} == {
         "team.example.com", "docs.example.com", "https.example.com"
     }

@@ -133,6 +133,7 @@ class EmailSearchDorkModule(BaseModule):
         use_proxies: bool = False,
         fetch: CachedFetch | None = None,
         signal_pool: Any | None = None,
+        progress_callback: Any | None = None,
     ) -> ModuleResult:  # type: ignore[override]
         if not settings.enable_email_search_dork:
             return ModuleResult(
@@ -291,6 +292,8 @@ class EmailSearchDorkModule(BaseModule):
                     nonlocal ddg_blocked, ddg_failed
                     consecutive_errors = 0
                     for q in queries_for_run:
+                        if progress_callback:
+                            progress_callback("Querying DDG...")
                         results, captcha = await ddg.search(q.query)
                         error = getattr(ddg, "_last_error", None)
                         ddg_findings.append(
@@ -309,12 +312,16 @@ class EmailSearchDorkModule(BaseModule):
                         consecutive_errors = 0
                         if captcha:
                             ddg_blocked = True
+                            if progress_callback:
+                                progress_callback("DDG CAPTCHA — trying Bing...")
                             return
 
                 async def run_bing() -> None:
                     nonlocal bing_blocked, bing_failed
                     consecutive_errors = 0
                     for q in queries_for_run:
+                        if progress_callback:
+                            progress_callback("Querying Bing...")
                         results, blocked = await bing.search(q.query)
                         error = getattr(bing, "_last_error", None)
                         bing_findings.append(

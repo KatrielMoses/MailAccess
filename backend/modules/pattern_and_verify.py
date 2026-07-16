@@ -31,6 +31,7 @@ from ..core.email_pattern_generator import (
     generate_patterns,
 )
 from ..core.email_validator import validate_email_batch
+from ..core.mail_provider import MailProvider, detect_provider_from_mx
 from ..core.mx_resolver import MXRecord, resolve_mx
 from ..core.role_classifier import classify_email
 from ..core.smtp_verifier import (
@@ -112,6 +113,7 @@ class PatternAndVerifyModule(BaseModule):
         enable_smtp: bool | None = None,
         enable_native_validation: bool = True,
         signal_pool: Any | None = None,
+        progress_callback: Any | None = None,
     ) -> ModuleResult:  # type: ignore[override]
         """Generate email patterns and optionally verify via SMTP.
 
@@ -123,8 +125,8 @@ class PatternAndVerifyModule(BaseModule):
             Optional list of names from upstream discovery. Empty list
             is fine — the module returns SUCCESS with no findings.
         enable_smtp:
-            Explicit SMTP opt-in. MUST-FIX M3: when the orchestrator
-            calls this method it MUST pass ``enable_smtp`` explicitly,
+            Explicit per-run SMTP override. The orchestrator passes this
+            value explicitly (default-on; ``--no-verify`` passes False),
             which is the only value consulted. The function falls back
             to ``settings.enable_smtp_verification`` ONLY when called
             standalone (e.g. from a test) and ``enable_smtp`` is None.
@@ -185,14 +187,20 @@ class PatternAndVerifyModule(BaseModule):
         medium_threshold = float(settings.pattern_medium_confidence_threshold)
 
         # ------------------------------------------------------------------
-        # 1. SMTP opt-in.  MUST-FIX M3: explicit parameter wins; only
+        # 1. SMTP policy. The explicit per-run parameter wins; only
         #    fall back to settings when called outside an orchestrator.
         # ------------------------------------------------------------------
         smtp_enabled = (
-            bool(enable_smtp)
-            if enable_smtp is not None
-            else bool(settings.enable_smtp_verification)
+            bool(enable_smtp) if enable_smtp is not None else bool(settings.smtp_verify_default)
         )
+
+        def _progress(action: str) -> None:
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(action)
+            except Exception:  # display callbacks never affect collection
+                _LOG.debug("pattern_and_verify progress callback failed", exc_info=True)
 
         batch_meta: dict[str, Any] = {}
         probes_used_total = 0
@@ -399,25 +407,36 @@ class PatternAndVerifyModule(BaseModule):
             # the same MX — a textbook anti-abuse trigger pattern.
             mx_records: list[MXRecord] = []
             try:
+                _progress(f"Resolving MX records for {cleaned_domain}...")
                 mx_records = await resolve_mx(cleaned_domain)
             except Exception as exc:  # noqa: BLE001
-                _LOG.warning(
-                    "pattern_and_verify: MX resolution failed: %s", exc
-                )
+                _LOG.warning("pattern_and_verify: MX resolution failed: %s", exc)
 
             if not mx_records:
+                _LOG.info("pattern_and_verify: no MX records found")
                 batch_meta["stop_reason"] = "no_mx_records"
                 _generate_without_probing()
             else:
+                provider = detect_provider_from_mx(
+                    mx_records, target_domain=cleaned_domain
+                ).provider
+                batch_meta["mail_provider"] = provider.value
+                if provider in {MailProvider.GOOGLE, MailProvider.M365}:
+                    # Cloud providers deliberately suppress reliable RCPT
+                    # mailbox enumeration. The harvest tail owns their
+                    # provider-specific verifier; do not contact SMTP here.
+                    batch_meta["provider_route"] = provider.value
+                    batch_meta["stop_reason"] = "provider_specific_verifier"
+                    _generate_without_probing()
+                    mx_records = []
+            if mx_records:
                 async with SMTPVerifier(
                     mx_records=mx_records,
-                    sender_address=(
-                        settings.smtp_sender_address or DEFAULT_SENDER
-                    ),
-                    probe_delay_seconds=float(
-                        settings.smtp_probe_delay_seconds
-                    )
+                    sender_address=(settings.smtp_sender_address or DEFAULT_SENDER),
+                    probe_delay_seconds=float(settings.smtp_probe_delay_seconds)
                     or DEFAULT_PROBE_DELAY,
+                    connect_timeout_seconds=float(settings.smtp_verify_timeout),
+                    greylist_retry_delay=float(settings.smtp_greylist_retry_delay),
                 ) as verifier:
                     # MUST-FIX M1: catch-all detection runs FIRST and
                     # ALWAYS. The previous implementation skipped this
@@ -451,6 +470,7 @@ class PatternAndVerifyModule(BaseModule):
                         # skipped instead of re-probed). Each name's
                         # first hit still consumes one SMTP probe.
                         cap = min(
+                            int(settings.smtp_verify_max_probes),
                             int(settings.smtp_max_probes_per_domain),
                             MAX_PROBES_HARD_CAP,
                         )
@@ -475,8 +495,7 @@ class PatternAndVerifyModule(BaseModule):
                                         reason="smtp_probe_budget_exhausted",
                                     )
                                 batch_meta["stop_reason"] = (
-                                    batch_meta.get("stop_reason")
-                                    or "budget_exhausted"
+                                    batch_meta.get("stop_reason") or "budget_exhausted"
                                 )
                                 _LOG.warning(
                                     "SMTP probe budget exhausted - %s names skipped",
@@ -486,15 +505,14 @@ class PatternAndVerifyModule(BaseModule):
                             pats = _generate_for_employee(
                                 emp,
                                 confirmed_template=confirmed_pattern,
-                                remaining_probe_budget=remaining_budget,
+                                remaining_probe_budget=None,
                             )
                             if not pats:
                                 continue
                             for pattern_offset, pattern in enumerate(pats):
                                 if probes_used_total >= cap:
                                     batch_meta["stop_reason"] = (
-                                        batch_meta.get("stop_reason")
-                                        or "budget_exhausted"
+                                        batch_meta.get("stop_reason") or "budget_exhausted"
                                     )
                                     # remaining candidates already
                                     # marked unverified by initial
@@ -502,13 +520,11 @@ class PatternAndVerifyModule(BaseModule):
                                     cand_index += 1
                                     continue
                                 try:
-                                    res = await verifier.verify_single(
-                                        pattern.email
-                                    )
+                                    _progress(f"SMTP probing {pattern.email}...")
+                                    res = await verifier.verify_single(pattern.email)
                                 except Exception as exc:  # noqa: BLE001
                                     _LOG.warning(
-                                        "pattern_and_verify: SMTP probe "
-                                        "error for %s: %s",
+                                        "pattern_and_verify: SMTP probe error for %s: %s",
                                         pattern.email,
                                         exc,
                                     )
@@ -526,9 +542,7 @@ class PatternAndVerifyModule(BaseModule):
                                 if getattr(res, "blocked_signal", False):
                                     # Mid-batch block — STOP, mark
                                     # remaining not_attempted.
-                                    batch_meta["stop_reason"] = (
-                                        "blocked_mid_batch"
-                                    )
+                                    batch_meta["stop_reason"] = "blocked_mid_batch"
                                     stop_for_block = True
                                     break
                                 if getattr(res, "exists", None) is True:
@@ -539,29 +553,22 @@ class PatternAndVerifyModule(BaseModule):
                                     # is O(n) per iter → O(n²) overall.
                                     if cand_index < len(candidates):
                                         cand = candidates[cand_index]
-                                        cand.source_type = (
-                                            _SOURCE_TYPE_VERIFIED
-                                        )
-                                        cand.verification_status = (
-                                            "verified"
-                                        )
-                                        cand.confidence_score = (
-                                            0.5 * 1.4
-                                        )
+                                        cand.source_type = _SOURCE_TYPE_VERIFIED
+                                        cand.verification_status = "verified"
+                                        cand.confidence_score = 0.65 * 1.5
                                     if confirmed_pattern is None:
-                                        confirmed_pattern = (
-                                            pattern.pattern_template
-                                        )
+                                        confirmed_pattern = pattern.pattern_template
                                         if signal_pool is not None and hasattr(
                                             signal_pool, "emit_confirmed_pattern"
                                         ):
-                                            signal_pool.emit_confirmed_pattern(
-                                                confirmed_pattern
-                                            )
+                                            signal_pool.emit_confirmed_pattern(confirmed_pattern)
                                     # Stop probing patterns for this
                                     # name — we found a working one.
                                     cand_index += len(pats) - pattern_offset
                                     break
+                                if getattr(res, "exists", None) is False:
+                                    if cand_index < len(candidates):
+                                        candidates[cand_index].verification_status = "not_found"
                                 cand_index += 1
                             if stop_for_block:
                                 break
@@ -585,6 +592,8 @@ class PatternAndVerifyModule(BaseModule):
         hunter_match_count = 0
         hunter_mismatch_count = 0
         for cand in candidates:
+            if cand.verification_status == "not_found":
+                continue
             classification = classify_email(cand.email)
             if classification.is_role:
                 # Skip — these are noise matches, not a person.
@@ -596,9 +605,7 @@ class PatternAndVerifyModule(BaseModule):
                 is_ca_attested=False,
                 oldest_timestamp=None,
             )
-            final_score = max(
-                cand.confidence_score, float(breakdown.score)
-            )
+            final_score = max(cand.confidence_score, float(breakdown.score))
             label = label_for_score(final_score)
             # P1: compute the hunter adjustment at emission time so
             # the breakdown carries the exact delta.  We recompute
@@ -626,9 +633,7 @@ class PatternAndVerifyModule(BaseModule):
             }
             if hunter_adjustment is not None:
                 finding_metadata["hunter_pattern"] = hunter_pattern_template
-                finding_metadata["hunter_pattern_adjustment"] = round(
-                    hunter_adjustment, 4
-                )
+                finding_metadata["hunter_pattern_adjustment"] = round(hunter_adjustment, 4)
             findings.append(
                 {
                     "platform": "pattern_and_verify",

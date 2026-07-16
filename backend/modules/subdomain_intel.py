@@ -467,6 +467,123 @@ async def resolve_candidates(
     return {hostname: addresses for hostname, addresses in resolved if addresses}
 
 
+def _txt_value(record: object) -> str:
+    """Normalize dnspython TXT rdata to a plain string."""
+    value = getattr(record, "to_text", lambda: str(record))()
+    return str(value).strip().strip('"')
+
+
+async def lookup_asn_team_cymru(ip: str, *, resolver: object | None = None) -> dict[str, object] | None:
+    """Resolve an IPv4 address to its origin ASN via Team Cymru DNS."""
+    try:
+        parsed = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if parsed.version != 4 or parsed.is_private or parsed.is_loopback or parsed.is_reserved:
+        return None
+    dns_resolver = resolver or dns.asyncresolver
+    try:
+        answers = await dns_resolver.resolve(f"{parsed.reverse_pointer}.origin.asn.cymru.com", "TXT")
+    except Exception:
+        return None
+    for answer in answers:
+        fields = [part.strip() for part in _txt_value(answer).split("|")]
+        if len(fields) < 5 or not fields[0].isdigit():
+            continue
+        return {
+            "asn": int(fields[0]),
+            "prefix": fields[1],
+            "country": fields[2],
+            "rir": fields[3],
+            "date": fields[4],
+        }
+    return None
+
+
+async def lookup_asn_org(asn: int, *, resolver: object | None = None) -> dict[str, object] | None:
+    """Resolve a Team Cymru ASN number to its organization name."""
+    dns_resolver = resolver or dns.asyncresolver
+    try:
+        answers = await dns_resolver.resolve(f"AS{int(asn)}.asn.cymru.com", "TXT")
+    except Exception:
+        return None
+    for answer in answers:
+        fields = [part.strip() for part in _txt_value(answer).split("|")]
+        if len(fields) < 5 or not fields[0].isdigit():
+            continue
+        return {
+            "asn": int(fields[0]),
+            "country": fields[1],
+            "rir": fields[2],
+            "date": fields[3],
+            "name": " | ".join(fields[4:]).strip(),
+        }
+    return None
+
+
+async def aggregate_infrastructure(
+    findings: list[dict[str, object]], *, resolver: object | None = None
+) -> dict[str, list[dict[str, object]]]:
+    """Aggregate resolved subdomain IPs by origin ASN."""
+    ip_hosts: dict[str, set[str]] = {}
+    ip_sources: dict[str, set[str]] = {}
+    for finding in findings:
+        host = str(finding.get("subdomain") or "")
+        addresses = finding.get("resolved_ips") or finding.get("addresses") or []
+        for raw_ip in addresses if isinstance(addresses, (list, tuple, set)) else []:
+            ip = str(raw_ip)
+            ip_hosts.setdefault(ip, set()).add(host)
+            for source in finding.get("discovery_method") or []:
+                ip_sources.setdefault(ip, set()).add(str(source))
+
+    lookups = await asyncio.gather(
+        *(lookup_asn_team_cymru(ip, resolver=resolver) for ip in sorted(ip_hosts)),
+        return_exceptions=True,
+    )
+    asn_ips: dict[int, list[str]] = {}
+    asn_records: dict[int, dict[str, object]] = {}
+    ip_asns: dict[str, int] = {}
+    for ip, record in zip(sorted(ip_hosts), lookups):
+        if isinstance(record, BaseException) or not isinstance(record, dict):
+            continue
+        asn = int(record["asn"])
+        ip_asns[ip] = asn
+        asn_ips.setdefault(asn, []).append(ip)
+        asn_records.setdefault(asn, record)
+
+    orgs = await asyncio.gather(
+        *(lookup_asn_org(asn, resolver=resolver) for asn in sorted(asn_ips)),
+        return_exceptions=True,
+    )
+    asn_rows: list[dict[str, object]] = []
+    for asn, org in zip(sorted(asn_ips), orgs):
+        row = dict(asn_records[asn])
+        if isinstance(org, dict):
+            row.update({key: value for key, value in org.items() if key != "asn"})
+        row["asn"] = asn
+        row["name"] = row.get("name") or "Unknown"
+        row["ips"] = sorted(asn_ips[asn])
+        row["cidrs"] = sorted(
+            {str(asn_records[asn].get("prefix") or "")} - {""}
+        )
+        row["subdomains"] = sorted({host for ip in asn_ips[asn] for host in ip_hosts[ip]})
+        row["sources"] = sorted({source for ip in asn_ips[asn] for source in ip_sources.get(ip, set())})
+        asn_rows.append(row)
+
+    return {
+        "ips": [
+            {
+                "ip": ip,
+                "asn": ip_asns.get(ip),
+                "subdomains": sorted(ip_hosts[ip]),
+                "sources": sorted(ip_sources.get(ip, set())),
+            }
+            for ip in sorted(ip_hosts)
+        ],
+        "asns": asn_rows,
+    }
+
+
 async def _content_hash(client: httpx.AsyncClient, hostname: str) -> str | None:
     for scheme in ("https", "http"):
         try:
@@ -838,6 +955,7 @@ class SubdomainIntelModule(BaseModule):
         signal_pool: object | None = None,
         budget: object | None = None,
         budget_seconds: float | None = None,
+        progress_callback: object | None = None,
     ) -> ModuleResult:
         domain = domain.strip().lower().rstrip(".")
         if not domain or "." not in domain:
@@ -869,18 +987,29 @@ class SubdomainIntelModule(BaseModule):
         wordlist = load_wordlist()
 
         try:
+            if callable(progress_callback):
+                progress_callback(f"Resolving {domain} passive sources...")
             axfr = await discover_axfr(domain, resolver=resolver)
             if axfr:
                 result.axfr_succeeded = True
                 result.add(axfr, "axfr")
             else:
+                certificate_results = await asyncio.gather(
+                    discover_crtsh(http, domain),
+                    discover_certspotter(http, domain),
+                    return_exceptions=True,
+                )
+                for source, value in zip(
+                    ("crt.sh", "certspotter"), certificate_results
+                ):
+                    if isinstance(value, BaseException):
+                        result.errors.append(f"{source}: {value}")
+                    else:
+                        result.add(value, source)
                 sources = [
-                    ("crt.sh", discover_crtsh),
                     ("subdomain.center", discover_subdomain_center),
                     ("wayback", discover_wayback),
                 ]
-                if getattr(settings, "certspotter_api_key", None) or os.getenv("CERTSPOTTER_API_KEY"):
-                    sources.append(("certspotter", discover_certspotter))
                 for source, discoverer in sources:
                     try:
                         result.add(await discoverer(http, domain), source)
@@ -916,6 +1045,9 @@ class SubdomainIntelModule(BaseModule):
         # Component 2: remove Tier 3 noise before any DNS work.
         filter_tier3(result.candidates, wordlist.get("tier3_exclude", []))
         try:
+            if callable(progress_callback):
+                for hostname in list(result.candidates)[:10]:
+                    progress_callback(f"Resolving {hostname}...")
             result.addresses = await resolve_candidates(http, result.candidates)
         except Exception as exc:
             result.errors.append(f"dns: {exc}")
@@ -964,16 +1096,75 @@ class SubdomainIntelModule(BaseModule):
         if enable_scraping and scrape_scores and slice_budget.can_start():
             scraped = await scrape_scored_candidates(domain, scrape_scores, session=scrape_session, budget=slice_budget)
 
-        findings = [
+        subdomain_findings = [
             {
                 "subdomain": host,
                 "discovery_method": sorted(result.candidates[host]),
                 "addresses": sorted(result.addresses.get(host, set())),
+                "resolved_ips": sorted(result.addresses.get(host, set())),
                 **scores.get(host, {"score": 0.0, "tier": "SKIP", "is_staging": is_staging_hostname(host), "evidence": ["probe_failed"]}),
                 "scraped": scraped.get(host, []),
             }
             for host in sorted(result.hosts)
         ]
+        # Keep the email findings emitted by the legacy subdomain surface
+        # collector.  The 0.12.3 replacement retained only the host records,
+        # which silently removed published role and personal addresses from
+        # the harvest aggregate.
+        email_findings: list[dict[str, object]] = []
+        for host_finding in subdomain_findings:
+            for record in host_finding.get("scraped", []) or []:
+                if not isinstance(record, dict) or not isinstance(record.get("email"), str):
+                    continue
+                email = str(record["email"]).strip().lower()
+                if "@" not in email:
+                    continue
+                email_findings.append({
+                    "platform": self.name,
+                    "profile_url": record.get("url"),
+                    "username": email.split("@", 1)[0],
+                    "metadata": {
+                        "email": email,
+                        "on_domain": email.rsplit("@", 1)[-1] == domain,
+                        "subdomain": host_finding["subdomain"],
+                        "url": record.get("url"),
+                        "source_type": "subdomain_surface",
+                        "source_types": ["structured_page"],
+                        "is_role": bool(record.get("is_role")),
+                    },
+                })
+        findings = subdomain_findings + email_findings
+        infrastructure = await aggregate_infrastructure(subdomain_findings, resolver=resolver)
+        from .ripe_stat_asn import RIPEStatASNModule
+        from .shodan_internetdb import ShodanInternetDBModule
+
+        shodan_records = await ShodanInternetDBModule().enrich(
+            [str(row.get("ip")) for row in infrastructure["ips"]],
+            client=http,
+        )
+        for row in infrastructure["ips"]:
+            ip = str(row.get("ip") or "")
+            if ip in shodan_records:
+                row["shodan_data"] = shodan_records[ip]
+        ripe_records = await RIPEStatASNModule().enrich(
+            infrastructure["asns"], client=http
+        )
+        for row in infrastructure["asns"]:
+            try:
+                asn = int(row.get("asn"))
+            except (TypeError, ValueError):
+                continue
+            record = ripe_records.get(asn)
+            if not record:
+                continue
+            prefixes = sorted(
+                {
+                    *(str(value) for value in row.get("cidrs", []) if value),
+                    *(str(value) for value in record.get("prefixes", []) if value),
+                }
+            )
+            row["prefixes"] = prefixes
+            row["cidrs"] = prefixes
         if signal_pool is not None and findings:
             try:
                 published = await publish_subdomain_signals(signal_pool, domain, findings)
@@ -1003,6 +1194,9 @@ class SubdomainIntelModule(BaseModule):
                 "scrape_tiers": sorted(behavior["scrape_tiers"]),
             },
             "signals_published": published,
+            "infrastructure": infrastructure,
+            "shodan_ips_enriched": len(shodan_records),
+            "ripe_asns_enriched": len(ripe_records),
             "budget": {
                 "total_seconds": slice_budget.total_seconds,
                 "soft_seconds": slice_budget.soft_seconds,

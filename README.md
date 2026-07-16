@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.12.3&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.12.7&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -22,18 +22,13 @@ Built for security researchers, OSINT analysts, and penetration testers operatin
 ### CLI only (no Docker)
 
 ```bash
-pip install mailaccess
+pip install 'mailaccess[harvest]'
 
-# Option A: auto-start (simplest)
+# Start the backend in a separate terminal before investigating
+mailaccess serve
 mailaccess investigate you@example.com
-# Server starts automatically, runs investigation,
-# stops when done.
 
-# Option B: keep server running
-mailaccess serve  # in one terminal
-mailaccess investigate you@example.com  # in another
-
-# Option C: full stack with Web UI
+# Full stack with Web UI
 git clone https://github.com/KatrielMoses/MailAccess
 docker compose up -d
 ```
@@ -292,7 +287,7 @@ mailaccess harvest-emails --domain example.com
 With SMTP verification (opt-in):
 
 ```bash
-mailaccess harvest-emails --domain example.com --verify-smtp
+mailaccess harvest-emails --domain example.com
 ```
 
 Export results:
@@ -308,7 +303,7 @@ Key flags:
 | Flag | What it does |
 |---|---|
 | `--domain DOMAIN` | Target domain (required). Rejects free providers. |
-| `--verify-smtp` | SMTP RCPT TO verification (opt-in only — see safety notes). |
+| `--no-verify` | Skip the SMTP verification that runs by default. |
 | `--use-proxies` | Route the proxy-aware harvest modules through the configured ScrapingAnt transport. |
 | `--proxy-fallback-ok` | Allow direct fallback if ScrapingAnt proxy fails. Without this flag, proxy failures raise an error instead of falling back silently. |
 | `--lite` | Faster, fewer dork queries per engine. |
@@ -531,6 +526,44 @@ datacenter proxies. Off by default.
 Sign up: https://scrapingant.com/?ref=mzliyzh
 
 ## Changelog
+
+### 0.12.7
+
+- Default JSON export to `~/.mailaccess/results/` on every harvest
+- Live log file written alongside JSON — `tail -f` for real-time feed
+- Auto-cleanup: 50 files per domain max, 30-day retention
+- `mailaccess keys test {KEY_NAME}` — validates API key with live call
+- Doctor command: per-source health from `platform_health.db`
+- Supplementary output files: `subdomains.txt`, `emails.txt`, `cidrs.txt`,
+  `nuclei_targets.txt`, `report.md` — all written automatically
+- `--no-extras` flag to skip supplementary files
+- `--no-export` flag to skip all file output
+- All output paths printed at end of every harvest
+
+### 0.12.6
+
+- Result cache: repeat harvests return in under one second from `~/.mailaccess/cache/`.
+- Cache TTL defaults to one hour; use `--force`, `--clear-cache`, or `--clear-all-cache` to invalidate it.
+- PGP keyservers run three concurrent queries, Common Crawl collections run in batches of three, and crt.sh runs alongside CertSpotter.
+- Added no-key HackerTarget subdomain discovery and Shodan InternetDB port, hostname, and CVE enrichment.
+- Added RIPE Stat ASN prefix discovery with masscan/nmap-ready CIDR output files.
+- Added `mailaccess doctor` diagnostics for installation, backend, configuration, API keys, network access, and cache state.
+
+### 0.12.5
+
+- SMTP verification now runs by default; use `--no-verify` to skip it.
+- Catch-all detection is mandatory before probing, with a 10-address cap and one 30-second greylist retry.
+- Google and Microsoft 365 MX routes bypass direct SMTP enumeration in favor of provider-aware verification.
+- Live progress reports module actions, findings, elapsed time, ETA, and writes a tail-friendly live log.
+- Qualified discovered names trigger bounded persona email searches across the public web.
+- Personal email candidates are labeled as unverified leads, hidden behind `--show-personal`, and always included in JSON exports.
+- Removed the `--verify-smtp` flag (breaking CLI change).
+
+### 0.12.4
+
+- Restored subdomain email extraction and role-account aggregation.
+- Added Team Cymru ASN infrastructure aggregation, CLI subdomain/infrastructure panels, and JSON export fields.
+- Harvest mode now reports the required optional extra clearly; ML remains opt-in and `investigate` fails fast when the backend is not running.
 
 ### 0.12.3
 

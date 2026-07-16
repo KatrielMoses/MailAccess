@@ -59,6 +59,9 @@ maltego/*.mtz
 
 # Test artifacts
 test_*.py
+!tests/test_smtp_verify_default.py
+!tests/test_live_progress.py
+!tests/test_persona_email_pivot.py
 !tests/test_name_consensus.py
 !tests/test_timeline.py
 !tests/test_maigret_platforms.py
@@ -123,3 +126,7 @@ results/
 # Subdomain Intelligence source data and regression suite
 !data/subdomain_wordlist.json
 !tests/test_subdomain_intel.py
+!tests/test_harvest_cache.py
+!tests/test_parallel_sources.py
+!tests/test_new_sources.py
+!tests/test_doctor_command.py

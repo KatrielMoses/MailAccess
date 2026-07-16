@@ -281,6 +281,17 @@ class Settings(BaseSettings):
     enable_investigation_cache: bool = True
     investigation_cache_window_minutes: int = 30
 
+    # 0.12.7 — Default JSON export on every harvest.
+    # When true, `mailaccess harvest-emails` writes a JSON export to
+    # `harvest_results_dir` automatically.  CLI flag --no-export
+    # overrides per-run.  ``harvest_results_max_per_domain`` enforces
+    # a per-domain rolling cap; ``harvest_results_max_age_days``
+    # triggers lazy cleanup of stale files on next harvest.
+    harvest_auto_export: bool = True
+    harvest_results_dir: Path = Path.home() / ".mailaccess" / "results"
+    harvest_results_max_per_domain: int = 50
+    harvest_results_max_age_days: int = 30
+
     # Common Crawl email harvesting (domain harvest mode only — Phase A of 0.10.0).
     # Master kill switch; the module itself is opt-in via domain harvest
     # mode, this is the global enable flag for the underlying fetcher too.
@@ -376,22 +387,28 @@ class Settings(BaseSettings):
     subdomain_surface_max_hosts: int = 8
     enable_subdomain_intel: bool = True
     # ------------------------------------------------------------------
-    # SMTP verification — OPT-IN ONLY.  The default is False to keep
-    # "just run a domain harvest" safe.  Flipping ENABLE_SMTP_VERIFICATION
-    # to true is the only way to actually probe mail servers.  Even when
-    # true, all safety ceilings are HARD-CODED in smtp_verifier.py
-    # (max 100 probes per domain, max 30/minute pacing).
+    # SMTP verification runs for domain harvests unless the caller opts out.
+    # Keep the legacy names as compatibility aliases while the 0.12.5 names
+    # are the canonical public configuration surface.
     # ------------------------------------------------------------------
-    enable_smtp_verification: bool = False
-    # Configurable downward only — smtp_verifier clamps to
-    # MAX_PROBES_HARD_CAP (100) regardless of what's set here.
-    smtp_max_probes_per_domain: int = 100
+    smtp_verify_default: bool = True
+    smtp_verify_max_probes: int = 10
+    smtp_verify_timeout: float = 10.0
+    smtp_greylist_retry_delay: float = 30.0
+    enable_smtp_verification: bool = True
+    smtp_max_probes_per_domain: int = 10
     smtp_probe_delay_seconds: float = 2.5
     # Sender address used in MAIL FROM.  Spec requires this be a
     # non-attributable, non-deliverable anonymous address; do not
     # change it to anything that points back at the operator.
     smtp_sender_address: str = "probe@mailaccess.invalid"
-    smtp_connect_timeout_seconds: int = 8
+    smtp_connect_timeout_seconds: int = 10
+    # A persona pivot is reactive only; it is never seeded as a normal module.
+    persona_pivot_enabled: bool = True
+    persona_pivot_max_names: int = 10
+    persona_pivot_max_queries_per_name: int = 3
+    harvest_cache_enabled: bool = True
+    harvest_cache_ttl_seconds: int = 3600
     # Automatic low-confidence email validation during domain harvests.
     # The validator itself is default-on; the per-run cap limits network probes.
     enable_low_email_validation: bool = True

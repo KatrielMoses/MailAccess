@@ -295,6 +295,7 @@ class AsyncSignalPool:
         self._email_subscribers: list[
             Callable[[str, str, dict[str, Any]], Awaitable[list[WorkItem]] | list[WorkItem]]
         ] = []
+        self._display_subscribers: list[Callable[[Signal], Any]] = []
         self._scheduler: WorkScheduler | None = None
         self._dispatch_tasks: set[asyncio.Task[Any]] = set()
 
@@ -321,6 +322,12 @@ class AsyncSignalPool:
     ) -> None:
         """Register a subscriber to be invoked when an email signal is emitted."""
         self._email_subscribers.append(callback)
+
+    def register_display_subscriber(
+        self, callback: Callable[[Signal], Any]
+    ) -> None:
+        """Register a best-effort observer for every newly absorbed signal."""
+        self._display_subscribers.append(callback)
 
     def set_scheduler(self, scheduler: WorkScheduler) -> None:
         """Set the scheduler to which subscribers can submit WorkItems."""
@@ -541,6 +548,16 @@ class AsyncSignalPool:
 
     async def _absorb(self, signal: Signal) -> None:
         """Merge *signal* into the cluster index under the lock."""
+        # Display subscribers observe every accepted signal, including
+        # subdomains that intentionally have no person/email cluster key.
+        for callback in tuple(self._display_subscribers):
+            try:
+                outcome = callback(signal)
+                if asyncio.isfuture(outcome) or asyncio.iscoroutine(outcome):
+                    self._track_dispatch(outcome)
+            except Exception:
+                logger.exception("Display subscriber %s raised", callback)
+
         key = canonical_key(signal.metadata.get("name"), signal.metadata.get("slug_or_email"))
         if key == (None, None):
             # Signal carried no identity payload we could key on; skip
@@ -577,6 +594,7 @@ class AsyncSignalPool:
 
         if signal.kind == "email" and self._email_subscribers:
             self._track_dispatch(self._dispatch_email(signal))
+
 
     def _track_dispatch(self, awaitable: Awaitable[Any]) -> None:
         """Track subscriber work so :meth:`close` can await its completion."""

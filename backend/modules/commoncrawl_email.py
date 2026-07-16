@@ -64,6 +64,7 @@ class CommonCrawlEmailModule(BaseModule):
         max_collections: int | None = None,
         aggressive: bool | None = None,
         signal_pool: Any | None = None,
+        progress_callback: Any | None = None,
     ) -> ModuleResult:  # type: ignore[override]
         """Harvest emails for *target*, which is a domain (not an email).
 
@@ -99,15 +100,15 @@ class CommonCrawlEmailModule(BaseModule):
                 metadata={"skip_reason": "invalid_domain", "domain": domain},
             )
 
-        effective_aggressive = bool(aggressive) if aggressive is not None else bool(
-            getattr(settings, "harvest_aggressive", False)
+        effective_aggressive = (
+            bool(aggressive)
+            if aggressive is not None
+            else bool(getattr(settings, "harvest_aggressive", False))
         )
 
         # Resolve effective caps.  ``max_records`` is the legacy override
         # path: when set it caps the *total* budget across collections.
-        default_max_collections = int(
-            getattr(settings, "cc_max_collections", 6) or 6
-        )
+        default_max_collections = int(getattr(settings, "cc_max_collections", 6) or 6)
         default_max_records_per = int(
             getattr(settings, "cc_max_records_per_collection", 250) or 250
         )
@@ -140,6 +141,8 @@ class CommonCrawlEmailModule(BaseModule):
         collections_swept: list[str] = []
 
         try:
+            if progress_callback:
+                progress_callback(f"Fetching collection 1 of {eff_max_collections}...")
             # scrapingant: dropped in S5 audit (CC index JSON + WARC fetches are direct).
             async with build_client(timeout=10.0) as shared_client:
                 client = CommonCrawlClient(transport=shared_client)
@@ -156,10 +159,15 @@ class CommonCrawlEmailModule(BaseModule):
                         max_collections=eff_max_collections,
                         max_records_per_collection=eff_max_records_per,
                         aggressive=effective_aggressive,
+                        progress_callback=progress_callback,
                     )
-                    collections_swept = sorted(
-                        {r.collection for r in records if r.collection}
-                    )
+                    collections_swept = sorted({r.collection for r in records if r.collection})
+                    if progress_callback:
+                        progress_callback(
+                            f"Fetched {len(collections_swept)} of "
+                            f"{eff_max_collections} collections; "
+                            f"retrieving {len(records)} pages..."
+                        )
                 except Exception as exc:
                     _LOG.warning("commoncrawl_email: multi-collection query failed: %s", exc)
                     index_unreachable = True
@@ -351,9 +359,7 @@ class CommonCrawlEmailModule(BaseModule):
                 "collections_swept": collections_swept,
                 "records_queried": len(records),
                 "records_fetched": (
-                    sum(1 for fr in fetch_results if fr is not None)
-                    if records
-                    else 0
+                    sum(1 for fr in fetch_results if fr is not None) if records else 0
                 ),
                 "fetch_failures": fetch_failures,
                 "total_emails_found": len(email_hits),
@@ -363,9 +369,7 @@ class CommonCrawlEmailModule(BaseModule):
                 "people_records_surfaced": len(people_records),
                 "aggressive": effective_aggressive,
                 "cc_coverage": (
-                    "none"
-                    if not records
-                    else ("high" if len(records) >= 50 else "low")
+                    "none" if not records else ("high" if len(records) >= 50 else "low")
                 ),
             },
         )

@@ -70,6 +70,7 @@ _LOG = logging.getLogger(__name__)
 # Public keyserver endpoints — no authentication required.
 _OPENPGP_SEARCH_URL = "https://keys.openpgp.org/search"
 _UBUNTU_HKP_URL = "https://keyserver.ubuntu.com/pks/lookup"
+_MIT_HKP_URL = "https://pgp.mit.edu/pks/lookup"
 
 _REQUEST_TIMEOUT = 10.0
 _RATE_LIMIT_SECONDS = 2.0
@@ -129,6 +130,7 @@ class PgpDomainEmailModule(BaseModule):
             )
 
         outcomes: dict[str, _SubSourceOutcome] = {
+            "mit_hkp": _SubSourceOutcome(source_id="mit_hkp"),
             "openpgp_search": _SubSourceOutcome(source_id="openpgp_search"),
             "ubuntu_hkp": _SubSourceOutcome(source_id="ubuntu_hkp"),
         }
@@ -138,13 +140,25 @@ class PgpDomainEmailModule(BaseModule):
         try:
             # scrapingant: dropped in S5 audit (PGP domain sources are JSON/static text)
             async with build_client(timeout=_REQUEST_TIMEOUT) as client:
-                openpgp_task = asyncio.create_task(self._openpgp_search(client, domain))
-                ubuntu_task = asyncio.create_task(self._ubuntu_hkp(client, domain))
-                openpgp_outcome = await openpgp_task
-                ubuntu_outcome = await ubuntu_task
-                outcomes["openpgp_search"] = openpgp_outcome
-                outcomes["ubuntu_hkp"] = ubuntu_outcome
-                for outcome in (openpgp_outcome, ubuntu_outcome):
+                results = await asyncio.gather(
+                    asyncio.wait_for(
+                        self._query_mit(domain, client), timeout=_REQUEST_TIMEOUT
+                    ),
+                    asyncio.wait_for(
+                        self._query_openpgp(domain, client), timeout=_REQUEST_TIMEOUT
+                    ),
+                    asyncio.wait_for(
+                        self._query_ubuntu(domain, client), timeout=_REQUEST_TIMEOUT
+                    ),
+                    return_exceptions=True,
+                )
+                for source_id, value in zip(outcomes, results):
+                    if isinstance(value, BaseException):
+                        _LOG.warning("pgp_domain_email: %s failed: %s", source_id, value)
+                        outcomes[source_id].error = type(value).__name__
+                        continue
+                    outcomes[source_id] = value
+                for outcome in outcomes.values():
                     for email, evidence in outcome.emails.items():
                         bucket = aggregated.setdefault(email, {"types": set(), "evidence": []})
                         bucket["types"].add(_TYPE)
@@ -219,6 +233,8 @@ class PgpDomainEmailModule(BaseModule):
             findings=findings,
             metadata={
                 "domain": domain,
+                "mit_keys_checked": outcomes["mit_hkp"].keys_checked,
+                "mit_emails_found": outcomes["mit_hkp"].count,
                 "openpgp_keys_checked": outcomes["openpgp_search"].keys_checked,
                 "openpgp_emails_found": outcomes["openpgp_search"].count,
                 "ubuntu_keys_checked": outcomes["ubuntu_hkp"].keys_checked,
@@ -239,6 +255,21 @@ class PgpDomainEmailModule(BaseModule):
     # ----------------------------------------------------------------------
     async def _throttle(self) -> None:
         await asyncio.sleep(_RATE_LIMIT_SECONDS)
+
+    async def _query_mit(
+        self, domain: str, client: httpx.AsyncClient
+    ) -> _SubSourceOutcome:
+        return await self._hkp_search(client, domain, _MIT_HKP_URL, "mit_hkp")
+
+    async def _query_openpgp(
+        self, domain: str, client: httpx.AsyncClient
+    ) -> _SubSourceOutcome:
+        return await self._openpgp_search(client, domain)
+
+    async def _query_ubuntu(
+        self, domain: str, client: httpx.AsyncClient
+    ) -> _SubSourceOutcome:
+        return await self._ubuntu_hkp(client, domain)
 
     async def _openpgp_search(self, client: httpx.AsyncClient, domain: str) -> _SubSourceOutcome:
         """Query ``keys.openpgp.org/search?q={domain}``.
@@ -346,6 +377,40 @@ class PgpDomainEmailModule(BaseModule):
             )
             outcome.count += 1
 
+        return outcome
+
+    async def _hkp_search(
+        self,
+        client: httpx.AsyncClient,
+        domain: str,
+        endpoint: str,
+        source_id: str,
+    ) -> _SubSourceOutcome:
+        outcome = _SubSourceOutcome(source_id=source_id)
+        try:
+            await self._throttle()
+            response = await client.get(
+                endpoint,
+                params={"op": "vindex", "search": domain, "fingerprint": "on"},
+                timeout=_REQUEST_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001
+            outcome.error = f"{source_id}_request:{exc}"
+            return outcome
+        if response.status_code != 200:
+            outcome.error = f"{source_id}_http_{response.status_code}"
+            return outcome
+        outcome.keys_checked = response.text.count("<br>") or len(
+            response.text.splitlines()
+        )
+        outcome.ok = True
+        for extracted in extract_emails(response.text, target_domain=domain):
+            if not _email_domain_matches(extracted.email, domain):
+                continue
+            outcome.emails.setdefault(extracted.email, []).append(
+                {"source": source_id, "snippet": extracted.source_text_snippet[:120]}
+            )
+            outcome.count += 1
         return outcome
 
     def _extract_uids(

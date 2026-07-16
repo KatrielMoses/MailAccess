@@ -220,6 +220,7 @@ class EmployeeNameDiscoveryModule(BaseModule):
         use_proxies: bool = False,
         candidate_paths: list[str] | tuple[str, ...] | None = None,
         signal_pool: Any | None = None,
+        progress_callback: Any | None = None,
     ) -> ModuleResult:  # type: ignore[override]
         self._use_proxies = use_proxies
         self._candidate_paths = tuple(candidate_paths or ())
@@ -248,6 +249,8 @@ class EmployeeNameDiscoveryModule(BaseModule):
         # ------------------------------------------------------------------
         # Source 1 — LinkedIn (reuse DDG/Bing dorkers from Phase B1)
         # ------------------------------------------------------------------
+        if progress_callback:
+            progress_callback(f"Scraping https://{domain}/...")
         linkedin_task = asyncio.create_task(self._linkedin(domain))
         # ------------------------------------------------------------------
         # Source 2 — Company pages (direct fetch)
@@ -270,6 +273,8 @@ class EmployeeNameDiscoveryModule(BaseModule):
             oc_task,
             return_exceptions=True,
         )
+        if progress_callback:
+            progress_callback("Consolidating employee names from 5 sources...")
 
         linkedin_findings: list[NameDiscovery] = self._unwrap(
             outcomes[0], default=[], label="linkedin_search"
