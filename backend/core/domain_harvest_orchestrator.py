@@ -219,6 +219,9 @@ class DomainHarvestResult:
     from_cache: bool = False
     cache_age_seconds: float = 0.0
     cached_at: str | None = None
+    # Off-domain addresses discovered while harvesting ``domain``. They are
+    # retained for analyst pivots but never mixed into ``unique_emails``.
+    shadow_profiles: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _normalize_module_result(
@@ -679,11 +682,48 @@ def _apply_signal_pool_correlation(
             break
 
 
+def _record_shadow_profile(
+    grouped_shadow: dict[str, dict[str, Any]],
+    email: str,
+    finding: dict[str, Any],
+    module_name: str,
+) -> None:
+    """Accumulate an off-domain email without promoting it to org output."""
+    normalized = email.strip().lower()
+    metadata = finding.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    entry = grouped_shadow.setdefault(
+        normalized,
+        {
+            "email": normalized,
+            "type": "personal_email_candidate",
+            "display_name": metadata.get("display_name")
+            or metadata.get("name")
+            or metadata.get("person_name"),
+            "username": metadata.get("username") or finding.get("username"),
+            "found_by_modules": [],
+            "source_count": 0,
+            "total_finding_count": 0,
+            "evidence": [],
+        },
+    )
+    entry["total_finding_count"] += 1
+    if module_name not in entry["found_by_modules"]:
+        entry["found_by_modules"].append(module_name)
+        entry["found_by_modules"].sort()
+        entry["source_count"] = len(entry["found_by_modules"])
+        entry["evidence"].append(
+            {"module": module_name, "metadata": dict(metadata)}
+        )
+
+
 def _aggregate(
     harvest_domain: str,
     module_results: dict[str, ModuleResult],
     signal_pool: Any | None = None,
     identity_clusters: list[Any] | None = None,
+    shadow_profiles_out: list[dict[str, Any]] | None = None,
 ) -> list[HarvestedEmail]:
     """Group findings across modules, dedup by email, aggregate confidence.
 
@@ -713,6 +753,7 @@ def _aggregate(
     analysts can still see all observed forms.
     """
     grouped: dict[str, HarvestedEmail] = {}
+    grouped_shadow: dict[str, dict[str, Any]] = {}
     # subaddress_key(email) → HarvestedEmail — the dedup key.
     # Email variants seen for the same key are recorded in
     # entry.subaddress_variants for analyst visibility.
@@ -724,6 +765,11 @@ def _aggregate(
         for finding in safe_result.findings or []:
             email = _extract_email(finding)
             if not email:
+                continue
+
+            actual_domain = email.rsplit("@", 1)[-1].strip().lower()
+            if "@" in email and actual_domain != harvest_domain.strip().lower():
+                _record_shadow_profile(grouped_shadow, email, finding, module_name)
                 continue
 
             meta = finding.get("metadata") or {}
@@ -934,6 +980,9 @@ def _aggregate(
     _apply_signal_pool_correlation(final, signal_pool)
     _apply_identity_cluster_snapshot(final, identity_clusters)
     _infer_confirmed_pattern_from_emails(final, signal_pool)
+    if shadow_profiles_out is not None:
+        shadow_profiles_out.clear()
+        shadow_profiles_out.extend(grouped_shadow[key] for key in sorted(grouped_shadow))
     return final
 
 
@@ -2902,7 +2951,13 @@ async def _orchestrate(
             MODULE_PATTERN_VERIFY: pattern_result,
         }
 
-        unique_emails = _aggregate(domain, module_results, signal_pool=signal_pool)
+        shadow_profiles: list[dict[str, Any]] = []
+        unique_emails = _aggregate(
+            domain,
+            module_results,
+            signal_pool=signal_pool,
+            shadow_profiles_out=shadow_profiles,
+        )
         unique_emails.sort(key=_sort_key)
 
         completed = datetime.now(timezone.utc)
@@ -2992,6 +3047,7 @@ async def _orchestrate(
             employee_names_processed=len(employee_names),
             fetch_cache_stats=cache_stats or None,
             metadata={"budget": budget.stats} if budget is not None else {},
+            shadow_profiles=shadow_profiles,
         )
     finally:
         # 0.11.1 Phase 3 cache: per-run teardown.  ``aclose`` clears every

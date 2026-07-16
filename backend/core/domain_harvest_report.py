@@ -99,7 +99,13 @@ def _build_shadow_profiles(result: DomainHarvestResult) -> list[dict[str, Any]]:
             item = dict(finding)
             item["module_name"] = module_name
             findings.append(item)
-    return ShadowProfileDetector().find_shadow_pairs(findings)
+    inferred = ShadowProfileDetector().find_shadow_pairs(findings)
+    explicit = [
+        dict(item)
+        for item in getattr(result, "shadow_profiles", [])
+        if isinstance(item, dict)
+    ]
+    return [*explicit, *inferred]
 
 
 def _build_subdomains(result: DomainHarvestResult) -> list[dict[str, Any]]:
@@ -1637,6 +1643,11 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
                 and (ev.get("metadata") or {}).get("source_type") == "persona_pivot_personal"
                 for ev in item.get("evidence", [])
             )
+        ]
+        + [
+            item
+            for item in shadow_profiles
+            if item.get("type") == "personal_email_candidate"
         ],
         "module_metadata": module_metadata,
         "errors": list(result.errors),

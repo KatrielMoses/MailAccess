@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.12.7&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.12.8&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -526,6 +526,18 @@ datacenter proxies. Off by default.
 Sign up: https://scrapingant.com/?ref=mzliyzh
 
 ## Changelog
+
+### 0.12.8
+
+- CRITICAL: Fixed the 7-minute idle hang caused by persona-pivot work holding
+  track 2 open until the full budget expired.
+- CRITICAL: Fixed budget cancellation bypassing module-result recording and
+  leaving modules marked `not_started` after they had run.
+- CRITICAL: Fixed cross-domain email leakage by always checking the address's
+  actual domain instead of trusting the merged `on_domain` flag.
+- Runtime policy and calibration skips now record an explicit `SKIPPED` result.
+- Off-domain email findings are retained in `shadow_profiles`, not mixed into
+  the main organization email list.
 
 ### 0.12.7
 

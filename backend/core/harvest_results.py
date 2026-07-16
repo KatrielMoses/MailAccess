@@ -149,10 +149,10 @@ def _collect_personal_emails(result: Any) -> list[Any]:
             continue
         if "@" not in entry.email:
             continue
-        if not entry.on_domain:
-            # On-domain filter — passwordspray tooling only wants org addresses.
-            if email_domain(entry.email) != domain:
-                continue
+        # Metadata can be wrong or merged with OR-semantics. Tool-chain output
+        # must always trust the actual address domain.
+        if email_domain(entry.email) != domain:
+            continue
         out.append(entry)
     return out
 

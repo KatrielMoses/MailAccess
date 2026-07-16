@@ -134,3 +134,5 @@ results/
 !tests/test_live_log.py
 !tests/test_keys_test_command.py
 !tests/test_toolchain_output.py
+!tests/test_budget_regression.py
+!tests/test_cross_domain_filter.py

@@ -82,12 +82,31 @@ MODULE_SYNDICATION_FEED_SWEEPER = "syndication_feed_sweeper"
 MODULE_HUNTER = "hunter"
 MODULE_HACKERTARGET = "hackertarget_hosts"
 _PERSON_PIVOT_MODULES = frozenset(
-    {MODULE_EMPLOYEE_NAMES, MODULE_PATTERN_VERIFY, MODULE_PERSON_EMAIL_PIVOT, MODULE_PERSONA_EMAIL_PIVOT, MODULE_EMAIL_IDENTITY_ENRICHMENT, "name_to_github_profile"}
+    {
+        MODULE_EMPLOYEE_NAMES,
+        MODULE_PATTERN_VERIFY,
+        MODULE_PERSON_EMAIL_PIVOT,
+        MODULE_EMAIL_IDENTITY_ENRICHMENT,
+        "name_to_github_profile",
+    }
 )
 _ACCUMULATING_MODULES = frozenset(
-    {MODULE_PERSON_EMAIL_PIVOT, MODULE_PERSONA_EMAIL_PIVOT, MODULE_EMAIL_IDENTITY_ENRICHMENT, "name_to_github_profile"}
+    {
+        MODULE_PERSON_EMAIL_PIVOT,
+        MODULE_PERSONA_EMAIL_PIVOT,
+        MODULE_EMAIL_IDENTITY_ENRICHMENT,
+        "name_to_github_profile",
+    }
 )
-_YIELD_PREDICTION_CANDIDATES = frozenset({MODULE_NPM_EMAIL, MODULE_PYPI_EMAIL, MODULE_PACKAGE_ECOSYSTEMS, MODULE_PGP_DOMAIN_EMAIL, MODULE_SYNDICATION_FEED_SWEEPER})
+_YIELD_PREDICTION_CANDIDATES = frozenset(
+    {
+        MODULE_NPM_EMAIL,
+        MODULE_PYPI_EMAIL,
+        MODULE_PACKAGE_ECOSYSTEMS,
+        MODULE_PGP_DOMAIN_EMAIL,
+        MODULE_SYNDICATION_FEED_SWEEPER,
+    }
+)
 _PAGE_HEADING_TOKENS = frozenset(
     {
         "blue",
@@ -234,9 +253,12 @@ async def run_adaptive_harvest(
         MODULE_HACKERTARGET,
     )
     for module_name in seeded_module_names:
+        skip_reason = (
+            "runtime_policy" if module_name in ctx.skip_modules else "not_started"
+        )
         module_results[module_name] = ModuleResult(
             status=ModuleStatus.SKIPPED,
-            metadata={"domain": cleaned, "skip_reason": "not_started"},
+            metadata={"domain": cleaned, "skip_reason": skip_reason},
         )
 
     await _seed_scheduler(ctx)
@@ -349,11 +371,13 @@ async def run_adaptive_harvest(
             yahoo_validation = await _attach_yahoo_email_verification(cleaned, module_results)
         else:
             yahoo_validation = {"checked": 0, "status": "yahoo_disabled"}
+        shadow_profiles: list[dict[str, Any]] = []
         unique_emails = _aggregate(
             cleaned,
             module_results,
             signal_pool=signal_pool,
             identity_clusters=identity_clusters,
+            shadow_profiles_out=shadow_profiles,
         )
         dns_signals = {"spf_present": False, "dmarc_strict": False}
         has_pattern_candidates = any(
@@ -411,6 +435,7 @@ async def run_adaptive_harvest(
                         module_results,
                         signal_pool=signal_pool,
                         identity_clusters=identity_clusters,
+                        shadow_profiles_out=shadow_profiles,
                     )
                     from .domain_harvest_orchestrator import apply_domain_email_dns_signals
 
@@ -456,6 +481,7 @@ async def run_adaptive_harvest(
                         module_results,
                         signal_pool=signal_pool,
                         identity_clusters=identity_clusters,
+                        shadow_profiles_out=shadow_profiles,
                     )
                     from .domain_harvest_orchestrator import apply_domain_email_dns_signals
 
@@ -549,6 +575,7 @@ async def run_adaptive_harvest(
             employee_names_processed=_employee_name_count(module_results),
             fetch_cache_stats=cache.stats(),
             metadata=metadata,
+            shadow_profiles=shadow_profiles,
         )
     finally:
         with contextlib.suppress(Exception):
@@ -671,21 +698,28 @@ async def _track1_loop(ctx: WorkerContext, concurrency: int = 3) -> None:
                 await ctx.scheduler.submit(new_item)
             _write_to_signal_pool(result, ctx.signal_pool)
 
-    while True:
-        if not ctx.budget.can_start_track1():
-            break
-        _prune_done(running)
-        item = await ctx.scheduler.pull_matching(
-            lambda work: work.track == TRACK_GUARANTEED,
-            timeout=0.05,
-        )
-        if item is None:
-            if ctx.scheduler.is_empty() and not running:
+    try:
+        while True:
+            if not ctx.budget.can_start_track1():
                 break
-            await asyncio.sleep(0)
-            continue
-        task = asyncio.create_task(_run_one(item))
-        running.add(task)
+            _prune_done(running)
+            item = await ctx.scheduler.pull_matching(
+                lambda work: work.track == TRACK_GUARANTEED,
+                timeout=0.05,
+            )
+            if item is None:
+                if ctx.scheduler.is_empty() and not running:
+                    break
+                await asyncio.sleep(0)
+                continue
+            task = asyncio.create_task(_run_one(item))
+            running.add(task)
+    except asyncio.CancelledError:
+        for task in running:
+            task.cancel()
+        if running:
+            await asyncio.gather(*running, return_exceptions=True)
+        raise
 
     if running:
         outcomes = await asyncio.gather(*running, return_exceptions=True)
@@ -713,31 +747,44 @@ async def _track2_loop(ctx: WorkerContext, concurrency: int = 5) -> None:
         return (
             item.kind == "generate_patterns"
             or item.module_name in _PERSON_PIVOT_MODULES
-            or item.source.startswith("name_subscriber:")
         )
 
-    while True:
-        # We must still pull one item inside the reserve window so a
-        # person-keyed pivot can run; non-pivot work is requeued below.
-        if ctx.budget.is_expired():
-            break
-        _prune_done(running)
-        item = await ctx.scheduler.pull_matching(
-            lambda work: work.track == TRACK_OPPORTUNISTIC,
-            timeout=0.05,
-        )
-        if item is None:
-            if ctx.scheduler.is_empty() and not running:
+    try:
+        while True:
+            # We must still pull one item inside the reserve window so a
+            # person-keyed pivot can run; non-pivot work is requeued below.
+            if ctx.budget.is_expired():
                 break
-            await asyncio.sleep(0)
-            continue
-        if not ctx.budget.can_start_track2(person_pivot=_is_person_pivot(item)):
-            # Put the non-pivot work back and preserve the final budget tail
-            # for names discovered late in the run.
-            await ctx.scheduler.requeue(item)
-            break
-        task = asyncio.create_task(_run_one(item))
-        running.add(task)
+            _prune_done(running)
+            item = await ctx.scheduler.pull_matching(
+                lambda work: work.track == TRACK_OPPORTUNISTIC,
+                timeout=0.05,
+            )
+            if item is None:
+                if ctx.scheduler.is_empty() and not running:
+                    break
+                # A producer may have drained immediately after the pull.
+                # Recheck after yielding briefly so an empty queue cannot
+                # hold track 2 open until the full harvest budget expires.
+                if ctx.scheduler.is_empty():
+                    await asyncio.sleep(0.01)
+                    if ctx.scheduler.is_empty() and not running:
+                        break
+                await asyncio.sleep(0)
+                continue
+            if not ctx.budget.can_start_track2(person_pivot=_is_person_pivot(item)):
+                # Put the non-pivot work back and preserve the final budget tail
+                # for names discovered late in the run.
+                await ctx.scheduler.requeue(item)
+                break
+            task = asyncio.create_task(_run_one(item))
+            running.add(task)
+    except asyncio.CancelledError:
+        for task in running:
+            task.cancel()
+        if running:
+            await asyncio.gather(*running, return_exceptions=True)
+        raise
 
     if running:
         outcomes = await asyncio.gather(*running, return_exceptions=True)
@@ -763,16 +810,54 @@ async def _execute_item(item: WorkItem, ctx: WorkerContext) -> WorkResult:
         soft_timeout = ctx.budget.soft_timeout_for_module()
     try:
         if item.module_name and item.module_name in ctx.skip_modules:
-            return WorkResult(item=item, success=True, findings=[], new_items=[], errors=["skipped by runtime policy"], duration_seconds=0.0)
+            skip_result = ModuleResult(
+                status=ModuleStatus.SKIPPED,
+                metadata={"domain": ctx.domain, "skip_reason": "runtime_policy"},
+            )
+            _record_module_result(ctx, item.module_name, skip_result)
+            _emit_module_complete(ctx, item.module_name, skip_result)
+            return WorkResult(
+                item=item,
+                success=True,
+                findings=[],
+                new_items=[],
+                errors=["skipped by runtime policy"],
+                duration_seconds=0.0,
+            )
         if ctx.subdomain_calibrate and item.module_name != MODULE_SUBDOMAIN_INTEL:
-            return WorkResult(item=item, success=True, findings=[], new_items=[], errors=["skipped for subdomain calibration"], duration_seconds=0.0)
-        if item.module_name and _should_defer_for_yield(ctx, item.module_name):
-            if ctx.module_results is not None:
-                ctx.module_results[item.module_name] = ModuleResult(
+            if item.module_name:
+                skip_result = ModuleResult(
                     status=ModuleStatus.SKIPPED,
-                    metadata={"domain": ctx.domain, "skip_reason": "yield_prediction"},
+                    metadata={
+                        "domain": ctx.domain,
+                        "skip_reason": "subdomain_calibration",
+                    },
                 )
-            return WorkResult(item=item, success=True, findings=[], new_items=[], errors=["deferred by yield prediction"], duration_seconds=0.0)
+                _record_module_result(ctx, item.module_name, skip_result)
+                _emit_module_complete(ctx, item.module_name, skip_result)
+            return WorkResult(
+                item=item,
+                success=True,
+                findings=[],
+                new_items=[],
+                errors=["skipped for subdomain calibration"],
+                duration_seconds=0.0,
+            )
+        if item.module_name and _should_defer_for_yield(ctx, item.module_name):
+            skip_result = ModuleResult(
+                status=ModuleStatus.SKIPPED,
+                metadata={"domain": ctx.domain, "skip_reason": "yield_prediction"},
+            )
+            _record_module_result(ctx, item.module_name, skip_result)
+            _emit_module_complete(ctx, item.module_name, skip_result)
+            return WorkResult(
+                item=item,
+                success=True,
+                findings=[],
+                new_items=[],
+                errors=["deferred by yield prediction"],
+                duration_seconds=0.0,
+            )
         if item.kind == "fetch_page" and item.url:
             findings, new_items = await _fetch_and_extract(item.url, ctx)
         elif item.kind == "run_module" and item.module_name:
@@ -925,6 +1010,7 @@ async def _run_module(
     started = time.perf_counter()
     if ctx.progress_callback is not None:
         ctx.progress_callback(module_name, "Starting module...")
+    result: ModuleResult | None = None
     try:
         result = await asyncio.wait_for(
             _run_module_instance(module_name, module, ctx, soft_timeout),
@@ -940,16 +1026,26 @@ async def _run_module(
             errors=[f"module timed out after {soft_timeout:.1f}s"],
             metadata={"domain": ctx.domain, "duration_seconds": elapsed},
         )
-        _record_module_result(ctx, module_name, result)
-        _emit_module_complete(ctx, module_name, result)
-        return [], []
+    except asyncio.CancelledError:
+        elapsed = round(time.perf_counter() - started, 3)
+        result = ModuleResult(
+            status=ModuleStatus.PARTIAL,
+            findings=[],
+            errors=["Cancelled by budget timeout"],
+            metadata={"domain": ctx.domain, "duration_seconds": elapsed},
+        )
+        raise
+    finally:
+        if result is not None:
+            result.metadata.setdefault(
+                "duration_seconds", round(time.perf_counter() - started, 3)
+            )
+            _record_module_result(ctx, module_name, result)
+            _emit_module_complete(ctx, module_name, result)
+            for finding in result.findings or []:
+                _emit_finding(ctx.signal_pool, module_name, finding, ctx.domain)
 
-    _record_module_result(ctx, module_name, result)
-    result.metadata.setdefault("duration_seconds", round(time.perf_counter() - started, 3))
-    _emit_module_complete(ctx, module_name, result)
-    for finding in result.findings or []:
-        _emit_finding(ctx.signal_pool, module_name, finding, ctx.domain)
-    
+    assert result is not None
     out_findings = [dict(f) for f in (result.findings or []) if isinstance(f, dict)]
     new_items = result.new_items if hasattr(result, "new_items") else []
     if module_name == MODULE_EMPLOYEE_NAMES:
@@ -984,6 +1080,7 @@ async def _run_module_with_payload(
     started = time.perf_counter()
     if ctx.progress_callback is not None:
         ctx.progress_callback(module_name, "Starting module...")
+    result: ModuleResult | None = None
     try:
         # Person-keyed pivots must use the same per-run cache/session as the
         # rest of harvest.  Passing it explicitly also keeps the module
@@ -1024,16 +1121,26 @@ async def _run_module_with_payload(
             errors=[f"module timed out after {soft_timeout:.1f}s"],
             metadata={"domain": ctx.domain, "duration_seconds": elapsed},
         )
-        _record_module_result(ctx, module_name, result)
-        _emit_module_complete(ctx, module_name, result)
-        return [], []
+    except asyncio.CancelledError:
+        elapsed = round(time.perf_counter() - started, 3)
+        result = ModuleResult(
+            status=ModuleStatus.PARTIAL,
+            findings=[],
+            errors=["Cancelled by budget timeout"],
+            metadata={"domain": ctx.domain, "duration_seconds": elapsed},
+        )
+        raise
+    finally:
+        if result is not None:
+            result.metadata.setdefault(
+                "duration_seconds", round(time.perf_counter() - started, 3)
+            )
+            _record_module_result(ctx, module_name, result)
+            _emit_module_complete(ctx, module_name, result)
+            for finding in result.findings or []:
+                _emit_finding(ctx.signal_pool, module_name, finding, ctx.domain)
 
-    result.metadata.setdefault("duration_seconds", round(time.perf_counter() - started, 3))
-    _record_module_result(ctx, module_name, result)
-    _emit_module_complete(ctx, module_name, result)
-    for finding in result.findings or []:
-        _emit_finding(ctx.signal_pool, module_name, finding, ctx.domain)
-        
+    assert result is not None
     out_findings = [dict(f) for f in (result.findings or []) if isinstance(f, dict)]
     new_items = result.new_items if hasattr(result, "new_items") else []
     return out_findings, new_items
