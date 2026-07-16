@@ -340,8 +340,8 @@ class Settings(BaseSettings):
     # pattern generation, not the email-mode investigation pipeline.
     enable_employee_name_discovery: bool = True
     employee_name_max_company_pages: int = 5
-    # Optional spaCy-backed classifier. One of: ask, on, off.
-    ml_name_classifier: str = "ask"
+    # Optional spaCy-backed classifier. One of: on, off.
+    ml_name_classifier: str = "off"
 
     # Email pattern generation + SMTP verification (Phase C2 of 0.10.0).
     # Master kill switch for the pattern_and_verify module.  Lives in
@@ -374,6 +374,7 @@ class Settings(BaseSettings):
     package_ecosystems_max_packages: int = 5
     enable_subdomain_surface: bool = True
     subdomain_surface_max_hosts: int = 8
+    enable_subdomain_intel: bool = True
     # ------------------------------------------------------------------
     # SMTP verification — OPT-IN ONLY.  The default is False to keep
     # "just run a domain harvest" safe.  Flipping ENABLE_SMTP_VERIFICATION

@@ -13,7 +13,15 @@ def _names(export: dict[str, Any]) -> set[str]:
 
 
 def _subdomains(export: dict[str, Any]) -> set[str]:
-    return {str(value).lower() for value in export.get("subdomains", []) if value}
+    hosts: set[str] = set()
+    for value in export.get("subdomains", []):
+        if isinstance(value, dict):
+            host = value.get("subdomain") or value.get("hostname") or value.get("host")
+            if host:
+                hosts.add(str(host).strip().lower())
+        elif value:
+            hosts.add(str(value).strip().lower())
+    return hosts
 
 
 def compare_harvest_exports(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:

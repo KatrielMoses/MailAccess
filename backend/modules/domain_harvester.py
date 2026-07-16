@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import time
 from typing import Any
@@ -37,6 +38,120 @@ _COLLECTOR_MAP = {
     "bufferoverun": collect_bufferoverun,
     "threatminer": collect_threatminer,
 }
+
+
+def _normalise_ip(value: Any) -> str | None:
+    try:
+        return str(ipaddress.ip_address(str(value).strip()))
+    except ValueError:
+        return None
+
+
+async def _resolve_ip_asn_footprint(
+    client: Any,
+    domain: str,
+    ip_map: dict[str, list[str]],
+    sem: asyncio.Semaphore,
+) -> dict[str, list[dict[str, Any]]]:
+    """Resolve unique subdomain/root IPs to BGPView ASN and CIDR data."""
+    try:
+        root_map = await resolve_ips(client, {domain}, sem)
+    except Exception as exc:
+        _LOG.debug("domain_harvester: root IP resolution failed for %s: %s", domain, exc)
+        root_map = {}
+
+    host_ips: dict[str, set[str]] = {}
+    for host, values in {**ip_map, **root_map}.items():
+        for value in values or []:
+            ip = _normalise_ip(value)
+            if ip:
+                host_ips.setdefault(ip, set()).add(host)
+
+    async def lookup(ip: str) -> tuple[str, dict[str, Any] | None]:
+        async with sem:
+            try:
+                response = await client.get(f"https://api.bgpview.io/ip/{ip}")
+                if int(getattr(response, "status_code", 0) or 0) >= 400:
+                    return ip, None
+                body = response.json()
+            except Exception as exc:
+                _LOG.debug("domain_harvester: ASN lookup failed for %s: %s", ip, exc)
+                return ip, None
+
+        prefixes = ((body.get("data") or {}).get("prefixes") or []) if isinstance(body, dict) else []
+        asns: dict[int, dict[str, Any]] = {}
+        for item in prefixes:
+            if not isinstance(item, dict):
+                continue
+            asn_data = item.get("asn")
+            if not isinstance(asn_data, dict):
+                continue
+            try:
+                number = int(asn_data.get("asn"))
+            except (TypeError, ValueError):
+                continue
+            record = asns.setdefault(
+                number,
+                {
+                    "asn": number,
+                    "name": str(asn_data.get("name") or asn_data.get("description") or "Unknown"),
+                    "cidrs": set(),
+                },
+            )
+            prefix = item.get("prefix")
+            if prefix:
+                record["cidrs"].add(str(prefix))
+
+        records = [
+            {
+                "asn": record["asn"],
+                "name": record["name"],
+                "cidrs": sorted(record["cidrs"]),
+            }
+            for record in asns.values()
+        ]
+        return ip, {"asns": records}
+
+    lookups = await asyncio.gather(*(lookup(ip) for ip in sorted(host_ips)))
+    ip_records: list[dict[str, Any]] = []
+    asn_groups: dict[int, dict[str, Any]] = {}
+    for ip, result in lookups:
+        records = (result or {}).get("asns", [])
+        cidrs: set[str] = set()
+        asn_values: list[int] = []
+        for record in records:
+            asn = int(record["asn"])
+            asn_values.append(asn)
+            cidrs.update(record.get("cidrs") or [])
+            group = asn_groups.setdefault(
+                asn,
+                {"asn": asn, "name": record["name"], "ips": set(), "cidrs": set()},
+            )
+            group["ips"].add(ip)
+            group["cidrs"].update(record.get("cidrs") or [])
+        ip_records.append(
+            {
+                "ip": ip,
+                "hosts": sorted(host_ips[ip]),
+                "asn": asn_values[0] if len(asn_values) == 1 else None,
+                "asn_name": records[0]["name"] if len(records) == 1 else None,
+                "asns": sorted(asn_values),
+                "cidrs": sorted(cidrs),
+            }
+        )
+
+    return {
+        "ips": ip_records,
+        "asns": [
+            {
+                "asn": group["asn"],
+                "name": group["name"],
+                "ips": sorted(group["ips"]),
+                "cidrs": sorted(group["cidrs"]),
+            }
+            for group in sorted(asn_groups.values(), key=lambda item: item["asn"])
+        ],
+    }
 
 
 def _enabled_source_names() -> set[str]:
@@ -201,6 +316,10 @@ class DomainHarvesterModule(BaseModule):
                 _LOG.debug("domain_harvester: resolve_ips error for %s: %s", domain, exc)
                 errors.append(f"resolve_ips: {exc}")
 
+            infrastructure = await _resolve_ip_asn_footprint(
+                client, domain, ip_map, ip_sem
+            )
+
         # Build per-subdomain source attribution
         subdomain_sources: dict[str, list[str]] = {}
         for source_name, found in per_source.items():
@@ -271,6 +390,7 @@ class DomainHarvesterModule(BaseModule):
                 "subdomains_found": len(seen_subdomains),
                 "subdomains_per_source": subdomains_per_source,
                 "ips_resolved": len(ip_map),
+                "infrastructure": infrastructure,
                 "dns_brute_hits": len(brute_hits),
                 "associate_emails": associate_emails,
                 "errors": errors,

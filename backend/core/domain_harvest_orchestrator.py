@@ -1821,6 +1821,11 @@ async def _safe_phase12_run(
     signal_pool: Any | None = None,
     budget: TimeBudget | None = None,
     soft_timeout: float | None = None,
+    with_subdomains: bool = False,
+    subdomain_deep: bool = False,
+    enable_scraping: bool = True,
+    context_vertical: tuple[str, ...] | list[str] | str | None = None,
+    scrape_session: Any | None = None,
 ) -> tuple[str, ModuleResult]:
     """Run a Phase 1+2 module with its optional kwargs.
 
@@ -1873,6 +1878,12 @@ async def _safe_phase12_run(
         kwargs["candidate_paths"] = candidate_paths
     if signal_pool is not None:
         kwargs["signal_pool"] = signal_pool
+    if name == "subdomain_intel":
+        kwargs["with_subdomains"] = with_subdomains
+        kwargs["subdomain_deep"] = subdomain_deep
+        kwargs["enable_scraping"] = enable_scraping
+        kwargs["context_vertical"] = context_vertical
+        kwargs["scrape_session"] = scrape_session
     accepted = _kwargs_accepted(module)
     try:
         if accepted is None:
@@ -2262,6 +2273,9 @@ async def run_domain_harvest(
     timeout_seconds: float | None = None,
     enable_email_identity_enrichment: bool | None = None,
     skip_modules: tuple[str, ...] | list[str] | None = None,
+    with_subdomains: bool = False,
+    subdomain_deep: bool = False,
+    subdomain_calibrate: bool = False,
 ) -> DomainHarvestResult:
     """Run all nine harvest modules in the recommended sequence.
 
@@ -2371,7 +2385,7 @@ async def run_domain_harvest(
             "public_surface_sweeper",
             "public_forge",
             "package_ecosystems",
-            "subdomain_surface",
+            "subdomain_intel",
             "wordpress_rest",
             "security_txt",
             "name_to_github_profile",
@@ -2398,6 +2412,9 @@ async def run_domain_harvest(
         proxy_fallback_ok=proxy_fallback_ok,
         enable_email_identity_enrichment=enable_email_identity_enrichment,
         skip_modules=tuple(sorted(effective_skip_modules)),
+        with_subdomains=with_subdomains,
+        subdomain_deep=subdomain_deep,
+        subdomain_calibrate=subdomain_calibrate,
     )
 
 

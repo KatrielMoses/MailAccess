@@ -102,16 +102,85 @@ def _build_shadow_profiles(result: DomainHarvestResult) -> list[dict[str, Any]]:
     return ShadowProfileDetector().find_shadow_pairs(findings)
 
 
-def _build_subdomains(result: DomainHarvestResult) -> list[str]:
-    values: set[str] = set()
+def _build_subdomains(result: DomainHarvestResult) -> list[dict[str, Any]]:
+    values: dict[str, dict[str, Any]] = {}
     for module_result in result.module_results.values():
         for finding in module_result.findings or []:
             if not isinstance(finding, dict):
                 continue
-            subdomain = (finding.get("metadata") or {}).get("subdomain")
+            subdomain = finding.get("subdomain")
+            if not isinstance(subdomain, str):
+                subdomain = (finding.get("metadata") or {}).get("subdomain")
             if isinstance(subdomain, str) and subdomain.strip():
-                values.add(subdomain.strip().lower())
-    return sorted(values)
+                item = dict(finding)
+                item["subdomain"] = subdomain.strip().lower()
+                values[item["subdomain"]] = item
+    return [values[key] for key in sorted(values)]
+
+
+def _format_subdomain_panel(result: DomainHarvestResult) -> Panel | Text:
+    entries = _build_subdomains(result)
+    module = result.module_results.get("subdomain_intel") or result.module_results.get("subdomain_surface")
+    metadata = (module.metadata if module else {}) or {}
+    if not entries and (not metadata or metadata.get("skip_reason")):
+        return Text()
+    counts = {tier: sum(str(item.get("tier", "SKIP")) == tier for item in entries) for tier in ("HIGH", "MEDIUM", "LOW", "SKIP", "INFRA")}
+    scraped = [item for item in entries if item.get("scraped")]
+    names = sum(1 for item in scraped for record in item.get("scraped", []) if record.get("name"))
+    emails = sum(1 for item in scraped for record in item.get("scraped", []) if record.get("email"))
+    text = Text()
+    text.append(f"  {len(entries)} discovered · {counts['HIGH']} scored HIGH · {len(scraped)} scraped · {names} names · {emails} emails\n")
+    for item in entries[:12]:
+        tier = str(item.get("tier", "SKIP"))
+        host = str(item.get("subdomain", ""))
+        status = "scraped" if item.get("scraped") else "noted"
+        if tier == "INFRA":
+            status = "skipped"
+        text.append(f"  {tier:<6} {host:<32} [{status}]\n", style="dim" if tier in {"LOW", "SKIP"} else None)
+    if len(entries) > 12:
+        text.append(f"  + {len(entries) - 12} more — full list in --export JSON\n", style="dim")
+    source_counts = metadata.get("source_counts") or {}
+    if source_counts:
+        text.append("  Sources: " + " · ".join(f"{key} ({value})" for key, value in sorted(source_counts.items())) + "\n", style="dim")
+    budget = metadata.get("budget") or {}
+    if budget:
+        text.append(f"  Budget: {budget.get('elapsed_seconds', 0)}s elapsed · hard cap {'hit' if budget.get('hard_exceeded') else 'not hit'}\n", style="dim")
+    return Panel(text, title="[bold cyan]SUBDOMAIN INTELLIGENCE[/bold cyan]", border_style="cyan")
+
+
+def _build_infrastructure(result: DomainHarvestResult) -> dict[str, list[dict[str, Any]]]:
+    """Return the normalized IP/ASN footprint emitted by subdomain discovery."""
+    for module_result in result.module_results.values():
+        metadata = module_result.metadata or {}
+        infrastructure = metadata.get("infrastructure")
+        if not isinstance(infrastructure, dict):
+            continue
+        ips = infrastructure.get("ips")
+        asns = infrastructure.get("asns")
+        if isinstance(ips, list) and isinstance(asns, list):
+            return {"ips": ips, "asns": asns}
+    return {"ips": [], "asns": []}
+
+
+def _format_infrastructure_panel(infrastructure: dict[str, list[dict[str, Any]]]) -> Panel:
+    ips = infrastructure.get("ips", [])
+    asns = infrastructure.get("asns", [])
+    lines = Text()
+    for record in asns:
+        if not isinstance(record, dict):
+            continue
+        lines.append(
+            f"  AS{record.get('asn')} {record.get('name') or 'Unknown'}"
+            f"  · {len(record.get('ips') or [])} IPs"
+            f" · {len(record.get('cidrs') or [])} CIDRs\n"
+        )
+    if not asns:
+        lines.append("  No ASN data resolved.\n", style="dim")
+    return Panel(
+        lines,
+        title=f"[bold cyan]INFRASTRUCTURE ({len(ips)} IPs · {len(asns)} ASNs)[/bold cyan]",
+        border_style="cyan",
+    )
 
 
 def _sanitised_export_emails(emails: list[HarvestedEmail]) -> list[HarvestedEmail]:
@@ -488,7 +557,12 @@ def _extract_discovered_names(result: DomainHarvestResult) -> list[dict[str, Any
     return out
 
 
-def _build_people(result: DomainHarvestResult) -> list[dict[str, Any]]:
+def _build_people(
+    result: DomainHarvestResult,
+    *,
+    include_low: bool = True,
+    include_patterns: bool = True,
+) -> list[dict[str, Any]]:
     """Build person-centric rows by joining names to email evidence.
 
     A direct ``metadata.name`` match wins.  When a source only provides an
@@ -565,6 +639,10 @@ def _build_people(result: DomainHarvestResult) -> list[dict[str, Any]]:
     entries = _sanitised_export_emails(result.unique_emails)
     for entry in entries:
         if entry.is_role:
+            continue
+        if entry.confidence_label == "LOW" and not include_low:
+            continue
+        if _is_unverified_permutation(entry) and not include_patterns:
             continue
         direct_names: list[tuple[str, str]] = []
         for evidence in entry.evidence or []:
@@ -938,12 +1016,6 @@ def _build_suggested_next_steps(
             "to confirm which addresses actually exist."
         )
 
-    if suppressed_low_count > 0 and not show_low:
-        hints.append(
-            f"-> {suppressed_low_count} LOW confidence emails hidden — "
-            "use --show-low to reveal."
-        )
-
     if role_count > 0 and not show_role:
         hints.append(
             f"-> {role_count} role accounts hidden — "
@@ -989,6 +1061,7 @@ def format_harvest_cli_output(
     result: DomainHarvestResult,
     *,
     show_low: bool = False,
+    hide_low: bool = False,
     show_unverified_patterns: bool = False,
     show_role: bool = False,
     full: bool = False,
@@ -1022,6 +1095,7 @@ def format_harvest_cli_output(
     # ``full`` is the convenience restore-legacy alias.
     if full:
         show_low = True
+        hide_low = False
         show_unverified_patterns = True
         show_role = True
 
@@ -1041,6 +1115,8 @@ def format_harvest_cli_output(
 
     # Per-source status table (unchanged).
     console.print(_build_sources_table(result))
+    infrastructure = _build_infrastructure(result)
+    console.print(_format_infrastructure_panel(infrastructure))
 
     # ------------------------------------------------------------------
     # Phase 1: split personal vs role emails, and unverified permutations
@@ -1078,18 +1154,11 @@ def format_harvest_cli_output(
     # ``high`` was the 3-tier HIGH bucket, now it means
     # "anything in the actionable tiers (CONFIRMED + LIKELY)".
     high = confirmed + likely
-    auto_show_unverified_patterns = (
-        bool(unverified_perms)
-        and not show_unverified_patterns
-        and len(high) + len(medium) == 0
-    )
-
     # ------------------------------------------------------------------
     # Phase 1: new summary bar.  Replaces the legacy "Total: N candidates"
     # with an "Actionable: ..." line that names each visible bucket and
     # the suppressed count.
     # ------------------------------------------------------------------
-    suppressed_total = len(low) + len(unverified_perms)
     summary_parts: list[str] = [
         f"[bold green]{len(confirmed)} CONFIRMED[/bold green]",
         f"[bold bright_green]{len(likely)} LIKELY[/bold bright_green]",
@@ -1097,11 +1166,15 @@ def format_harvest_cli_output(
     ]
     if role_emails:
         summary_parts.append(f"{len(role_emails)} role accounts")
-    if suppressed_total > 0:
-        summary_parts.append(
-            f"{suppressed_total:,} suppressed (LOW + unverified patterns)"
-        )
     console.print("\n[bold]Actionable:[/bold] " + " · ".join(summary_parts))
+    if low or unverified_perms:
+        console.print(
+            f"[bold]Suppressed:[/bold] {len(low)} LOW emails · "
+            f"{len(unverified_perms)} unverified patterns"
+        )
+        console.print("  → Use --show-low to review LOW emails")
+        console.print("  → Use --show-unverified-patterns to review patterns")
+        console.print("  → Use --full to show everything")
     validation_summary = (result.metadata or {}).get("low_email_validation")
     if isinstance(validation_summary, dict):
         promotion = validation_summary.get("promotion") or {}
@@ -1159,34 +1232,22 @@ def format_harvest_cli_output(
         )
     )
 
-    # LOW: hidden by default.  When shown, unverified permutations are
-    # included only if ``show_unverified_patterns`` is also True (the
-    # two flags are independent).
-    if show_low:
-        low_panel_emails = list(low)
-        if show_unverified_patterns:
-            low_panel_emails.extend(unverified_perms)
+    # LOW content is opt-in. Counts and review commands are always shown
+    # above, even when the analyst keeps the content hidden.
+    if show_low and not hide_low:
         console.print(
             Panel(
-                _format_emails_block(low_panel_emails),
+                _format_emails_block(low),
                 title=(
-                    f"[dim]LOW CONFIDENCE ({len(low_panel_emails)})"
+                    f"[dim]LOW CONFIDENCE ({len(low)})"
                     "[/dim]"
                 ),
                 border_style="dim",
             )
         )
-    elif low:
-        # LOW panel suppressed — print the dedicated suppressed-count line.
-        console.print(
-            f"[dim]LOW confidence: {len(low)} emails hidden. "
-            "Run with --show-low to reveal.[/dim]"
-        )
 
-    # Unverified permutations: always suppressed unless the explicit
-    # flag is passed.  Independent of ``show_low`` — even when LOW is
-    # shown, unverified patterns stay hidden behind their own flag.
-    if auto_show_unverified_patterns:
+    # Unverified permutations are independently opt-in.
+    if show_unverified_patterns:
         console.print(
             Panel(
                 _format_emails_block(unverified_perms),
@@ -1197,13 +1258,6 @@ def format_harvest_cli_output(
                     "--verify-smtp to confirm."
                 ),
             )
-        )
-    elif unverified_perms and not show_unverified_patterns:
-        console.print(
-            f"[dim]Unverified pattern candidates: {len(unverified_perms)} "
-            "hidden (score 0.0 — no SMTP verification). "
-            "Run with --verify-smtp to verify, or "
-            "--show-unverified-patterns to view raw.[/dim]"
         )
 
     # ------------------------------------------------------------------
@@ -1271,7 +1325,16 @@ def format_harvest_cli_output(
     # steps, per the audit spec.
     discovered = _extract_discovered_names(result)
     console.print(_format_discovered_names_panel(discovered))
-    console.print(_format_people_panel(_build_people(result)))
+    console.print(
+        _format_people_panel(
+            _build_people(
+                result,
+                include_low=show_low and not hide_low,
+                include_patterns=show_unverified_patterns,
+            )
+        )
+    )
+    console.print(_format_subdomain_panel(result))
 
     # Suggested next steps — now display-aware.
     hints = _build_suggested_next_steps(
@@ -1431,10 +1494,22 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
         }
 
     summary_counts = _export_summary_counts(export_emails)
+    suppressed_low = [
+        entry
+        for entry in export_emails
+        if not entry.is_role
+        and entry.confidence_label == "LOW"
+        and not _is_unverified_permutation(entry)
+    ]
+    suppressed_patterns = [
+        entry for entry in export_emails if _is_unverified_permutation(entry)
+    ]
+    suppressed_count = len(suppressed_low) + len(suppressed_patterns)
     people = _build_people(result)
     quality_metrics = build_metrics(result, emails_out)
     shadow_profiles = _build_shadow_profiles(result)
     subdomains = _build_subdomains(result)
+    infrastructure = _build_infrastructure(result)
     module_timings = {
         name: float((mod.metadata or {}).get("duration_seconds"))
         for name, mod in result.module_results.items()
@@ -1481,6 +1556,9 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
             #     "all"               — no filter applied (legacy)
             #     "medium_and_above"  — LOW + unverified patterns hidden
             "display_filter": "medium_and_above",
+            "suppressed_count": suppressed_count,
+            "suppressed_low_count": len(suppressed_low),
+            "suppressed_pattern_count": len(suppressed_patterns),
             "p0_p1_metrics": quality_metrics,
             "shadow_profile_count": len(shadow_profiles),
             "module_timings": module_timings,
@@ -1496,6 +1574,7 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
         "people": people,
         "shadow_profiles": shadow_profiles,
         "subdomains": subdomains,
+        "infrastructure": infrastructure,
         # MUST-FIX S12: schema version for forward-compatibility. Bump this
         # when the export structure changes in a backward-incompatible
         # way (renaming a top-level key, removing a field, changing a

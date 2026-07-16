@@ -26,13 +26,14 @@ from ..modules.pgp_domain_email import PgpDomainEmailModule
 from ..modules.public_forge import PublicForgeModule
 from ..modules.public_surface_sweeper import PublicSurfaceSweeper
 from ..modules.pypi_email import PyPIEmailModule
-from ..modules.subdomain_surface import SubdomainSurfaceModule
+from ..modules.subdomain_intel import SubdomainIntelModule
 from ..modules.syndication_feed_sweeper import SyndicationFeedSweeper
 from ..modules.wayback import WaybackDomainHarvestModule
 from ..modules.wordpress_rest import WordPressRestModule
 from .concurrent_fetch_cache import CachedFetch, ConcurrentFetchCache
 from .context_router import IndustryVocabularyRouter
 from .email_extraction import extract_emails
+from .name_quality import _NAVIGATION_TOKENS, COMMON_ENGLISH_NOUNS, _clean_token
 from .pagination_handler import PaginationHandler
 from .signal_pool import AsyncSignalPool
 from .stealth_client import StealthSession, resolve_timing_profile
@@ -64,7 +65,9 @@ MODULE_PYPI_EMAIL = "pypi_email"
 MODULE_PUBLIC_SURFACE = "public_surface_sweeper"
 MODULE_PUBLIC_FORGE = "public_forge"
 MODULE_PACKAGE_ECOSYSTEMS = "package_ecosystems"
-MODULE_SUBDOMAIN_SURFACE = "subdomain_surface"
+MODULE_SUBDOMAIN_INTEL = "subdomain_intel"
+# Compatibility alias for callers that used the pre-intelligence module name.
+MODULE_SUBDOMAIN_SURFACE = MODULE_SUBDOMAIN_INTEL
 MODULE_PGP_DOMAIN_EMAIL = "pgp_domain_email"
 MODULE_GITHUB_ORG_MEMBERS = "github_org_members"
 MODULE_GITHUB_DOMAIN_COMMITS = "github_domain_commits"
@@ -82,6 +85,19 @@ _ACCUMULATING_MODULES = frozenset(
     {MODULE_PERSON_EMAIL_PIVOT, MODULE_EMAIL_IDENTITY_ENRICHMENT, "name_to_github_profile"}
 )
 _YIELD_PREDICTION_CANDIDATES = frozenset({MODULE_NPM_EMAIL, MODULE_PYPI_EMAIL, MODULE_PACKAGE_ECOSYSTEMS, MODULE_PGP_DOMAIN_EMAIL, MODULE_SYNDICATION_FEED_SWEEPER})
+_PAGE_HEADING_TOKENS = frozenset(
+    {
+        "blue",
+        "convention",
+        "curiosity",
+        "going",
+        "impact",
+        "industry",
+        "key",
+        "over",
+        "team",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -106,6 +122,21 @@ class WorkerContext:
     cc_max_collections: int | None = None
     proxy_fallback_ok: bool = False
     skip_modules: frozenset[str] = frozenset()
+    with_subdomains: bool = False
+    subdomain_deep: bool = False
+    subdomain_calibrate: bool = False
+    context_vertical: tuple[str, ...] = ()
+
+
+def _is_obvious_non_person_name(name: str) -> bool:
+    """Reject noun/navigation-only labels before invoking NER."""
+    tokens = [_clean_token(token) for token in str(name).split()]
+    return bool(tokens) and all(
+        token in COMMON_ENGLISH_NOUNS
+        or token in _NAVIGATION_TOKENS
+        or token in _PAGE_HEADING_TOKENS
+        for token in tokens
+    )
 
 
 async def run_adaptive_harvest(
@@ -126,6 +157,9 @@ async def run_adaptive_harvest(
     proxy_fallback_ok: bool = False,
     enable_email_identity_enrichment: bool = True,
     skip_modules: tuple[str, ...] | list[str] | None = None,
+    with_subdomains: bool = False,
+    subdomain_deep: bool = False,
+    subdomain_calibrate: bool = False,
 ) -> Any:
     from .domain_harvest_orchestrator import (
         DomainHarvestResult,
@@ -145,6 +179,11 @@ async def run_adaptive_harvest(
     cache = ConcurrentFetchCache(session)
     page_cache = CachedFetch(cache)
     module_results: dict[str, ModuleResult] = {}
+    normalized_skip_modules = {
+        str(name).strip() for name in (skip_modules or ()) if str(name).strip()
+    }
+    if "subdomain_surface" in normalized_skip_modules:
+        normalized_skip_modules.add(MODULE_SUBDOMAIN_INTEL)
     ctx = WorkerContext(
         domain=cleaned,
         scheduler=scheduler,
@@ -165,7 +204,10 @@ async def run_adaptive_harvest(
         cc_max_records=cc_max_records,
         cc_max_collections=cc_max_collections,
         proxy_fallback_ok=proxy_fallback_ok,
-        skip_modules=frozenset(str(name).strip() for name in (skip_modules or ()) if str(name).strip()),
+        skip_modules=frozenset(normalized_skip_modules),
+        with_subdomains=with_subdomains,
+        subdomain_deep=subdomain_deep,
+        subdomain_calibrate=subdomain_calibrate,
     )
 
     # Preserve a truthful per-run module inventory even when the budget is
@@ -490,6 +532,7 @@ async def run_adaptive_harvest(
 async def _seed_scheduler(ctx: WorkerContext) -> None:
     homepage = await _read_homepage_for_router(ctx)
     router_result = IndustryVocabularyRouter().route(homepage)
+    object.__setattr__(ctx, "context_vertical", tuple(router_result.inferred_industries))
     for path in router_result.target_paths:
         await ctx.scheduler.submit(
             WorkItem(
@@ -684,6 +727,8 @@ async def _execute_item(item: WorkItem, ctx: WorkerContext) -> WorkResult:
     try:
         if item.module_name and item.module_name in ctx.skip_modules:
             return WorkResult(item=item, success=True, findings=[], new_items=[], errors=["skipped by runtime policy"], duration_seconds=0.0)
+        if ctx.subdomain_calibrate and item.module_name != MODULE_SUBDOMAIN_INTEL:
+            return WorkResult(item=item, success=True, findings=[], new_items=[], errors=["skipped for subdomain calibration"], duration_seconds=0.0)
         if item.module_name and _should_defer_for_yield(ctx, item.module_name):
             if ctx.module_results is not None:
                 ctx.module_results[item.module_name] = ModuleResult(
@@ -968,6 +1013,13 @@ async def _run_pattern_for_name(
     name = payload["name"]
     domain = ctx.domain
 
+    if _is_obvious_non_person_name(name):
+        return [], []
+
+    from backend.core.name_classifier import classify_name
+    if not classify_name(name).is_person:
+        return [], []
+
     from backend.core.email_pattern_generator import _PATTERN_TEMPLATES, generate_patterns
     if "templates" in payload:
         templates = payload["templates"]
@@ -1040,6 +1092,8 @@ async def _on_name_found(
     medium_threshold = float(
         getattr(settings, "pattern_medium_confidence_threshold", 0.50) or 0.50
     )
+    if _is_obvious_non_person_name(name):
+        return []
     result = classify_name(name)
     if not result.is_person:
         return []
@@ -1148,6 +1202,11 @@ async def _run_module_instance(
         signal_pool=ctx.signal_pool,
         budget=ctx.budget,
         soft_timeout=soft_timeout,
+        with_subdomains=ctx.with_subdomains,
+        subdomain_deep=ctx.subdomain_deep,
+        enable_scraping=not ctx.subdomain_calibrate,
+        context_vertical=ctx.context_vertical,
+        scrape_session=ctx.stealth_session,
     )
     return _normalize_module_result(name, result)
 
@@ -1166,7 +1225,7 @@ def _get_module_instance(module_name: str, ctx: WorkerContext) -> Any:
         MODULE_PUBLIC_SURFACE: PublicSurfaceSweeper,
         MODULE_PUBLIC_FORGE: PublicForgeModule,
         MODULE_PACKAGE_ECOSYSTEMS: PackageEcosystemsModule,
-        MODULE_SUBDOMAIN_SURFACE: SubdomainSurfaceModule,
+        MODULE_SUBDOMAIN_SURFACE: SubdomainIntelModule,
         MODULE_PGP_DOMAIN_EMAIL: PgpDomainEmailModule,
         MODULE_GITHUB_ORG_MEMBERS: GitHubOrgMembersModule,
         MODULE_GITHUB_DOMAIN_COMMITS: GitHubDomainCommitsModule,

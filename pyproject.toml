@@ -87,6 +87,7 @@ packages = ["backend", "cli"]
 "data/service_categories.yaml" = "data/service_categories.yaml"
 "data/sherlock_sites.json" = "data/sherlock_sites.json"
 "data/subdomain_wordlist.txt" = "data/subdomain_wordlist.txt"
+"data/subdomain_wordlist.json" = "data/subdomain_wordlist.json"
 "data/wmn_sites.json" = "data/wmn_sites.json"
 
 [tool.hatch.build.targets.sdist.force-include]
@@ -103,7 +104,25 @@ packages = ["backend", "cli"]
 "data/service_categories.yaml" = "data/service_categories.yaml"
 "data/sherlock_sites.json" = "data/sherlock_sites.json"
 "data/subdomain_wordlist.txt" = "data/subdomain_wordlist.txt"
+"data/subdomain_wordlist.json" = "data/subdomain_wordlist.json"
 "data/wmn_sites.json" = "data/wmn_sites.json"
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/venv-ner",
+  "/frontend",
+  "/.codex",
+  "/public",
+  "/dist",
+  "/build",
+  "/buildtmp",
+  "/.tmp",
+  "/.pytest-tmp",
+  "/.pytest_cache",
+  "/.ruff_cache",
+  "/results",
+  "/data/*.db",
+]
 
 [tool.ruff]
 line-length = 100

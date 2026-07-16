@@ -939,12 +939,28 @@ def harvest_emails_command(
             "show emails whose domain equals the target domain."
         ),
     ),
+    enable_ml: bool = typer.Option(
+        False,
+        "--enable-ml",
+        help=(
+            "Enable the optional spaCy name classifier for this harvest. "
+            "Requires mailaccess[ml] and en_core_web_md."
+        ),
+    ),
     show_low: bool = typer.Option(
         False,
         "--show-low/--no-show-low",
         help=(
             "Phase 1: include LOW confidence emails in the CLI "
             "output (hidden by default to reduce noise)."
+        ),
+    ),
+    hide_low: bool = typer.Option(
+        False,
+        "--hide-low",
+        help=(
+            "Suppress LOW email content. Suppression counts remain visible; "
+            "--show-low can review LOW emails unless this flag is set."
         ),
     ),
     show_unverified_patterns: bool = typer.Option(
@@ -1017,6 +1033,18 @@ def harvest_emails_command(
             "candidate emails."
         ),
     ),
+    with_subdomains: bool = typer.Option(
+        False, "--with-subdomains", help="Enable Tier 1 subdomain brute-force discovery at T2-T5."
+    ),
+    subdomain_deep: bool = typer.Option(
+        False, "--subdomain-deep", help="Enable Tier 2 subdomain discovery and GitHub search."
+    ),
+    no_subdomains: bool = typer.Option(
+        False, "--no-subdomains", help="Disable subdomain intelligence, including passive sources."
+    ),
+    subdomain_calibrate: bool = typer.Option(
+        False, "--subdomain-calibrate", help="Discover and score subdomains without scraping."
+    ),
 ) -> None:
     """Harvest email addresses associated with a domain.
 
@@ -1086,12 +1114,18 @@ def harvest_emails_command(
                 min_confidence_score=min_confidence_score,
                 exclude_domains=tuple(exclude_domain),
                 on_domain_only=on_domain_only,
+                enable_ml=enable_ml,
                 show_low=show_low,
+                hide_low=hide_low,
                 show_unverified_patterns=show_unverified_patterns,
                 show_role=show_role,
                 full=full,
                 aggressive=aggressive,
                 timeout_seconds=timeout,
+                with_subdomains=with_subdomains,
+                subdomain_deep=subdomain_deep,
+                no_subdomains=no_subdomains,
+                subdomain_calibrate=subdomain_calibrate,
             )
         finally:
             settings.harvest_timing_profile = original_profile
@@ -1124,12 +1158,18 @@ def harvest_emails_command(
                 min_confidence_score=min_confidence_score,
                 exclude_domains=tuple(exclude_domain),
                 on_domain_only=on_domain_only,
+                enable_ml=enable_ml,
                 show_low=show_low,
+                hide_low=hide_low,
                 show_unverified_patterns=show_unverified_patterns,
                 show_role=show_role,
                 full=full,
                 aggressive=aggressive,
                 timeout_seconds=timeout,
+                with_subdomains=with_subdomains,
+                subdomain_deep=subdomain_deep,
+                no_subdomains=no_subdomains,
+                subdomain_calibrate=subdomain_calibrate,
             )
         finally:
             _settings.harvest_aggressive = original_aggressive

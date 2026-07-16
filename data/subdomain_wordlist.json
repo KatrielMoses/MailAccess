@@ -1,0 +1,51 @@
+{
+  "tier1": [
+    "team", "people", "about", "staff", "leadership", "careers", "jobs",
+    "contact", "press", "news", "blog", "docs", "support", "help",
+    "status", "portal", "intranet", "login", "auth", "sso", "api",
+    "app", "admin", "dashboard", "dev", "development", "staging", "stage",
+    "stg", "test", "qa", "uat", "preview", "sandbox", "demo", "beta",
+    "alpha", "next", "canary", "old", "legacy", "archive", "backup", "store",
+    "shop", "community", "forum", "partners", "investor", "ir", "vendor"
+  ],
+  "tier2": [
+    "advisors", "alumni", "faculty", "instructor", "provider", "physician",
+    "patient", "supplier", "finance", "compliance", "governance", "foi",
+    "transparency", "git", "gitlab", "grafana", "prometheus", "kibana",
+    "jenkins", "ci", "cd", "build", "deploy", "internal", "secure", "vpn",
+    "remote", "files", "download", "media", "assets", "static", "cdn",
+    "images", "img", "fonts", "mx", "ns", "dns", "mail", "webmail",
+    "smtp", "imap", "pop", "ftp", "sftp", "cpanel", "web", "www",
+    "mobile", "m", "graphql", "rest", "v1", "v2", "monitor", "metrics",
+    "logs", "trace", "observe", "sandbox2", "uat2", "qa2", "test2", "dev2",
+    "stage2", "preview2", "beta2", "alpha2", "prototype", "research", "labs",
+    "engineering", "security", "trust", "legal", "privacy", "investigation",
+    "board", "founders", "executives", "directory", "members", "account",
+    "accounts", "billing", "subscribe", "events", "webinars", "learning",
+    "training", "academy", "careers2", "recruiting", "apply", "jobs2", "press2",
+    "newsroom", "updates", "release", "releases", "changelog", "documentation",
+    "knowledgebase", "kb", "statuspage", "support2", "helpdesk", "ticket",
+    "tickets", "customer", "customers", "client", "clients", "partner", "partners2",
+    "reseller", "wholesale", "investors", "shareholders", "ir2", "reports", "annual",
+    "sustainability", "esg", "procurement", "supplier2", "vendors", "vendor2", "api-dev",
+    "api-stage", "api-test", "api-qa", "api-prod", "production", "prod", "origin",
+    "edge", "proxy", "gateway", "router", "loadbalancer", "lb", "database", "db",
+    "redis", "ldap", "ntp", "mail2", "ns1", "ns2", "dns1", "dns2", "sandbox3",
+    "demo2", "preview3", "canary2", "next2", "legacy2", "archive2", "backup2",
+    "temp", "tmp", "old2", "new", "wordpress", "wp", "feed", "rss", "atom",
+    "sitemap", "robots", "well-known", "security-txt", "autodiscover", "autoconfig"
+  ],
+  "tier3_exclude": [
+    "mail", "smtp", "imap", "pop", "pop3", "mx", "ns1", "ns2", "ftp", "sftp",
+    "cpanel", "webmail", "cdn", "static", "assets", "img", "images", "js", "css",
+    "fonts", "db", "redis", "ldap", "ntp"
+  ],
+  "vertical_extras": {
+    "tech": ["git", "gitlab", "grafana", "jenkins", "kibana"],
+    "healthcare": ["provider", "physician", "patient", "clinical", "portal"],
+    "education": ["faculty", "instructor", "alumni", "library", "courses"],
+    "finance": ["investor", "ir", "compliance", "reports", "shareholders"],
+    "government": ["foi", "transparency", "open-data", "procurement", "records"],
+    "manufacturing": ["supplier", "vendor", "procurement", "quality", "factory"]
+  }
+}

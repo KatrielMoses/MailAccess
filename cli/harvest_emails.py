@@ -35,7 +35,6 @@ import asyncio
 import contextlib
 import json
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -48,7 +47,6 @@ if sys.platform == "win32":
 
 from rich.console import Console
 from rich.live import Live
-from rich.prompt import Confirm
 from rich.table import Table
 
 from backend.config import settings
@@ -61,8 +59,6 @@ from backend.core.email_extraction import validate_domain
 from backend.core.harvest_diff import compare_harvest_exports
 from backend.core.harvest_history import load_latest, save_latest
 from backend.core.name_classifier import is_ml_available
-
-_ML_PREF_VALUES = {"ask", "on", "off"}
 
 
 def _resolve_export_path(export: str) -> Path:
@@ -81,51 +77,6 @@ def _is_proxy_fail(status: str, errors: list[str]) -> bool:
             for e in errors
         )
     )
-
-
-def _persist_ml_pref(value: str) -> None:
-    env_path = Path.home() / ".mailaccess" / ".env"
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    from dotenv import set_key
-
-    set_key(str(env_path), "ML_NAME_CLASSIFIER", value)
-
-
-def _maybe_prompt_ml_install(console: Console) -> None:
-    ml_pref = str(getattr(settings, "ml_name_classifier", "ask") or "ask").lower()
-    if ml_pref not in _ML_PREF_VALUES:
-        ml_pref = "ask"
-
-    if ml_pref in {"off", "on"}:
-        return
-    if is_ml_available():
-        _persist_ml_pref("on")
-        return
-
-    console.print(
-        "\n[bold]Optional: ML name classifier[/bold]"
-        "\nReduces false positives like 'Going Blue Team' being classified as a person name."
-        "\nAdds ~190MB (spaCy + en_core_web_md model). CPU-only, offline after install.\n"
-    )
-    if Confirm.ask("Install ML deps now?", default=False):
-        console.print("Installing spaCy...")
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "mailaccess[ml]"],
-            stdout=subprocess.DEVNULL,
-        )
-        console.print("Downloading en_core_web_md...")
-        subprocess.check_call(
-            [sys.executable, "-m", "spacy", "download", "en_core_web_md"],
-            stdout=subprocess.DEVNULL,
-        )
-        console.print("[green]ML classifier ready.[/green]\n")
-        _persist_ml_pref("on")
-    else:
-        _persist_ml_pref("off")
-        console.print(
-            "[dim]Skipped. Using heuristic filter. "
-            "Set ML_NAME_CLASSIFIER=ask to prompt again.[/dim]\n"
-        )
 
 
 def _format_progress_table(
@@ -357,11 +308,17 @@ def run_harvest_emails(
     exclude_domains: tuple[str, ...] = (),
     on_domain_only: bool = False,
     show_low: bool = False,
+    hide_low: bool = False,
+    enable_ml: bool = False,
     show_unverified_patterns: bool = False,
     show_role: bool = False,
     full: bool = False,
     aggressive: bool = False,
     timeout_seconds: int | None = None,
+    with_subdomains: bool = False,
+    subdomain_deep: bool = False,
+    no_subdomains: bool = False,
+    subdomain_calibrate: bool = False,
 ) -> int:
     """Run the domain email harvest and render / export results.
 
@@ -394,11 +351,19 @@ def run_harvest_emails(
         console.print(f"[red]Error:[/] {exc}")
         return 2
 
-    try:
-        _maybe_prompt_ml_install(console)
-    except subprocess.CalledProcessError as exc:
-        console.print(f"[red]Error:[/] ML classifier install failed: {exc}")
-        return 3
+    ml_enabled_for_run = (
+        enable_ml
+        or str(getattr(settings, "ml_name_classifier", "off") or "off").lower() == "on"
+    )
+    if enable_ml and not is_ml_available():
+        console.print("[red]ML name classifier is unavailable.[/] Install it with:")
+        console.print("  pip install mailaccess[ml]", markup=False)
+        console.print("  python -m spacy download en_core_web_md", markup=False)
+        return 2
+
+    original_ml_pref = settings.ml_name_classifier
+    if enable_ml:
+        settings.ml_name_classifier = "on"
 
     # ------------------------------------------------------------------
     # 2. MUST-FIX M3: per-invocation options are threaded as explicit
@@ -459,6 +424,7 @@ def run_harvest_emails(
     }
 
     started = time.time()
+    effective_skip_modules = tuple(skip_modules) + (("subdomain_intel",) if no_subdomains else ())
 
     def _on_module_complete(
         name: str, status: str, errors: list[str] | None = None
@@ -495,26 +461,42 @@ def run_harvest_emails(
             cc_max_collections=cli_cc_max_collections,
             on_module_complete=_on_module_complete,
             timeout_seconds=timeout_seconds,
-            skip_modules=skip_modules,
+            skip_modules=effective_skip_modules,
+            with_subdomains=with_subdomains,
+            subdomain_deep=subdomain_deep,
+            subdomain_calibrate=subdomain_calibrate,
         )
 
     try:
-        with Live(
-            _format_progress_table(module_states, started),
-            console=console,
-            refresh_per_second=4,
-            transient=True,
-        ):
-            result = asyncio.run(_drive())
-    except ValueError as exc:
-        # Domain validation / free-provider rejection.
-        console.print(f"[red]Error:[/] {exc}")
-        return 2
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]Error:[/] harvest failed: {exc}")
-        return 3
+        try:
+            with Live(
+                _format_progress_table(module_states, started),
+                console=console,
+                refresh_per_second=4,
+                transient=True,
+            ):
+                result = asyncio.run(_drive())
+        except ValueError as exc:
+            # Domain validation / free-provider rejection.
+            console.print(f"[red]Error:[/] {exc}")
+            return 2
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]Error:[/] harvest failed: {exc}")
+            return 3
+    finally:
+        settings.ml_name_classifier = original_ml_pref
     # MUST-FIX M3: no settings restoration needed — we never mutated
     # settings in the first place.
+
+    if subdomain_calibrate:
+        calibration = (result.module_results or {}).get("subdomain_intel")
+        findings = list(getattr(calibration, "findings", []) or [])
+        counts = {tier: sum(str(item.get("tier", "SKIP")) == tier for item in findings) for tier in ("HIGH", "MEDIUM", "LOW", "SKIP", "INFRA")}
+        console.print(
+            "[cyan]Subdomain calibration:[/] "
+            + " · ".join(f"{tier}={count}" for tier, count in counts.items())
+            + " · scraping=disabled"
+        )
 
     # ------------------------------------------------------------------
     # 5. Apply S8 post-processing filters (display + export only).
@@ -547,11 +529,18 @@ def run_harvest_emails(
         format_harvest_cli_output(
             result,
             show_low=show_low,
+            hide_low=hide_low,
             show_unverified_patterns=show_unverified_patterns,
             show_role=show_role,
             full=full,
         )
     )
+    if result.employee_names_processed and not ml_enabled_for_run:
+        console.print(
+            "[dim]Tip: run with --enable-ml for improved name filtering\n"
+            "  (requires: pip install mailaccess[ml] + "
+            "python -m spacy download en_core_web_md)[/dim]"
+        )
 
     # M2: if any module had a proxy failure, show a hint.
     proxy_failed = any(

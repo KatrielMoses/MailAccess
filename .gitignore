@@ -119,3 +119,7 @@ results/
 
 # Documentation
 !.env.example
+
+# Subdomain Intelligence source data and regression suite
+!data/subdomain_wordlist.json
+!tests/test_subdomain_intel.py

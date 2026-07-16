@@ -21,7 +21,7 @@ _NLP: Any | None = None
 _NLP_LOAD_FAILED = False
 
 
-def _get_nlp() -> Any | None:
+def _load_nlp() -> Any | None:
     global _NLP, _NLP_LOAD_FAILED
     if _NLP is not None:
         return _NLP
@@ -40,6 +40,15 @@ def _get_nlp() -> Any | None:
         return None
 
 
+def _get_nlp() -> Any | None:
+    """Return the model only when ML was explicitly enabled."""
+    from backend.config import settings
+
+    if str(getattr(settings, "ml_name_classifier", "off") or "off").lower() != "on":
+        return None
+    return _load_nlp()
+
+
 def is_ml_available() -> bool:
     """Return True when spaCy and en_core_web_md are both loadable."""
     try:
@@ -47,7 +56,7 @@ def is_ml_available() -> bool:
 
         if not spacy.util.is_package("en_core_web_md"):
             return False
-        return _get_nlp() is not None
+        return _load_nlp() is not None
     except ImportError:
         return False
 
