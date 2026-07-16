@@ -7,8 +7,10 @@ import pytest
 from typer.testing import CliRunner
 
 from backend.config import settings
+from backend.core.domain_harvest_orchestrator import _attach_smtp_email_verification
 from backend.core.mx_resolver import MXRecord
 from backend.core.smtp_verifier import SMTPVerifier
+from backend.modules.base import ModuleResult, ModuleStatus
 from cli.main import app
 
 
@@ -108,3 +110,35 @@ async def test_550_response_marks_not_found() -> None:
     result = await verifier.verify_single("one@example.com")
     assert result.exists is False
     assert result.verification_status == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_provider_route_reports_real_candidate_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "backend.core.domain_harvest_orchestrator.resolve_mx",
+        AsyncMock(return_value=[MXRecord("aspmx.l.google.com", 10)]),
+    )
+    modules = {
+        "email_search_dork": ModuleResult(
+            status=ModuleStatus.SUCCESS,
+            findings=[
+                {
+                    "metadata": {
+                        "email": "person@example.com",
+                        "on_domain": True,
+                    }
+                }
+            ],
+        )
+    }
+
+    summary = await _attach_smtp_email_verification("example.com", modules)
+
+    assert summary == {
+        "checked": 1,
+        "candidates": 1,
+        "provider": "google",
+        "skipped": "provider_specific_verifier",
+    }

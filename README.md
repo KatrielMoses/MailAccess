@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.12.9&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.13.0&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -526,6 +526,19 @@ datacenter proxies. Off by default.
 Sign up: https://scrapingant.com/?ref=mzliyzh
 
 ## Changelog
+
+### 0.13.0
+
+- RIPE Stat IP-to-ASN enrichment now produces provider names and announced
+  CIDR prefixes in JSON, CLI infrastructure output, and `cidrs.txt`.
+- ASN enrichment runs after IP discovery without reducing email discovery
+  coverage.
+- Final email validation and confidence promotion continue after the discovery
+  budget is exhausted, restoring complete harvest output.
+- SMTP provider routing and timeout reporting now preserve accurate candidate
+  counts in live logs and exports.
+- Fixed the Team Cymru origin lookup query and added regression coverage for
+  ASN, CIDR, SMTP, and output-quality paths.
 
 ### 0.12.8
 

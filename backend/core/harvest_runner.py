@@ -304,6 +304,12 @@ async def run_adaptive_harvest(
         logger.error("Track failure: %s", exc)
 
     try:
+        # Infrastructure enrichment consumes finalized HackerTarget output.
+        # Keep it outside the discovery scheduler so it cannot displace email
+        # work or be skipped merely because discovery used its full budget.
+        if MODULE_RIPE_STAT_ASN not in ctx.skip_modules:
+            await _run_module(MODULE_RIPE_STAT_ASN, ctx, soft_timeout=120.0)
+
         # Flush subscriber work before taking the identity-cluster snapshot.
         try:
             await asyncio.wait_for(signal_pool.close(), timeout=5.0)
@@ -312,6 +318,7 @@ async def run_adaptive_harvest(
         from .domain_harvest_orchestrator import (
             _attach_native_email_validation,
             _attach_smtp_email_verification,
+            _collect_smtp_findings,
         )
         from .historical_diff import annotate_historical_diff
         historical_metrics = annotate_historical_diff(module_results)
@@ -323,17 +330,15 @@ async def run_adaptive_harvest(
                 "checked": 0,
                 "skipped": "injected_modules",
             }
-        elif budget.is_expired():
-            native_validation = {
-                "checked": 0,
-                "skipped": "budget_exhausted",
-            }
         else:
             native_validation = await _attach_native_email_validation(
                 cleaned,
                 module_results,
             )
         if ctx.enable_smtp and not ctx.module_overrides:
+            smtp_candidate_count = len(
+                _collect_smtp_findings(cleaned, module_results)
+            )
             try:
                 # SMTP is deliberately given its own bounded tail. A target
                 # MX can accept TCP and then stop answering; never let that
@@ -359,7 +364,8 @@ async def run_adaptive_harvest(
                         }:
                             metadata["smtp_verification_status"] = "verification_timeout"
                 smtp_validation = {
-                    "checked": 0,
+                    "checked": smtp_candidate_count,
+                    "candidates": smtp_candidate_count,
                     "status": "verification_timeout",
                 }
         else:
@@ -389,7 +395,7 @@ async def run_adaptive_harvest(
             for result in module_results.values()
             for finding in result.findings or []
         )
-        if has_pattern_candidates and not ctx.module_overrides and not budget.is_expired():
+        if has_pattern_candidates and not ctx.module_overrides:
             from .domain_harvest_orchestrator import (
                 apply_domain_email_dns_signals,
                 resolve_domain_email_dns_signals,
@@ -401,8 +407,6 @@ async def run_adaptive_harvest(
         low_email_validation: dict[str, Any]
         if ctx.module_overrides:
             low_email_validation = {"checked": 0, "status": "skipped_injected_modules"}
-        elif budget.is_expired():
-            low_email_validation = {"checked": 0, "status": "budget_exhausted"}
         elif not settings.enable_low_email_validation:
             low_email_validation = {"checked": 0, "status": "disabled"}
         else:
@@ -1051,16 +1055,6 @@ async def _run_module(
     assert result is not None
     out_findings = [dict(f) for f in (result.findings or []) if isinstance(f, dict)]
     new_items = result.new_items if hasattr(result, "new_items") else []
-    if module_name == MODULE_HACKERTARGET and MODULE_RIPE_STAT_ASN not in ctx.skip_modules:
-        new_items.append(
-            WorkItem(
-                kind="run_module",
-                module_name=MODULE_RIPE_STAT_ASN,
-                priority=PRIORITY_HIGH_SIGNAL,
-                track=TRACK_GUARANTEED,
-                source="hackertarget_hosts_complete",
-            )
-        )
     if module_name == MODULE_EMPLOYEE_NAMES:
         names = [
             {

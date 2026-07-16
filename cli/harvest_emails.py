@@ -778,12 +778,11 @@ def run_harvest_emails(
     if not enable_smtp:
         display.log_event("SMTP", "disabled (--no-verify)")
     else:
-        smtp_validation_meta: dict[str, Any] = {}
-        for module_result in (result.module_results or {}).values():
-            meta = module_result.metadata if module_result else None
-            if isinstance(meta, dict) and "smtp_email_verification" in meta:
-                smtp_validation_meta = meta.get("smtp_email_verification") or {}
-                break
+        smtp_validation_meta = (result.metadata or {}).get(
+            "smtp_email_verification", {}
+        )
+        if not isinstance(smtp_validation_meta, dict):
+            smtp_validation_meta = {}
         # Walk findings to emit per-email [SMTP] events.
         probe_count = 0
         for module_result in (result.module_results or {}).values():
@@ -809,8 +808,43 @@ def run_harvest_emails(
                         display.log_event("SMTP", f"probing {email} → not found ({code})")
                     else:
                         display.log_event("SMTP", f"probing {email} → {status} ({code})")
-        if probe_count == 0 and not smtp_validation_meta:
-            display.log_event("SMTP", "no candidates to probe")
+        if probe_count == 0:
+            checked = int(smtp_validation_meta.get("checked") or 0)
+            if smtp_validation_meta.get("skipped") == "provider_specific_verifier":
+                provider = smtp_validation_meta.get("provider") or "cloud mail"
+                provider_result = smtp_validation_meta.get("provider_validation")
+                if not isinstance(provider_result, dict) and provider == "m365":
+                    candidate = (result.metadata or {}).get(
+                        "m365_email_verification"
+                    )
+                    if (
+                        isinstance(candidate, dict)
+                        and candidate.get("status") != "m365_disabled"
+                    ):
+                        provider_result = candidate
+                if isinstance(provider_result, dict):
+                    display.log_event(
+                        "SMTP",
+                        f"routed {checked} candidates to {provider} verifier "
+                        f"({provider_result.get('status') or 'completed'})",
+                    )
+                else:
+                    display.log_event(
+                        "SMTP",
+                        f"skipped direct probes for {checked} candidates "
+                        f"({provider} requires provider-specific verification)",
+                    )
+            elif smtp_validation_meta.get("status") == "no_mx_records":
+                display.log_event("SMTP", "no MX records found")
+            elif smtp_validation_meta.get("status") == "verification_timeout":
+                display.log_event(
+                    "SMTP",
+                    f"verification timed out for {checked} candidates",
+                )
+            elif checked:
+                display.log_event("SMTP", f"0 of {checked} candidates probed")
+            else:
+                display.log_event("SMTP", "no candidates to probe")
 
     # ------------------------------------------------------------------
     # 5. Apply S8 post-processing filters (display + export only).

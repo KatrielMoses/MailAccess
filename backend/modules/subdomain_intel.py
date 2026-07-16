@@ -483,7 +483,10 @@ async def lookup_asn_team_cymru(ip: str, *, resolver: object | None = None) -> d
         return None
     dns_resolver = resolver or dns.asyncresolver
     try:
-        answers = await dns_resolver.resolve(f"{parsed.reverse_pointer}.origin.asn.cymru.com", "TXT")
+        reversed_octets = ".".join(reversed(str(parsed).split(".")))
+        answers = await dns_resolver.resolve(
+            f"{reversed_octets}.origin.asn.cymru.com", "TXT"
+        )
     except Exception:
         return None
     for answer in answers:

@@ -6,6 +6,7 @@ from rich.console import Console
 from backend.core.domain_harvest_orchestrator import DomainHarvestResult
 from backend.core.domain_harvest_report import (
     _build_infrastructure,
+    _build_suggested_next_steps,
     _format_infrastructure_panel,
     format_harvest_json_export,
 )
@@ -15,8 +16,13 @@ from backend.modules.hackertarget_hosts import (
     HackerTargetHostsModule,
     parse_hackertarget_response,
 )
-from backend.modules.ripe_stat_asn import RIPEStatASNModule, parse_ripe_stat
+from backend.modules.ripe_stat_asn import (
+    RIPEStatASNModule,
+    parse_ripe_network_info,
+    parse_ripe_stat,
+)
 from backend.modules.shodan_internetdb import ShodanInternetDBModule, parse_internetdb
+from backend.modules.subdomain_intel import lookup_asn_team_cymru
 from cli.harvest_emails import _write_cidr_file
 
 
@@ -98,14 +104,55 @@ def test_cidr_file_written_to_results_dir(monkeypatch, tmp_path):
     assert path.read_text() == "192.0.2.0/24\n"
 
 
-def test_ripe_stat_cap_20_asns(monkeypatch):
+def test_ripe_stat_cap_20_asns():
     client = _Client(_Response(payload={"data": {"prefixes": []}}))
-    async def no_sleep(*args):
-        return None
-    monkeypatch.setattr("backend.modules.ripe_stat_asn.asyncio.sleep", no_sleep)
     rows = [{"asn": 64000 + i, "name": "Example"} for i in range(25)]
     records = asyncio.run(RIPEStatASNModule().enrich(rows, client=client))
-    assert len(client.calls) == len(records) == 20
+    assert len(records) == 20
+    assert len(client.calls) == 40  # announced-prefixes + as-overview per ASN
+
+
+def test_ripe_network_info_resolves_ip_to_asn_and_prefix():
+    rows = parse_ripe_network_info(
+        "108.139.47.74",
+        {"data": {"asns": [16509], "prefix": "108.139.44.0/22"}},
+    )
+
+    assert rows == [
+        {
+            "asn": 16509,
+            "name": "Unknown",
+            "ips": ["108.139.47.74"],
+            "cidrs": ["108.139.44.0/22"],
+            "prefixes": ["108.139.44.0/22"],
+            "subdomains": [],
+            "sources": ["ripe_stat"],
+        }
+    ]
+
+
+def test_team_cymru_uses_origin_query_without_in_addr_arpa():
+    class Resolver:
+        def __init__(self):
+            self.queries = []
+
+        async def resolve(self, name, record_type):
+            self.queries.append((name, record_type))
+            return ['"16509 | 108.139.44.0/22 | US | arin | 2018-09-18"']
+
+    resolver = Resolver()
+    record = asyncio.run(lookup_asn_team_cymru("108.139.47.74", resolver=resolver))
+
+    assert resolver.queries == [
+        ("74.47.139.108.origin.asn.cymru.com", "TXT")
+    ]
+    assert record == {
+        "asn": 16509,
+        "prefix": "108.139.44.0/22",
+        "country": "US",
+        "rir": "arin",
+        "date": "2018-09-18",
+    }
 
 
 def _asn_result() -> DomainHarvestResult:
@@ -214,3 +261,14 @@ def test_asn_panel_not_empty_when_ips_resolved() -> None:
 
     assert "AS64500 Example Networks" in output
     assert "No ASN data resolved" not in output
+
+
+def test_smtp_used_hint_does_not_tell_analyst_to_enable_smtp() -> None:
+    result = _asn_result()
+    result.total_unique_emails = 1
+    result.smtp_verification_used = True
+
+    hints = _build_suggested_next_steps(result)
+
+    assert not any("--no-verify" in hint for hint in hints)
+    assert any("Verification did not confirm" in hint for hint in hints)

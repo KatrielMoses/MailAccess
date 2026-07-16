@@ -1535,11 +1535,11 @@ async def _attach_native_email_validation(
     return counts
 
 
-async def _attach_smtp_email_verification(
+def _collect_smtp_findings(
     domain: str,
     module_results: dict[str, ModuleResult],
-) -> dict[str, int | str | bool | None]:
-    """Probe every valid on-domain email through one guarded SMTP batch."""
+) -> dict[str, list[dict[str, Any]]]:
+    """Collect valid on-domain findings eligible for the SMTP tail."""
     findings_by_email: dict[str, list[dict[str, Any]]] = {}
     for result in module_results.values():
         for finding in result.findings or []:
@@ -1554,9 +1554,18 @@ async def _attach_smtp_email_verification(
             if isinstance(native, dict) and native.get("status") in {"invalid", "disposable", "mx_missing"}:
                 continue
             findings_by_email.setdefault(normalized, []).append(finding)
+    return findings_by_email
+
+
+async def _attach_smtp_email_verification(
+    domain: str,
+    module_results: dict[str, ModuleResult],
+) -> dict[str, int | str | bool | None]:
+    """Probe every valid on-domain email through one guarded SMTP batch."""
+    findings_by_email = _collect_smtp_findings(domain, module_results)
 
     if not findings_by_email:
-        return {"checked": 0, "is_catchall": None}
+        return {"checked": 0, "status": "no_candidates", "is_catchall": None}
 
     mx_records = await resolve_mx(domain)
     if not mx_records:
@@ -1565,7 +1574,8 @@ async def _attach_smtp_email_verification(
     provider_detection = detect_provider_from_mx(mx_records, target_domain=domain)
     if provider_detection.provider in {MailProvider.GOOGLE, MailProvider.M365}:
         return {
-            "checked": 0,
+            "checked": len(findings_by_email),
+            "candidates": len(findings_by_email),
             "provider": provider_detection.provider.value,
             "skipped": "provider_specific_verifier",
         }

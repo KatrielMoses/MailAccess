@@ -1102,10 +1102,16 @@ def _build_suggested_next_steps(
         )
 
     if result.total_unique_emails > 0 and result.high_confidence_count == 0:
-        hints.append(
-            "No CONFIRMED-tier hits. Consider rerunning without --no-verify, "
-            "checking related domains, or pivoting through discovered names."
-        )
+        if result.smtp_verification_used:
+            hints.append(
+                "No CONFIRMED-tier hits. Verification did not confirm a mailbox; "
+                "check related domains or pivot through discovered names."
+            )
+        else:
+            hints.append(
+                "No CONFIRMED-tier hits. Consider rerunning without --no-verify, "
+                "checking related domains, or pivoting through discovered names."
+            )
 
     # Phase 1: always-present "reveal everything" hint — the user can
     # opt into the legacy "show everything" surface with a single flag.
