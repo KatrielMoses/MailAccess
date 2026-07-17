@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.13.2&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.13.3&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -526,6 +526,31 @@ datacenter proxies. Off by default.
 Sign up: https://scrapingant.com/?ref=mzliyzh
 
 ## Changelog
+
+### 0.13.3
+
+- `email_search_dork` promoted from `PRIORITY_SEARCH` (40) to
+  `PRIORITY_HIGH_SIGNAL` (10) — now dispatched alongside `code_and_cert_email`
+  and the GitHub modules instead of after 11 higher-priority seeds.
+- Shodan + RIPE inline enrichment moved out of `subdomain_intel.run()` into the
+  post-harvest tail — removes 30-140s from `subdomain_intel`'s 300s budget
+  slice, restoring that time to email discovery modules.
+- Net effect: `email_search_dork` gets budget time it was being starved of,
+  approaching the v0.12.8 email yield.
+- Provider verifier (Google Workspace / M365) now falls back to all on-domain
+  candidates when the SMTP-eligible set is empty. PGP signers and other passive
+  sources that don't carry `mx_valid` native evidence no longer starve the
+  verifier of candidates. `_attach_smtp_email_verification` reaches the provider
+  dispatch even when `_collect_smtp_findings` returns nothing.
+- The fallback candidate collector gates at MEDIUM+ confidence (CONFIRMED /
+  LIKELY / MEDIUM), so weak LOW-confidence guesses are not sent to live
+  provider/SMTP probes. Domains with only a MEDIUM signal (e.g. 1 MEDIUM, 0
+  LIKELY) now get their candidate verified instead of skipped.
+- `provider_verification_provider` and `provider_verification_status` are now
+  carried onto the aggregated email record in `_aggregate()` (a verified
+  verdict is sticky), and the exporter surfaces them for the Google path — they
+  were previously read only from M365 evidence and rendered blank for
+  Google-verified emails.
 
 ### 0.13.2
 

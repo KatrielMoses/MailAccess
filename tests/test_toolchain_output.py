@@ -61,6 +61,8 @@ class _EmailStub:
     occurrence_count_per_module: dict[str, int] = field(default_factory=dict)
     is_smtp_verified: bool = False
     is_provider_verified: bool = False
+    provider_verification_provider: str | None = None
+    provider_verification_status: str | None = None
     is_ca_attested: bool = False
     is_pgp_or_ca: bool = False
 

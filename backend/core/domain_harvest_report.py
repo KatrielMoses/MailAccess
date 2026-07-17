@@ -352,8 +352,16 @@ def _email_validation_summary(entry: HarvestedEmail) -> dict[str, Any]:
         "smtp_mx_host": smtp.get("mx_host", ""),
         "smtp_transport_error": smtp.get("transport_error", ""),
         "smtp_catchall": smtp.get("is_catchall", ""),
-        "provider_verification_status": m365.get("status", ""),
-        "provider_verification_provider": m365.get("provider", ""),
+        # Prefer the aggregated record's provider fields (populated in
+        # ``_aggregate`` for both the Google and M365 verifier paths); fall
+        # back to the m365 evidence dict for backward compatibility. Previously
+        # this read only ``m365.*``, so Google-verified emails rendered blank.
+        "provider_verification_status": (
+            entry.provider_verification_status or m365.get("status", "")
+        ),
+        "provider_verification_provider": (
+            entry.provider_verification_provider or m365.get("provider", "")
+        ),
         "m365_if_exists_result": m365.get("if_exists_result", ""),
     }
 

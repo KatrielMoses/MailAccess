@@ -147,6 +147,13 @@ class HarvestedEmail:
     last_seen_timestamp: str | None = None
     is_smtp_verified: bool = False
     is_provider_verified: bool = False
+    # Provider verifier (Google Workspace / M365) attribution carried onto the
+    # aggregated record. ``provider_verification_provider`` is the MailProvider
+    # value ("google" / "m365"); ``provider_verification_status`` is the
+    # verifier's per-email status ("verified", "inconclusive", ...). Both stay
+    # None until a provider verifier reports on this email.
+    provider_verification_provider: str | None = None
+    provider_verification_status: str | None = None
     is_ca_attested: bool = False
     is_pgp_or_ca: bool = False
     # MUST-FIX M4: how many raw findings contributed to this email
@@ -856,6 +863,15 @@ def _aggregate(
                 entry.is_smtp_verified = True
             if meta.get("provider_verification_status") == "verified":
                 entry.is_provider_verified = True
+            # Fix 3: carry the provider verifier's provider + status onto the
+            # record. A "verified" verdict is sticky — a later inconclusive
+            # finding for the same email must not overwrite it.
+            provider_status = meta.get("provider_verification_status")
+            if provider_status and entry.provider_verification_status != "verified":
+                entry.provider_verification_status = str(provider_status)
+                provider_name = meta.get("provider_verification_provider")
+                if provider_name:
+                    entry.provider_verification_provider = str(provider_name)
             if meta.get("source_type") in ("ca_attested",):
                 entry.is_ca_attested = True
             if meta.get("source_type") in ("ca_attested", "pgp_uid"):
@@ -1584,10 +1600,52 @@ def _collect_smtp_findings(
     return findings_by_email
 
 
+def _collect_all_on_domain_candidates(
+    domain: str,
+    module_results: dict[str, ModuleResult],
+) -> dict[str, list[dict[str, Any]]]:
+    """Fallback candidate set for provider verification.
+
+    ``_collect_smtp_findings`` drops candidates that fail the native-validation
+    SMTP-eligibility filter (PGP signers and some passive sources never carry
+    ``mx_valid`` native evidence), so on domains with only a weak signal the
+    provider verifier can receive zero candidates. This collector ignores that
+    eligibility filter and instead selects on-domain, non-role candidates at
+    MEDIUM+ confidence — i.e. ``CONFIRMED`` / ``LIKELY`` / ``MEDIUM`` — using
+    the post-aggregation tier so it reflects all contributing findings. LOW is
+    excluded so weak guesses are not sent to live provider/SMTP probes. Already
+    verified addresses are skipped.
+    """
+    aggregated = _aggregate(domain, module_results)
+    eligible: set[str] = {
+        entry.email.strip().lower()
+        for entry in aggregated
+        if entry.on_domain
+        and not entry.is_role
+        and entry.confidence_label in {"CONFIRMED", "LIKELY", "MEDIUM"}
+        and not entry.is_smtp_verified
+        and not entry.is_provider_verified
+    }
+    if not eligible:
+        return {}
+
+    findings_by_email: dict[str, list[dict[str, Any]]] = {}
+    for result in module_results.values():
+        for finding in result.findings or []:
+            email = _extract_email(finding)
+            if not email or "@" not in email:
+                continue
+            normalized = email.strip().lower()
+            if normalized in eligible:
+                findings_by_email.setdefault(normalized, []).append(finding)
+    return findings_by_email
+
+
 async def _dispatch_provider_verifier(
     domain: str,
     findings_by_email: dict[str, list[dict[str, Any]]],
     detection: Any,
+    module_results: dict[str, ModuleResult] | None = None,
 ) -> dict[str, int | str | bool | None]:
     """Dispatch GOOGLE / M365 candidates to their provider-specific verifier.
 
@@ -1601,6 +1659,20 @@ async def _dispatch_provider_verifier(
     """
     provider = detection.provider
     emails = list(findings_by_email)
+    if not emails:
+        # PGP signers and other passive sources don't pass the SMTP-eligibility
+        # filter, so ``findings_by_email`` can be empty even when the domain has
+        # MEDIUM+ on-domain candidates. Fall back to all on-domain candidates so
+        # the provider verifier still has something to work with.
+        fallback = (
+            _collect_all_on_domain_candidates(domain, module_results)
+            if module_results is not None
+            else {}
+        )
+        if not fallback:
+            return {"checked": 0, "status": "no_candidates", "provider": provider.value}
+        findings_by_email = fallback
+        emails = list(findings_by_email)[: settings.smtp_verify_max_probes]
     summary: dict[str, int | str | bool | None] = {
         "checked": len(emails),
         "candidates": len(emails),
@@ -1678,18 +1750,25 @@ async def _attach_smtp_email_verification(
     """Probe every valid on-domain email through one guarded SMTP batch."""
     findings_by_email = _collect_smtp_findings(domain, module_results)
 
-    if not findings_by_email:
-        return {"checked": 0, "status": "no_candidates", "is_catchall": None}
-
     mx_records = await resolve_mx(domain)
     if not mx_records:
+        if not findings_by_email:
+            return {"checked": 0, "status": "no_candidates", "is_catchall": None}
         return {"checked": len(findings_by_email), "status": "no_mx_records"}
 
     provider_detection = detect_provider_from_mx(mx_records, target_domain=domain)
     if provider_detection.provider in {MailProvider.GOOGLE, MailProvider.M365}:
+        # Provider verifiers own their own candidate fallback (Fix 1), so we
+        # dispatch even when the SMTP-eligible set is empty. ``module_results``
+        # is threaded through so the verifier can collect MEDIUM+ on-domain
+        # candidates when needed.
         return await _dispatch_provider_verifier(
-            domain, findings_by_email, provider_detection
+            domain, findings_by_email, provider_detection, module_results
         )
+
+    # Non-provider (SMTP) path needs at least one SMTP-eligible candidate.
+    if not findings_by_email:
+        return {"checked": 0, "status": "no_candidates", "is_catchall": None}
     shared_hosting = provider_detection.provider is MailProvider.SHARED_HOSTING
 
     async with SMTPVerifier(

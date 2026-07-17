@@ -1137,37 +1137,11 @@ class SubdomainIntelModule(BaseModule):
                     },
                 })
         findings = subdomain_findings + email_findings
-        infrastructure = await aggregate_infrastructure(subdomain_findings, resolver=resolver)
-        from .ripe_stat_asn import RIPEStatASNModule
-        from .shodan_internetdb import ShodanInternetDBModule
-
-        shodan_records = await ShodanInternetDBModule().enrich(
-            [str(row.get("ip")) for row in infrastructure["ips"]],
-            client=http,
-        )
-        for row in infrastructure["ips"]:
-            ip = str(row.get("ip") or "")
-            if ip in shodan_records:
-                row["shodan_data"] = shodan_records[ip]
-        ripe_records = await RIPEStatASNModule().enrich(
-            infrastructure["asns"], client=http
-        )
-        for row in infrastructure["asns"]:
-            try:
-                asn = int(row.get("asn"))
-            except (TypeError, ValueError):
-                continue
-            record = ripe_records.get(asn)
-            if not record:
-                continue
-            prefixes = sorted(
-                {
-                    *(str(value) for value in row.get("cidrs", []) if value),
-                    *(str(value) for value in record.get("prefixes", []) if value),
-                }
-            )
-            row["prefixes"] = prefixes
-            row["cidrs"] = prefixes
+        # Infrastructure enrichment (IP aggregation + Shodan InternetDB + RIPE
+        # ASN prefixes) is intentionally NOT run here. As of 0.13.3 it lives in
+        # the post-harvest tail (harvest_runner) outside the 600s discovery
+        # envelope, so it no longer consumes 30-140s of this module's budget
+        # slice or displaces email discovery work.
         if signal_pool is not None and findings:
             try:
                 published = await publish_subdomain_signals(signal_pool, domain, findings)
@@ -1197,9 +1171,6 @@ class SubdomainIntelModule(BaseModule):
                 "scrape_tiers": sorted(behavior["scrape_tiers"]),
             },
             "signals_published": published,
-            "infrastructure": infrastructure,
-            "shodan_ips_enriched": len(shodan_records),
-            "ripe_asns_enriched": len(ripe_records),
             "budget": {
                 "total_seconds": slice_budget.total_seconds,
                 "soft_seconds": slice_budget.soft_seconds,

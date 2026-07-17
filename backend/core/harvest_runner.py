@@ -28,6 +28,7 @@ from ..modules.public_forge import PublicForgeModule
 from ..modules.public_surface_sweeper import PublicSurfaceSweeper
 from ..modules.pypi_email import PyPIEmailModule
 from ..modules.ripe_stat_asn import RIPEStatASNModule
+from ..modules.shodan_internetdb import ShodanInternetDBModule
 from ..modules.subdomain_intel import SubdomainIntelModule
 from ..modules.syndication_feed_sweeper import SyndicationFeedSweeper
 from ..modules.wayback import WaybackDomainHarvestModule
@@ -47,7 +48,6 @@ from .work_scheduler import (
     PRIORITY_HIGH_SIGNAL,
     PRIORITY_REGISTRY,
     PRIORITY_ROUTER_EXPANSION,
-    PRIORITY_SEARCH,
     PRIORITY_UNIVERSAL,
     TRACK_GUARANTEED,
     TRACK_OPPORTUNISTIC,
@@ -83,6 +83,37 @@ MODULE_SYNDICATION_FEED_SWEEPER = "syndication_feed_sweeper"
 MODULE_HUNTER = "hunter"
 MODULE_HACKERTARGET = "hackertarget_hosts"
 MODULE_RIPE_STAT_ASN = "ripe_stat_asn"
+MODULE_SHODAN_INTERNETDB = "shodan_internetdb"
+
+# Seed dispatch priorities for the discovery scheduler. Insertion order is the
+# submission order; the scheduler pulls lower numbers first. Kept at module
+# scope so priority regressions can be asserted directly in tests.
+_MODULE_PRIORITIES: dict[str, int] = {
+    MODULE_COMMONCRAWL: PRIORITY_ARCHIVE,
+    MODULE_WAYBACK_DOMAIN: PRIORITY_ARCHIVE,
+    MODULE_CODE_CERT: PRIORITY_HIGH_SIGNAL,
+    # 0.13.3: promoted from PRIORITY_SEARCH (40) so on-domain email snippet
+    # discovery competes alongside code_and_cert_email and the GitHub modules
+    # instead of after the archive crawlers and 11 other higher-priority seeds.
+    MODULE_EMAIL_DORK: PRIORITY_HIGH_SIGNAL,
+    MODULE_NPM_EMAIL: PRIORITY_REGISTRY,
+    MODULE_PYPI_EMAIL: PRIORITY_REGISTRY,
+    MODULE_PUBLIC_SURFACE: PRIORITY_GUARANTEED,
+    MODULE_SUBDOMAIN_SURFACE: PRIORITY_HIGH_SIGNAL,
+    MODULE_HACKERTARGET: PRIORITY_HIGH_SIGNAL,
+    MODULE_PUBLIC_FORGE: PRIORITY_HIGH_SIGNAL,
+    MODULE_PACKAGE_ECOSYSTEMS: PRIORITY_REGISTRY,
+    MODULE_PGP_DOMAIN_EMAIL: PRIORITY_REGISTRY,
+    MODULE_GITHUB_ORG_MEMBERS: PRIORITY_HIGH_SIGNAL,
+    MODULE_GITHUB_DOMAIN_COMMITS: PRIORITY_HIGH_SIGNAL,
+    MODULE_EMPLOYEE_NAMES: PRIORITY_UNIVERSAL,
+    MODULE_WORDPRESS_REST: PRIORITY_HIGH_SIGNAL,
+    MODULE_SYNDICATION_FEED_SWEEPER: PRIORITY_UNIVERSAL,
+    # Phase 3: pattern_and_verify is always seeded so it appears in
+    # module_results even when no employee names are found (the mock-based
+    # test path). In real harvests it also fires via signal emission.
+    MODULE_PATTERN_VERIFY: PRIORITY_UNIVERSAL,
+}
 _PERSON_PIVOT_MODULES = frozenset(
     {
         MODULE_EMPLOYEE_NAMES,
@@ -390,6 +421,12 @@ async def run_adaptive_harvest(
         # work or be skipped merely because discovery used its full budget.
         if MODULE_RIPE_STAT_ASN not in ctx.skip_modules:
             await _run_module(MODULE_RIPE_STAT_ASN, ctx, soft_timeout=120.0)
+        # Shodan InternetDB enrichment also consumes finalized HackerTarget IPs
+        # and runs here (outside the 600s discovery envelope) rather than inline
+        # inside subdomain_intel, where it was eating 30-140s of that module's
+        # budget slice and starving email discovery.
+        if MODULE_SHODAN_INTERNETDB not in ctx.skip_modules:
+            await _run_module(MODULE_SHODAN_INTERNETDB, ctx, soft_timeout=60.0)
 
         # Flush subscriber work before taking the identity-cluster snapshot.
         try:
@@ -696,29 +733,7 @@ async def _seed_scheduler(ctx: WorkerContext) -> None:
         )
     )
 
-    seeds = (
-        (MODULE_COMMONCRAWL, PRIORITY_ARCHIVE),
-        (MODULE_WAYBACK_DOMAIN, PRIORITY_ARCHIVE),
-        (MODULE_CODE_CERT, PRIORITY_HIGH_SIGNAL),
-        (MODULE_EMAIL_DORK, PRIORITY_SEARCH),
-        (MODULE_NPM_EMAIL, PRIORITY_REGISTRY),
-        (MODULE_PYPI_EMAIL, PRIORITY_REGISTRY),
-        (MODULE_PUBLIC_SURFACE, PRIORITY_GUARANTEED),
-        (MODULE_SUBDOMAIN_SURFACE, PRIORITY_HIGH_SIGNAL),
-        (MODULE_HACKERTARGET, PRIORITY_HIGH_SIGNAL),
-        (MODULE_PUBLIC_FORGE, PRIORITY_HIGH_SIGNAL),
-        (MODULE_PACKAGE_ECOSYSTEMS, PRIORITY_REGISTRY),
-        (MODULE_PGP_DOMAIN_EMAIL, PRIORITY_REGISTRY),
-        (MODULE_GITHUB_ORG_MEMBERS, PRIORITY_HIGH_SIGNAL),
-        (MODULE_GITHUB_DOMAIN_COMMITS, PRIORITY_HIGH_SIGNAL),
-        (MODULE_EMPLOYEE_NAMES, PRIORITY_UNIVERSAL),
-        (MODULE_WORDPRESS_REST, PRIORITY_HIGH_SIGNAL),
-        (MODULE_SYNDICATION_FEED_SWEEPER, PRIORITY_UNIVERSAL),
-        # Phase 3: pattern_and_verify is always seeded so it appears in
-        # module_results even when no employee names are found (the mock-based
-        # test path). In real harvests it also fires via signal emission.
-        (MODULE_PATTERN_VERIFY, PRIORITY_UNIVERSAL),
-    )
+    seeds = tuple(_MODULE_PRIORITIES.items())
     for module_name, priority in seeds:
         if module_name in ctx.skip_modules:
             continue
@@ -1503,6 +1518,42 @@ async def _run_module_instance(
             if isinstance(row, dict) and row.get("ip")
         ]
         return await module.run(ctx.domain, resolved_ips=resolved_ips)
+    if module_name == MODULE_SHODAN_INTERNETDB:
+        hackertarget = (ctx.module_results or {}).get(MODULE_HACKERTARGET)
+        infrastructure = (hackertarget.metadata or {}).get("infrastructure", {}) if hackertarget else {}
+        ip_rows = infrastructure.get("ips", []) if isinstance(infrastructure, dict) else []
+        resolved_ips = [
+            str(row.get("ip"))
+            for row in ip_rows
+            if isinstance(row, dict) and row.get("ip")
+        ]
+        if not resolved_ips:
+            return ModuleResult(
+                ModuleStatus.SKIPPED,
+                metadata={
+                    "domain": ctx.domain,
+                    "skip_reason": "no_resolved_ips",
+                    "infrastructure": {"ips": [], "asns": []},
+                },
+            )
+        records = await module.enrich(resolved_ips)
+        enriched_ips = [
+            {
+                "ip": ip,
+                "shodan_data": data,
+                "sources": ["shodan_internetdb"],
+            }
+            for ip, data in sorted(records.items())
+        ]
+        return ModuleResult(
+            ModuleStatus.SUCCESS if records else ModuleStatus.PARTIAL,
+            metadata={
+                "domain": ctx.domain,
+                "resolved_ips": len(resolved_ips),
+                "shodan_ips_enriched": len(records),
+                "infrastructure": {"ips": enriched_ips, "asns": []},
+            },
+        )
     name, result = await _safe_phase12_run(
         module_name,
         module,
@@ -1554,6 +1605,7 @@ def _get_module_instance(module_name: str, ctx: WorkerContext) -> Any:
         MODULE_SYNDICATION_FEED_SWEEPER: SyndicationFeedSweeper,
         MODULE_HACKERTARGET: HackerTargetHostsModule,
         MODULE_RIPE_STAT_ASN: RIPEStatASNModule,
+        MODULE_SHODAN_INTERNETDB: ShodanInternetDBModule,
     }
     
     from ..modules.email_identity_enrichment import EmailIdentityEnrichmentModule
