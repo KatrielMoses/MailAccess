@@ -1584,6 +1584,93 @@ def _collect_smtp_findings(
     return findings_by_email
 
 
+async def _dispatch_provider_verifier(
+    domain: str,
+    findings_by_email: dict[str, list[dict[str, Any]]],
+    detection: Any,
+) -> dict[str, int | str | bool | None]:
+    """Dispatch GOOGLE / M365 candidates to their provider-specific verifier.
+
+    Historically the primary harvest path short-circuited here with
+    ``skipped: provider_specific_verifier`` and never called either verifier,
+    so ``is_provider_verified`` and the ``provider_verification_*`` fields
+    never populated on this path (0.13.0-0.13.1 regression). Both verifiers
+    exist and are dispatched here directly. M365 works immediately
+    (GetCredentialType is not patched); for Google the gxlu + SMTP + Gravatar
+    fallback chain runs inside :meth:`GoogleWorkspaceVerifier.verify_batch`.
+    """
+    provider = detection.provider
+    emails = list(findings_by_email)
+    summary: dict[str, int | str | bool | None] = {
+        "checked": len(emails),
+        "candidates": len(emails),
+        "provider": provider.value,
+    }
+
+    results: list[Any]
+    if provider is MailProvider.GOOGLE:
+        if not settings.google_workspace_verifier_enabled:
+            summary["checked"] = 0
+            summary["skipped"] = "google_verifier_disabled"
+            return summary
+        summary["method"] = "google"
+        verifier = GoogleWorkspaceVerifier(
+            delay_seconds=1.0,
+            timeout_seconds=settings.google_verifier_timeout,
+            gravatar_enabled=settings.gravatar_verification_enabled,
+            smtp_fallback_enabled=settings.enable_smtp_verification,
+            max_checks=settings.smtp_verify_max_probes,
+        )
+        results = await verifier.verify_batch(
+            emails,
+            domain,
+            session=None,
+            max_checks=settings.smtp_verify_max_probes,
+        )
+        promoted_source = "permutation_verified_google"
+    else:  # MailProvider.M365
+        summary["method"] = "m365"
+        verifier = M365Verifier(
+            delay_seconds=settings.m365_verification_delay_seconds,
+            timeout_seconds=settings.m365_verification_timeout_seconds,
+            max_checks=settings.m365_verification_max_checks,
+        )
+        results = await verifier.verify_batch(emails)
+        promoted_source = "permutation_verified_m365"
+
+    summary["checked"] = len(results)
+    for result in results:
+        status = str(getattr(result, "status", "inconclusive"))
+        exists = getattr(result, "exists", None)
+        summary[status] = int(summary.get(status, 0) or 0) + 1
+        payload: dict[str, Any] = {
+            "method": summary["method"],
+            "status": status,
+            "exists": exists,
+            "http_status": getattr(result, "http_status", None),
+            "error": getattr(result, "error", None),
+            "provider": provider.value,
+        }
+        for field_name in ("gravatar_hit", "if_exists_result", "is_unmanaged", "throttle_status"):
+            if hasattr(result, field_name):
+                payload[field_name] = getattr(result, field_name)
+        email = str(getattr(result, "email", "")).strip().lower()
+        verified = status == "verified" or exists is True
+        for finding in findings_by_email.get(email, []):
+            metadata = finding.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+                finding["metadata"] = metadata
+            metadata["provider_verification"] = payload
+            metadata["provider_verification_provider"] = provider.value
+            metadata["provider_verification_status"] = "verified" if verified else status
+            if verified:
+                metadata["verification_status"] = "verified"
+                if metadata.get("pattern_template"):
+                    metadata["source_type"] = promoted_source
+    return summary
+
+
 async def _attach_smtp_email_verification(
     domain: str,
     module_results: dict[str, ModuleResult],
@@ -1600,12 +1687,9 @@ async def _attach_smtp_email_verification(
 
     provider_detection = detect_provider_from_mx(mx_records, target_domain=domain)
     if provider_detection.provider in {MailProvider.GOOGLE, MailProvider.M365}:
-        return {
-            "checked": len(findings_by_email),
-            "candidates": len(findings_by_email),
-            "provider": provider_detection.provider.value,
-            "skipped": "provider_specific_verifier",
-        }
+        return await _dispatch_provider_verifier(
+            domain, findings_by_email, provider_detection
+        )
     shared_hosting = provider_detection.provider is MailProvider.SHARED_HOSTING
 
     async with SMTPVerifier(

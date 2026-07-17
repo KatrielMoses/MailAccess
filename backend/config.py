@@ -375,6 +375,12 @@ class Settings(BaseSettings):
     enable_npm_email: bool = True
     enable_pypi_email: bool = True
     enable_pgp_domain_email: bool = True
+    # PGP keyserver resilience. When all keyservers fail simultaneously the
+    # module falls back to a 24h result cache with a freshness penalty and
+    # retries each server once with backoff before moving on.
+    pgp_cache_enabled: bool = True
+    pgp_cache_ttl_hours: int = 24
+    pgp_retry_on_failure: bool = True
     # Keyless public-surface expansion. All limits are hard caps per run.
     enable_public_surface_sweeper: bool = True
     public_surface_max_urls: int = 12

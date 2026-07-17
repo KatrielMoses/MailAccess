@@ -412,6 +412,7 @@ class PatternAndVerifyModule(BaseModule):
             except Exception as exc:  # noqa: BLE001
                 _LOG.warning("pattern_and_verify: MX resolution failed: %s", exc)
 
+            provider_specific_verifier = False
             if not mx_records:
                 _LOG.info("pattern_and_verify: no MX records found")
                 batch_meta["stop_reason"] = "no_mx_records"
@@ -422,13 +423,13 @@ class PatternAndVerifyModule(BaseModule):
                 ).provider
                 batch_meta["mail_provider"] = provider.value
                 if provider in {MailProvider.GOOGLE, MailProvider.M365}:
-                    # Cloud providers deliberately suppress reliable RCPT
-                    # mailbox enumeration. The harvest tail owns their
-                    # provider-specific verifier; do not contact SMTP here.
+                    # The provider verifier owns positive existence decisions,
+                    # but SMTP still supplies catch-all and hard not-found
+                    # elimination signals. Keep this pass deliberately small.
+                    provider_specific_verifier = True
                     batch_meta["provider_route"] = provider.value
                     batch_meta["stop_reason"] = "provider_specific_verifier"
                     _generate_without_probing()
-                    mx_records = []
             if mx_records:
                 async with SMTPVerifier(
                     mx_records=mx_records,
@@ -469,10 +470,14 @@ class PatternAndVerifyModule(BaseModule):
                         # subsequent names' same-template candidate is
                         # skipped instead of re-probed). Each name's
                         # first hit still consumes one SMTP probe.
-                        cap = min(
-                            int(settings.smtp_verify_max_probes),
-                            int(settings.smtp_max_probes_per_domain),
-                            MAX_PROBES_HARD_CAP,
+                        cap = (
+                            5
+                            if provider_specific_verifier
+                            else min(
+                                int(settings.smtp_verify_max_probes),
+                                int(settings.smtp_max_probes_per_domain),
+                                MAX_PROBES_HARD_CAP,
+                            )
                         )
                         # MUST-FIX S3: track the candidate index with
                         # an integer counter instead of calling
@@ -545,7 +550,10 @@ class PatternAndVerifyModule(BaseModule):
                                     batch_meta["stop_reason"] = "blocked_mid_batch"
                                     stop_for_block = True
                                     break
-                                if getattr(res, "exists", None) is True:
+                                if (
+                                    not provider_specific_verifier
+                                    and getattr(res, "exists", None) is True
+                                ):
                                     # MUST-FIX S3: ``cand_index`` is an
                                     # integer counter (O(1) per iter).
                                     # The pre-fix code used
@@ -566,9 +574,19 @@ class PatternAndVerifyModule(BaseModule):
                                     # name — we found a working one.
                                     cand_index += len(pats) - pattern_offset
                                     break
-                                if getattr(res, "exists", None) is False:
+                                if (
+                                    getattr(res, "exists", None) is False
+                                    or getattr(res, "verification_status", None)
+                                    == "not_found"
+                                ):
                                     if cand_index < len(candidates):
                                         candidates[cand_index].verification_status = "not_found"
+                                if provider_specific_verifier:
+                                    # 250/positive responses are deliberately
+                                    # ignored here; the provider verifier owns
+                                    # positive existence promotion.
+                                    cand_index += 1
+                                    continue
                                 cand_index += 1
                             if stop_for_block:
                                 break
@@ -661,6 +679,8 @@ class PatternAndVerifyModule(BaseModule):
                 "smtp_verification_enabled": smtp_enabled,
                 "native_validation_enabled": bool(enable_native_validation),
                 "native_validation": native_validation_meta,
+                "mail_provider": batch_meta.get("mail_provider"),
+                "provider_route": batch_meta.get("provider_route"),
                 "smtp_probes_used": probes_used_total,
                 "is_catchall": batch_meta.get("is_catchall"),
                 "confirmed_pattern": confirmed_pattern,

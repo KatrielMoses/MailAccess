@@ -227,10 +227,11 @@ def _build_infrastructure(result: DomainHarvestResult) -> dict[str, list[dict[st
             existing["prefixes"] = sorted(
                 {*existing.get("prefixes", []), *existing.get("cidrs", [])}
             )
-    return {
+    payload = {
         "ips": [ip_rows[key] for key in sorted(ip_rows)],
         "asns": [asn_rows[key] for key in sorted(asn_rows)],
     }
+    return payload
 
 
 def _format_infrastructure_panel(infrastructure: dict[str, list[dict[str, Any]]]) -> Panel:
@@ -1611,7 +1612,7 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
         for name, mod in result.module_results.items()
         if (mod.metadata or {}).get("skip_reason")
     }
-    return {
+    payload = {
         "domain": result.domain,
         "harvested_at": result.completed_at,
         "duration_seconds": result.duration_seconds,
@@ -1678,6 +1679,12 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
         # before consuming.
         "schema_version": 1,
     }
+    export_metadata = result.metadata or {}
+    if isinstance(export_metadata, dict):
+        for key in ("harvest_status", "timed_out", "timeout_at_seconds"):
+            if key in export_metadata:
+                payload[key] = export_metadata[key]
+    return payload
 
 
 # --------------------------------------------------------------------------

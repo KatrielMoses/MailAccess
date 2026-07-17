@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from backend.core.domain_harvest_orchestrator import (
     _run_with_soft_timeout,
     _safe_phase12_run,
@@ -63,3 +65,29 @@ def test_safe_module_runner_accepts_and_forwards_progress_callback():
     _, result = asyncio.run(run())
     assert result.status == ModuleStatus.SUCCESS
     assert actions == ["querying source"]
+
+
+@pytest.mark.asyncio
+async def test_discovery_timeout_returns_exportable_partial_result(monkeypatch):
+    async def timed_out_tracks(ctx):
+        ctx.module_results["commoncrawl_email"] = ModuleResult(
+            status=ModuleStatus.SUCCESS,
+            findings=[
+                {
+                    "metadata": {
+                        "email": "found@example.com",
+                        "confidence_score": 0.9,
+                        "source_type": "commoncrawl_email",
+                    }
+                }
+            ],
+        )
+        await asyncio.sleep(2)
+
+    monkeypatch.setattr("backend.core.harvest_runner._run_tracks", timed_out_tracks)
+    result = await run_adaptive_harvest("example.com", timeout_seconds=0.01)
+
+    assert result.metadata["harvest_status"] == "partial_timeout"
+    assert result.metadata["timed_out"] is True
+    assert result.metadata["timeout_at_seconds"] == 0.01
+    assert any(email.email == "found@example.com" for email in result.unique_emails)

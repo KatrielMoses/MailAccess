@@ -52,8 +52,11 @@ API choice:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -75,6 +78,92 @@ _MIT_HKP_URL = "https://pgp.mit.edu/pks/lookup"
 _REQUEST_TIMEOUT = 10.0
 _RATE_LIMIT_SECONDS = 2.0
 _MAX_KEYS_PER_SOURCE = 20
+
+# Retry a failed keyserver once after this backoff before moving on.
+_RETRY_BACKOFF_SECONDS = 2.0
+
+
+def _cache_dir() -> Path:
+    """Directory holding PGP result caches (patched in tests)."""
+    return Path.home() / ".mailaccess" / "cache"
+
+
+def _cache_path(domain: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in domain.lower())
+    return _cache_dir() / f"pgp_{safe}.json"
+
+
+def _write_cache(domain: str, findings: list[dict[str, Any]]) -> None:
+    """Persist a successful keyserver query for graceful degradation."""
+    if not settings.pgp_cache_enabled:
+        return
+    try:
+        directory = _cache_dir()
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = _cache_path(domain)
+        payload = {
+            "domain": domain,
+            "timestamp": time.time(),
+            "findings": findings,
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("pgp_domain_email: cache write failed for %s: %s", domain, exc)
+
+
+def _read_cache(domain: str) -> tuple[list[dict[str, Any]], float] | None:
+    """Return ``(findings, freshness_factor)`` from cache, or ``None``.
+
+    Freshness penalty (relative to ``pgp_cache_ttl_hours``, default 24h):
+      * age < ttl        -> 0.85
+      * ttl <= age < 2*ttl -> 0.65
+      * age >= 2*ttl     -> not used (returns ``None``)
+    """
+    if not settings.pgp_cache_enabled:
+        return None
+    path = _cache_path(domain)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    timestamp = raw.get("timestamp")
+    findings = raw.get("findings")
+    if not isinstance(timestamp, (int, float)) or not isinstance(findings, list):
+        return None
+    age_hours = max(0.0, (time.time() - float(timestamp)) / 3600.0)
+    ttl = max(1.0, float(settings.pgp_cache_ttl_hours))
+    if age_hours < ttl:
+        freshness = 0.85
+    elif age_hours < 2 * ttl:
+        freshness = 0.65
+    else:
+        return None
+    return findings, freshness
+
+
+def _apply_cache_freshness(
+    findings: list[dict[str, Any]], freshness: float
+) -> list[dict[str, Any]]:
+    """Label cached findings and apply the freshness penalty to confidence."""
+    penalized: list[dict[str, Any]] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        metadata = finding.get("metadata")
+        if isinstance(metadata, dict):
+            metadata["source_type"] = "pgp_cached"
+            metadata["cache_freshness_factor"] = freshness
+            score = metadata.get("confidence_score")
+            if isinstance(score, (int, float)):
+                new_score = round(float(score) * freshness, 4)
+                metadata["confidence_score"] = new_score
+                finding["confidence"] = label_for_score(new_score).lower()
+        penalized.append(finding)
+    return penalized
 
 # Source-weight identifier (mirrors SOURCE_WEIGHTS key in email_confidence).
 # PGP UIDs are deliberate, user-verified assertions of identity —
@@ -140,24 +229,25 @@ class PgpDomainEmailModule(BaseModule):
         try:
             # scrapingant: dropped in S5 audit (PGP domain sources are JSON/static text)
             async with build_client(timeout=_REQUEST_TIMEOUT) as client:
-                results = await asyncio.gather(
-                    asyncio.wait_for(
-                        self._query_mit(domain, client), timeout=_REQUEST_TIMEOUT
+                # Each source owns a shared outcome object so that partial
+                # results collected before a timeout survive cancellation
+                # (Part C: partial credit). Each source also retries once
+                # after a backoff before giving up (Part A: retry).
+                await asyncio.gather(
+                    self._run_source(
+                        lambda: self._query_mit(domain, client, outcomes["mit_hkp"]),
+                        outcomes["mit_hkp"],
                     ),
-                    asyncio.wait_for(
-                        self._query_openpgp(domain, client), timeout=_REQUEST_TIMEOUT
+                    self._run_source(
+                        lambda: self._query_openpgp(domain, client, outcomes["openpgp_search"]),
+                        outcomes["openpgp_search"],
                     ),
-                    asyncio.wait_for(
-                        self._query_ubuntu(domain, client), timeout=_REQUEST_TIMEOUT
+                    self._run_source(
+                        lambda: self._query_ubuntu(domain, client, outcomes["ubuntu_hkp"]),
+                        outcomes["ubuntu_hkp"],
                     ),
                     return_exceptions=True,
                 )
-                for source_id, value in zip(outcomes, results):
-                    if isinstance(value, BaseException):
-                        _LOG.warning("pgp_domain_email: %s failed: %s", source_id, value)
-                        outcomes[source_id].error = type(value).__name__
-                        continue
-                    outcomes[source_id] = value
                 for outcome in outcomes.values():
                     for email, evidence in outcome.emails.items():
                         bucket = aggregated.setdefault(email, {"types": set(), "evidence": []})
@@ -220,8 +310,37 @@ class PgpDomainEmailModule(BaseModule):
             else:
                 personal_count += 1
 
+        any_ok = any(o.ok for o in outcomes.values())
+        cache_used = False
+        cache_freshness: float | None = None
+
+        if any_ok:
+            # A keyserver answered — persist for future graceful degradation.
+            _write_cache(domain, findings)
+        else:
+            # Every keyserver failed simultaneously. Fall back to the last
+            # good cache (Part B) rather than reporting zero candidates.
+            cached = _read_cache(domain)
+            if cached is not None:
+                cached_findings, cache_freshness = cached
+                findings = _apply_cache_freshness(cached_findings, cache_freshness)
+                cache_used = True
+                role_count = sum(
+                    1 for f in findings
+                    if isinstance(f.get("metadata"), dict)
+                    and f["metadata"].get("is_role")
+                )
+                personal_count = len(findings) - role_count
+                on_domain_count = sum(
+                    1 for f in findings
+                    if isinstance(f.get("metadata"), dict)
+                    and f["metadata"].get("on_domain")
+                )
+
         ok_count = sum(1 for o in outcomes.values() if o.ok or o.keys_checked or o.emails)
-        if ok_count == 0:
+        if cache_used:
+            status = ModuleStatus.PARTIAL
+        elif ok_count == 0:
             status = ModuleStatus.FAILED
         elif ok_count == 1:
             status = ModuleStatus.PARTIAL
@@ -239,10 +358,12 @@ class PgpDomainEmailModule(BaseModule):
                 "openpgp_emails_found": outcomes["openpgp_search"].count,
                 "ubuntu_keys_checked": outcomes["ubuntu_hkp"].keys_checked,
                 "ubuntu_emails_found": outcomes["ubuntu_hkp"].count,
-                "total_unique_emails": len(aggregated),
+                "total_unique_emails": len(findings) if cache_used else len(aggregated),
                 "on_domain_emails": on_domain_count,
                 "role_accounts": role_count,
                 "personal_emails": personal_count,
+                "cache_used": cache_used,
+                "cache_freshness_factor": cache_freshness,
                 "sub_source_outcomes": {
                     sid: {"ok": o.ok, "error": o.error, "count": o.count}
                     for sid, o in outcomes.items()
@@ -251,34 +372,73 @@ class PgpDomainEmailModule(BaseModule):
         )
 
     # ----------------------------------------------------------------------
+    # Resilient source runner (retry + partial credit)
+    # ----------------------------------------------------------------------
+    async def _run_source(
+        self,
+        factory: Any,
+        outcome: _SubSourceOutcome,
+    ) -> _SubSourceOutcome:
+        """Run one keyserver query with a single backoff retry.
+
+        ``factory`` is a zero-arg callable returning a fresh coroutine so the
+        query can be re-issued on retry. The ``outcome`` is mutated in place,
+        so any partial results collected before a timeout are preserved even
+        when the coroutine is cancelled.
+        """
+
+        async def attempt() -> None:
+            try:
+                await asyncio.wait_for(factory(), timeout=_REQUEST_TIMEOUT)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                if not outcome.error:
+                    outcome.error = "timeout"
+            except Exception as exc:  # noqa: BLE001
+                if not outcome.error:
+                    outcome.error = type(exc).__name__
+
+        await attempt()
+
+        # Retry once after a backoff when the source produced neither a
+        # successful response nor any partial results. A partial harvest is
+        # kept as-is (Part C) rather than re-fetched.
+        failed = not outcome.ok and not outcome.emails
+        if settings.pgp_retry_on_failure and failed:
+            await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
+            outcome.error = None
+            await attempt()
+        return outcome
+
+    # ----------------------------------------------------------------------
     # Sub-source fetchers
     # ----------------------------------------------------------------------
     async def _throttle(self) -> None:
         await asyncio.sleep(_RATE_LIMIT_SECONDS)
 
     async def _query_mit(
-        self, domain: str, client: httpx.AsyncClient
+        self, domain: str, client: httpx.AsyncClient, outcome: _SubSourceOutcome
     ) -> _SubSourceOutcome:
-        return await self._hkp_search(client, domain, _MIT_HKP_URL, "mit_hkp")
+        return await self._hkp_search(client, domain, _MIT_HKP_URL, "mit_hkp", outcome)
 
     async def _query_openpgp(
-        self, domain: str, client: httpx.AsyncClient
+        self, domain: str, client: httpx.AsyncClient, outcome: _SubSourceOutcome
     ) -> _SubSourceOutcome:
-        return await self._openpgp_search(client, domain)
+        return await self._openpgp_search(client, domain, outcome)
 
     async def _query_ubuntu(
-        self, domain: str, client: httpx.AsyncClient
+        self, domain: str, client: httpx.AsyncClient, outcome: _SubSourceOutcome
     ) -> _SubSourceOutcome:
-        return await self._ubuntu_hkp(client, domain)
+        return await self._ubuntu_hkp(client, domain, outcome)
 
-    async def _openpgp_search(self, client: httpx.AsyncClient, domain: str) -> _SubSourceOutcome:
+    async def _openpgp_search(
+        self, client: httpx.AsyncClient, domain: str, outcome: _SubSourceOutcome
+    ) -> _SubSourceOutcome:
         """Query ``keys.openpgp.org/search?q={domain}``.
 
         Returns a JSON list of key objects with embedded UID strings
         in the ``uids`` field.  We only need the UID text — no key
         material — to extract candidate emails.
         """
-        outcome = _SubSourceOutcome(source_id="openpgp_search")
         try:
             await self._throttle()
             response = await client.get(
@@ -324,14 +484,15 @@ class PgpDomainEmailModule(BaseModule):
 
         return outcome
 
-    async def _ubuntu_hkp(self, client: httpx.AsyncClient, domain: str) -> _SubSourceOutcome:
+    async def _ubuntu_hkp(
+        self, client: httpx.AsyncClient, domain: str, outcome: _SubSourceOutcome
+    ) -> _SubSourceOutcome:
         """Query the Ubuntu keyserver HKP ``vindex`` endpoint.
 
         Returns an HTML index page listing keys matching the search
         term.  Each row contains the UID string for the key, which
         is all we need to harvest emails.
         """
-        outcome = _SubSourceOutcome(source_id="ubuntu_hkp")
         try:
             await self._throttle()
             response = await client.get(
@@ -385,8 +546,8 @@ class PgpDomainEmailModule(BaseModule):
         domain: str,
         endpoint: str,
         source_id: str,
+        outcome: _SubSourceOutcome,
     ) -> _SubSourceOutcome:
-        outcome = _SubSourceOutcome(source_id=source_id)
         try:
             await self._throttle()
             response = await client.get(

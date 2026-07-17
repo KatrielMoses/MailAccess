@@ -757,6 +757,14 @@ def run_harvest_emails(
     # MUST-FIX M3: no settings restoration needed — we never mutated
     # settings in the first place.
 
+    timeout_metadata = result.metadata or {}
+    if isinstance(timeout_metadata, dict) and timeout_metadata.get("harvest_status") == "partial_timeout":
+        timeout_at = timeout_metadata.get("timeout_at_seconds")
+        display.log_event("TIMEOUT", f"partial result exported at {timeout_at}s budget")
+        console.print(
+            f"[yellow]Harvest timed out after {timeout_at}s; exporting partial results.[/]"
+        )
+
     if result.from_cache:
         age_minutes = max(0, int(result.cache_age_seconds // 60))
         age_text = (
@@ -810,7 +818,29 @@ def run_harvest_emails(
                         display.log_event("SMTP", f"probing {email} → {status} ({code})")
         if probe_count == 0:
             checked = int(smtp_validation_meta.get("checked") or 0)
-            if smtp_validation_meta.get("skipped") == "provider_specific_verifier":
+            method = smtp_validation_meta.get("method")
+            if method in {"google", "m365"}:
+                # 0.13.2: the primary path now dispatches Google/M365 candidates
+                # to their provider-specific verifier instead of skipping.
+                provider = smtp_validation_meta.get("provider") or method
+                verified = int(smtp_validation_meta.get("verified") or 0)
+                if verified:
+                    display.log_event(
+                        "SMTP",
+                        f"routed {checked} candidates to {provider} verifier "
+                        f"({verified} verified)",
+                    )
+                else:
+                    display.log_event(
+                        "SMTP",
+                        f"routed {checked} candidates to {provider} verifier",
+                    )
+            elif smtp_validation_meta.get("skipped") == "google_verifier_disabled":
+                display.log_event(
+                    "SMTP",
+                    f"skipped {checked} candidates (Google verifier disabled)",
+                )
+            elif smtp_validation_meta.get("skipped") == "provider_specific_verifier":
                 provider = smtp_validation_meta.get("provider") or "cloud mail"
                 provider_result = smtp_validation_meta.get("provider_validation")
                 if not isinstance(provider_result, dict) and provider == "m365":

@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.13.1&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.13.2&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -526,6 +526,22 @@ datacenter proxies. Off by default.
 Sign up: https://scrapingant.com/?ref=mzliyzh
 
 ## Changelog
+
+### 0.13.2
+
+- CRITICAL: Provider routing dispatch now wired — `GoogleWorkspaceVerifier`
+  and `M365Verifier` are actually called on the primary harvest path (it had
+  been short-circuiting to `skipped: provider_specific_verifier` since 0.13.0).
+- Google Workspace verifier: SMTP RCPT TO fallback when the gxlu endpoint
+  returns 204 (Google patched the endpoint). Gravatar is applied as a
+  secondary signal on both the gxlu and SMTP paths.
+- PGP graceful degradation: 24h result cache with a freshness penalty, one
+  retry with 2s backoff per keyserver, and partial-response preservation on
+  timeout (`PGP_CACHE_ENABLED`, `PGP_CACHE_TTL_HOURS`, `PGP_RETRY_ON_FAILURE`).
+- `is_provider_verified` and `provider_verification_provider` now populate
+  correctly on email records.
+- M365 `GetCredentialType` results now surface in the primary harvest output
+  (previously only reachable via `low_email_validation`).
 
 ### 0.13.1
 

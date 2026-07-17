@@ -120,6 +120,19 @@ async def test_provider_route_reports_real_candidate_count(
         "backend.core.domain_harvest_orchestrator.resolve_mx",
         AsyncMock(return_value=[MXRecord("aspmx.l.google.com", 10)]),
     )
+    monkeypatch.setattr(settings, "google_workspace_verifier_enabled", True)
+
+    # 0.13.2: the Google route now dispatches to the verifier rather than
+    # short-circuiting with ``skipped: provider_specific_verifier``. Stub the
+    # verifier so the test stays offline while asserting the real dispatch.
+    from backend.core import domain_harvest_orchestrator as orch
+    from backend.core.google_workspace_verifier import VerificationResult
+
+    async def fake_verify(self, emails, domain, session=None, max_checks=25):
+        return [VerificationResult(email=e, status="inconclusive") for e in emails]
+
+    monkeypatch.setattr(orch.GoogleWorkspaceVerifier, "verify_batch", fake_verify)
+
     modules = {
         "email_search_dork": ModuleResult(
             status=ModuleStatus.SUCCESS,
@@ -136,9 +149,7 @@ async def test_provider_route_reports_real_candidate_count(
 
     summary = await _attach_smtp_email_verification("example.com", modules)
 
-    assert summary == {
-        "checked": 1,
-        "candidates": 1,
-        "provider": "google",
-        "skipped": "provider_specific_verifier",
-    }
+    assert summary["candidates"] == 1
+    assert summary["provider"] == "google"
+    assert summary["method"] == "google"
+    assert "skipped" not in summary

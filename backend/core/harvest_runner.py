@@ -286,9 +286,11 @@ async def run_adaptive_harvest(
             )
         )
 
+    timed_out = False
     try:
         await asyncio.wait_for(_run_tracks(ctx), timeout=timeout_seconds)
-    except TimeoutError:
+    except (TimeoutError, asyncio.TimeoutError):
+        timed_out = True
         budget.mark_exhausted()
         logger.info("Budget exhausted - returning partial results")
     except asyncio.CancelledError:
@@ -296,6 +298,7 @@ async def run_adaptive_harvest(
         # short budgets instead of translating it to TimeoutError. Preserve
         # the partial-result contract once the configured budget is spent.
         if budget.is_expired():
+            timed_out = True
             budget.mark_exhausted()
             logger.info("Budget exhausted during track cancellation")
         else:
@@ -304,6 +307,84 @@ async def run_adaptive_harvest(
         logger.error("Track failure: %s", exc)
 
     try:
+        if timed_out:
+            # The discovery timeout is a valid partial-result boundary.
+            # Do not enter RIPE/provider/validation tails: those are network
+            # work and can otherwise postpone the export indefinitely.
+            try:
+                await asyncio.wait_for(signal_pool.close(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Signal-pool shutdown exceeded 5s during timeout recovery")
+            from .domain_harvest_orchestrator import (
+                DomainHarvestResult,
+                _aggregate,
+                _sort_key,
+            )
+
+            identity_clusters = await signal_pool.all_candidates()
+            shadow_profiles: list[dict[str, Any]] = []
+            unique_emails = _aggregate(
+                cleaned,
+                module_results,
+                signal_pool=signal_pool,
+                identity_clusters=identity_clusters,
+                shadow_profiles_out=shadow_profiles,
+            )
+            unique_emails.sort(key=_sort_key)
+            completed = datetime.now(timezone.utc)
+            errors = [
+                f"[{name}] {err}"
+                for name, result in module_results.items()
+                for err in (result.errors or [])
+            ]
+            errors.append("harvest timed out during discovery; partial result exported")
+            partial_metadata = {
+                "harvest_status": "partial_timeout",
+                "timed_out": True,
+                "timeout_at_seconds": timeout_seconds,
+                "budget": budget.stats,
+            }
+            return DomainHarvestResult(
+                domain=cleaned,
+                started_at=started_iso,
+                completed_at=completed.isoformat().replace("+00:00", "Z"),
+                duration_seconds=round((completed - started).total_seconds(), 3),
+                module_results=module_results,
+                unique_emails=unique_emails,
+                total_unique_emails=len(unique_emails),
+                high_confidence_count=sum(
+                    1 for e in unique_emails
+                    if e.confidence_label in {"CONFIRMED", "HIGH"} and not e.is_role
+                ),
+                likely_confidence_count=sum(
+                    1 for e in unique_emails
+                    if e.confidence_label == "LIKELY" and not e.is_role
+                ),
+                medium_confidence_count=sum(
+                    1 for e in unique_emails
+                    if e.confidence_label in {"LIKELY", "MEDIUM"} and not e.is_role
+                ),
+                low_confidence_count=sum(
+                    1 for e in unique_emails
+                    if e.confidence_label == "LOW" and not e.is_role
+                ),
+                role_account_count=sum(1 for e in unique_emails if e.is_role),
+                personal_email_count=sum(1 for e in unique_emails if not e.is_role),
+                errors=errors,
+                smtp_verification_used=False,
+                employee_names_processed=len(
+                    (
+                        module_results.get(MODULE_EMPLOYEE_NAMES).findings
+                        if module_results.get(MODULE_EMPLOYEE_NAMES) is not None
+                        else []
+                    )
+                    or []
+                ),
+                fetch_cache_stats=cache.stats(),
+                metadata=partial_metadata,
+                shadow_profiles=shadow_profiles,
+            )
+
         # Infrastructure enrichment consumes finalized HackerTarget output.
         # Keep it outside the discovery scheduler so it cannot displace email
         # work or be skipped merely because discovery used its full budget.

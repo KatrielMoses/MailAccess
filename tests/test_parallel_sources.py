@@ -10,9 +10,11 @@ from backend.modules.subdomain_intel import SubdomainIntelModule
 def test_pgp_keyservers_queried_in_parallel(monkeypatch):
     module = PgpDomainEmailModule()
 
-    async def query(domain, client):
+    # 0.13.2: sources mutate a shared outcome (partial-credit support).
+    async def query(domain, client, outcome):
         await asyncio.sleep(0.05)
-        return _SubSourceOutcome("source", ok=True)
+        outcome.ok = True
+        return outcome
 
     monkeypatch.setattr(module, "_query_mit", query)
     monkeypatch.setattr(module, "_query_openpgp", query)
@@ -25,11 +27,14 @@ def test_pgp_keyservers_queried_in_parallel(monkeypatch):
 
 def test_pgp_one_server_timeout_does_not_fail_module(monkeypatch):
     module = PgpDomainEmailModule()
+    # Keep the backoff retry from adding real latency to the test.
+    monkeypatch.setattr("backend.modules.pgp_domain_email._RETRY_BACKOFF_SECONDS", 0.0)
 
-    async def good(domain, client):
-        return _SubSourceOutcome("good", ok=True)
+    async def good(domain, client, outcome):
+        outcome.ok = True
+        return outcome
 
-    async def bad(domain, client):
+    async def bad(domain, client, outcome):
         raise asyncio.TimeoutError
 
     monkeypatch.setattr(module, "_query_mit", bad)
