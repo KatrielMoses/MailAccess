@@ -36,7 +36,6 @@ def test_provider_routing_covers_every_provider() -> None:
     assert _select_verifier_for_provider(MailProvider.M365) == "m365"
     assert _select_verifier_for_provider(MailProvider.YAHOO) == "yahoo"
     for provider in (
-        MailProvider.GOOGLE,
         MailProvider.PROTON,
         MailProvider.ZOHO,
         MailProvider.FASTMAIL,

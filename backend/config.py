@@ -425,6 +425,9 @@ class Settings(BaseSettings):
     yahoo_verification_delay_seconds: float = 1.2
     yahoo_verification_max_checks: int = 25
     yahoo_verification_timeout_seconds: float = 10.0
+    google_workspace_verifier_enabled: bool = True
+    google_verifier_timeout: float = 8.0
+    gravatar_verification_enabled: bool = True
 
     # Webhooks
     slack_webhook_url: str | None = None

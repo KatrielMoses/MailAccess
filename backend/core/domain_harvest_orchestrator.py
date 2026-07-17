@@ -86,6 +86,7 @@ from .hunter_client import (
 )
 from .m365_tenant import get_user_realm
 from .m365_verifier import M365Verifier
+from .google_workspace_verifier import GoogleWorkspaceVerifier
 from .mail_provider import MailProvider, detect_provider_from_mx
 from .mx_resolver import resolve_mx
 from .role_classifier import classify_email
@@ -997,8 +998,9 @@ def _select_verifier_for_provider(provider: MailProvider) -> str:
         return "m365"
     if provider is MailProvider.YAHOO:
         return "yahoo"
+    if provider is MailProvider.GOOGLE:
+        return "google"
     if provider in {
-        MailProvider.GOOGLE,
         MailProvider.PROTON,
         MailProvider.ZOHO,
         MailProvider.FASTMAIL,
@@ -1218,6 +1220,24 @@ async def _run_low_email_validation(
             max_checks=settings.yahoo_verification_max_checks,
         )
         result_objects = await verifier.verify_batch(emails)
+    elif verifier_key == "google":
+        if not settings.google_workspace_verifier_enabled:
+            summary["checked"] = 0
+            summary["status"] = "google_verifier_disabled"
+            summary["skipped"] = "google_verifier_disabled"
+            return summary
+        verifier = GoogleWorkspaceVerifier(
+            delay_seconds=1.0,
+            timeout_seconds=settings.google_verifier_timeout,
+            gravatar_enabled=settings.gravatar_verification_enabled,
+            max_checks=settings.smtp_verify_max_probes,
+        )
+        result_objects = await verifier.verify_batch(
+            emails,
+            domain,
+            session=None,
+            max_checks=settings.smtp_verify_max_probes,
+        )
     elif verifier_key == "smtp":
         mx_records = await resolve_mx(domain)
         if not mx_records:
@@ -1278,6 +1298,10 @@ async def _run_low_email_validation(
             ):
                 if hasattr(result, field_name):
                     payload[field_name] = getattr(result, field_name)
+            if hasattr(result, "exists"):
+                payload["exists"] = getattr(result, "exists")
+            if hasattr(result, "gravatar_hit"):
+                payload["gravatar_hit"] = getattr(result, "gravatar_hit")
 
         email = str(getattr(result, "email", "")).strip().lower()
         payload["inconclusive"] = status in {
@@ -1294,6 +1318,8 @@ async def _run_low_email_validation(
                 metadata = {}
                 finding["metadata"] = metadata
             metadata["low_email_validation"] = payload
+            if status == "possibly_exists" and payload.get("gravatar_hit"):
+                metadata["source_type"] = "permutation_gravatar_hit"
 
     for item in summary["results"]:
         status = item["status"]
@@ -1384,6 +1410,7 @@ def _apply_low_email_validation_results(
         "m365": "permutation_verified_m365",
         "yahoo": "permutation_verified_yahoo",
         "smtp": "permutation_verified",
+        "google": "permutation_verified_google",
     }.get(method)
     counts = {"promoted": 0, "not_found": 0, "inconclusive": 0}
     promoted_emails: set[str] = set()
@@ -1404,7 +1431,7 @@ def _apply_low_email_validation_results(
                     finding["metadata"] = metadata
                 metadata["source_type"] = verified_source
                 metadata["verification_status"] = "verified"
-                if method in {"m365", "yahoo"}:
+                if method in {"m365", "yahoo", "google"}:
                     metadata["provider_verification_status"] = "verified"
                     metadata["provider_verification_provider"] = method
                 else:
@@ -1437,7 +1464,7 @@ def _apply_low_email_validation_results(
         for email in unique_emails:
             if email.email.strip().lower() not in promoted_emails:
                 continue
-            email.is_provider_verified = method in {"m365", "yahoo"}
+            email.is_provider_verified = method in {"m365", "yahoo", "google"}
             email.is_smtp_verified = method == "smtp"
             source_types: list[str] = []
             for evidence in email.evidence:

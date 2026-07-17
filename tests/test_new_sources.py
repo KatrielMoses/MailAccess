@@ -247,6 +247,13 @@ def test_asn_appears_in_infrastructure_json() -> None:
     ]
 
 
+def test_cidr_prefixes_normalized_into_json_prefixes_array() -> None:
+    result = _asn_result()
+    result.module_results["ripe_stat_asn"].metadata["infrastructure"]["asns"][0].pop("prefixes")
+    payload = format_harvest_json_export(result)
+    assert payload["infrastructure"]["asns"][0]["prefixes"] == ["192.0.2.0/24"]
+
+
 def test_cidrs_txt_written_with_real_prefixes(tmp_path) -> None:
     path = write_cidr_file(tmp_path / "cidrs.txt", _asn_result())
 

@@ -221,6 +221,12 @@ def _build_infrastructure(result: DomainHarvestResult) -> dict[str, list[dict[st
                 existing[field] = sorted(
                     {*existing.get(field, []), *row.get(field, [])}
                 )
+            # RIPE and legacy infrastructure producers use both names for
+            # the same announced-prefix collection.  Keep the JSON contract
+            # stable even when an upstream row only contains ``cidrs``.
+            existing["prefixes"] = sorted(
+                {*existing.get("prefixes", []), *existing.get("cidrs", [])}
+            )
     return {
         "ips": [ip_rows[key] for key in sorted(ip_rows)],
         "asns": [asn_rows[key] for key in sorted(asn_rows)],
