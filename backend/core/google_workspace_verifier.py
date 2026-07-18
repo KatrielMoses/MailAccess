@@ -19,6 +19,10 @@ class VerificationResult:
     status: str = "inconclusive"
     exists: bool | None = None
     gravatar_hit: bool = False
+    # Set the moment an actual Gravatar lookup is performed for this
+    # address (regardless of outcome). Telemetry uses it to separate
+    # candidates ROUTED to the verifier from mechanisms CONTACTED.
+    gravatar_checked: bool = False
     http_status: int | None = None
     error: str | None = None
 
@@ -37,12 +41,17 @@ class GoogleWorkspaceVerifier:
         timeout_seconds: float = 8.0,
         gravatar_enabled: bool = True,
         smtp_fallback_enabled: bool = False,
+        gxlu_enabled: bool = True,
         max_checks: int = 25,
     ) -> None:
         self.delay_seconds = max(float(delay_seconds), 0.0)
         self.timeout_seconds = max(float(timeout_seconds), 1.0)
         self.gravatar_enabled = bool(gravatar_enabled)
         self.smtp_fallback_enabled = bool(smtp_fallback_enabled)
+        # The gxlu endpoint was patched by Google (uniform 204/no-set-cookie)
+        # and yields zero information per request. The harvest tail disables
+        # it and routes directly to the Gravatar signal instead.
+        self.gxlu_enabled = bool(gxlu_enabled)
         self.max_checks = max(1, min(int(max_checks), 100))
 
     async def verify_batch(
@@ -60,6 +69,22 @@ class GoogleWorkspaceVerifier:
         own_client = session is None
         client = session or build_client(timeout=self.timeout_seconds, follow_redirects=True)
         try:
+            if not self.gxlu_enabled:
+                # Gravatar-only path: no gxlu lookups, and NEVER an SMTP
+                # RCPT fallback — Google MX returns no usable RCPT responses,
+                # so SMTP probing burns the tail budget for zero information.
+                results = [
+                    VerificationResult(
+                        email=email,
+                        status="inconclusive" if index < cap else "not_attempted",
+                        error=None if index < cap else "over_cap",
+                    )
+                    for index, email in enumerate(cleaned)
+                ]
+                if self.gravatar_enabled:
+                    for result in results[:cap]:
+                        await self._gravatar(client, result)
+                return results
             gxlu_results = await self._gxlu_batch(client, cleaned, cap)
 
             # Google patched the gxlu endpoint: it now answers 204 with no
@@ -194,6 +219,7 @@ class GoogleWorkspaceVerifier:
         return result
 
     async def _gravatar(self, client: Any, result: VerificationResult) -> None:
+        result.gravatar_checked = True
         digest = hashlib.md5(result.email.encode("utf-8"), usedforsecurity=False).hexdigest()
         try:
             response = await asyncio.wait_for(

@@ -176,6 +176,13 @@ def _format_subdomain_panel(result: DomainHarvestResult) -> Panel | Text:
             + "\n",
             style="dim",
         )
+    quorum = metadata.get("passive_quorum") or {}
+    if quorum and not quorum.get("met", True):
+        text.append(
+            f"  WARNING: passive enumeration quorum failed "
+            f"({quorum.get('returned_results', 0)}/{quorum.get('required', 2)} sources responded healthy)\n",
+            style="bold yellow",
+        )
     budget = metadata.get("budget") or {}
     if budget:
         text.append(
@@ -1653,6 +1660,9 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
             "shadow_profile_count": len(shadow_profiles),
             "module_timings": module_timings,
             "module_skip_reasons": module_skip_reasons,
+            # Authoritative export-level subdomain count. Module metadata uses
+            # scoped ``discovered`` fields and must not be compared to this.
+            "subdomains_total_including_derived": len(subdomains),
         },
         "emails": emails_out,
         "personal_email_candidates": [

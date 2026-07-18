@@ -111,23 +111,243 @@ async def test_passive_sources_are_ordered_and_deduplicated(monkeypatch):
         calls.append("certspotter")
         return {"docs.example.com"}
 
+    async def otx(client, domain):
+        calls.append("otx")
+        return {"otx.example.com"}
+
+    async def anubis(client, domain):
+        calls.append("anubis")
+        return {"anubis.example.com"}
+
     monkeypatch.setattr("backend.modules.subdomain_intel.discover_axfr", axfr)
     monkeypatch.setattr("backend.modules.subdomain_intel.discover_crtsh", crt)
     monkeypatch.setattr("backend.modules.subdomain_intel.discover_subdomain_center", center)
     monkeypatch.setattr("backend.modules.subdomain_intel.discover_wayback", wayback)
     monkeypatch.setattr("backend.modules.subdomain_intel.discover_certspotter", cert)
+    monkeypatch.setattr("backend.modules.subdomain_intel.discover_otx", otx)
+    monkeypatch.setattr("backend.modules.subdomain_intel.discover_anubis", anubis)
     async def resolve_doh(client, hostname):
         return {"2001:db8::1"}
     monkeypatch.setattr("backend.modules.subdomain_intel.resolve_doh", resolve_doh)
     monkeypatch.setenv("CERTSPOTTER_API_KEY", "present")
+    monkeypatch.setenv("OTX_API_KEY", "present")
 
     result = await SubdomainIntelModule().run("example.com", client=Client({}), enable_scraping=False)
     assert calls[0] == "axfr"
-    assert set(calls[1:3]) == {"crt.sh", "certspotter"}
-    assert calls[3:] == ["subdomain.center", "wayback"]
+    assert set(calls[1:]) == {
+        "crt.sh", "certspotter", "subdomain.center", "wayback", "otx", "anubis"
+    }
     assert {item["subdomain"] for item in result.findings} == {
         "team.example.com", "docs.example.com", "https.example.com"
+        , "otx.example.com", "anubis.example.com"
     }
+    assert result.metadata["passive_quorum"]["met"] is True
+
+
+@pytest.mark.asyncio
+async def test_crtsh_retries_with_retry_after(monkeypatch):
+    import backend.modules.subdomain_intel as source
+
+    sleeps = []
+
+    class RetryResponse(Response):
+        def __init__(self, status_code, payload=None, headers=None):
+            super().__init__(payload=payload, status_code=status_code)
+            self.headers = headers or {}
+
+    responses = iter([
+        RetryResponse(429, headers={"Retry-After": "0"}),
+        RetryResponse(200, payload=[{"name_value": "team.example.com"}]),
+    ])
+
+    class RetryClient:
+        async def get(self, url, **kwargs):
+            return next(responses)
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(source.asyncio, "sleep", fake_sleep)
+    assert await source.discover_crtsh(RetryClient(), "example.com") == {"team.example.com"}
+    assert sleeps == [0.0]
+
+
+@pytest.mark.asyncio
+async def test_blocked_crtsh_keeps_otx_anubis_and_exports_source_health(monkeypatch):
+    async def empty_axfr(domain, *, resolver=None):
+        return set()
+
+    async def blocked_crt(client, domain):
+        raise TimeoutError("crt.sh blocked")
+
+    async def cert(client, domain):
+        return set()
+
+    async def center(client, domain):
+        return set()
+
+    async def wayback(client, domain):
+        return set()
+
+    async def otx(client, domain):
+        return {"team.example.com", "docs.example.com"}
+
+    async def anubis(client, domain):
+        return {"api.example.com"}
+
+    async def resolve_doh(client, hostname):
+        return {"192.0.2.10"}
+
+    monkeypatch.setattr("backend.modules.subdomain_intel.discover_axfr", empty_axfr)
+    monkeypatch.setattr("backend.modules.subdomain_intel.discover_crtsh", blocked_crt)
+    monkeypatch.setattr("backend.modules.subdomain_intel.discover_certspotter", cert)
+    monkeypatch.setattr("backend.modules.subdomain_intel.discover_subdomain_center", center)
+    monkeypatch.setattr("backend.modules.subdomain_intel.discover_wayback", wayback)
+    monkeypatch.setattr("backend.modules.subdomain_intel.discover_otx", otx)
+    monkeypatch.setattr("backend.modules.subdomain_intel.discover_anubis", anubis)
+    monkeypatch.setattr("backend.modules.subdomain_intel.resolve_doh", resolve_doh)
+    monkeypatch.setenv("OTX_API_KEY", "present")
+
+    result = await SubdomainIntelModule().run(
+        "example.com", profile="t5", client=Client({}), enable_scraping=False
+    )
+
+    assert {item["subdomain"] for item in result.findings} == {
+        "team.example.com", "docs.example.com", "api.example.com"
+    }
+    sources = result.metadata["sources"]
+    assert sources["crt.sh"]["status"] == "timeout"
+    assert sources["otx"] == {"status": "ok", "count": 2}
+    assert sources["anubis"] == {"status": "ok", "count": 1}
+    assert result.metadata["passive_quorum"]["met"] is True
+
+
+@pytest.mark.asyncio
+async def test_passive_quorum_counts_healthy_empty_sources(monkeypatch):
+    import backend.modules.subdomain_intel as source
+
+    async def empty_axfr(domain, *, resolver=None):
+        return set()
+
+    async def empty_source(client, domain):
+        return set()
+
+    monkeypatch.setattr(source, "discover_axfr", empty_axfr)
+    for name in (
+        "discover_crtsh",
+        "discover_certspotter",
+        "discover_subdomain_center",
+        "discover_wayback",
+        "discover_anubis",
+        "discover_otx",
+    ):
+        monkeypatch.setattr(source, name, empty_source)
+    monkeypatch.setenv("OTX_API_KEY", "present")
+
+    result = await SubdomainIntelModule().run(
+        "example.com", profile="t5", client=Client({}), enable_scraping=False
+    )
+
+    assert result.metadata["passive_quorum"] == {
+        "required": 2,
+        "returned_results": 6,
+        "met": True,
+        "warning": None,
+    }
+    assert result.metadata["sources"]["axfr"]["status"] == "ok"
+    assert all(
+        details["status"] == "ok"
+        for name, details in result.metadata["sources"].items()
+        if name != "axfr"
+    )
+
+
+@pytest.mark.asyncio
+async def test_passive_source_telemetry_survives_phase_timeout(monkeypatch):
+    import asyncio
+    import backend.modules.subdomain_intel as source
+
+    async def empty_axfr(domain, *, resolver=None):
+        return set()
+
+    async def slow_source(client, domain):
+        await asyncio.sleep(1)
+        return {f"slow.{domain}"}
+
+    monkeypatch.setattr(source, "discover_axfr", empty_axfr)
+    for name in (
+        "discover_crtsh",
+        "discover_certspotter",
+        "discover_subdomain_center",
+        "discover_wayback",
+        "discover_anubis",
+    ):
+        monkeypatch.setattr(source, name, slow_source)
+    monkeypatch.delenv("OTX_API_KEY", raising=False)
+    monkeypatch.setattr(source, "PASSIVE_SOURCE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(source, "PASSIVE_PHASE_TIMEOUT_SECONDS", 0.02)
+
+    result = await SubdomainIntelModule().run(
+        "example.com", profile="t5", client=Client({}), enable_scraping=False
+    )
+
+    sources = result.metadata["sources"]
+    assert set(sources) == {
+        "axfr", "crt.sh", "certspotter", "subdomain.center", "wayback", "otx", "anubis"
+    }
+    assert sources["otx"]["status"] == "not_run"
+    assert all(
+        sources[name]["status"] in {"timeout", "not_run"}
+        for name in ("crt.sh", "certspotter", "subdomain.center", "wayback", "anubis")
+    )
+
+
+@pytest.mark.asyncio
+async def test_incremental_source_telemetry_survives_external_kill(monkeypatch):
+    import asyncio
+    import backend.modules.subdomain_intel as source
+
+    started = asyncio.Event()
+    telemetry = {
+        name: {"status": "not_run", "count": 0}
+        for name in ("axfr", "crt.sh", "certspotter", "subdomain.center", "wayback", "otx", "anubis")
+    }
+
+    async def empty_axfr(domain, *, resolver=None):
+        return set()
+
+    async def hanging_crt(client, domain):
+        started.set()
+        await asyncio.sleep(60)
+        return set()
+
+    async def empty_source(client, domain):
+        return set()
+
+    monkeypatch.setattr(source, "discover_axfr", empty_axfr)
+    monkeypatch.setattr(source, "discover_crtsh", hanging_crt)
+    for name in ("discover_certspotter", "discover_subdomain_center", "discover_wayback", "discover_anubis"):
+        monkeypatch.setattr(source, name, empty_source)
+    monkeypatch.delenv("OTX_API_KEY", raising=False)
+
+    task = asyncio.create_task(
+        source.SubdomainIntelModule().run(
+            "stripe.com",
+            profile="t5",
+            client=Client({}),
+            enable_scraping=False,
+            source_telemetry=telemetry,
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert telemetry["crt.sh"]["status"] == "killed"
+    assert telemetry["crt.sh"]["error"] == "in_progress_at_timeout"
+    assert telemetry["certspotter"]["status"] in {"ok", "killed", "in_progress"}
+    assert telemetry["otx"]["status"] == "not_run"
 
 
 @pytest.mark.asyncio

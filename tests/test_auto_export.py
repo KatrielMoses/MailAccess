@@ -78,6 +78,9 @@ def _patched_command_run(
     """
     payload = result or _result()
     async def _fake_run(*args: Any, **kwargs: Any) -> DomainHarvestResult:
+        on_harvest_end = kwargs.get("on_harvest_end")
+        if on_harvest_end is not None:
+            on_harvest_end(payload)
         return payload
 
     monkeypatch.setattr(command, "_CFFI_AVAILABLE", True)

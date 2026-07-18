@@ -1197,6 +1197,7 @@ async def _run_low_email_validation(
     verifier_key: str,
     *,
     provider: MailProvider | None = None,
+    mx_records: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Execute one provider-specific verifier against selected candidates.
 
@@ -1210,6 +1211,11 @@ async def _run_low_email_validation(
         "method": verifier_key,
         "checked": len(emails),
         "candidates": len(emails),
+        # Routed-vs-contacted telemetry (same pattern as the provider
+        # dispatch): ``candidates_routed`` counts objects handed to the
+        # verifier; ``gravatar_checked`` (Google route only) counts actual
+        # Gravatar lookups performed, bounded by the probe cap.
+        "candidates_routed": len(emails),
         "results": [],
     }
     if not emails:
@@ -1246,6 +1252,8 @@ async def _run_low_email_validation(
             delay_seconds=1.0,
             timeout_seconds=settings.google_verifier_timeout,
             gravatar_enabled=settings.gravatar_verification_enabled,
+            smtp_fallback_enabled=False,
+            gxlu_enabled=False,
             max_checks=settings.smtp_verify_max_probes,
         )
         result_objects = await verifier.verify_batch(
@@ -1254,13 +1262,16 @@ async def _run_low_email_validation(
             session=None,
             max_checks=settings.smtp_verify_max_probes,
         )
+        summary["gravatar_checked"] = sum(
+            1 for r in result_objects if getattr(r, "gravatar_checked", False)
+        )
     elif verifier_key == "smtp":
-        mx_records = await resolve_mx(domain)
-        if not mx_records:
+        resolved_mx_records = list(mx_records) if mx_records is not None else await resolve_mx(domain)
+        if not resolved_mx_records:
             summary["status"] = "no_mx_records"
             return summary
         async with SMTPVerifier(
-            mx_records=mx_records,
+            mx_records=resolved_mx_records,
             sender_address=settings.smtp_sender_address or DEFAULT_SENDER,
             probe_delay_seconds=float(settings.smtp_probe_delay_seconds) or DEFAULT_PROBE_DELAY,
             connect_timeout_seconds=float(settings.smtp_connect_timeout_seconds),
@@ -1654,8 +1665,9 @@ async def _dispatch_provider_verifier(
     so ``is_provider_verified`` and the ``provider_verification_*`` fields
     never populated on this path (0.13.0-0.13.1 regression). Both verifiers
     exist and are dispatched here directly. M365 works immediately
-    (GetCredentialType is not patched); for Google the gxlu + SMTP + Gravatar
-    fallback chain runs inside :meth:`GoogleWorkspaceVerifier.verify_batch`.
+    (GetCredentialType is not patched); for Google the verifier routes
+    directly to the Gravatar signal — gxlu is patched server-side and SMTP
+    probing against Google MX is forbidden (no usable RCPT responses).
     """
     provider = detection.provider
     emails = list(findings_by_email)
@@ -1670,11 +1682,22 @@ async def _dispatch_provider_verifier(
             else {}
         )
         if not fallback:
-            return {"checked": 0, "status": "no_candidates", "provider": provider.value}
+            return {
+                "candidates_routed": 0,
+                "status": "no_candidates",
+                "provider": provider.value,
+            }
         findings_by_email = fallback
         emails = list(findings_by_email)[: settings.smtp_verify_max_probes]
+    # Routed vs contacted are ALWAYS separate fields: ``candidates_routed``
+    # counts the candidate objects handed to the verifier; the mechanism
+    # counter (``gravatar_checked`` for Google) counts actual lookups
+    # performed and is bounded by the probe cap. ``candidates_routed`` is
+    # fixed here at dispatch time — a re-probe artifact in the verifier's
+    # result list must not inflate it. Any future verifier must follow the
+    # same pattern: one routed field, one contacted field per mechanism.
     summary: dict[str, int | str | bool | None] = {
-        "checked": len(emails),
+        "candidates_routed": len(emails),
         "candidates": len(emails),
         "provider": provider.value,
     }
@@ -1682,15 +1705,21 @@ async def _dispatch_provider_verifier(
     results: list[Any]
     if provider is MailProvider.GOOGLE:
         if not settings.google_workspace_verifier_enabled:
-            summary["checked"] = 0
+            summary["gravatar_checked"] = 0
             summary["skipped"] = "google_verifier_disabled"
             return summary
         summary["method"] = "google"
+        # Google policy: cached provider detection says ``google`` → the
+        # verifier MUST NOT attempt SMTP probing (Google MX returns no usable
+        # RCPT responses; the v0.13.2 fallback burned the whole tail budget
+        # for zero information) and the patched gxlu endpoint is skipped too.
+        # Route directly to the Gravatar signal.
         verifier = GoogleWorkspaceVerifier(
             delay_seconds=1.0,
             timeout_seconds=settings.google_verifier_timeout,
             gravatar_enabled=settings.gravatar_verification_enabled,
-            smtp_fallback_enabled=settings.enable_smtp_verification,
+            smtp_fallback_enabled=False,
+            gxlu_enabled=False,
             max_checks=settings.smtp_verify_max_probes,
         )
         results = await verifier.verify_batch(
@@ -1710,10 +1739,30 @@ async def _dispatch_provider_verifier(
         results = await verifier.verify_batch(emails)
         promoted_source = "permutation_verified_m365"
 
-    summary["checked"] = len(results)
+    # ``gravatar_checked`` counts actual Gravatar lookups performed by the
+    # Google verifier (bounded by the probe cap), never the candidates
+    # merely routed to it. SMTP and gxlu are disabled on this route, so no
+    # field here may imply SMTP contact occurred.
+    if provider is MailProvider.GOOGLE:
+        summary["gravatar_checked"] = sum(
+            1 for r in results if getattr(r, "gravatar_checked", False)
+        )
+    google_unverifiable = {
+        "inconclusive",
+        "not_attempted",
+        "rate_limited",
+    }
     for result in results:
         status = str(getattr(result, "status", "inconclusive"))
         exists = getattr(result, "exists", None)
+        if (
+            provider is MailProvider.GOOGLE
+            and status in google_unverifiable
+            and not getattr(result, "gravatar_hit", False)
+        ):
+            # Honest non-verified stamp: Google offers no SMTP/gxlu existence
+            # signal and Gravatar returned no hit for this address.
+            status = "unverifiable_provider"
         summary[status] = int(summary.get(status, 0) or 0) + 1
         payload: dict[str, Any] = {
             "method": summary["method"],
@@ -1746,17 +1795,21 @@ async def _dispatch_provider_verifier(
 async def _attach_smtp_email_verification(
     domain: str,
     module_results: dict[str, ModuleResult],
+    *,
+    provider_detection: Any | None = None,
+    mx_records: list[Any] | None = None,
 ) -> dict[str, int | str | bool | None]:
     """Probe every valid on-domain email through one guarded SMTP batch."""
     findings_by_email = _collect_smtp_findings(domain, module_results)
 
-    mx_records = await resolve_mx(domain)
-    if not mx_records:
+    resolved_mx_records = list(mx_records) if mx_records is not None else await resolve_mx(domain)
+    if not resolved_mx_records:
         if not findings_by_email:
             return {"checked": 0, "status": "no_candidates", "is_catchall": None}
         return {"checked": len(findings_by_email), "status": "no_mx_records"}
 
-    provider_detection = detect_provider_from_mx(mx_records, target_domain=domain)
+    if provider_detection is None:
+        provider_detection = detect_provider_from_mx(resolved_mx_records, target_domain=domain)
     if provider_detection.provider in {MailProvider.GOOGLE, MailProvider.M365}:
         # Provider verifiers own their own candidate fallback (Fix 1), so we
         # dispatch even when the SMTP-eligible set is empty. ``module_results``
@@ -1772,7 +1825,7 @@ async def _attach_smtp_email_verification(
     shared_hosting = provider_detection.provider is MailProvider.SHARED_HOSTING
 
     async with SMTPVerifier(
-        mx_records=mx_records,
+        mx_records=resolved_mx_records,
         sender_address=settings.smtp_sender_address or DEFAULT_SENDER,
         probe_delay_seconds=float(settings.smtp_probe_delay_seconds) or DEFAULT_PROBE_DELAY,
         connect_timeout_seconds=float(settings.smtp_connect_timeout_seconds),
@@ -1822,6 +1875,9 @@ async def _attach_smtp_email_verification(
 async def _attach_m365_email_verification(
     domain: str,
     module_results: dict[str, ModuleResult],
+    *,
+    provider_detection: Any | None = None,
+    mx_records: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Run the opt-in M365 signal for valid on-domain candidates."""
     findings_by_email: dict[str, list[dict[str, Any]]] = {}
@@ -1835,8 +1891,10 @@ async def _attach_m365_email_verification(
                 findings_by_email.setdefault(normalized, []).append(finding)
     if not findings_by_email:
         return {"checked": 0, "status": "no_candidates"}
-    mx_records = await resolve_mx(domain)
-    detection = detect_provider_from_mx(mx_records, target_domain=domain)
+    resolved_mx_records = list(mx_records) if mx_records is not None else await resolve_mx(domain)
+    detection = provider_detection
+    if detection is None:
+        detection = detect_provider_from_mx(resolved_mx_records, target_domain=domain)
     summary: dict[str, Any] = {
         "provider": detection.provider.value,
         "primary_mx": detection.primary_mx,
@@ -1889,8 +1947,10 @@ async def _attach_m365_email_verification(
             }
             metadata["m365_verification"] = payload
             metadata["m365_realm"] = summary["realm"]
-            metadata["provider_verification_status"] = verification.status
-            if verification.status == "verified":
+            if metadata.get("provider_verification_status") != "verified":
+                metadata["provider_verification_status"] = verification.status
+            if metadata.get("provider_verification_status") == "verified":
+                metadata["provider_verification_provider"] = "m365"
                 metadata["verification_status"] = "verified"
                 if metadata.get("pattern_template"):
                     metadata["source_type"] = "permutation_verified_m365"
@@ -1900,6 +1960,9 @@ async def _attach_m365_email_verification(
 async def _attach_yahoo_email_verification(
     domain: str,
     module_results: dict[str, ModuleResult],
+    *,
+    provider_detection: Any | None = None,
+    mx_records: list[Any] | None = None,
 ) -> dict[str, Any]:
     findings_by_email: dict[str, list[dict[str, Any]]] = {}
     for result in module_results.values():
@@ -1909,7 +1972,10 @@ async def _attach_yahoo_email_verification(
                 findings_by_email.setdefault(email.strip().lower(), []).append(finding)
     if not findings_by_email:
         return {"checked": 0, "status": "no_candidates"}
-    detection = detect_provider_from_mx(await resolve_mx(domain), target_domain=domain)
+    resolved_mx_records = list(mx_records) if mx_records is not None else await resolve_mx(domain)
+    detection = provider_detection
+    if detection is None:
+        detection = detect_provider_from_mx(resolved_mx_records, target_domain=domain)
     summary: dict[str, Any] = {"provider": detection.provider.value, "checked": 0}
     if detection.provider is not MailProvider.YAHOO:
         summary["status"] = "provider_not_yahoo"
@@ -2085,6 +2151,7 @@ async def _safe_phase12_run(
     context_vertical: tuple[str, ...] | list[str] | str | None = None,
     scrape_session: Any | None = None,
     progress_callback: Any | None = None,
+    source_telemetry: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[str, ModuleResult]:
     """Run a Phase 1+2 module with its optional kwargs.
 
@@ -2145,6 +2212,7 @@ async def _safe_phase12_run(
         kwargs["enable_scraping"] = enable_scraping
         kwargs["context_vertical"] = context_vertical
         kwargs["scrape_session"] = scrape_session
+        kwargs["source_telemetry"] = source_telemetry
     accepted = _kwargs_accepted(module)
     try:
         if accepted is None:
@@ -2220,6 +2288,8 @@ async def _run_pattern(
     progress_callback: Any | None = None,
     signal_pool: Any | None = None,
     budget: TimeBudget | None = None,
+    provider_detection: Any | None = None,
+    mx_records: list[MXRecord] | None = None,
 ) -> ModuleResult:
     """Run pattern_and_verify with explicit kwargs.
 
@@ -2245,6 +2315,14 @@ async def _run_pattern(
         pattern_accepted is None or "signal_pool" in pattern_accepted
     ):
         pattern_kwargs["signal_pool"] = signal_pool
+    if provider_detection is not None and (
+        pattern_accepted is None or "provider_detection" in pattern_accepted
+    ):
+        pattern_kwargs["provider_detection"] = provider_detection
+    if mx_records is not None and (
+        pattern_accepted is None or "mx_records" in pattern_accepted
+    ):
+        pattern_kwargs["mx_records"] = mx_records
     result = await _run_with_soft_timeout(
         pattern.name,
         pattern.run(domain, **pattern_kwargs),
@@ -2537,8 +2615,10 @@ async def run_domain_harvest(
     subdomain_deep: bool = False,
     subdomain_calibrate: bool = False,
     progress_callback: Any | None = None,
+    log_callback: Any | None = None,
     display_subscriber: Any | None = None,
     force: bool = False,
+    on_harvest_end: Any | None = None,
 ) -> DomainHarvestResult:
     """Run all nine harvest modules in the recommended sequence.
 
@@ -2697,7 +2777,9 @@ async def run_domain_harvest(
         subdomain_deep=subdomain_deep,
         subdomain_calibrate=subdomain_calibrate,
         progress_callback=progress_callback,
+        log_callback=log_callback,
         display_subscriber=display_subscriber,
+        on_harvest_end=on_harvest_end,
     )
     if cache_enabled:
         cache.set(domain, result)

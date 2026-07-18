@@ -387,7 +387,7 @@ class DomainHarvesterModule(BaseModule):
                 "sources_probed": all_sources_probed,
                 "sources_succeeded": sources_succeeded,
                 "sources_failed": sources_failed,
-                "subdomains_found": len(seen_subdomains),
+                "discovered": len(seen_subdomains),
                 "subdomains_per_source": subdomains_per_source,
                 "ips_resolved": len(ip_map),
                 "infrastructure": infrastructure,

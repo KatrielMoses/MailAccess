@@ -392,6 +392,10 @@ class Settings(BaseSettings):
     enable_subdomain_surface: bool = True
     subdomain_surface_max_hosts: int = 8
     enable_subdomain_intel: bool = True
+    # AlienVault OTX requires authentication for passive DNS from this
+    # environment; keep it opt-in so an anonymous 429 cannot consume harvest
+    # budget or distort passive-source health.
+    otx_api_key: str | None = None
     # ------------------------------------------------------------------
     # SMTP verification runs for domain harvests unless the caller opts out.
     # Keep the legacy names as compatibility aliases while the 0.12.5 names

@@ -114,6 +114,8 @@ class PatternAndVerifyModule(BaseModule):
         enable_native_validation: bool = True,
         signal_pool: Any | None = None,
         progress_callback: Any | None = None,
+        provider_detection: Any | None = None,
+        mx_records: list[MXRecord] | None = None,
     ) -> ModuleResult:  # type: ignore[override]
         """Generate email patterns and optionally verify via SMTP.
 
@@ -374,11 +376,12 @@ class PatternAndVerifyModule(BaseModule):
         # reserved for the explicit SMTP path below.
         native_validation_meta: dict[str, Any] = {}
         if enable_native_validation and candidates:
-            mx_for_validation: list[MXRecord] = []
-            try:
-                mx_for_validation = await resolve_mx(cleaned_domain)
-            except Exception as exc:  # noqa: BLE001
-                native_validation_meta["error"] = str(exc)
+            mx_for_validation: list[MXRecord] = list(mx_records or [])
+            if mx_records is None:
+                try:
+                    mx_for_validation = await resolve_mx(cleaned_domain)
+                except Exception as exc:  # noqa: BLE001
+                    native_validation_meta["error"] = str(exc)
             validation_results = await validate_email_batch(
                 [candidate.email for candidate in candidates],
                 mx_records=mx_for_validation,
@@ -405,22 +408,28 @@ class PatternAndVerifyModule(BaseModule):
             # The per-name loop previously constructed N verifiers,
             # triggering N TCP connects + N MAIL FROM handshakes against
             # the same MX — a textbook anti-abuse trigger pattern.
-            mx_records: list[MXRecord] = []
-            try:
-                _progress(f"Resolving MX records for {cleaned_domain}...")
-                mx_records = await resolve_mx(cleaned_domain)
-            except Exception as exc:  # noqa: BLE001
-                _LOG.warning("pattern_and_verify: MX resolution failed: %s", exc)
+            resolved_mx_records: list[MXRecord] = list(mx_records or [])
+            if mx_records is None:
+                try:
+                    _progress(f"Resolving MX records for {cleaned_domain}...")
+                    resolved_mx_records = await resolve_mx(cleaned_domain)
+                except Exception as exc:  # noqa: BLE001
+                    _LOG.warning("pattern_and_verify: MX resolution failed: %s", exc)
 
             provider_specific_verifier = False
-            if not mx_records:
+            skip_smtp_probing = False
+            if not resolved_mx_records:
                 _LOG.info("pattern_and_verify: no MX records found")
                 batch_meta["stop_reason"] = "no_mx_records"
                 _generate_without_probing()
             else:
-                provider = detect_provider_from_mx(
-                    mx_records, target_domain=cleaned_domain
-                ).provider
+                provider = (
+                    provider_detection.provider
+                    if provider_detection is not None
+                    else detect_provider_from_mx(
+                        resolved_mx_records, target_domain=cleaned_domain
+                    ).provider
+                )
                 batch_meta["mail_provider"] = provider.value
                 if provider in {MailProvider.GOOGLE, MailProvider.M365}:
                     # The provider verifier owns positive existence decisions,
@@ -430,9 +439,16 @@ class PatternAndVerifyModule(BaseModule):
                     batch_meta["provider_route"] = provider.value
                     batch_meta["stop_reason"] = "provider_specific_verifier"
                     _generate_without_probing()
-            if mx_records:
+                    if provider is MailProvider.GOOGLE:
+                        # Google MX returns no usable RCPT responses, so even
+                        # the small elimination pass (catch-all probe + up to
+                        # 5 RCPT probes with greylist backoff) burns the tail
+                        # budget for zero information. The provider verifier
+                        # (Gravatar-routed) owns the Google signal.
+                        skip_smtp_probing = True
+            if resolved_mx_records and not skip_smtp_probing:
                 async with SMTPVerifier(
-                    mx_records=mx_records,
+                    mx_records=resolved_mx_records,
                     sender_address=(settings.smtp_sender_address or DEFAULT_SENDER),
                     probe_delay_seconds=float(settings.smtp_probe_delay_seconds)
                     or DEFAULT_PROBE_DELAY,
@@ -489,6 +505,12 @@ class PatternAndVerifyModule(BaseModule):
                         # calls. The counter makes every lookup O(1).
                         cand_index = 0
                         stop_for_block = False
+                        # Dedup: ``probes_used_total`` counts UNIQUE candidate
+                        # addresses, never attempts. A repeated address
+                        # (duplicate employee names generating identical
+                        # patterns) reuses the cached probe outcome instead
+                        # of re-probing and inflating the counter.
+                        probe_results_by_email: dict[str, Any] = {}
                         for emp_index, emp in enumerate(employee_names):
                             remaining_budget = cap - probes_used_total
                             if remaining_budget < 3:
@@ -515,7 +537,9 @@ class PatternAndVerifyModule(BaseModule):
                             if not pats:
                                 continue
                             for pattern_offset, pattern in enumerate(pats):
-                                if probes_used_total >= cap:
+                                email_key = pattern.email.strip().lower()
+                                cached_res = probe_results_by_email.get(email_key)
+                                if cached_res is None and probes_used_total >= cap:
                                     batch_meta["stop_reason"] = (
                                         batch_meta.get("stop_reason") or "budget_exhausted"
                                     )
@@ -524,25 +548,29 @@ class PatternAndVerifyModule(BaseModule):
                                     # generation
                                     cand_index += 1
                                     continue
-                                try:
-                                    _progress(f"SMTP probing {pattern.email}...")
-                                    res = await verifier.verify_single(pattern.email)
-                                except Exception as exc:  # noqa: BLE001
-                                    _LOG.warning(
-                                        "pattern_and_verify: SMTP probe error for %s: %s",
-                                        pattern.email,
-                                        exc,
-                                    )
-                                    res = type(
-                                        "R",
-                                        (),
-                                        {
-                                            "exists": None,
-                                            "blocked_signal": False,
-                                            "verification_status": "inconclusive",
-                                        },
-                                    )()
-                                probes_used_total += 1
+                                if cached_res is not None:
+                                    res = cached_res
+                                else:
+                                    try:
+                                        _progress(f"SMTP probing {pattern.email}...")
+                                        res = await verifier.verify_single(pattern.email)
+                                    except Exception as exc:  # noqa: BLE001
+                                        _LOG.warning(
+                                            "pattern_and_verify: SMTP probe error for %s: %s",
+                                            pattern.email,
+                                            exc,
+                                        )
+                                        res = type(
+                                            "R",
+                                            (),
+                                            {
+                                                "exists": None,
+                                                "blocked_signal": False,
+                                                "verification_status": "inconclusive",
+                                            },
+                                        )()
+                                    probe_results_by_email[email_key] = res
+                                    probes_used_total += 1
 
                                 if getattr(res, "blocked_signal", False):
                                     # Mid-batch block — STOP, mark

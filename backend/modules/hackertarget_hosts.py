@@ -97,7 +97,7 @@ class HackerTargetHostsModule(BaseModule):
             findings=findings,
             metadata={
                 "domain": target,
-                "subdomains_found": len(findings),
+                "discovered": len(findings),
                 "infrastructure": {
                     "ips": [
                         {"ip": ip, "subdomains": sorted(hosts), "sources": ["hackertarget"]}

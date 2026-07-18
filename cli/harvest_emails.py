@@ -69,6 +69,7 @@ from backend.core.harvest_results import (
     HarvestResultFiles,
     results_paths,
     timestamp_slug,
+    write_harvest_export,
     write_harvest_results,
 )
 from backend.core.name_classifier import is_ml_available
@@ -714,6 +715,34 @@ def run_harvest_emails(
         """
         display.complete(name, status, errors)
 
+    # Harvest-termination handler wiring. The runner fires this exactly
+    # once on EVERY termination path (normal completion, budget timeout,
+    # stage exception, soft kill) with the harvest context as it exists
+    # at that moment. When the run cannot return a result object, this
+    # snapshot is the export source — the export depends on nothing
+    # except the harvest ending.
+    termination_snapshot: dict[str, Any] = {}
+    extra_export_path: Path | None = None
+    if export and not no_export:
+        extra_export_path = _resolve_export_path(export)
+
+    def _on_harvest_end(snapshot: Any) -> None:
+        termination_snapshot["result"] = snapshot
+        if no_export:
+            return
+        if (
+            not bool(getattr(settings, "harvest_auto_export", True))
+            and extra_export_path is None
+        ):
+            return
+        # Sole production call site for the canonical export. The runner
+        # invokes this handler from its termination finally block.
+        termination_snapshot["written"] = write_harvest_export(
+            snapshot,
+            timestamp=timestamp,
+            extra_export_path=extra_export_path,
+        )
+
     async def _drive() -> Any:
         return await run_domain_harvest(
             cleaned_domain,
@@ -732,10 +761,14 @@ def run_harvest_emails(
             subdomain_deep=subdomain_deep,
             subdomain_calibrate=subdomain_calibrate,
             progress_callback=display.progress,
+            log_callback=display.log_event,
             display_subscriber=display.signal,
             force=force,
+            on_harvest_end=_on_harvest_end,
         )
 
+    drive_error: BaseException | None = None
+    result: Any | None = None
     try:
         try:
             with Live(
@@ -746,21 +779,43 @@ def run_harvest_emails(
             ):
                 result = asyncio.run(_drive())
         except ValueError as exc:
-            # Domain validation / free-provider rejection.
+            # Domain validation / free-provider rejection — raised before
+            # any harvest context exists, so there is nothing to export.
             console.print(f"[red]Error:[/] {exc}")
             return 2
+        except KeyboardInterrupt:
+            # Soft kill. The termination handler has already snapshotted
+            # the harvest context; fall through so the export still lands.
+            drive_error = KeyboardInterrupt("harvest interrupted")
         except Exception as exc:  # noqa: BLE001
-            console.print(f"[red]Error:[/] harvest failed: {exc}")
-            return 3
+            drive_error = exc
     finally:
         settings.ml_name_classifier = original_ml_pref
     # MUST-FIX M3: no settings restoration needed — we never mutated
     # settings in the first place.
 
+    if result is None:
+        # The run did not return (stage exception or soft kill). Use the
+        # termination handler's snapshot of the in-memory context.
+        result = termination_snapshot.get("result")
+
+    if result is None:
+        # No harvest context ever existed — nothing to export.
+        if isinstance(drive_error, KeyboardInterrupt):
+            console.print(
+                "[yellow]Harvest interrupted before any results existed.[/]"
+            )
+            return 130
+        console.print(f"[red]Error:[/] harvest failed: {drive_error}")
+        return 3
+
     timeout_metadata = result.metadata or {}
     if isinstance(timeout_metadata, dict) and timeout_metadata.get("harvest_status") == "partial_timeout":
         timeout_at = timeout_metadata.get("timeout_at_seconds")
-        display.log_event("TIMEOUT", f"partial result exported at {timeout_at}s budget")
+        display.log_event(
+            "TIMEOUT",
+            f"discovery timed out at {timeout_at}s; verification tail completed before export",
+        )
         console.print(
             f"[yellow]Harvest timed out after {timeout_at}s; exporting partial results.[/]"
         )
@@ -785,6 +840,11 @@ def run_harvest_emails(
     # line so analysts can see the gate decision in the log.
     if not enable_smtp:
         display.log_event("SMTP", "disabled (--no-verify)")
+    elif (result.metadata or {}).get("verification_tail"):
+        # The runner emitted verification events at the point the tail ran,
+        # before enrichment. Do not append a late duplicate after the result
+        # has returned; that would obscure the structural ordering in live.log.
+        pass
     else:
         smtp_validation_meta = (result.metadata or {}).get(
             "smtp_email_verification", {}
@@ -817,14 +877,25 @@ def run_harvest_emails(
                     else:
                         display.log_event("SMTP", f"probing {email} → {status} ({code})")
         if probe_count == 0:
-            checked = int(smtp_validation_meta.get("checked") or 0)
+            checked = int(
+                smtp_validation_meta.get("candidates_routed")
+                or smtp_validation_meta.get("checked")
+                or 0
+            )
             method = smtp_validation_meta.get("method")
             if method in {"google", "m365"}:
                 # 0.13.2: the primary path now dispatches Google/M365 candidates
                 # to their provider-specific verifier instead of skipping.
                 provider = smtp_validation_meta.get("provider") or method
                 verified = int(smtp_validation_meta.get("verified") or 0)
-                if verified:
+                gravatar_checked = smtp_validation_meta.get("gravatar_checked")
+                if method == "google" and gravatar_checked is not None:
+                    display.log_event(
+                        "SMTP",
+                        f"routed {checked} candidates to {provider} verifier "
+                        f"({gravatar_checked} gravatar checks)",
+                    )
+                elif verified:
                     display.log_event(
                         "SMTP",
                         f"routed {checked} candidates to {provider} verifier "
@@ -962,22 +1033,10 @@ def run_harvest_emails(
         except Exception as exc:
             console.print(f"[yellow]Harvest comparison skipped:[/] {exc}")
 
-    # Resolve the explicit --export target (when provided).
-    extra_export_path: Path | None = None
-    if export and not no_export:
-        extra_export_path = _resolve_export_path(export)
-        text, err = serialise_harvest_for_export(result, extra_export_path, comparison=comparison)
-        if err is not None:
-            console.print(f"[red]Error:[/] {err}")
-            return 4
-        extra_export_path.parent.mkdir(parents=True, exist_ok=True)
-        extra_export_path.write_text(text, encoding="utf-8")
-        console.print(f"[green]✓ Exported harvest to:[/] {extra_export_path}")
-
     # Always-on default export + supplementary files (gated by
     # ``harvest_auto_export`` setting and ``--no-export`` / ``--no-extras``).
     auto_export_enabled = bool(getattr(settings, "harvest_auto_export", True)) and not no_export
-    written = HarvestResultFiles()
+    written = termination_snapshot.get("written") or HarvestResultFiles()
     if auto_export_enabled:
         written = asyncio.run(
             write_harvest_results(
@@ -985,11 +1044,21 @@ def run_harvest_emails(
                 timestamp=timestamp,
                 no_export=False,
                 no_extras=no_extras,
-                # The explicit export was written above with comparison
-                # metadata included. Do not overwrite it with the default
-                # payload while writing the canonical result file.
+                # The termination handler already wrote the canonical JSON;
+                # this pass writes supplementary artifacts only.
+                write_main_json=False,
                 extra_export_path=None,
             )
+        )
+        canonical = termination_snapshot.get("written") or HarvestResultFiles()
+        written = HarvestResultFiles(
+            main_json=canonical.main_json,
+            live_log=written.live_log,
+            subdomains=written.subdomains,
+            emails=written.emails,
+            nuclei_targets=written.nuclei_targets,
+            report_md=written.report_md,
+            cidrs=written.cidrs,
         )
         # 0.12.7 — print every written file.  The legacy
         # ``Results saved:`` style header is preserved for grep-friendly
@@ -1034,6 +1103,13 @@ def run_harvest_emails(
                 console.print("[dim]Saved latest harvest baseline.[/dim]")
         except Exception as exc:
             console.print(f"[dim]Harvest history cache unavailable: {exc}[/dim]")
+
+    if isinstance(drive_error, KeyboardInterrupt):
+        console.print("[yellow]Harvest interrupted; partial results exported.[/]")
+        return 130
+    if drive_error is not None:
+        console.print(f"[red]Error:[/] harvest failed: {drive_error}")
+        return 3
 
     return 0
 

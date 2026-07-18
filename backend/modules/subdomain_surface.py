@@ -93,6 +93,6 @@ class SubdomainSurfaceModule(BaseModule):
         return ModuleResult(
             status=status,
             findings=findings,
-            metadata={"domain": domain, "subdomains_found": len(discovered), "hosts_checked": checked, "email_hits": len(findings), "source_counts": {k: len(v) for k, v in discovered.items()}},
+            metadata={"domain": domain, "discovered": len(discovered), "hosts_checked": checked, "email_hits": len(findings), "source_counts": {k: len(v) for k, v in discovered.items()}},
             errors=errors[:10],
         )

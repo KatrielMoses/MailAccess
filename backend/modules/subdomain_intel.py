@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import hashlib
 import ipaddress
 import json
@@ -13,6 +14,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, field
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -33,6 +35,13 @@ from .base import BaseModule, ModuleResult, ModuleStatus
 _LOG = logging.getLogger(__name__)
 _HOST_RE = re.compile(r"(?i)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
 _DEFAULT_WORDLIST = Path(__file__).resolve().parents[2] / "data" / "subdomain_wordlist.json"
+PASSIVE_PHASE_TIMEOUT_SECONDS = 45.0
+PASSIVE_SOURCE_TIMEOUT_SECONDS = 15.0
+CRT_TOTAL_TIMEOUT_SECONDS = 20.0
+PASSIVE_SOURCE_NAMES = (
+    "crt.sh", "certspotter", "subdomain.center", "wayback", "otx", "anubis"
+)
+DISCOVERY_SOURCE_NAMES = ("axfr",) + PASSIVE_SOURCE_NAMES
 _DOH_ENDPOINTS = (
     "https://cloudflare-dns.com/dns-query",
     "https://dns.google/resolve",
@@ -70,12 +79,28 @@ class DiscoveryResult:
     wildcard_detected: bool = False
     addresses: dict[str, set[str]] = field(default_factory=dict)
     root_content_hash: str | None = None
+    sources: dict[str, dict[str, object]] = field(default_factory=dict)
+    telemetry_sink: dict[str, dict[str, object]] | None = None
 
     def add(self, hosts: set[str] | list[str], source: str) -> None:
         for host in hosts:
             normalized = normalize_hostname(host, self.domain)
             if normalized:
                 self.candidates.setdefault(normalized, set()).add(source)
+
+    def record_source(
+        self,
+        source: str,
+        status: str,
+        count: int = 0,
+        error: str | None = None,
+    ) -> None:
+        entry: dict[str, object] = {"status": status, "count": int(count)}
+        if error:
+            entry["error"] = error
+        self.sources[source] = entry
+        if self.telemetry_sink is not None:
+            self.telemetry_sink[source] = dict(entry)
 
     @property
     def hosts(self) -> set[str]:
@@ -316,21 +341,129 @@ async def discover_axfr(domain: str, *, resolver: object | None = None) -> set[s
 
 
 async def discover_crtsh(client: httpx.AsyncClient, domain: str) -> set[str]:
-    response = await client.get(f"https://crt.sh/?q=%25.{quote(domain)}&output=json")
-    if response.status_code != 200:
-        return set()
+    url = f"https://crt.sh/?q=%25.{quote(domain)}&output=json"
+    backoffs = (5.0, 15.0)
+    deadline = asyncio.get_running_loop().time() + CRT_TOTAL_TIMEOUT_SECONDS
+    for attempt in range(3):
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError("crt.sh total retry budget exhausted")
+        try:
+            response = await asyncio.wait_for(client.get(url), timeout=remaining)
+        except (httpx.TimeoutException, asyncio.TimeoutError):
+            if attempt == 2:
+                raise
+            delay = min(backoffs[attempt], max(0.0, deadline - asyncio.get_running_loop().time()))
+            await asyncio.sleep(delay)
+            continue
+        if response.status_code == 200:
+            try:
+                records = response.json()
+            except ValueError:
+                # A large crt.sh response can be cut off by an upstream or
+                # transport limit. Preserve any complete hostname tokens
+                # already present instead of retrying the multi-MB response.
+                return _hosts_from_text(getattr(response, "text", ""), domain)
+            values = [
+                str(row.get("name_value", ""))
+                for row in records
+                if isinstance(row, dict)
+            ]
+            return {host for value in values for host in (_hosts_from_text(value, domain))}
+        if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
+            retry_after = _retry_after_seconds(response)
+            await asyncio.sleep(retry_after if retry_after is not None else backoffs[attempt])
+            continue
+        raise PassiveSourceHTTPError(response.status_code)
+    return set()
+
+
+class PassiveSourceHTTPError(RuntimeError):
+    def __init__(self, status_code: int):
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+def _retry_after_seconds(response: object) -> float | None:
+    headers = getattr(response, "headers", {}) or {}
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if raw is None:
+        return None
     try:
-        records = response.json()
-    except ValueError:
-        return set()
-    values = [str(row.get("name_value", "")) for row in records if isinstance(row, dict)]
-    return {host for value in values for host in (_hosts_from_text(value, domain))}
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(str(raw))
+            return max(0.0, (retry_at - datetime.now(retry_at.tzinfo or timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+async def discover_otx(client: httpx.AsyncClient, domain: str) -> set[str]:
+    api_key = getattr(settings, "otx_api_key", None) or os.getenv("OTX_API_KEY")
+    if not api_key:
+        raise PassiveSourceHTTPError(401)
+    response = await client.get(
+        f"https://otx.alienvault.com/api/v1/indicators/domain/{quote(domain)}/passive_dns",
+        headers={"X-OTX-API-KEY": api_key},
+    )
+    if response.status_code != 200:
+        raise PassiveSourceHTTPError(response.status_code)
+    payload = response.json()
+    records = payload.get("passive_dns", []) if isinstance(payload, dict) else []
+    hosts: set[str] = set()
+    for record in records if isinstance(records, list) else []:
+        if not isinstance(record, dict):
+            continue
+        for key in ("hostname", "host_name", "domain"):
+            hosts.update(_hosts_from_text(str(record.get(key, "")), domain))
+    return hosts
+
+
+async def discover_anubis(client: httpx.AsyncClient, domain: str) -> set[str]:
+    response = await client.get(f"https://anubisdb.com/subdomains/{quote(domain)}")
+    if response.status_code != 200:
+        raise PassiveSourceHTTPError(response.status_code)
+    payload = response.json()
+    if isinstance(payload, list):
+        values = payload
+    elif isinstance(payload, dict):
+        values = payload.get("subdomains") or payload.get("data") or payload.get("results") or []
+    else:
+        values = []
+    return {
+        host
+        for value in values if isinstance(value, str)
+        for host in _hosts_from_text(value, domain)
+    }
+
+
+def _passive_error_status(exc: BaseException) -> str:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException)):
+        return "timeout"
+    if isinstance(exc, PassiveSourceHTTPError) and exc.status_code in {408, 425, 429, 500, 502, 503, 504}:
+        return "rate_limited" if exc.status_code == 429 else "error"
+    return "error"
+
+
+async def _run_passive_source(
+    source: str,
+    discoverer: object,
+    client: httpx.AsyncClient,
+    domain: str,
+) -> tuple[str, set[str], str, str | None]:
+    try:
+        hosts = await discoverer(client, domain)  # type: ignore[misc]
+        return source, set(hosts or ()), "ok", None
+    except Exception as exc:  # noqa: BLE001
+        detail = str(exc).strip() or type(exc).__name__
+        return source, set(), _passive_error_status(exc), detail
 
 
 async def discover_subdomain_center(client: httpx.AsyncClient, domain: str) -> set[str]:
     response = await client.get(f"https://subdomain.center/?domain={quote(domain)}")
     if response.status_code != 200:
-        return set()
+        raise PassiveSourceHTTPError(response.status_code)
     return _hosts_from_text(response.text, domain)
 
 
@@ -342,7 +475,7 @@ async def discover_wayback(client: httpx.AsyncClient, domain: str) -> set[str]:
     )
     response = await client.get(url)
     if response.status_code != 200:
-        return set()
+        raise PassiveSourceHTTPError(response.status_code)
     try:
         rows = response.json()
     except ValueError:
@@ -366,7 +499,7 @@ async def discover_certspotter(client: httpx.AsyncClient, domain: str) -> set[st
         headers=headers,
     )
     if response.status_code != 200:
-        return set()
+        raise PassiveSourceHTTPError(response.status_code)
     try:
         records = response.json()
     except ValueError:
@@ -943,6 +1076,60 @@ class SubdomainIntelModule(BaseModule):
     requires_key = False
     priority = 15
 
+    def __init__(self) -> None:
+        self._active_result: DiscoveryResult | None = None
+        self._passive_started_at: float | None = None
+        self._passive_finished_at: float | None = None
+        self._passive_finished = False
+        self._passive_termination = "not_started"
+
+    def partial_metadata(self) -> dict[str, object]:
+        """Return failure-atomic source telemetry for cancellation paths."""
+        result = self._active_result
+        if result is None:
+            return {
+                "sources": {
+                    source: {"status": "not_run", "count": 0}
+                    for source in DISCOVERY_SOURCE_NAMES
+                },
+                "passive_phase": {
+                    "status": "terminated",
+                    "termination": "not_started",
+                    "elapsed_seconds": 0.0,
+                    "max_seconds": PASSIVE_PHASE_TIMEOUT_SECONDS,
+                    "source_max_seconds": PASSIVE_SOURCE_TIMEOUT_SECONDS,
+                    "crt_total_max_seconds": CRT_TOTAL_TIMEOUT_SECONDS,
+                },
+            }
+        passive = {
+            source: dict(result.sources.get(source) or {"status": "not_run", "count": 0})
+            for source in DISCOVERY_SOURCE_NAMES
+        }
+        healthy = sum(1 for details in passive.values() if details.get("status") == "ok")
+        elapsed_end = self._passive_finished_at or asyncio.get_running_loop().time()
+        elapsed = (
+            max(0.0, elapsed_end - self._passive_started_at)
+            if self._passive_started_at is not None
+            else 0.0
+        )
+        return {
+            "domain": result.domain,
+            "sources": passive,
+            "passive_phase": {
+                "status": "complete" if self._passive_finished else "terminated",
+                "termination": self._passive_termination,
+                "elapsed_seconds": round(elapsed, 3),
+                "max_seconds": PASSIVE_PHASE_TIMEOUT_SECONDS,
+                "source_max_seconds": PASSIVE_SOURCE_TIMEOUT_SECONDS,
+                "crt_total_max_seconds": CRT_TOTAL_TIMEOUT_SECONDS,
+            },
+            "passive_quorum": {
+                "required": 2,
+                "returned_results": healthy,
+                "met": result.axfr_succeeded or healthy >= 2,
+            },
+        }
+
     async def run(
         self,
         domain: str,
@@ -959,17 +1146,35 @@ class SubdomainIntelModule(BaseModule):
         budget: object | None = None,
         budget_seconds: float | None = None,
         progress_callback: object | None = None,
+        source_telemetry: dict[str, dict[str, object]] | None = None,
     ) -> ModuleResult:
         domain = domain.strip().lower().rstrip(".")
         if not domain or "." not in domain:
-            return ModuleResult(ModuleStatus.SKIPPED, errors=["invalid domain"])
+            return ModuleResult(
+                ModuleStatus.SKIPPED,
+                errors=["invalid domain"],
+                metadata={
+                    "domain": domain,
+                    "sources": {
+                        source: {"status": "not_run", "count": 0}
+                        for source in DISCOVERY_SOURCE_NAMES
+                    },
+                },
+            )
         if (
             not getattr(settings, "enable_subdomain_intel", True)
             or not getattr(settings, "enable_subdomain_surface", True)
         ):
             return ModuleResult(
                 ModuleStatus.SKIPPED,
-                metadata={"domain": domain, "skip_reason": "disabled_by_config"},
+                metadata={
+                    "domain": domain,
+                    "skip_reason": "disabled_by_config",
+                    "sources": {
+                        source: {"status": "not_run", "count": 0}
+                        for source in DISCOVERY_SOURCE_NAMES
+                    },
+                },
             )
         behavior = profile_behavior(
             profile or getattr(settings, "harvest_timing_profile", "t2"),
@@ -984,7 +1189,8 @@ class SubdomainIntelModule(BaseModule):
             budget_seconds or profile_budgets.get(profile, 600.0),
             parent=budget,
         )
-        result = DiscoveryResult(domain)
+        result = DiscoveryResult(domain, telemetry_sink=source_telemetry)
+        self._active_result = result
         own_client = client is None
         http = client or build_client(timeout=15.0, follow_redirects=True, max_redirects=2)
         wordlist = load_wordlist()
@@ -992,33 +1198,106 @@ class SubdomainIntelModule(BaseModule):
         try:
             if callable(progress_callback):
                 progress_callback(f"Resolving {domain} passive sources...")
-            axfr = await discover_axfr(domain, resolver=resolver)
+            passive_sources = [
+                ("crt.sh", discover_crtsh),
+                ("certspotter", discover_certspotter),
+                ("subdomain.center", discover_subdomain_center),
+                ("wayback", discover_wayback),
+                ("anubis", discover_anubis),
+            ]
+            otx_api_key = getattr(settings, "otx_api_key", None) or os.getenv("OTX_API_KEY")
+            if otx_api_key:
+                passive_sources.append(("otx", discover_otx))
+
+            self._passive_started_at = asyncio.get_running_loop().time()
+            self._passive_finished_at = None
+            self._passive_finished = False
+            self._passive_termination = "running"
+
+            # Seed the complete telemetry shape before any network work. This
+            # guarantees an exportable source block even if the module is
+            # cancelled during discovery.
+            for source, _discoverer in passive_sources:
+                result.record_source(source, "not_run", 0)
+            for source in PASSIVE_SOURCE_NAMES:
+                result.record_source(source, "not_run", 0)
+            result.record_source("axfr", "not_run", 0)
+            if not otx_api_key:
+                result.record_source("otx", "not_run", 0, "otx_api_key not configured")
+
+            try:
+                axfr = await asyncio.wait_for(
+                    discover_axfr(domain, resolver=resolver),
+                    timeout=PASSIVE_SOURCE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                result.record_source("axfr", "timeout", 0, "per-source timeout")
+                axfr = set()
+            except Exception as exc:  # noqa: BLE001
+                result.record_source("axfr", "error", 0, str(exc))
+                result.errors.append(f"axfr: {exc}")
+                axfr = set()
             if axfr:
                 result.axfr_succeeded = True
                 result.add(axfr, "axfr")
+                result.record_source("axfr", "ok", len(axfr))
+                self._passive_termination = "axfr_success"
+                self._passive_finished = True
+                self._passive_finished_at = asyncio.get_running_loop().time()
             else:
-                certificate_results = await asyncio.gather(
-                    discover_crtsh(http, domain),
-                    discover_certspotter(http, domain),
-                    return_exceptions=True,
-                )
-                for source, value in zip(
-                    ("crt.sh", "certspotter"), certificate_results
-                ):
-                    if isinstance(value, BaseException):
-                        result.errors.append(f"{source}: {value}")
-                    else:
-                        result.add(value, source)
-                sources = [
-                    ("subdomain.center", discover_subdomain_center),
-                    ("wayback", discover_wayback),
-                ]
-                for source, discoverer in sources:
+                result.record_source("axfr", "ok", 0)
+                async def run_one(source: str, discoverer: object) -> None:
                     try:
-                        result.add(await discoverer(http, domain), source)
-                    except Exception as exc:
-                        detail = str(exc).strip() or type(exc).__name__
-                        result.errors.append(f"{source}: {detail}")
+                        result.record_source(source, "in_progress", 0, "in_progress")
+                        source_name, hosts, source_status, error = await asyncio.wait_for(
+                            _run_passive_source(source, discoverer, http, domain),
+                            timeout=PASSIVE_SOURCE_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.CancelledError:
+                        result.record_source(source, "killed", 0, "in_progress_at_timeout")
+                        raise
+                    except asyncio.TimeoutError:
+                        result.record_source(source, "timeout", 0, "per-source timeout")
+                        return
+                    except Exception as exc:  # noqa: BLE001
+                        result.record_source(source, "error", 0, str(exc))
+                        return
+                    result.record_source(source_name, source_status, len(hosts), error)
+                    if error:
+                        result.errors.append(f"{source_name}: {error}")
+                    result.add(hosts, source_name)
+
+                tasks = [
+                    asyncio.create_task(run_one(source, discoverer))
+                    for source, discoverer in passive_sources
+                ]
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*tasks),
+                        timeout=PASSIVE_PHASE_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    for task, (source, _discoverer) in zip(tasks, passive_sources):
+                        if not task.done():
+                            task.cancel()
+                            result.record_source(source, "killed", 0, "in_progress_at_timeout")
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    self._passive_termination = "phase_cap"
+                else:
+                    self._passive_termination = "sources_finished"
+                self._passive_finished = True
+                self._passive_finished_at = asyncio.get_running_loop().time()
+
+                successful_sources = sum(
+                    1
+                    for source, source_result in result.sources.items()
+                    if source != "axfr"
+                    and source_result.get("status") == "ok"
+                )
+                if successful_sources < 2:
+                    result.errors.append(
+                        f"passive enumeration quorum failed: {successful_sources}/2 sources responded healthy"
+                    )
 
                 if active and slice_budget.can_start():
                     prefixes = list(wordlist.get("tier1", []))
@@ -1043,6 +1322,9 @@ class SubdomainIntelModule(BaseModule):
                             "brute_t2",
                         )
                         result.add(await discover_github(http, domain), "github")
+        except asyncio.CancelledError:
+            self._passive_termination = "killed"
+            raise
         except Exception as exc:
             result.errors.append(f"discovery: {exc}")
         # Component 2: remove Tier 3 noise before any DNS work.
@@ -1150,14 +1432,50 @@ class SubdomainIntelModule(BaseModule):
                 published = 0
         else:
             published = 0
+        passive_result_sources = {
+            source: details
+            for source, details in result.sources.items()
+            if source != "axfr"
+        }
+        passive_quorum_count = sum(
+            1
+            for details in passive_result_sources.values()
+            if details.get("status") == "ok"
+        )
+        passive_quorum_met = result.axfr_succeeded or passive_quorum_count >= 2
         metadata = {
             "domain": domain,
-            "subdomains_found": len(findings),
+            "discovered": len(subdomain_findings),
+            "email_findings": len(email_findings),
             "source_counts": {
                 source: sum(source in sources for sources in result.candidates.values())
                 for source in sorted({source for sources in result.candidates.values() for source in sources})
             },
             "axfr_succeeded": result.axfr_succeeded,
+            "sources": result.sources,
+            "passive_phase": {
+                "status": "complete" if self._passive_finished else "terminated",
+                "termination": self._passive_termination,
+                "elapsed_seconds": round(
+                    max(
+                        0.0,
+                        (self._passive_finished_at or asyncio.get_running_loop().time())
+                        - (self._passive_started_at or asyncio.get_running_loop().time()),
+                    ),
+                    3,
+                ),
+                "max_seconds": PASSIVE_PHASE_TIMEOUT_SECONDS,
+                "source_max_seconds": PASSIVE_SOURCE_TIMEOUT_SECONDS,
+                "crt_total_max_seconds": CRT_TOTAL_TIMEOUT_SECONDS,
+            },
+            "passive_quorum": {
+                "required": 2,
+                "returned_results": passive_quorum_count,
+                "met": passive_quorum_met,
+                "warning": None
+                if passive_quorum_met
+                else "passive enumeration quorum failed: fewer than 2 sources responded healthy",
+            },
             "wildcard_detected": result.wildcard_detected,
             "active_enabled": active,
             "deep_enabled": deep,
@@ -1188,7 +1506,8 @@ class SubdomainIntelModule(BaseModule):
 
 __all__ = [
     "DiscoveryResult", "SubdomainIntelModule", "detect_wildcard", "discover_axfr",
-    "discover_bruteforce", "discover_certspotter", "discover_crtsh", "discover_github", "discover_ptr",
-    "discover_subdomain_center", "discover_wayback", "load_wordlist", "normalize_hostname",
+    "discover_anubis", "discover_bruteforce", "discover_certspotter", "discover_crtsh",
+    "discover_github", "discover_otx", "discover_ptr", "discover_subdomain_center",
+    "discover_wayback", "load_wordlist", "normalize_hostname",
     "resolve_doh",
 ]

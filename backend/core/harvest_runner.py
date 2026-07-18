@@ -36,6 +36,8 @@ from ..modules.wordpress_rest import WordPressRestModule
 from .concurrent_fetch_cache import CachedFetch, ConcurrentFetchCache
 from .context_router import IndustryVocabularyRouter
 from .email_extraction import extract_emails
+from .mail_provider import detect_provider_from_mx
+from .mx_resolver import resolve_mx
 from .name_quality import _NAVIGATION_TOKENS, COMMON_ENGLISH_NOUNS, _clean_token
 from .pagination_handler import PaginationHandler
 from .signal_pool import AsyncSignalPool
@@ -182,6 +184,11 @@ class WorkerContext:
     subdomain_calibrate: bool = False
     context_vertical: tuple[str, ...] = ()
     progress_callback: Any | None = None
+    log_callback: Any | None = None
+    provider_detection: Any | None = None
+    provider_mx_records: list[Any] | None = None
+    provider_detection_ready: asyncio.Event | None = None
+    subdomain_source_telemetry: dict[str, dict[str, Any]] | None = None
 
 
 def _is_obvious_non_person_name(name: str) -> bool:
@@ -192,6 +199,130 @@ def _is_obvious_non_person_name(name: str) -> bool:
         or token in _NAVIGATION_TOKENS
         or token in _PAGE_HEADING_TOKENS
         for token in tokens
+    )
+
+
+def _derive_harvest_status(ctx: WorkerContext, *, timed_out: bool) -> str:
+    """Classify termination from scheduler state, not wall-clock duration."""
+    if not timed_out:
+        return "terminated_early"
+    return "completed_saturated" if ctx.budget.track1_closed else "partial_timeout"
+
+
+def _hydrate_subdomain_source_telemetry(ctx: WorkerContext) -> None:
+    """Copy incremental source telemetry into the exportable module result."""
+    telemetry = ctx.subdomain_source_telemetry or {}
+    result = (ctx.module_results or {}).get(MODULE_SUBDOMAIN_INTEL)
+    if result is None or not telemetry:
+        return
+    metadata = dict(result.metadata or {})
+    metadata["sources"] = {
+        source: dict(details) for source, details in telemetry.items()
+    }
+    healthy = sum(
+        1 for details in telemetry.values() if details.get("status") == "ok"
+    )
+    metadata.setdefault(
+        "passive_quorum",
+        {
+            "required": 2,
+            "returned_results": healthy,
+            "met": healthy >= 2,
+            "warning": None if healthy >= 2 else "passive enumeration quorum failed",
+        },
+    )
+    result.metadata = metadata
+
+
+def _termination_snapshot(
+    ctx: WorkerContext,
+    cleaned: str,
+    *,
+    started: datetime,
+    started_iso: str,
+    timeout_seconds: float,
+    timed_out: bool,
+) -> Any:
+    """Snapshot the harvest context exactly as it exists at termination.
+
+    Used by the harvest-termination handler when the run cannot return a
+    result object (stage exception, soft kill). Stages write to the shared
+    context; this function only READS it. It never raises — the export must
+    depend on nothing except the harvest ending.
+    """
+    from .domain_harvest_orchestrator import (
+        DomainHarvestResult,
+        _aggregate,
+        _sort_key,
+    )
+
+    module_results = ctx.module_results or {}
+    _hydrate_subdomain_source_telemetry(ctx)
+    try:
+        unique_emails = _aggregate(
+            cleaned,
+            module_results,
+            signal_pool=None,
+            identity_clusters=[],
+            shadow_profiles_out=[],
+        )
+        unique_emails.sort(key=_sort_key)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Termination snapshot aggregation degraded: %s", exc)
+        unique_emails = []
+    completed = datetime.now(timezone.utc)
+    errors = [
+        f"[{name}] {err}"
+        for name, result in module_results.items()
+        for err in (result.errors or [])
+    ]
+    errors.append("harvest terminated before completion; context snapshot exported")
+    metadata = {
+        "harvest_status": _derive_harvest_status(ctx, timed_out=timed_out),
+        "terminated_early": True,
+        "timed_out": timed_out,
+        "timeout_at_seconds": timeout_seconds,
+        "budget": ctx.budget.stats,
+    }
+    return DomainHarvestResult(
+        domain=cleaned,
+        started_at=started_iso,
+        completed_at=completed.isoformat().replace("+00:00", "Z"),
+        duration_seconds=round((completed - started).total_seconds(), 3),
+        module_results=module_results,
+        unique_emails=unique_emails,
+        total_unique_emails=len(unique_emails),
+        high_confidence_count=sum(
+            1 for e in unique_emails
+            if e.confidence_label in {"CONFIRMED", "HIGH"} and not e.is_role
+        ),
+        likely_confidence_count=sum(
+            1 for e in unique_emails
+            if e.confidence_label == "LIKELY" and not e.is_role
+        ),
+        medium_confidence_count=sum(
+            1 for e in unique_emails
+            if e.confidence_label in {"LIKELY", "MEDIUM"} and not e.is_role
+        ),
+        low_confidence_count=sum(
+            1 for e in unique_emails
+            if e.confidence_label == "LOW" and not e.is_role
+        ),
+        role_account_count=sum(1 for e in unique_emails if e.is_role),
+        personal_email_count=sum(1 for e in unique_emails if not e.is_role),
+        errors=errors,
+        smtp_verification_used=bool(ctx.enable_smtp and not ctx.module_overrides),
+        employee_names_processed=len(
+            (
+                module_results.get(MODULE_EMPLOYEE_NAMES).findings
+                if module_results.get(MODULE_EMPLOYEE_NAMES) is not None
+                else []
+            )
+            or []
+        ),
+        fetch_cache_stats=None,
+        metadata=metadata,
+        shadow_profiles=[],
     )
 
 
@@ -217,7 +348,9 @@ async def run_adaptive_harvest(
     subdomain_deep: bool = False,
     subdomain_calibrate: bool = False,
     progress_callback: Any | None = None,
+    log_callback: Any | None = None,
     display_subscriber: Any | None = None,
+    on_harvest_end: Any | None = None,
 ) -> Any:
     from .domain_harvest_orchestrator import (
         DomainHarvestResult,
@@ -269,7 +402,12 @@ async def run_adaptive_harvest(
         subdomain_deep=subdomain_deep,
         subdomain_calibrate=subdomain_calibrate,
         progress_callback=progress_callback,
+        log_callback=log_callback,
+        provider_detection_ready=asyncio.Event(),
+        subdomain_source_telemetry={},
     )
+    if ctx.module_overrides:
+        ctx.provider_detection_ready.set()
 
     # Preserve a truthful per-run module inventory even when the budget is
     # exhausted before a queued item starts. A missing key used to look like
@@ -290,9 +428,26 @@ async def run_adaptive_harvest(
         skip_reason = (
             "runtime_policy" if module_name in ctx.skip_modules else "not_started"
         )
+        seed_metadata: dict[str, Any] = {"domain": cleaned, "skip_reason": skip_reason}
+        if module_name == MODULE_SUBDOMAIN_INTEL:
+            from ..modules.subdomain_intel import DISCOVERY_SOURCE_NAMES
+
+            seeded_sources = {
+                source: {"status": "not_run", "count": 0}
+                for source in DISCOVERY_SOURCE_NAMES
+            }
+            seed_metadata["sources"] = seeded_sources
+            seed_metadata["passive_phase"] = {
+                "status": "not_started",
+                "termination": "not_started",
+            }
+            if ctx.subdomain_source_telemetry is not None:
+                ctx.subdomain_source_telemetry.update(
+                    {source: dict(details) for source, details in seeded_sources.items()}
+                )
         module_results[module_name] = ModuleResult(
             status=ModuleStatus.SKIPPED,
-            metadata={"domain": cleaned, "skip_reason": skip_reason},
+            metadata=seed_metadata,
         )
 
     await _seed_scheduler(ctx)
@@ -318,30 +473,271 @@ async def run_adaptive_harvest(
         )
 
     timed_out = False
+
+    async def _run_smtp_validation_tail() -> dict[str, Any]:
+        """Run the guarded SMTP/provider tail for complete or partial runs."""
+        from .domain_harvest_orchestrator import (
+            _attach_smtp_email_verification,
+            _collect_smtp_findings,
+        )
+
+        if not ctx.enable_smtp or ctx.module_overrides:
+            return {"candidates_routed": 0, "skipped": "smtp_disabled"}
+
+        smtp_candidate_count = len(_collect_smtp_findings(cleaned, module_results))
+        if ctx.log_callback is not None:
+            ctx.log_callback("SMTP", "provider verification started")
+        try:
+            attach_kwargs: dict[str, Any] = {}
+            try:
+                accepted = inspect.signature(_attach_smtp_email_verification).parameters
+            except (TypeError, ValueError):
+                accepted = {}
+            if "provider_detection" in accepted:
+                attach_kwargs["provider_detection"] = ctx.provider_detection
+            if "mx_records" in accepted:
+                attach_kwargs["mx_records"] = ctx.provider_mx_records
+            summary = await asyncio.wait_for(
+                _attach_smtp_email_verification(
+                    cleaned,
+                    module_results,
+                    **attach_kwargs,
+                ),
+                timeout=45.0,
+            )
+            if ctx.log_callback is not None:
+                provider = summary.get("provider") or "smtp"
+                routed = int(summary.get("candidates_routed") or 0)
+                ctx.log_callback(
+                    "SMTP",
+                    f"provider verification completed: {provider}, {routed} candidates routed",
+                )
+            return summary
+        except (TimeoutError, asyncio.TimeoutError):
+            for result in module_results.values():
+                for finding in result.findings or []:
+                    metadata = finding.setdefault("metadata", {})
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                        finding["metadata"] = metadata
+                    native_meta = metadata.get("native_email_validation") or {}
+                    if not isinstance(native_meta, dict):
+                        native_meta = {}
+                    if native_meta.get("status") not in {
+                        "invalid",
+                        "disposable",
+                        "mx_missing",
+                    }:
+                        metadata["smtp_verification_status"] = "verification_timeout"
+            timeout_summary = {
+                "candidates_routed": smtp_candidate_count,
+                "status": "verification_timeout",
+            }
+            if ctx.log_callback is not None:
+                ctx.log_callback(
+                    "SMTP",
+                    f"provider verification timed out for {smtp_candidate_count} candidates",
+                )
+            return timeout_summary
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SMTP/provider verification failed: %s", exc)
+            failure_summary = {
+                "candidates_routed": smtp_candidate_count,
+                "status": "verification_failed",
+                "error": str(exc),
+            }
+            if ctx.log_callback is not None:
+                ctx.log_callback("SMTP", "provider verification failed")
+            return failure_summary
+
+    async def _run_verification_tail(
+        identity_clusters: list[Any],
+    ) -> dict[str, Any]:
+        """Run verification, low-email validation, then droppable enrichment.
+
+        This deadline starts when the tail starts, independently of the
+        discovery budget. It is shared by normal and partial harvests.
+        """
+        from .domain_harvest_orchestrator import (
+            _aggregate,
+            _apply_low_email_validation_results,
+            _attach_m365_email_verification,
+            _attach_yahoo_email_verification,
+            _run_low_email_validation,
+            _select_low_email_validation_candidates,
+            _select_verifier_for_provider,
+        )
+
+        tail: dict[str, Any] = {}
+        tail_started = asyncio.get_running_loop().time()
+
+        async def _body() -> None:
+            if not ctx.enable_smtp or ctx.module_overrides:
+                tail["smtp_email_verification"] = {
+                    "candidates_routed": 0,
+                    "skipped": "smtp_disabled",
+                }
+                tail["m365_email_verification"] = {"checked": 0, "status": "m365_disabled"}
+                tail["yahoo_email_verification"] = {"checked": 0, "status": "yahoo_disabled"}
+                tail["low_email_validation"] = {"checked": 0, "status": "disabled"}
+            else:
+                await _ensure_provider_detection(ctx)
+                detection = ctx.provider_detection
+                mx_records = ctx.provider_mx_records
+                tail["smtp_email_verification"] = await _run_smtp_validation_tail()
+                if ctx.enable_m365 and not ctx.module_overrides:
+                    tail["m365_email_verification"] = await _attach_m365_email_verification(
+                        cleaned,
+                        module_results,
+                        provider_detection=detection,
+                        mx_records=mx_records,
+                    )
+                else:
+                    tail["m365_email_verification"] = {"checked": 0, "status": "m365_disabled"}
+                if ctx.enable_yahoo and not ctx.module_overrides:
+                    tail["yahoo_email_verification"] = await _attach_yahoo_email_verification(
+                        cleaned,
+                        module_results,
+                        provider_detection=detection,
+                        mx_records=mx_records,
+                    )
+                else:
+                    tail["yahoo_email_verification"] = {"checked": 0, "status": "yahoo_disabled"}
+
+                provisional = _aggregate(
+                    cleaned,
+                    module_results,
+                    signal_pool=signal_pool,
+                    identity_clusters=identity_clusters,
+                    shadow_profiles_out=[],
+                )
+                if not settings.enable_low_email_validation:
+                    tail["low_email_validation"] = {"checked": 0, "status": "disabled"}
+                else:
+                    candidates = _select_low_email_validation_candidates(
+                        cleaned, module_results, provisional
+                    )
+                    if not candidates:
+                        tail["low_email_validation"] = {"checked": 0, "status": "no_candidates"}
+                    else:
+                        method = _select_verifier_for_provider(
+                            detection.provider if detection is not None else None
+                        )
+                        low = await _run_low_email_validation(
+                            cleaned,
+                            candidates,
+                            method,
+                            provider=detection.provider if detection is not None else None,
+                            mx_records=mx_records,
+                        )
+                        low["provider"] = (
+                            detection.provider.value if detection is not None else "unknown"
+                        )
+                        low["promotion"] = _apply_low_email_validation_results(
+                            candidates, low, provisional
+                        )
+                        tail["low_email_validation"] = low
+
+                if settings.xposed_or_not_enabled and not ctx.module_overrides:
+                    from .domain_harvest_orchestrator import _run_xposed_or_not_validation
+
+                    primary_checked = int(tail["low_email_validation"].get("checked") or 0)
+                    shared_cap = min(25, int(settings.harvest_validation_max_per_run))
+                    xposed_budget = max(0, shared_cap - primary_checked)
+                    xposed_candidates = _select_low_email_validation_candidates(
+                        cleaned,
+                        module_results,
+                        provisional,
+                        max_candidates=xposed_budget,
+                    )
+                    try:
+                        xposed_summary, format_metadata = await _run_xposed_or_not_validation(
+                            cleaned,
+                            xposed_candidates,
+                            max_checks=xposed_budget,
+                            delay_seconds=1.0,
+                        )
+                        tail["low_email_validation"]["xposed_or_not"] = xposed_summary
+                        module_results["xposed_or_not"] = ModuleResult(
+                            status=ModuleStatus.SUCCESS,
+                            findings=[],
+                            metadata=format_metadata,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("XposedOrNot passive validation skipped: %s", exc)
+                        tail["low_email_validation"]["xposed_or_not"] = {
+                            "checked": 0,
+                            "status": "skipped",
+                        }
+
+            # Enrichment is intentionally last and can be dropped when the
+            # dedicated tail budget is consumed by verification.
+            for module_name, module_budget in (
+                (MODULE_RIPE_STAT_ASN, 60.0),
+                (MODULE_SHODAN_INTERNETDB, 45.0),
+            ):
+                if module_name in ctx.skip_modules:
+                    continue
+                remaining = 120.0 - (asyncio.get_running_loop().time() - tail_started)
+                if remaining <= 1.0:
+                    tail.setdefault("enrichment", {})[module_name] = "dropped_tail_budget"
+                    continue
+                try:
+                    await _run_module(module_name, ctx, soft_timeout=min(module_budget, remaining))
+                    tail.setdefault("enrichment", {})[module_name] = "completed"
+                except Exception as exc:  # noqa: BLE001
+                    tail.setdefault("enrichment", {})[module_name] = f"failed: {exc}"
+
+        try:
+            await asyncio.wait_for(_body(), timeout=120.0)
+            tail["tail_status"] = "completed"
+        except (TimeoutError, asyncio.TimeoutError):
+            tail["tail_status"] = "partial_timeout"
+            tail.setdefault("low_email_validation", {"checked": 0, "status": "tail_timeout"})
+            logger.warning("Verification tail exhausted its dedicated 120s budget")
+        except Exception as exc:  # noqa: BLE001
+            tail["tail_status"] = "failed"
+            tail["error"] = str(exc)
+            logger.warning("Verification tail failed: %s", exc)
+        return tail
+
+    # ``final_result`` is set by the completion branches below. The
+    # harvest-termination handler (the ``finally`` at the bottom of this
+    # function) exports exactly this object — or a snapshot of the live
+    # context when no result object could be built (stage exception,
+    # soft kill). This outer try is what makes the export reachable from
+    # every termination path.
+    final_result: Any | None = None
     try:
-        await asyncio.wait_for(_run_tracks(ctx), timeout=timeout_seconds)
-    except (TimeoutError, asyncio.TimeoutError):
-        timed_out = True
-        budget.mark_exhausted()
-        logger.info("Budget exhausted - returning partial results")
-    except asyncio.CancelledError:
-        # ``wait_for`` can surface cancellation from a child track on very
-        # short budgets instead of translating it to TimeoutError. Preserve
-        # the partial-result contract once the configured budget is spent.
-        if budget.is_expired():
+        try:
+            await asyncio.wait_for(_run_tracks(ctx), timeout=timeout_seconds)
+        except (TimeoutError, asyncio.TimeoutError):
             timed_out = True
             budget.mark_exhausted()
-            logger.info("Budget exhausted during track cancellation")
-        else:
-            raise
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Track failure: %s", exc)
+            logger.info("Budget exhausted - returning partial results")
+        except asyncio.CancelledError:
+            # ``wait_for`` can surface cancellation from a child track on very
+            # short budgets instead of translating it to TimeoutError. Preserve
+            # the partial-result contract once the configured budget is spent.
+            if budget.is_expired():
+                timed_out = True
+                budget.mark_exhausted()
+                logger.info("Budget exhausted during track cancellation")
+            else:
+                raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Track failure: %s", exc)
 
-    try:
+        # A module can soft-timeout internally while the overall harvest still
+        # completes normally. Preserve incremental source telemetry on that
+        # path too; the export must not depend on the module returning its
+        # end-of-run metadata.
+        _hydrate_subdomain_source_telemetry(ctx)
+
         if timed_out:
-            # The discovery timeout is a valid partial-result boundary.
-            # Do not enter RIPE/provider/validation tails: those are network
-            # work and can otherwise postpone the export indefinitely.
+            # The discovery timeout is a valid partial-result boundary. The
+            # dedicated post-discovery tail still runs before aggregation and
+            # export, using its own deadline.
             try:
                 await asyncio.wait_for(signal_pool.close(), timeout=5.0)
             except asyncio.TimeoutError:
@@ -353,7 +749,10 @@ async def run_adaptive_harvest(
             )
 
             identity_clusters = await signal_pool.all_candidates()
+            _hydrate_subdomain_source_telemetry(ctx)
             shadow_profiles: list[dict[str, Any]] = []
+            tail = await _run_verification_tail(identity_clusters)
+            smtp_validation = tail.get("smtp_email_verification", {})
             unique_emails = _aggregate(
                 cleaned,
                 module_results,
@@ -370,12 +769,17 @@ async def run_adaptive_harvest(
             ]
             errors.append("harvest timed out during discovery; partial result exported")
             partial_metadata = {
-                "harvest_status": "partial_timeout",
+                "harvest_status": _derive_harvest_status(ctx, timed_out=True),
                 "timed_out": True,
                 "timeout_at_seconds": timeout_seconds,
                 "budget": budget.stats,
+                "smtp_email_verification": smtp_validation,
+                "m365_email_verification": tail.get("m365_email_verification", {}),
+                "yahoo_email_verification": tail.get("yahoo_email_verification", {}),
+                "low_email_validation": tail.get("low_email_validation", {}),
+                "verification_tail": tail,
             }
-            return DomainHarvestResult(
+            final_result = DomainHarvestResult(
                 domain=cleaned,
                 started_at=started_iso,
                 completed_at=completed.isoformat().replace("+00:00", "Z"),
@@ -402,7 +806,7 @@ async def run_adaptive_harvest(
                 role_account_count=sum(1 for e in unique_emails if e.is_role),
                 personal_email_count=sum(1 for e in unique_emails if not e.is_role),
                 errors=errors,
-                smtp_verification_used=False,
+                smtp_verification_used=bool(ctx.enable_smtp and not ctx.module_overrides),
                 employee_names_processed=len(
                     (
                         module_results.get(MODULE_EMPLOYEE_NAMES).findings
@@ -415,29 +819,14 @@ async def run_adaptive_harvest(
                 metadata=partial_metadata,
                 shadow_profiles=shadow_profiles,
             )
-
-        # Infrastructure enrichment consumes finalized HackerTarget output.
-        # Keep it outside the discovery scheduler so it cannot displace email
-        # work or be skipped merely because discovery used its full budget.
-        if MODULE_RIPE_STAT_ASN not in ctx.skip_modules:
-            await _run_module(MODULE_RIPE_STAT_ASN, ctx, soft_timeout=120.0)
-        # Shodan InternetDB enrichment also consumes finalized HackerTarget IPs
-        # and runs here (outside the 600s discovery envelope) rather than inline
-        # inside subdomain_intel, where it was eating 30-140s of that module's
-        # budget slice and starving email discovery.
-        if MODULE_SHODAN_INTERNETDB not in ctx.skip_modules:
-            await _run_module(MODULE_SHODAN_INTERNETDB, ctx, soft_timeout=60.0)
+            return final_result
 
         # Flush subscriber work before taking the identity-cluster snapshot.
         try:
             await asyncio.wait_for(signal_pool.close(), timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning("Signal-pool shutdown exceeded 5s; continuing with snapshot")
-        from .domain_harvest_orchestrator import (
-            _attach_native_email_validation,
-            _attach_smtp_email_verification,
-            _collect_smtp_findings,
-        )
+        from .domain_harvest_orchestrator import _attach_native_email_validation
         from .historical_diff import annotate_historical_diff
         historical_metrics = annotate_historical_diff(module_results)
         identity_clusters = await signal_pool.all_candidates()
@@ -453,51 +842,10 @@ async def run_adaptive_harvest(
                 cleaned,
                 module_results,
             )
-        if ctx.enable_smtp and not ctx.module_overrides:
-            smtp_candidate_count = len(
-                _collect_smtp_findings(cleaned, module_results)
-            )
-            try:
-                # SMTP is deliberately given its own bounded tail. A target
-                # MX can accept TCP and then stop answering; never let that
-                # make the whole harvest hang past its result boundary.
-                smtp_validation = await asyncio.wait_for(
-                    _attach_smtp_email_verification(cleaned, module_results),
-                    timeout=45.0,
-                )
-            except asyncio.TimeoutError:
-                for result in module_results.values():
-                    for finding in result.findings or []:
-                        metadata = finding.setdefault("metadata", {})
-                        if not isinstance(metadata, dict):
-                            metadata = {}
-                            finding["metadata"] = metadata
-                        native_meta = metadata.get("native_email_validation") or {}
-                        if not isinstance(native_meta, dict):
-                            native_meta = {}
-                        if native_meta.get("status") not in {
-                            "invalid",
-                            "disposable",
-                            "mx_missing",
-                        }:
-                            metadata["smtp_verification_status"] = "verification_timeout"
-                smtp_validation = {
-                    "checked": smtp_candidate_count,
-                    "candidates": smtp_candidate_count,
-                    "status": "verification_timeout",
-                }
-        else:
-            smtp_validation = {"checked": 0, "skipped": "smtp_disabled"}
-        if ctx.enable_m365 and not ctx.module_overrides:
-            from .domain_harvest_orchestrator import _attach_m365_email_verification
-            m365_validation = await _attach_m365_email_verification(cleaned, module_results)
-        else:
-            m365_validation = {"checked": 0, "status": "m365_disabled"}
-        if ctx.enable_yahoo and not ctx.module_overrides:
-            from .domain_harvest_orchestrator import _attach_yahoo_email_verification
-            yahoo_validation = await _attach_yahoo_email_verification(cleaned, module_results)
-        else:
-            yahoo_validation = {"checked": 0, "status": "yahoo_disabled"}
+        tail = await _run_verification_tail(identity_clusters)
+        smtp_validation = tail.get("smtp_email_verification", {})
+        m365_validation = tail.get("m365_email_verification", {})
+        yahoo_validation = tail.get("yahoo_email_verification", {})
         shadow_profiles: list[dict[str, Any]] = []
         unique_emails = _aggregate(
             cleaned,
@@ -522,102 +870,7 @@ async def run_adaptive_harvest(
             dns_signals = await resolve_domain_email_dns_signals(cleaned)
             apply_domain_email_dns_signals(unique_emails, dns_signals)
         unique_emails.sort(key=_sort_key)
-        low_email_validation: dict[str, Any]
-        if ctx.module_overrides:
-            low_email_validation = {"checked": 0, "status": "skipped_injected_modules"}
-        elif not settings.enable_low_email_validation:
-            low_email_validation = {"checked": 0, "status": "disabled"}
-        else:
-            from .domain_harvest_orchestrator import (
-                _apply_low_email_validation_results,
-                _run_low_email_validation,
-                _select_low_email_validation_candidates,
-                _select_verifier_for_provider,
-            )
-            from .mail_provider import detect_provider_from_mx
-            from .mx_resolver import resolve_mx
-
-            candidates = _select_low_email_validation_candidates(
-                cleaned, module_results, unique_emails
-            )
-            if not candidates:
-                low_email_validation = {"checked": 0, "status": "no_candidates"}
-            else:
-                try:
-                    detection = detect_provider_from_mx(
-                        await resolve_mx(cleaned), target_domain=cleaned
-                    )
-                    method = _select_verifier_for_provider(detection.provider)
-                    low_email_validation = await _run_low_email_validation(
-                        cleaned, candidates, method, provider=detection.provider
-                    )
-                    low_email_validation["provider"] = detection.provider.value
-                    low_email_validation["promotion"] = _apply_low_email_validation_results(
-                        candidates, low_email_validation, unique_emails
-                    )
-                    unique_emails = _aggregate(
-                        cleaned,
-                        module_results,
-                        signal_pool=signal_pool,
-                        identity_clusters=identity_clusters,
-                        shadow_profiles_out=shadow_profiles,
-                    )
-                    from .domain_harvest_orchestrator import apply_domain_email_dns_signals
-
-                    apply_domain_email_dns_signals(unique_emails, dns_signals)
-                    unique_emails.sort(key=_sort_key)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Automatic low-email validation failed: %s", exc)
-                    low_email_validation = {
-                        "checked": len(candidates),
-                        "status": "validation_error",
-                        "error": str(exc),
-                    }
-            if settings.xposed_or_not_enabled and not ctx.module_overrides:
-                from .domain_harvest_orchestrator import (
-                    _run_xposed_or_not_validation,
-                    _select_low_email_validation_candidates,
-                )
-
-                primary_checked = int(low_email_validation.get("checked") or 0)
-                shared_cap = min(25, int(settings.harvest_validation_max_per_run))
-                xposed_budget = max(0, shared_cap - primary_checked)
-                xposed_candidates = _select_low_email_validation_candidates(
-                    cleaned,
-                    module_results,
-                    unique_emails,
-                    max_candidates=xposed_budget,
-                )
-                try:
-                    xposed_summary, format_metadata = await _run_xposed_or_not_validation(
-                        cleaned,
-                        xposed_candidates,
-                        max_checks=xposed_budget,
-                        delay_seconds=1.0,
-                    )
-                    low_email_validation["xposed_or_not"] = xposed_summary
-                    module_results["xposed_or_not"] = ModuleResult(
-                        status=ModuleStatus.SUCCESS,
-                        findings=[],
-                        metadata=format_metadata,
-                    )
-                    unique_emails = _aggregate(
-                        cleaned,
-                        module_results,
-                        signal_pool=signal_pool,
-                        identity_clusters=identity_clusters,
-                        shadow_profiles_out=shadow_profiles,
-                    )
-                    from .domain_harvest_orchestrator import apply_domain_email_dns_signals
-
-                    apply_domain_email_dns_signals(unique_emails, dns_signals)
-                    unique_emails.sort(key=_sort_key)
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("XposedOrNot passive validation skipped: %s", exc)
-                    low_email_validation["xposed_or_not"] = {
-                        "checked": 0,
-                        "status": "skipped",
-                    }
+        low_email_validation = tail.get("low_email_validation", {})
         completed = datetime.now(timezone.utc)
         completed_iso = completed.isoformat().replace("+00:00", "Z")
         duration = (completed - started).total_seconds()
@@ -656,6 +909,8 @@ async def run_adaptive_harvest(
         ).metadata or {}
         confirmed_patterns = signal_pool.get_confirmed_patterns()
         metadata = {
+            "harvest_status": "completed",
+            "timed_out": False,
             "budget": budget.stats,
             "identity_clusters": [
                 {
@@ -673,8 +928,9 @@ async def run_adaptive_harvest(
             "m365_email_verification": m365_validation,
             "yahoo_email_verification": yahoo_validation,
             "low_email_validation": low_email_validation,
+            "verification_tail": tail,
         }
-        return DomainHarvestResult(
+        final_result = DomainHarvestResult(
             domain=cleaned,
             started_at=started_iso,
             completed_at=completed_iso,
@@ -702,11 +958,41 @@ async def run_adaptive_harvest(
             metadata=metadata,
             shadow_profiles=shadow_profiles,
         )
+        return final_result
     finally:
         with contextlib.suppress(Exception):
             await signal_pool.close()
         with contextlib.suppress(Exception):
             await cache.aclose()
+        # --------------------------------------------------------------
+        # Harvest-termination handler — the single unconditional export
+        # trigger. It runs on EVERY exit path (normal completion, budget
+        # timeout, stage exception, soft kill) and exports the harvest
+        # context exactly as it exists at this moment: the finished
+        # result object when one was built, otherwise a snapshot of the
+        # shared in-memory state. Stages write to context; only this
+        # handler emits the harvest-end event the export hangs off of,
+        # so the export depends on nothing except the harvest ending.
+        # No pipeline stage owns, gates, or chains it.
+        #
+        # ``on_harvest_end`` must be a SYNCHRONOUS callable: it may run
+        # while the task is being cancelled, so it must not await.
+        # --------------------------------------------------------------
+        if on_harvest_end is not None:
+            snapshot = final_result
+            if snapshot is None:
+                snapshot = _termination_snapshot(
+                    ctx,
+                    cleaned,
+                    started=started,
+                    started_iso=started_iso,
+                    timeout_seconds=timeout_seconds,
+                    timed_out=timed_out,
+                )
+            try:
+                on_harvest_end(snapshot)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Harvest-end export trigger failed: %s", exc)
 
 
 async def _seed_scheduler(ctx: WorkerContext) -> None:
@@ -721,6 +1007,15 @@ async def _seed_scheduler(ctx: WorkerContext) -> None:
                 priority=PRIORITY_GUARANTEED,
                 track=TRACK_GUARANTEED,
                 source="industry_router",
+            )
+        )
+    if not ctx.module_overrides:
+        await ctx.scheduler.submit(
+            WorkItem(
+                kind="provider_detection",
+                priority=PRIORITY_GUARANTEED,
+                track=TRACK_GUARANTEED,
+                source="mx_provider_detection",
             )
         )
     await ctx.scheduler.submit(
@@ -927,6 +1222,12 @@ async def _execute_item(item: WorkItem, ctx: WorkerContext) -> WorkResult:
                 errors=["skipped by runtime policy"],
                 duration_seconds=0.0,
             )
+        if (
+            item.module_name == MODULE_PATTERN_VERIFY
+            and ctx.provider_detection_ready is not None
+            and not ctx.provider_detection_ready.is_set()
+        ):
+            await ctx.provider_detection_ready.wait()
         if ctx.subdomain_calibrate and item.module_name != MODULE_SUBDOMAIN_INTEL:
             if item.module_name:
                 skip_result = ModuleResult(
@@ -961,7 +1262,10 @@ async def _execute_item(item: WorkItem, ctx: WorkerContext) -> WorkResult:
                 errors=["deferred by yield prediction"],
                 duration_seconds=0.0,
             )
-        if item.kind == "fetch_page" and item.url:
+        if item.kind == "provider_detection":
+            await _ensure_provider_detection(ctx)
+            findings, new_items = [], []
+        elif item.kind == "fetch_page" and item.url:
             findings, new_items = await _fetch_and_extract(item.url, ctx)
         elif item.kind == "run_module" and item.module_name:
             module = _get_module_instance(item.module_name, ctx)
@@ -1124,18 +1428,24 @@ async def _run_module(
         )
     except asyncio.TimeoutError:
         elapsed = round(time.perf_counter() - started, 3)
+        partial_metadata = {}
+        if module_name == MODULE_SUBDOMAIN_INTEL:
+            partial_metadata = getattr(module, "partial_metadata", lambda: {})()
         result = ModuleResult(
             status=ModuleStatus.FAILED,
             errors=[f"module timed out after {soft_timeout:.1f}s"],
-            metadata={"domain": ctx.domain, "duration_seconds": elapsed},
+            metadata={"domain": ctx.domain, **partial_metadata, "duration_seconds": elapsed},
         )
     except asyncio.CancelledError:
         elapsed = round(time.perf_counter() - started, 3)
+        partial_metadata = {}
+        if module_name == MODULE_SUBDOMAIN_INTEL:
+            partial_metadata = getattr(module, "partial_metadata", lambda: {})()
         result = ModuleResult(
             status=ModuleStatus.PARTIAL,
             findings=[],
             errors=["Cancelled by budget timeout"],
-            metadata={"domain": ctx.domain, "duration_seconds": elapsed},
+            metadata={"domain": ctx.domain, **partial_metadata, "duration_seconds": elapsed},
         )
         raise
     finally:
@@ -1172,6 +1482,28 @@ async def _run_module(
                 source="employee_name_discovery_complete",
             ))
     return out_findings, new_items
+
+
+async def _ensure_provider_detection(ctx: WorkerContext) -> Any:
+    """Resolve and classify MX exactly once for this harvest context."""
+    if ctx.provider_detection is not None:
+        if ctx.provider_detection_ready is not None:
+            ctx.provider_detection_ready.set()
+        return ctx.provider_detection
+    if ctx.module_overrides:
+        return None
+    try:
+        mx_records = await resolve_mx(ctx.domain)
+        detection = detect_provider_from_mx(mx_records, target_domain=ctx.domain)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Provider detection failed for %s: %s", ctx.domain, exc)
+        mx_records = []
+        detection = detect_provider_from_mx([], target_domain=ctx.domain)
+    object.__setattr__(ctx, "provider_mx_records", list(mx_records))
+    object.__setattr__(ctx, "provider_detection", detection)
+    if ctx.provider_detection_ready is not None:
+        ctx.provider_detection_ready.set()
+    return detection
 
 async def _run_module_with_payload(
     module_name: str,
@@ -1503,6 +1835,8 @@ async def _run_module_instance(
             enable_smtp=ctx.enable_smtp,
             signal_pool=ctx.signal_pool,
             budget=ctx.budget,
+            provider_detection=ctx.provider_detection,
+            mx_records=ctx.provider_mx_records,
             progress_callback=(
                 (lambda action: ctx.progress_callback(module_name, action))
                 if ctx.progress_callback is not None else None
@@ -1573,6 +1907,7 @@ async def _run_module_instance(
         enable_scraping=not ctx.subdomain_calibrate,
         context_vertical=ctx.context_vertical,
         scrape_session=ctx.stealth_session,
+        source_telemetry=ctx.subdomain_source_telemetry,
         progress_callback=(
             (lambda action: ctx.progress_callback(module_name, action))
             if ctx.progress_callback is not None else None

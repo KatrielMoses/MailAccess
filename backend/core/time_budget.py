@@ -93,6 +93,11 @@ class TimeBudget:
     def mark_track1_closed(self) -> None:
         self.track1_closed_event.set()
 
+    @property
+    def track1_closed(self) -> bool:
+        """Whether all guaranteed work reached its scheduler boundary."""
+        return bool(self._track1_closed is not None and self._track1_closed.is_set())
+
     async def wait_until_exhausted(self) -> None:
         await self.exhausted_event.wait()
 
@@ -106,6 +111,7 @@ class TimeBudget:
             "elapsed_seconds": round(self.elapsed(), 2),
             "remaining_seconds": round(self.remaining(), 2),
             "track1_status": self.track1_status(),
+            "track1_closed": self.track1_closed,
             "is_expired": self.is_expired(),
         }
 

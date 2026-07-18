@@ -33,7 +33,7 @@ async def test_subdomain_surface_filters_hosts_and_emails(monkeypatch):
     monkeypatch.setattr("backend.modules.subdomain_surface.settings.subdomain_surface_max_hosts", 8)
 
     result = await SubdomainSurfaceModule().run("acme.org", fetch=Fetch())
-    assert result.metadata["subdomains_found"] == 2
+    assert result.metadata["discovered"] == 2
     assert {x["metadata"]["email"] for x in result.findings} == {"security@acme.org"}
     assert {x["metadata"]["subdomain"] for x in result.findings} == {"www.acme.org", "docs.acme.org"}
     assert all("evil.example.net" not in x["metadata"]["subdomain"] for x in result.findings)

@@ -461,6 +461,7 @@ async def write_harvest_results(
     no_export: bool = False,
     no_extras: bool = False,
     extra_export_path: Path | None = None,
+    write_main_json: bool = True,
 ) -> HarvestResultFiles:
     """Write the default JSON + supplementary files for one harvest.
 
@@ -481,6 +482,10 @@ async def write_harvest_results(
         When provided, an additional JSON copy is written to this path
         (the legacy ``--export <path>`` flow).  The default export is
         still written unless ``no_export=True``.
+    write_main_json:
+        When False, skip the canonical JSON write. This is used by the
+        post-termination supplementary-artifact pass after the termination
+        handler has already written the one canonical export.
     """
     if no_export:
         return HarvestResultFiles()
@@ -491,8 +496,11 @@ async def write_harvest_results(
         _LOG.warning("harvest_results: default JSON serialisation failed: %s", err)
         return HarvestResultFiles()
 
-    main_json = await asyncio.to_thread(_write_text, paths["json"], text)
-    extras: dict[str, Path | None] = {"main_json": main_json}
+    main_json: Path | None = None
+    extras: dict[str, Path | None] = {}
+    if write_main_json:
+        main_json = await asyncio.to_thread(_write_text, paths["json"], text)
+    extras["main_json"] = main_json
 
     if extra_export_path is not None:
         # Write the explicit export too — same payload, different path.
@@ -539,6 +547,30 @@ async def write_harvest_results(
     )
 
     return HarvestResultFiles(**extras)
+
+
+def write_harvest_export(
+    result: Any,
+    *,
+    timestamp: str,
+    extra_export_path: Path | None = None,
+) -> HarvestResultFiles:
+    """Write the canonical export from a harvest-termination snapshot.
+
+    This is deliberately synchronous so the termination handler can execute
+    it while the harvest task is unwinding or being cancelled. Production
+    callers should invoke this exactly once, from the harvest-end handler;
+    supplementary files are written separately after that point.
+    """
+    paths = results_paths(result.domain, timestamp)
+    text, err = serialise_harvest_for_export(result, "default.json")
+    if err is not None:
+        raise RuntimeError(f"harvest export serialisation failed: {err}")
+    main_json = _write_text(paths["json"], text)
+    if extra_export_path is not None:
+        extra_export_path.parent.mkdir(parents=True, exist_ok=True)
+        extra_export_path.write_text(text, encoding="utf-8")
+    return HarvestResultFiles(main_json=main_json)
 
 
 def _ensure_file(path: Path) -> None:
@@ -639,4 +671,5 @@ __all__ = [
     "results_paths",
     "timestamp_slug",
     "write_harvest_results",
+    "write_harvest_export",
 ]

@@ -10,6 +10,7 @@ from backend.core.domain_harvest_orchestrator import (
     DomainHarvestResult,
     HarvestedEmail,
     _apply_low_email_validation_results,
+    _attach_m365_email_verification,
     _run_low_email_validation,
     _select_low_email_validation_candidates,
     _select_verifier_for_provider,
@@ -131,6 +132,70 @@ async def test_throttled_result_is_inconclusive(monkeypatch: pytest.MonkeyPatch)
     counts = _apply_low_email_validation_results(candidates, summary)
     assert counts["promoted"] == 0
     assert counts["inconclusive"] == 1
+
+
+@pytest.mark.asyncio
+async def test_m365_verified_not_clobbered_by_second_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    finding = _finding(
+        "person@example.com",
+        provider_verification_status="verified",
+    )
+    module_results = {
+        "pattern_and_verify": ModuleResult(
+            status=ModuleStatus.SUCCESS,
+            findings=[finding],
+        )
+    }
+
+    async def fake_resolve_mx(domain):
+        return []
+
+    async def fake_get_user_realm(domain, timeout_seconds):
+        return SimpleNamespace(
+            status="managed",
+            namespace_type=None,
+            auth_url=None,
+            federation_brand_name=None,
+            cloud_instance_name=None,
+            http_status=200,
+            error=None,
+        )
+
+    class FakeM365:
+        def __init__(self, **kwargs):
+            pass
+
+        async def verify_batch(self, emails):
+            return [
+                SimpleNamespace(
+                    email=emails[0],
+                    status="inconclusive",
+                    if_exists_result=None,
+                    is_unmanaged=None,
+                    throttle_status=None,
+                    http_status=200,
+                    error=None,
+                )
+            ]
+
+    monkeypatch.setattr(orchestrator, "resolve_mx", fake_resolve_mx)
+    monkeypatch.setattr(
+        orchestrator,
+        "detect_provider_from_mx",
+        lambda records, target_domain: SimpleNamespace(
+            provider=MailProvider.M365,
+            primary_mx="example-com.mail.protection.outlook.com",
+            matched_mx_hosts=[],
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "get_user_realm", fake_get_user_realm)
+    monkeypatch.setattr(orchestrator, "M365Verifier", FakeM365)
+
+    await _attach_m365_email_verification("example.com", module_results)
+
+    metadata = finding["metadata"]
+    assert metadata["provider_verification_status"] == "verified"
+    assert metadata["provider_verification_provider"] == "m365"
 
 
 @pytest.mark.asyncio
