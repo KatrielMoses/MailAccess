@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.13.3&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.13.4&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -526,6 +526,24 @@ datacenter proxies. Off by default.
 Sign up: https://scrapingant.com/?ref=mzliyzh
 
 ## Changelog
+
+### 0.13.4
+
+- Passive subdomain sources now write status and result counts incrementally
+  into shared harvest context, so soft-timeout and exception exports retain a
+  complete `subdomain_intel.sources` table.
+- Added explicit source lifecycle telemetry for completed, timed-out,
+  rate-limited, killed, in-progress, and not-run sources while preserving the
+  existing per-source caps and quorum behavior.
+- Harvest status now distinguishes healthy budget saturation
+  (`completed_saturated`) from guaranteed-work truncation
+  (`partial_timeout`).
+- Export sequencing and schema documentation now use the authoritative
+  `summary.subdomains_total_including_derived` count.
+- Provider verification telemetry separates candidates routed from Gravatar
+  or other verifier contacts; Google MX verification remains Gravatar-only.
+- M365 provider verification writeback remains sticky and is populated on the
+  individual email records.
 
 ### 0.13.3
 
