@@ -460,3 +460,30 @@ npm run dev
 pip install -e .
 mailaccess investigate user@example.com
 ```
+
+---
+
+## README Install Options
+
+### CLI only (no Docker)
+
+```bash
+pip install 'mailaccess[harvest]'
+
+# Start the backend in a separate terminal before investigating
+mailaccess serve
+mailaccess investigate you@example.com
+
+# Full stack with Web UI
+git clone https://github.com/KatrielMoses/MailAccess
+docker compose up -d
+```
+
+## README Self-Hosting Quick Setup
+
+```bash
+cp .env.example .env      # all API keys are optional
+docker compose up         # backend :8000  ·  frontend :3000
+```
+
+Open **http://localhost:3000** in your browser. Full setup guide: [docs/self-hosting.md](docs/self-hosting.md).

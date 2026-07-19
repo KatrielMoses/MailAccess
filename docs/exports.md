@@ -105,3 +105,16 @@ Best for: graph-based OSINT analysis in Maltego Desktop.
 ## Adding an Export Format
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md#adding-an-exporter) for the `BaseExporter` interface.
+
+---
+
+## README Export Formats
+
+| Format | `?format=` value | Use case |
+|--------|-----------------|----------|
+| JSON | `json` | Programmatic use, archiving |
+| CSV | `csv` | Spreadsheet analysis |
+| PDF | `pdf` | Human-readable reports |
+| Markdown | `markdown` | Wikis, issue trackers |
+| STIX 2.1 | `stix` | Threat intelligence platforms |
+| Maltego XML | `maltego` | Maltego graph import |

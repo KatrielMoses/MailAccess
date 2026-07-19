@@ -1,5 +1,101 @@
 # Module Reference
 
+## README Module Summary
+
+### Modules
+
+| Module | Coverage | Key Required | Opt-in |
+|--------|----------|--------------|--------|
+| gravatar | Profile hash lookup | No | No |
+| hibp | Breach check | Yes | No |
+| breach_deep | Probes top 100 highest-severity breached sites for account existence | No (HIBP corpus fetched automatically) | Yes |
+| emailrep | Reputation + blacklist | No | No |
+| hudson_rock | Infostealer logs (free) | No | No |
+| google_dork | 5 automated dorks | Yes (SerpAPI) | No |
+| email_discovery | Recovers other email addresses owned by same person via name dorks | Yes (SERPAPI_KEY) | No |
+| domain_intel | Domain + Shodan | No (Shodan optional) | No |
+| dns_lookup | MX/SPF/DMARC/DKIM/A/NS extraction | No | No |
+| whois_lookup | Domain WHOIS, privacy detection | No | No |
+| wayback | Finds historical pages where email appeared publicly via Wayback Machine CDX | No | No |
+| github_commits | Finds repos committed to with this email, surfaces real name from git config. Requires GITHUB_TOKEN for commit search; user profile search works without token. | No (GITHUB_TOKEN optional, required for commit search) | No |
+| pgp_keyserver | PGP key UID name lookup | No | No |
+| orcid_lookup | ORCID researcher identity | No | No |
+| hackernews | HackerNews profile name | No | No |
+| sec_edgar | SEC EDGAR filing contact extraction | No | No |
+| companies_house | UK Companies House officers | Yes (COMPANIES_HOUSE_API_KEY, free) | No |
+| press_intel | Press release contact extraction | No | Yes |
+| xposedornot | Default-on direct email-to-breach corpus lookup with breach names, data classes, and risk indicators | No | No |
+| leakcheck | Default-on public breach corpus lookup with regional coverage and stealer routing | No | No |
+| ransomware_intel | Default-on domain victim correlation against ransomware lists; skips free providers | No | No |
+| social | 13 platforms via YAML | No | No |
+| social_links | Username extraction, feeds pivot | No | No |
+| account_discovery | Holehe 120+ platforms | No | Yes |
+| user_scanner | 205+ platform vectors | No | Yes |
+| whatsmyname | 700+ platforms | No | Yes |
+| maigret_platforms | Native Maigret platform engine, 2500+ platforms | No | No (disable via `ENABLE_MAIGRET_PLATFORMS=false`) |
+| sherlock_platforms | Sherlock native engine, ~300 platforms | No | No |
+| nexfil_platforms | Nexfil native engine, ~300 platforms | No | No |
+| blackbird_platforms | Blackbird native engine, social focus | No | No |
+| breachdirectory | 2nd breach source | Yes | No |
+| username_pivot | WMN via recovered usernames | No | Yes |
+| permutation_discovery | 60 email variants | No | Yes |
+| phone_intel | Phone validation + WA/TG hints | No | No |
+| messaging_hints | Telegram/WhatsApp username check | No | No |
+| ghunt | Gmail deep intel | No (setup required) | Yes |
+| identity_graph | Cross-platform cluster analysis | No | No (automatic) |
+| platform_health | Persistent probe health, fragility, and skip decisions | No | No (automatic) |
+| temporal_cluster | Coordinated account-creation windows | No | No (automatic) |
+| shadow_profiles | Same-name accounts tied to alternate emails | No | No (automatic) |
+| avatar_clusters | Cross-platform perceptual-avatar clusters | No | No (automatic) |
+| breach_corpus | Cached and severity-ranked public HIBP breach catalog | No | No (used by `breach_deep`) |
+| common_names | Common-name and username false-positive controls | No | No (automatic) |
+| disposable_domains | Disposable-email confidence controls | No | No (automatic) |
+
+> 64 modules · 2500+ platforms by default
+
+### Platform Coverage
+
+MailAccess checks usernames derived from the target email across multiple platform databases:
+
+| Source | Platforms | Default |
+|--------|-----------|---------|
+| WhatsMyName | 700+ | On |
+| Holehe | 120+ | On |
+| user-scanner | 205+ | On |
+| Maigret native engine | 2500+ | On |
+| Sherlock native | ~300 | On |
+| Nexfil native | ~300 | On |
+| Blackbird native | social focus | On |
+
+Total with Maigret enabled: 2500+ unique platforms after deduplication.
+
+Enable Maigret:
+
+```bash
+ENABLE_MAIGRET_PLATFORMS=true mailaccess investigate email
+```
+
+Enable Maigret + Wave 2, the slower platform sweep:
+
+```bash
+ENABLE_MAIGRET_PLATFORMS=true ENABLE_MAIGRET_WAVE2=true mailaccess investigate email
+```
+
+The platform database is fetched from Maigret's GitHub repository (MIT licensed) and cached locally for 24 hours. Custom platforms can be added to `data/mailaccess-extra-sites.json` in the same format.
+
+Findings from WMN and Maigret are deduplicated by URL domain. When both tools confirm the same platform, the finding is marked dual-confirmed with high confidence.
+
+| Variable | Module | Key Required | Default | Description |
+|----------|--------|--------------|---------|-------------|
+| `ENABLE_MAIGRET_PLATFORMS` | `maigret_platforms` | None | `false` | Enable 2500+ platform sweep. Adds ~35-90s. |
+| `ENABLE_MAIGRET_WAVE2` | `maigret_platforms` (Wave 2) | None | `false` | Enable slow/fragile platform sweep. Requires `ENABLE_MAIGRET_PLATFORMS=true`. Adds ~90-150s. |
+| `MAIGRET_FORCE_{PLATFORM}` | `maigret_platforms` | None | _(unset)_ | Override auto-demotion for one platform. |
+| `MAILACCESS_SHARE_HEALTH` | `platform-health` | None | `false` | Opt in to anonymized health sharing; sharing still requires `--share`. |
+| `DOMAIN_CLUSTER_CAP` | `domain_cluster` | None | `20` | Maximum domains checked per infrastructure cluster pass. |
+
+---
+
+
 MailAccess ships 64 modules covering 2500+ platforms. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
 
 A module marked **key required** skips itself with `status: skipped` when its API key is absent — it does not cause the investigation to fail.

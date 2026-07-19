@@ -152,3 +152,14 @@ cat targets.txt | mailaccess investigate - --format jsonl | jq 'select(.severity
       exit 1
     fi
 ```
+
+---
+
+## README Integrations
+
+| Integration | How |
+|-------------|-----|
+| Maltego | Local transform server at `POST /maltego/email_investigate` (no API key required) |
+| Slack | Set `SLACK_WEBHOOK_URL` in `.env` |
+| Discord | Set `DISCORD_WEBHOOK_URL` in `.env` |
+| Generic webhook | `INTEGRATION_WEBHOOK_URL` + optional `INTEGRATION_WEBHOOK_SECRET` (HMAC) |
