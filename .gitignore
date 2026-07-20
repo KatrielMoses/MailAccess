@@ -99,11 +99,18 @@ test_*.py
 !tests/test_no_live_network.py
 verify_*.py
 .pytest_cache/
+.pytest-tmp/
 coverage/
 .coverage
 
 # Agents
 .agents/
+.codex/
+
+# Local verification / scratch artifacts
+.tmp/
+live-verification-*/
+inspect_structure.py
 
 # Investigation outputs (never commit personal investigation data)
 results/
