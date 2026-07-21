@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0e12" />
+    <meta name="description" content="MailAccess is an open-source OSINT platform for email intelligence and domain email harvesting." />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="MailAccess — email intelligence for authorized investigations" />
+    <meta property="og:description" content="Fan out across breach databases, social networks, DNS, and the open web. Get structured findings you can export or pipe into Maltego." />
+    <meta property="og:image" content="/public/ma_logo_github.png" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="MailAccess" />
+    <meta name="twitter:description" content="Open-source OSINT email intelligence and domain harvesting." />
+    <link rel="icon" type="image/png" href="/public/ma_logo.png" />
+    <link rel="stylesheet" href="styles-v2.css" />
+    <link rel="stylesheet" href="styles-v2-overrides.css" />
+    <title>MailAccess — email intelligence, on your terms</title>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="shell nav-wrap">
+        <a class="brand" href="#top" aria-label="MailAccess home">
+          <pre class="brand-ascii" aria-label="MailAccess">███╗   ███╗ █████╗ ██╗██╗      █████╗  ██████╗ ██████╗███████╗███████╗███████╗
+████╗ ████║██╔══██╗██║██║     ██╔══██╗██╔════╝██╔════╝██╔════╝██╔════╝██╔════╝
+██╔████╔██║███████║██║██║     ███████║██║     ██║     █████╗  ███████╗███████╗
+██║╚██╔╝██║██╔══██║██║██║     ██╔══██║██║     ██║     ██╔══╝  ╚════██║╚════██║
+██║ ╚═╝ ██║██║  ██║██║███████╗██║  ██║╚██████╗╚██████╗███████╗███████║███████║
+╚═╝     ╚═╝╚═╝  ╚═╝╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚══════╝╚══════╝╚══════╝</pre>
+        </a>
+        <nav aria-label="Primary navigation">
+          <a class="nav-link" href="#commands">Commands</a>
+          <a class="nav-link" href="#capabilities">Capabilities</a>
+          <a class="nav-link" href="#exports">Outputs</a>
+          <a class="button button-small button-primary" href="https://github.com/KatrielMoses/MailAccess" target="_blank" rel="noreferrer">View repository <span aria-hidden="true">↗</span></a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero shell">
+        <div class="eyebrow"><span class="status-dot"></span> OPEN SOURCE / SELF-HOSTABLE / AUTHORIZED USE</div>
+        <h1>Email intelligence<br /><span>without the black box.</span></h1>
+        <p class="hero-copy">Investigate email addresses and harvest organizational mailboxes across the open web. MailAccess turns scattered signals into a defensible, exportable view of exposure.</p>
+        <div class="actions">
+          <a class="button button-primary" href="#install">Install MailAccess <span aria-hidden="true">→</span></a>
+          <a class="button button-secondary" href="#commands">See the commands</a>
+        </div>
+        <figure class="terminal-figure">
+          <div class="terminal-label"><span class="terminal-dots"><i></i><i></i><i></i></span><span>mailaccess — terminal output</span><span class="terminal-state">READY</span></div>
+          <img src="assets/terminal-hero.png" alt="MailAccess terminal showing available investigation and harvesting commands" />
+        </figure>
+        <div class="command-line" id="install"><span class="prompt">$</span><code>pip install mailaccess</code><button class="copy-button" type="button" data-copy="pip install mailaccess">copy</button><span class="copy-status" aria-live="polite"></span></div>
+      </section>
+
+      <section class="rule-section command-showcase" id="commands">
+        <div class="shell">
+          <div class="section-heading-row"><div><p class="section-label">01 / CORE COMMANDS</p><h2>Two commands.<br /><span>The whole signal.</span></h2></div><p class="section-intro narrow">Start with a person. Or start with a domain. MailAccess gives both paths the same structured, repeatable treatment.</p></div>
+          <div class="command-grid">
+            <article class="command-card">
+              <div class="command-card-head"><span class="command-index">01</span><span class="command-kind">EMAIL INVESTIGATION</span></div>
+              <h3>Investigate an address</h3>
+              <p>Fan out across breach intelligence, social platforms, DNS, reputation, and identity signals.</p>
+              <div class="mini-terminal"><div class="mini-terminal-title"><span><i></i><i></i><i></i></span> investigate</div><code><b>$</b> mailaccess investigate you@example.com
+<span class="comment">→ identity graph + breach checks</span>
+<span class="comment">→ 2500+ platform coverage</span>
+<span class="success">✓ structured findings ready</span></code><button class="copy-button" type="button" data-copy="mailaccess investigate you@example.com">copy command</button></div>
+            </article>
+            <article class="command-card command-card-accent">
+              <div class="command-card-head"><span class="command-index">02</span><span class="command-kind">DOMAIN HARVESTING</span></div>
+              <h3>Harvest an organization</h3>
+              <p>Find public-facing employee addresses across archives, certificates, code, registries, and search sources.</p>
+              <div class="mini-terminal"><div class="mini-terminal-title"><span><i></i><i></i><i></i></span> harvest-emails</div><code><b>$</b> mailaccess harvest-emails --domain company.com
+<span class="comment">→ 8 concurrent discovery sources</span>
+<span class="comment">→ confidence-scored addresses</span>
+<span class="success">✓ export to CSV or JSON</span></code><button class="copy-button" type="button" data-copy="mailaccess harvest-emails --domain company.com">copy command</button></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="rule-section" id="capabilities">
+        <div class="shell section-grid">
+          <div><p class="section-label">02 / CAPABILITIES</p><h2>One address.<br />A wider signal.</h2></div>
+          <div><p class="section-intro">MailAccess fans out through independent sources, then brings the results back into one investigation surface. Every finding is structured, scored, and ready to inspect.</p><div class="capability-grid">
+            <article class="capability"><span class="number">01</span><h3>Identity graph</h3><p>Correlate usernames, names, avatars, breach data, and profile links across platforms.</p></article>
+            <article class="capability"><span class="number">02</span><h3>Domain harvesting</h3><p>Discover organization addresses through Common Crawl, CT logs, GitHub, dorks, and employee pages.</p></article>
+            <article class="capability"><span class="number">03</span><h3>Exposure scoring</h3><p>Separate identity exposure from credential risk with clear drivers and recommended next actions.</p></article>
+            <article class="capability"><span class="number">04</span><h3>Defender's brief</h3><p>Turn technical findings into a security-manager-ready summary with prioritized risk.</p></article>
+          </div></div>
+        </div>
+      </section>
+
+      <section class="rule-section" id="workflow">
+        <div class="shell">
+          <div class="section-heading-row"><div><p class="section-label">03 / WORKFLOW</p><h2>Trace the path.<br /><span>Keep the evidence.</span></h2></div><p class="section-intro narrow">A predictable pipeline for research teams, analysts, and penetration testers operating under authorization.</p></div>
+          <div class="pipeline" aria-label="MailAccess investigation workflow"><div class="pipeline-step"><span>01</span><strong>INPUT</strong><em>email or domain</em></div><div class="pipeline-connector" aria-hidden="true">→</div><div class="pipeline-step"><span>02</span><strong>FAN OUT</strong><em>sources &amp; modules</em></div><div class="pipeline-connector" aria-hidden="true">→</div><div class="pipeline-step"><span>03</span><strong>REASON</strong><em>correlate &amp; score</em></div><div class="pipeline-connector" aria-hidden="true">→</div><div class="pipeline-step"><span>04</span><strong>EXPORT</strong><em>report or pipeline</em></div></div>
+        </div>
+      </section>
+
+      <section class="rule-section" id="exports">
+        <div class="shell section-grid reverse-mobile">
+          <div><p class="section-label">04 / OUTPUTS</p><h2>Built to leave<br />the terminal.</h2></div>
+          <div><p class="section-intro">Use the interface for exploration, the CLI for repeatability, and the export layer for the rest of your stack.</p><div class="output-table-wrap"><table><thead><tr><th>FORMAT</th><th>USE</th><th>STATUS</th></tr></thead><tbody><tr><td>JSON / JSONL</td><td>Automation and pipelines</td><td class="ok">AVAILABLE</td></tr><tr><td>CSV</td><td>Analyst handoff</td><td class="ok">AVAILABLE</td></tr><tr><td>PDF / Markdown</td><td>Briefings and documentation</td><td class="ok">AVAILABLE</td></tr><tr><td>STIX 2.1 / Maltego XML</td><td>Threat intelligence tooling</td><td class="ok">AVAILABLE</td></tr></tbody></table></div></div>
+        </div>
+      </section>
+
+      <section class="rule-section install-section">
+        <div class="shell install-panel"><p class="section-label">GET STARTED</p><h2>Run the first pass<br /><span>in one command.</span></h2><div class="install-code"><span class="prompt">$</span><code>mailaccess investigate you@example.com</code><button class="copy-button" type="button" data-copy="mailaccess investigate you@example.com">copy</button></div><p class="fine-print">Passive OSINT by default — no emails sent, no accounts modified. Use only on systems and identities you are authorized to investigate.</p></div>
+      </section>
+    </main>
+
+    <footer class="site-footer"><div class="shell footer-wrap"><div><strong>MAILACCESS</strong><p>Open-source email intelligence for authorized investigations.</p></div><div class="footer-links"><a href="https://github.com/KatrielMoses/MailAccess" target="_blank" rel="noreferrer">GitHub ↗</a><a href="README.md">Documentation</a><a href="DISCLAIMER.md">Authorized use</a></div></div></footer>
+    <script src="script.js"></script>
+  </body>
+</html>
