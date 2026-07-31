@@ -11,6 +11,11 @@ SOURCE_WEIGHTS: dict[str, float] = {
     "github_commit_author": 0.95,
     "npm_package_author": 0.75,
     "pypi_package_author": 0.75,
+    # FIX 4A: package-maintainer emails carry the same developer-evidence
+    # weight as package-author emails.
+    "npm_maintainer": 0.75,
+    "pypi_maintainer": 0.75,
+    "github_maintainer": 0.75,
     "press_release": 0.70,
     "common_crawl_high_density": 0.75,
     "common_crawl_medium": 0.55,
@@ -19,6 +24,10 @@ SOURCE_WEIGHTS: dict[str, float] = {
     "search_snippet_ddg": 0.35,
     "search_snippet_bing": 0.25,
     "search_snippet_google_cse": 0.55,  # 0.11.1 Phase 4
+    "search_snippet_brave": 0.40,  # FIX 4A: Brave was emitted but had no weight
+    # FIX 4A: cached PGP finding — real UID evidence, but discounted
+    # below live ``pgp_uid`` (1.00) for cache staleness.
+    "pgp_cached": 0.65,
     "github_org_member": 0.85,  # 0.11.1 Phase 4
     "github_profile_email": 0.85,  # Public email on a name-matched GitHub profile
     "hunter_verified": 0.85,  # 0.11.1 Phase 4 — Hunter confidence >= 90
@@ -36,29 +45,45 @@ SOURCE_WEIGHTS: dict[str, float] = {
     "permutation_unverified_{last}": 0.07,
     "permutation_unverified_{last}_{first}": 0.05,
     "permutation_unverified_other": 0.03,
-    # P6: pattern-generation boosters.  These are added to a
-    # candidate's source-type list when the corresponding
-    # corroboration is true:
-    #   * ``permutation_format_match`` — the candidate's template
-    #     matches a confirmed format (Hunter, SMTP-verified, or
-    #     snippet-derived).  ``0.20`` keeps it under the
-    #     developer-evidence threshold so it does not accidentally
-    #     outrank a github_commit_author hit.
-    #   * ``permutation_name_match`` — the candidate's local part
-    #     contains the discoverer's name tokens.  ``0.25`` is
-    #     intentionally higher than ``permutation_format_match``
-    #     because a name match is direct evidence; a format match
-    #     is a prior.
-    #   * ``permutation_unverified_{first}_tier1`` — the
-    #     ``{first}@`` candidate for a top-tier (executive) name
-    #     with a confirmed ``{first}@`` pattern.  ``0.55`` is
-    #     strong enough to clear the new LIKELY threshold (0.70)
-    #     once the multi_source multiplier is applied.
-    "permutation_format_match": 0.20,
-    "permutation_name_match": 0.25,
-    "permutation_unverified_{first}_tier1": 0.55,
+    # FIX 4D: removed dead SOURCE_WEIGHTS keys — no module ever emitted
+    # these source types (verified by repo-wide grep), so they only
+    # added confusion and could silently inflate a pure-guess candidate
+    # to CONFIRMED if ever wired up.  Removed keys:
+    #   * ``permutation_format_match``          (was 0.20)
+    #   * ``permutation_name_match``            (was 0.25)
+    #   * ``permutation_unverified_{first}_tier1`` (was 0.55)
+    # Autodiscover existence probe (FIX 2). Kept just below SMTP/PGP
+    # verification but above unverified permutations.
+    "autodiscover_m365": 0.90,
+    # M365 Passive Intel Phase 1.
+    #   * autodiscover_rest — Check 3, just below autodiscover_m365 (0.90).
+    #   * onedrive_probe    — Check 4, an independent existence signal.
+    #   * m365_getuserrealm — Check 1, tenant intelligence, not an existence
+    #                         signal, so it contributes 0 to the score.
+    #   * openid_preflight  — Check 5, infrastructure signal only, 0 weight.
+    "autodiscover_rest": 0.88,
+    "onedrive_probe": 0.80,
+    "m365_getuserrealm": 0.0,
+    "openid_preflight": 0.0,
+    # Enterprise Net Intel Phase 2 — infrastructure metadata only. Neither
+    # signal claims a mailbox exists, so both contribute 0 to the score.
+    "ntlm_challenge": 0.0,
+    "lync_discovery": 0.0,
+    # M365 Active Intel Phase 3 — single-probe account-state telemetry. Each
+    # sends exactly one probe with an invalid credential. All three are direct
+    # provider-side existence checks and, like autodiscover_m365, do not decay.
+    #   * aadsts_probe     — direct AADSTS decode (highest signal).
+    #   * wstrust_probe    — federated authentication attempt.
+    #   * activesync_probe — timing heuristic, less definitive.
+    "aadsts_probe": 0.90,
+    "wstrust_probe": 0.85,
+    "activesync_probe": 0.65,
     # Native syntax + DNS evidence. This is stronger than an untested
     # permutation, but intentionally below SMTP mailbox verification.
+    # Phase 4 — IMAP single-probe existence. A decoded IMAP LOGIN response is a
+    # direct provider-side existence signal for self-hosted / shared-hosting
+    # domains, kept in line with the other verification checks.
+    "imap_probe": 0.70,
     "permutation_mx_valid": 0.30,
     "permutation_verified_m365": 0.85,
     "permutation_verified_yahoo": 0.80,
@@ -67,6 +92,13 @@ SOURCE_WEIGHTS: dict[str, float] = {
     "permutation_breach_hit": 0.15,
     "breach_recent": 0.20,
     "breach_historical": 0.10,
+    # Phase 5 — breach aggregation. Corroborates that an email existed at
+    # breach time (not necessarily current); ages via freshness_factor and
+    # is never a PERMANENT source.
+    "scylla_breach": 0.55,
+    "hibp_paste": 0.50,
+    "dehashed_breach": 0.70,  # paid aggregator, higher data quality
+    "snusbase_breach": 0.68,
     # Direct company-owned identity surfaces.  These are strong evidence
     # of publication, but are kept below cryptographic/developer evidence.
     "security_txt_contact": 0.75,
@@ -89,11 +121,15 @@ VERIFICATION_MULTIPLIER: dict[str, float] = {
 
 SOURCE_CLASS: dict[str, str] = {
     "pgp_uid": "cryptographic",
+    "pgp_cached": "cryptographic",  # FIX 4A
     "ca_attested": "cryptographic",
     "github_commit_author": "developer",
     "github_code_match": "developer",
     "npm_package_author": "developer",
     "pypi_package_author": "developer",
+    "npm_maintainer": "developer",  # FIX 4A
+    "pypi_maintainer": "developer",  # FIX 4A
+    "github_maintainer": "developer",  # FIX 4A
     "common_crawl_high_density": "scraping",
     "common_crawl_medium": "scraping",
     "common_crawl_single": "scraping",
@@ -101,6 +137,7 @@ SOURCE_CLASS: dict[str, str] = {
     "search_snippet_ddg": "scraping",
     "search_snippet_bing": "scraping",
     "search_snippet_google_cse": "scraping",  # 0.11.1 Phase 4
+    "search_snippet_brave": "scraping",  # FIX 4A
     "github_org_member": "developer",  # 0.11.1 Phase 4
     "github_profile_email": "developer",
     "hunter_verified": "api",
@@ -116,12 +153,28 @@ SOURCE_CLASS: dict[str, str] = {
     "permutation_unverified_{last}": "verification",
     "permutation_unverified_{last}_{first}": "verification",
     "permutation_unverified_other": "verification",
-    # P6: pattern-generation boosters carry the same source
-    # family as the unverified permutations — they live or die
-    # with their parent template's evidence.
-    "permutation_format_match": "verification",
-    "permutation_name_match": "verification",
-    "permutation_unverified_{first}_tier1": "verification",
+    # FIX 4D: dead keys removed (permutation_format_match,
+    # permutation_name_match, permutation_unverified_{first}_tier1).
+    "autodiscover_m365": "verification",  # FIX 2
+    # M365 Passive Intel Phase 1. The two existence signals join the
+    # "verification" family; the two infrastructure signals share a single
+    # "infrastructure" family so that, even if they ever leak into a per-email
+    # source-type list, they collapse to one family and cannot inflate the
+    # multi-source multiplier.
+    "autodiscover_rest": "verification",
+    "onedrive_probe": "verification",
+    "m365_getuserrealm": "infrastructure",
+    "openid_preflight": "infrastructure",
+    # Enterprise Net Intel Phase 2 — share the single "infrastructure"
+    # family so they can never inflate the multi-source multiplier.
+    "ntlm_challenge": "infrastructure",
+    "lync_discovery": "infrastructure",
+    # M365 Active Intel Phase 3 — all three join the "verification" family.
+    "aadsts_probe": "verification",
+    "activesync_probe": "verification",
+    "wstrust_probe": "verification",
+    # Phase 4 — IMAP single-probe existence joins the "verification" family.
+    "imap_probe": "verification",
     "permutation_mx_valid": "verification",
     "permutation_verified_m365": "verification",
     "permutation_verified_yahoo": "verification",
@@ -130,6 +183,11 @@ SOURCE_CLASS: dict[str, str] = {
     "permutation_breach_hit": "corroboration",
     "breach_recent": "corroboration",
     "breach_historical": "corroboration",
+    # Phase 5 — breach aggregation sources share the "breach" family.
+    "scylla_breach": "breach",
+    "hibp_paste": "breach",
+    "dehashed_breach": "breach",
+    "snusbase_breach": "breach",
     "security_txt_contact": "direct",
     "structured_page": "direct",
     "json_ld": "direct",
@@ -140,6 +198,38 @@ SOURCE_CLASS: dict[str, str] = {
 }
 
 MAX_SCORE = 1.5
+
+# FIX 4B: sources whose evidence does not decay with age.  A PGP UID,
+# a git commit authorship, or a confirmed provider-side existence check
+# is exactly as strong eight years later as it was the day it was made —
+# applying the freshness penalty to these inverts the evidence hierarchy
+# (a fresh scrape outscoring a decade-old cryptographic signature).
+PERMANENT_SOURCES: frozenset[str] = frozenset(
+    {
+        "pgp_uid",
+        "pgp_cached",
+        "pgp_subkey",
+        "github_commit_author",
+        "autodiscover_m365",
+        # M365 Passive Intel Phase 1: provider-side existence checks. Like
+        # autodiscover_m365, a confirmed REST-Autodiscover / OneDrive result
+        # is exactly as strong later as the day it was made — it must not
+        # decay with age.
+        "autodiscover_rest",
+        "onedrive_probe",
+        "permutation_verified_m365",
+        "permutation_verified_google",
+        # M365 Active Intel Phase 3: single-probe account-state checks. A
+        # confirmed AADSTS / WS-Trust / ActiveSync result reflects the account
+        # state at probe time and does not decay with age.
+        "aadsts_probe",
+        "wstrust_probe",
+        "activesync_probe",
+        # Phase 4 — a decoded IMAP existence result reflects the account state
+        # at probe time and does not decay with age.
+        "imap_probe",
+    }
+)
 
 # P7: 4-tier label system.  The legacy 3-tier thresholds
 # (HIGH ≥ 0.85, MEDIUM ≥ 0.55, LOW < 0.55) collapsed two
@@ -207,7 +297,12 @@ def freshness_factor(timestamp: str | None, source: str | None = None) -> float:
     The ``source`` check is opt-in: callers that pass ``source=None``
     get the legacy behaviour.  Pattern candidates and any source
     starting with ``"permutation_"`` opt in to the relaxed rule.
+
+    FIX 4B: sources in :data:`PERMANENT_SOURCES` never decay — they
+    return ``1.0`` regardless of the timestamp.
     """
+    if source and str(source) in PERMANENT_SOURCES:
+        return 1.0
     if not timestamp:
         if source and str(source).startswith("permutation_"):
             return 1.0
@@ -250,9 +345,22 @@ def freshness_factor(timestamp: str | None, source: str | None = None) -> float:
 
 
 def _source_family(source_type: str) -> str:
-    """Return the corroboration bucket for multiplier selection."""
-    if source_type.startswith(("common_crawl_", "search_snippet_", "wayback_")):
-        return source_type
+    """Return the corroboration bucket for multiplier selection.
+
+    FIX 4C: collapse every Common Crawl density tier, every search
+    snippet engine, and every Wayback variant to a SINGLE family each.
+    Previously each tier/engine returned itself as its own family, so a
+    single web page indexed by three CC collections (or surfaced by
+    three search engines) counted as three distinct corroborating
+    sources and wrongly triggered the multi-source multiplier.  One page
+    is one source, regardless of how many crawlers indexed it.
+    """
+    if source_type.startswith("common_crawl_"):
+        return "common_crawl"
+    if source_type.startswith("search_snippet_"):
+        return "search_snippet"
+    if source_type.startswith("wayback_"):
+        return "wayback"
     return SOURCE_CLASS.get(source_type, source_type)
 
 
@@ -323,11 +431,14 @@ def compute_confidence(
         is_smtp_verified=is_smtp_verified,
         is_pgp_or_ca=pgp_or_ca,
     )
-    # P2: pass the *first* permutation source (if any) so
-    # ``freshness_factor`` knows to return 1.0 on missing
-    # timestamps.  We pick the lexicographically first permutation
-    # key for determinism — the actual base_score is unaffected.
+    # P2 / FIX 4B: pass a representative source so ``freshness_factor``
+    # can apply the no-decay rule.  A PERMANENT source (PGP, commit,
+    # provider-verified) wins; otherwise the first permutation source
+    # (which returns 1.0 on a missing timestamp).
     perm_source = next(
+        (st for st in unique_types if st in PERMANENT_SOURCES),
+        None,
+    ) or next(
         (st for st in unique_types if str(st).startswith("permutation_")),
         None,
     )

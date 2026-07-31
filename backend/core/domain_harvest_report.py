@@ -192,15 +192,29 @@ def _format_subdomain_panel(result: DomainHarvestResult) -> Panel | Text:
     return Panel(text, title="[bold cyan]SUBDOMAINS DISCOVERED[/bold cyan]", border_style="cyan")
 
 
-def _build_infrastructure(result: DomainHarvestResult) -> dict[str, list[dict[str, Any]]]:
-    """Return the normalized IP/ASN footprint emitted by subdomain discovery."""
+def _build_infrastructure(result: DomainHarvestResult) -> dict[str, Any]:
+    """Return the normalized IP/ASN footprint emitted by subdomain discovery.
+
+    May also carry ``active_directory`` and ``unified_communications`` blocks
+    emitted by the Phase 2 enterprise-net enrichment when present.
+    """
     ip_rows: dict[str, dict[str, Any]] = {}
     asn_rows: dict[int, dict[str, Any]] = {}
+    active_directory: dict[str, Any] | None = None
+    unified_communications: dict[str, Any] | None = None
     for module_result in result.module_results.values():
         metadata = module_result.metadata or {}
         infrastructure = metadata.get("infrastructure")
         if not isinstance(infrastructure, dict):
             continue
+        # Enterprise Net Intel (Phase 2) emits these two enrichment blocks
+        # instead of ip/asn rows; capture them independently of the footprint.
+        ad = infrastructure.get("active_directory")
+        if isinstance(ad, dict):
+            active_directory = ad
+        uc = infrastructure.get("unified_communications")
+        if isinstance(uc, dict):
+            unified_communications = uc
         ips = infrastructure.get("ips")
         asns = infrastructure.get("asns")
         if not isinstance(ips, list) or not isinstance(asns, list):
@@ -234,10 +248,14 @@ def _build_infrastructure(result: DomainHarvestResult) -> dict[str, list[dict[st
             existing["prefixes"] = sorted(
                 {*existing.get("prefixes", []), *existing.get("cidrs", [])}
             )
-    payload = {
+    payload: dict[str, Any] = {
         "ips": [ip_rows[key] for key in sorted(ip_rows)],
         "asns": [asn_rows[key] for key in sorted(asn_rows)],
     }
+    if active_directory is not None:
+        payload["active_directory"] = active_directory
+    if unified_communications is not None:
+        payload["unified_communications"] = unified_communications
     return payload
 
 

@@ -449,11 +449,13 @@ class PatternAndVerifyModule(BaseModule):
             if resolved_mx_records and not skip_smtp_probing:
                 async with SMTPVerifier(
                     mx_records=resolved_mx_records,
-                    sender_address=(settings.smtp_sender_address or DEFAULT_SENDER),
+                    sender_address=settings.smtp_sender_address,
                     probe_delay_seconds=float(settings.smtp_probe_delay_seconds)
                     or DEFAULT_PROBE_DELAY,
                     connect_timeout_seconds=float(settings.smtp_verify_timeout),
                     greylist_retry_delay=float(settings.smtp_greylist_retry_delay),
+                    probe_domain_pattern=settings.smtp_probe_domain_pattern,
+                    probe_custom_domain=settings.smtp_probe_custom_domain,
                 ) as verifier:
                     # MUST-FIX M1: catch-all detection runs FIRST and
                     # ALWAYS. The previous implementation skipped this

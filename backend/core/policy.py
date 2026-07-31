@@ -2,7 +2,8 @@ from __future__ import annotations
 
 _INFOSTEALER_MODULES = frozenset({"hudson_rock"})
 _BREACH_MODULES = frozenset(
-    {"hibp", "breachdirectory", "breach_deep", "xposedornot", "intelx_lookup"}
+    {"hibp", "breachdirectory", "breach_deep", "xposedornot", "intelx_lookup",
+     "breach_aggregator"}
 )
 _USERNAME_ENUM_MODULES = frozenset(
     {
@@ -46,6 +47,7 @@ _POST_PRIMARY_ONLY = frozenset(
         "linkedin_serp",
         "marketplace_profile",
         "domain_cluster",
+        "breach_aggregator",
     }
 )
 
@@ -91,6 +93,7 @@ _MODULE_CAP: dict[str, int] = {
     "breachdirectory": 40,
     "xposedornot": 45,
     "intelx_lookup": 50,
+    "breach_aggregator": 50,
 }
 _MODULE_DEFAULT_TIMEOUTS: dict[str, int] = {
     "breach_deep": 90,

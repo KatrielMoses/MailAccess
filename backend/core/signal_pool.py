@@ -503,10 +503,22 @@ class AsyncSignalPool:
         return out
 
     def _publish_background(self, signal: Signal) -> None:
-        """Best-effort bridge from sync emit helpers to async publish()."""
+        """Best-effort bridge from sync emit helpers to async publish().
+
+        FIX 6: when there is no running event loop the signal cannot be
+        enqueued. Rather than dropping it silently, log at DEBUG and
+        count it in :meth:`stats` so the loss is observable.
+        """
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
+            self._dropped += 1
+            logger.debug(
+                "AsyncSignalPool._publish_background: no running event loop; "
+                "dropped signal from %s (kind=%s)",
+                signal.source,
+                signal.kind,
+            )
             return
         loop.create_task(self.publish(signal))
 

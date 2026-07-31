@@ -37,7 +37,13 @@ async def resolve_mx(domain: str) -> list[MXRecord]:
         return []
 
     records = await _resolve_with_dnspython(target)
-    return records
+    if records:
+        return records
+    # RFC 5321 §5.1: when a domain publishes no MX record but does have an
+    # address (A/AAAA) record, that host is an implicit mail exchanger.
+    # FIX 6: fall back to the domain's A record as a last-resort mail
+    # server rather than silently reporting "no mail" for A-only domains.
+    return await _resolve_implicit_a_fallback(target)
 
 
 async def _resolve_with_dnspython(domain: str) -> list[MXRecord]:
@@ -50,7 +56,14 @@ async def _resolve_with_dnspython(domain: str) -> list[MXRecord]:
     try:
         answers = await dns.asyncresolver.resolve(domain, "MX")
     except Exception as exc:  # noqa: BLE001 - dnspython raises many types
-        _LOG.debug("MX lookup failed for %s: %s", domain, exc)
+        # FIX 6: log DNS failures (timeout, SERVFAIL, NXDOMAIN) at WARNING
+        # so an empty result is never silently indistinguishable from a
+        # genuine "no MX" answer.
+        import dns.resolver  # type: ignore[import]
+
+        no_records = (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN)
+        level = _LOG.debug if isinstance(exc, no_records) else _LOG.warning
+        level("MX lookup failed for %s: %s: %s", domain, type(exc).__name__, exc)
         return []
 
     out: list[MXRecord] = []
@@ -69,3 +82,21 @@ async def _resolve_with_dnspython(domain: str) -> list[MXRecord]:
 
     out.sort(key=lambda r: (r.priority, r.host))
     return out
+
+
+async def _resolve_implicit_a_fallback(domain: str) -> list[MXRecord]:
+    """Return the domain itself as an implicit MX if it has an A record."""
+    try:
+        import dns.asyncresolver  # type: ignore[import]
+    except ImportError:
+        return []
+    try:
+        answers = await dns.asyncresolver.resolve(domain, "A")
+    except Exception as exc:  # noqa: BLE001 - dnspython raises many types
+        _LOG.debug("A-record fallback failed for %s: %s", domain, exc)
+        return []
+    if not list(answers):
+        return []
+    _LOG.info("no MX for %s — using implicit A-record mail host (RFC 5321)", domain)
+    # Priority 0: the domain is its own mail exchanger.
+    return [MXRecord(host=domain, priority=0)]

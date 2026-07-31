@@ -101,6 +101,7 @@ class IntelxLookupModule(BaseModule):
         findings: list[dict[str, Any]] = []
         errors: list[str] = []
         records_fetched = 0
+        rate_limited = False
         try:
             records = await client.search(
                 term=email,
@@ -124,6 +125,9 @@ class IntelxLookupModule(BaseModule):
         except IntelxCreditsError as exc:
             errors.append(f"intelx_lookup: out of credits — {exc}")
         except IntelxRateLimitError as exc:
+            # FIX 6: surface rate-limiting as a typed, machine-readable
+            # status rather than folding it into a generic PARTIAL.
+            rate_limited = True
             errors.append(f"intelx_lookup: rate limited after retries — {exc}")
         except IntelxTimeoutError as exc:
             errors.append(f"intelx_lookup: search timed out — {exc}")
@@ -135,17 +139,21 @@ class IntelxLookupModule(BaseModule):
         finally:
             await client.aclose()
 
+        metadata: dict[str, Any] = {
+            "source": "intelx",
+            "selector": email,
+            "buckets": buckets,
+            "records_fetched": records_fetched,
+            "max_results_cap": max_results,
+            "findings_count": len(findings),
+        }
+        if rate_limited:
+            metadata["status"] = "rate_limited"
+            metadata["rate_limited"] = True
         return ModuleResult(
             status=ModuleStatus.PARTIAL if errors else ModuleStatus.SUCCESS,
             findings=findings,
-            metadata={
-                "source": "intelx",
-                "selector": email,
-                "buckets": buckets,
-                "records_fetched": records_fetched,
-                "max_results_cap": max_results,
-                "findings_count": len(findings),
-            },
+            metadata=metadata,
             errors=errors,
         )
 

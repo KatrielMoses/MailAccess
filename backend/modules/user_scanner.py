@@ -71,14 +71,23 @@ class UserScannerModule(BaseModule):
 
         findings: list[dict[str, Any]] = []
         for result in registered:
+            metadata: dict[str, Any] = {
+                "category": result.get("category", ""),
+                "reason": result.get("reason", ""),
+                "source": "user_scanner",
+            }
+            # FIX 5A: preserve the per-platform ``extras`` (bio,
+            # display_name, avatar_url, location, join_date,
+            # follower_count, website, ...). These are already fetched
+            # by user-scanner at zero extra network cost; previously the
+            # whole dict was discarded.
+            extras = result.get("extras")
+            if extras:
+                metadata["profile_extras"] = extras
             findings.append({
                 "platform": result.get("site_name", "unknown"),
                 "profile_url": result.get("url"),
-                "metadata": {
-                    "category": result.get("category", ""),
-                    "reason": result.get("reason", ""),
-                    "source": "user_scanner",
-                },
+                "metadata": metadata,
                 "confidence": "high",
             })
 

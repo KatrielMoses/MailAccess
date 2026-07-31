@@ -1,5 +1,85 @@
 # Changelog
 
+### 0.14.0
+
+- Phase 1: M365 passive intelligence
+  (GetUserRealm, IfExistsResult:5 fix, REST Autodiscover, OneDrive probe,
+  OpenID preflight)
+- Phase 2: Enterprise network intelligence
+  (NTLM NetBIOS challenge, Lync/S4B discovery)
+- Phase 3: M365 single-probe active intelligence
+  (AADSTS error codes, ActiveSync probe, WS-Trust RST2 federated existence)
+- Phase 4: IMAP single-probe existence check
+- Phase 5: Breach aggregation
+  (Scylla.so free, HIBP Pastes, Dehashed, Snusbase)
+- Phase 6: Hunter.io full implementation
+  (domain search with format inference, email verification, monthly usage
+  tracking). The `hunter_io` module now verifies a single address against
+  Hunter's email-verifier endpoint on the investigate path and surfaces the
+  deliverability verdict + score; the domain-search harvest path maps
+  Hunter's 0-100 confidence to `hunter_verified`/`hunter_high`/`hunter_low`
+  source weights and feeds `data.pattern` into the format-inference pipeline.
+  Free-tier usage is capped independently at 25 domain searches and 25
+  verifications per calendar month via a persistent counter in
+  `~/.mailaccess/hunter_usage.json` (`hunter_usage_tracking`,
+  `hunter_domain_search_limit`, `hunter_verify_limit`); the counters warn at
+  two remaining and reset on a month boundary. A 401 latches an
+  invalid-key flag that skips all remaining Hunter calls.
+- Dehashed auth fix: account login email separate from target email
+
+### Unreleased
+
+- New `enterprise_net_intel` module (Enterprise Network Intelligence — Phase 2):
+  two unauthenticated, domain-level passive checks that extract internal
+  infrastructure without any auth attempt or lockout risk.
+  - NTLM NetBIOS challenge reader (`ntlm_challenge`): POSTs a standard Type-1
+    NTLM negotiation to `autodiscover.{domain}` (OWA fallback) and parses the
+    server's Type-2 challenge for NetBIOS domain/host, DNS domain/host, and the
+    AD forest name.
+  - Lync / Skype for Business discovery (`lync_discovery`): probes
+    `lyncdiscover.{domain}` (HTTPS then HTTP) and classifies the UC deployment
+    (onprem/hybrid/cloud) from the exposed pool FQDNs.
+  Both run concurrently under a combined budget (`enterprise_net_intel_budget_seconds`,
+  default 15s), gated by `enable_ntlm_challenge` / `enable_lync_discovery`, on
+  every domain regardless of provider. Results surface in the JSON export under
+  `infrastructure.active_directory` and `infrastructure.unified_communications`.
+  Both source types carry weight `0.0` (infrastructure metadata, not email
+  existence) in the `infrastructure` confidence family.
+
+### 0.13.5
+
+- SMTP probes now present a realistic per-probe sender derived from the
+  target domain (`MAIL FROM: <verify-{uuid8}@{domain}>`, `EHLO mail.{domain}`)
+  instead of the `probe@mailaccess.invalid` / `mailaccess-probe.invalid`
+  identities that hardened MTAs reject at `MAIL FROM`. Configurable via
+  `smtp_probe_domain_pattern` (`target`/`custom`) and `smtp_probe_custom_domain`.
+- New `outlook_autodiscover` module: unauthenticated Microsoft Autodiscover v1
+  existence probe (`autodiscover_m365`, weight 0.90). Runs first on M365
+  domains (faster and unthrottled); `GetCredentialType` only handles addresses
+  Autodiscover cannot confirm. Also probes consumer `@outlook.com` /
+  `@hotmail.com` / `@live.com` / `@msn.com` addresses on the investigate path.
+- SMTP `252` responses are now treated as catch-all hints, not confirmed
+  existence (removed from `EXISTS_CODES`); multi-line replies require a proper
+  terminating line before a code is treated as final.
+- Yahoo verifier posts the full email address (not just the local part), so
+  Yahoo-hosted custom domains are tested correctly.
+- M365 verifier runs a random-address control probe first and marks the whole
+  batch inconclusive when a tenant reports "exists" for everything.
+- Confidence model: added `search_snippet_brave`, `pgp_cached`, and
+  `npm/pypi/github_maintainer` weights; PGP, GitHub-commit, and
+  provider-verified sources no longer decay with age; Common Crawl / search /
+  Wayback variants collapse to one corroboration family each (a single page
+  indexed by multiple crawlers no longer inflates the multi-source multiplier);
+  removed three never-emitted dead booster keys.
+- `user_scanner` now preserves per-platform `extras` (bio, display name,
+  avatar, location, join date, follower count, website) under
+  `metadata.profile_extras`; `pgp_keyserver` surfaces `key_created` and
+  `key_age_days`.
+- Replaced several silent failure paths with typed/logged outcomes:
+  `mx_resolver` logs DNS failures and adds an RFC 5321 A-record implicit-MX
+  fallback; `signal_pool` counts background-publish drops; `intelx_lookup`
+  surfaces a `rate_limited` status; `platform_executor` logs transport errors.
+
 ### 0.13.4
 
 - Passive subdomain sources now write status and result counts incrementally

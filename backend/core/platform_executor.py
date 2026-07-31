@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from typing import Any
 
@@ -9,6 +10,8 @@ import httpx
 
 from ..platforms.schema import PlatformCheck
 from .user_agents import random_user_agent
+
+_LOG = logging.getLogger(__name__)
 
 
 def _split_alternatives(value: str | None) -> list[str]:
@@ -178,8 +181,16 @@ class PlatformExecutor:
                 timeout=platform.timeout,
             )
         except httpx.TimeoutException:
+            # FIX 6: distinguish and log instead of silently returning None.
+            _LOG.debug("platform_executor: %s request timed out", platform.name)
             return None
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - transport-level failure
+            _LOG.warning(
+                "platform_executor: %s request failed: %s: %s",
+                platform.name,
+                type(exc).__name__,
+                exc,
+            )
             return None
 
     async def _check_generic(

@@ -30,7 +30,7 @@ class DefendersBrief:
 
 _RISK_ORDER = ["MINIMAL", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
-_BREACH_MODULES = {"hibp", "haveibeenpwned", "breachdirectory", "breach_deep", "xposedornot", "leakcheck"}
+_BREACH_MODULES = {"hibp", "haveibeenpwned", "breachdirectory", "breach_deep", "xposedornot", "leakcheck", "breach_aggregator"}
 _ACCOUNT_MODULES = {
     "account_discovery",
     "user_scanner",

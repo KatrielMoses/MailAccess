@@ -88,11 +88,15 @@ class YahooVerifier:
         session_index: str,
         spec_id: str = "yidReg",
     ) -> YahooVerificationResult:
-        local = email.rsplit("@", 1)[0]
+        # FIX 3C: post the FULL email address as the userId. Stripping
+        # the domain and posting only the local part tested
+        # ``local@yahoo.com`` — the wrong mailbox for Yahoo-hosted
+        # custom domains (matched on ``.yahoodns.net`` MX). The Yahoo
+        # signup validator accepts full addresses.
         try:
             response = await client.post(
                 self.check_url,
-                data={"userId": local, "specId": spec_id, "acrumb": acrumb, "sessionIndex": session_index},
+                data={"userId": email, "specId": spec_id, "acrumb": acrumb, "sessionIndex": session_index},
                 headers={"X-Requested-With": "XMLHttpRequest", "Origin": "https://login.yahoo.com", "Referer": self.bootstrap_url},
             )
         except Exception as exc:  # noqa: BLE001

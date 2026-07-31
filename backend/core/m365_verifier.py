@@ -8,10 +8,14 @@ responses remaining inconclusive.
 from __future__ import annotations
 
 import asyncio
+import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from .http_client import build_client
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -23,6 +27,13 @@ class M365VerificationResult:
     throttle_status: int | None = None
     http_status: int | None = None
     error: str | None = None
+    # Check 2: explicit existence verdict + confidence. ``exists`` is True for
+    # any IfExistsResult that means the account is present (0 / 5 / 6); the
+    # federated-IdP case (5) carries a ``note`` and a slightly lower
+    # ``confidence`` because the third-party IdP adds one layer of indirection.
+    exists: bool | None = None
+    note: str | None = None
+    confidence: float | None = None
 
 
 class M365Verifier:
@@ -34,9 +45,38 @@ class M365Verifier:
         self.max_checks = max(1, min(int(max_checks), 100))
 
     async def verify_batch(self, emails: list[str]) -> list[M365VerificationResult]:
+        cleaned = list(
+            dict.fromkeys(
+                e.strip().lower() for e in emails if isinstance(e, str) and "@" in e
+            )
+        )
         results: list[M365VerificationResult] = []
         async with build_client(timeout=self.timeout_seconds, follow_redirects=True) as client:
-            for index, email in enumerate(dict.fromkeys(e.strip().lower() for e in emails if isinstance(e, str) and "@" in e)):
+            # FIX 3D: control probe. Before verifying anything, probe one
+            # guaranteed-nonexistent address. If the tenant reports it as
+            # existing (IfExistsResult == 0 → status "verified"), it returns
+            # "exists" for everything — every result would be a false
+            # positive — so mark the whole batch inconclusive and stop.
+            if cleaned:
+                control_domain = cleaned[0].rsplit("@", 1)[-1]
+                control_email = f"probe-{uuid.uuid4().hex[:12]}@{control_domain}"
+                control = await self._verify_one(client, control_email)
+                if control.if_exists_result == 0 or control.status == "verified":
+                    _LOG.warning(
+                        "M365 tenant appears to return exists for all (%s)",
+                        control_domain,
+                    )
+                    return [
+                        M365VerificationResult(
+                            email=email,
+                            status="inconclusive",
+                            error="catchall_tenant",
+                        )
+                        for email in cleaned
+                    ]
+                if self.delay_seconds:
+                    await asyncio.sleep(self.delay_seconds)
+            for index, email in enumerate(cleaned):
                 if index >= self.max_checks:
                     results.append(M365VerificationResult(email=email, status="not_attempted"))
                     continue
@@ -75,8 +115,18 @@ class M365Verifier:
             result.status = "inconclusive"
         elif result.if_exists_result in (0, 5, 6):
             result.status = "verified"
+            result.exists = True
+            if result.if_exists_result == 5:
+                # Check 2: IfExistsResult 5 == account exists but on a
+                # different IdP (Google / Okta / Ping). This is a real
+                # existence signal — treat it as exists, but at a slightly
+                # lower confidence than a native M365 mailbox because the
+                # federated IdP introduces one layer of indirection.
+                result.note = "federated_idp"
+                result.confidence = 0.75
         elif result.if_exists_result == 1:
             result.status = "not_found"
+            result.exists = False
         else:
             result.status = "inconclusive"
         return result

@@ -136,6 +136,28 @@ class PrimaryPhase(InvestigationPhase):
         return collected
 
 
+class BreachAggregatorPhase(InvestigationPhase):
+    """Phase 5 — breach aggregation.
+
+    Runs strictly after ``PrimaryPhase`` (which runs the HIBP breach
+    check) so the four aggregator sources corroborate the existing breach
+    evidence.  Findings land in ``collected["breach_aggregator"]`` and flow
+    into ``_prepare_results`` / the Defender's Brief like any other module.
+    """
+
+    name = "breach_aggregator"
+    dependencies = ("primary",)
+
+    async def run(self, **kwargs: Any) -> dict[str, ModuleResult]:
+        from ..modules.breach_aggregator import BreachAggregatorModule
+
+        await _run_and_record(
+            BreachAggregatorModule(),
+            **_runner_kwargs(kwargs),
+        )
+        return kwargs["collected"]
+
+
 class PivotPhase(InvestigationPhase):
     name = "username_pivot"
     dependencies = ("primary",)
@@ -334,6 +356,7 @@ def _runner_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 PHASE_DAG: tuple[InvestigationPhase, ...] = (
     CredibilityPhase(),
     PrimaryPhase(),
+    BreachAggregatorPhase(),
     PivotPhase(),
     PermutationPhase(),
     EmailDiscoveryPhase(),

@@ -688,6 +688,33 @@ async def run_adaptive_harvest(
                 except Exception as exc:  # noqa: BLE001
                     tail.setdefault("enrichment", {})[module_name] = f"failed: {exc}"
 
+            # Enterprise Network Intelligence (Phase 2). Domain-level and
+            # provider-agnostic; runs once per domain in the same enrichment
+            # phase as Shodan / RIPE. Fully budget-capped inside the module and
+            # exception-guarded here so a failure never disturbs the tail.
+            if (
+                not ctx.module_overrides
+                and (settings.enable_ntlm_challenge or settings.enable_lync_discovery)
+                and "enterprise_net_intel" not in ctx.skip_modules
+            ):
+                from .domain_harvest_orchestrator import _attach_enterprise_net_intel
+
+                remaining = 120.0 - (asyncio.get_running_loop().time() - tail_started)
+                if remaining <= 1.0:
+                    tail.setdefault("enrichment", {})[
+                        "enterprise_net_intel"
+                    ] = "dropped_tail_budget"
+                else:
+                    try:
+                        await _attach_enterprise_net_intel(cleaned, module_results)
+                        tail.setdefault("enrichment", {})[
+                            "enterprise_net_intel"
+                        ] = "completed"
+                    except Exception as exc:  # noqa: BLE001
+                        tail.setdefault("enrichment", {})[
+                            "enterprise_net_intel"
+                        ] = f"failed: {exc}"
+
         try:
             await asyncio.wait_for(_body(), timeout=120.0)
             tail["tail_status"] = "completed"
@@ -869,6 +896,8 @@ async def run_adaptive_harvest(
 
             dns_signals = await resolve_domain_email_dns_signals(cleaned)
             apply_domain_email_dns_signals(unique_emails, dns_signals)
+        if not ctx.module_overrides:
+            await _attach_breach_enrichment(unique_emails)
         unique_emails.sort(key=_sort_key)
         low_email_validation = tail.get("low_email_validation", {})
         completed = datetime.now(timezone.utc)
@@ -2087,6 +2116,31 @@ def _emit_module_complete(
             ctx.on_module_complete(module_name, status_value)
     except Exception:  # noqa: BLE001
         logger.debug("on_module_complete(%s) raised", module_name, exc_info=True)
+
+
+async def _attach_breach_enrichment(unique_emails: list[Any]) -> None:
+    """Phase 5 — run breach aggregation on confirmed emails only.
+
+    Post-confirmation enrichment: only SMTP-/provider-verified mailboxes
+    are probed; unverified pattern candidates are never sent to the breach
+    sources.  Failures are swallowed so enrichment can never stall or fail
+    the harvest tail.  Each confirmed email's ``breach_enrichment`` field is
+    populated with privacy-safe finding dicts.
+    """
+    try:
+        from ..modules.breach_aggregator import enrich_confirmed_emails
+
+        enrichment = await enrich_confirmed_emails(unique_emails, settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("breach enrichment tail failed: %s", exc)
+        return
+    if not enrichment:
+        return
+    by_email = {getattr(e, "email", None): e for e in unique_emails}
+    for address, findings in enrichment.items():
+        entry = by_email.get(address)
+        if entry is not None:
+            entry.breach_enrichment = [bf.to_finding() for bf in findings]
 
 
 def _employee_name_count(module_results: dict[str, ModuleResult]) -> int:

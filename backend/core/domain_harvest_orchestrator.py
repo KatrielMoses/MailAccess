@@ -186,6 +186,10 @@ class HarvestedEmail:
     identity_graph_score: float | None = None
     identity_graph_label: str | None = None
     identity_graph_flags: list[str] = field(default_factory=list)
+    # Phase 5 — post-confirmation breach aggregation. Populated only for
+    # SMTP-/provider-confirmed emails; each entry is a privacy-safe breach
+    # finding dict (password existence as a boolean flag, never the value).
+    breach_enrichment: list[dict[str, Any]] = field(default_factory=list)
 
 
 # MUST-FIX M4: cap on aggregated_source_urls to keep JSON export
@@ -1272,9 +1276,11 @@ async def _run_low_email_validation(
             return summary
         async with SMTPVerifier(
             mx_records=resolved_mx_records,
-            sender_address=settings.smtp_sender_address or DEFAULT_SENDER,
+            sender_address=settings.smtp_sender_address,
             probe_delay_seconds=float(settings.smtp_probe_delay_seconds) or DEFAULT_PROBE_DELAY,
             connect_timeout_seconds=float(settings.smtp_connect_timeout_seconds),
+            probe_domain_pattern=settings.smtp_probe_domain_pattern,
+            probe_custom_domain=settings.smtp_probe_custom_domain,
         ) as verifier:
             batch = await verifier.verify_batch(
                 domain,
@@ -1703,6 +1709,10 @@ async def _dispatch_provider_verifier(
     }
 
     results: list[Any]
+    # FIX 2: per-email promoted source override. Autodiscover-verified
+    # addresses are promoted with ``autodiscover_m365``; everything else
+    # keeps the branch default ``promoted_source``.
+    source_by_email: dict[str, str] = {}
     if provider is MailProvider.GOOGLE:
         if not settings.google_workspace_verifier_enabled:
             summary["gravatar_checked"] = 0
@@ -1731,13 +1741,74 @@ async def _dispatch_provider_verifier(
         promoted_source = "permutation_verified_google"
     else:  # MailProvider.M365
         summary["method"] = "m365"
-        verifier = M365Verifier(
-            delay_seconds=settings.m365_verification_delay_seconds,
-            timeout_seconds=settings.m365_verification_timeout_seconds,
-            max_checks=settings.m365_verification_max_checks,
-        )
-        results = await verifier.verify_batch(emails)
         promoted_source = "permutation_verified_m365"
+        results = []
+        # FIX 2: Autodiscover runs FIRST (faster, unthrottled). Any
+        # address it confirms is promoted immediately and skipped by the
+        # slower GetCredentialType probe; inconclusive addresses fall
+        # through to GetCredentialType.
+        confirmed: set[str] = set()
+        if settings.enable_outlook_autodiscover:
+            from ..modules.outlook_autodiscover import (
+                AutodiscoverVerifier,
+                reconcile_autodiscover,
+            )
+
+            autodiscover = AutodiscoverVerifier(
+                timeout_seconds=settings.autodiscover_timeout_seconds,
+                max_checks=settings.autodiscover_max_probes,
+            )
+            ad_results = await autodiscover.verify_batch(emails)
+            v1_status_by_email = {ad.email: ad.status for ad in ad_results}
+            ad_by_email = {ad.email: ad for ad in ad_results}
+            # Check 3: REST Autodiscover variant runs alongside the v1 probe.
+            # Its verdict is reconciled with v1 — agreement raises confidence,
+            # a REST-only "verified" still promotes, disagreement is dropped.
+            rest_status_by_email: dict[str, str] = {}
+            rest_by_email: dict[str, Any] = {}
+            if settings.enable_autodiscover_rest:
+                try:
+                    rest_results = await autodiscover.rest_verify_batch(emails)
+                except Exception as exc:  # noqa: BLE001 - additive signal only
+                    _LOG.debug("Autodiscover REST probe failed: %s", exc)
+                    rest_results = []
+                rest_status_by_email = {r.email: r.status for r in rest_results}
+                rest_by_email = {r.email: r for r in rest_results}
+                summary["autodiscover_rest_checked"] = len(rest_results)
+            agreements = 0
+            for email in emails:
+                v1_status = v1_status_by_email.get(email, "not_attempted")
+                rest_status = rest_status_by_email.get(email, "not_attempted")
+                if settings.enable_autodiscover_rest:
+                    reconciliation = reconcile_autodiscover(v1_status, rest_status)
+                    resolved = reconciliation.status
+                    if reconciliation.agreement:
+                        agreements += 1
+                else:
+                    resolved = v1_status
+                if resolved != "verified":
+                    continue
+                confirmed.add(email)
+                # Prefer the stronger v1 source type; fall back to the REST
+                # source type when only REST confirmed the mailbox.
+                if v1_status == "verified" and email in ad_by_email:
+                    source_by_email[email] = "autodiscover_m365"
+                    results.append(ad_by_email[email])
+                elif email in rest_by_email:
+                    source_by_email[email] = "autodiscover_rest"
+                    results.append(rest_by_email[email])
+            summary["autodiscover_checked"] = len(ad_results)
+            summary["autodiscover_verified"] = len(confirmed)
+            if settings.enable_autodiscover_rest:
+                summary["autodiscover_rest_agreements"] = agreements
+        remaining = [e for e in emails if e not in confirmed]
+        if remaining:
+            verifier = M365Verifier(
+                delay_seconds=settings.m365_verification_delay_seconds,
+                timeout_seconds=settings.m365_verification_timeout_seconds,
+                max_checks=settings.m365_verification_max_checks,
+            )
+            results.extend(await verifier.verify_batch(remaining))
 
     # ``gravatar_checked`` counts actual Gravatar lookups performed by the
     # Google verifier (bounded by the probe cap), never the candidates
@@ -1788,8 +1859,234 @@ async def _dispatch_provider_verifier(
             if verified:
                 metadata["verification_status"] = "verified"
                 if metadata.get("pattern_template"):
-                    metadata["source_type"] = promoted_source
+                    # FIX 2: Autodiscover-verified addresses carry
+                    # ``autodiscover_m365``; the rest keep the branch default.
+                    metadata["source_type"] = source_by_email.get(email, promoted_source)
+
+    # M365 Passive Intel Phase 1 (Checks 5, 1, 4). Runs on the default M365
+    # path, after the existence probes. Additive and fully exception-guarded:
+    # it enriches the summary with tenant intelligence and an independent
+    # OneDrive existence signal, and stashes the ADFS URL for Phase 3. A
+    # failure here never affects the verification verdict.
+    if provider is MailProvider.M365 and settings.enable_m365_passive_intel:
+        try:
+            # Hard overall bound: this is additive enrichment, never worth
+            # stalling the harvest tail for. Individual checks also carry
+            # their own httpx timeouts.
+            await asyncio.wait_for(
+                _attach_m365_passive_intel(domain, emails, findings_by_email, summary),
+                timeout=settings.m365_passive_intel_budget_seconds,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            _LOG.debug("M365 passive intel exceeded its budget")
+            summary["infrastructure"] = {"m365_tenant": {"error": "budget_exceeded"}}
+        except Exception as exc:  # noqa: BLE001 - additive enrichment only
+            _LOG.debug("M365 passive intel failed: %s", exc)
+            summary["infrastructure"] = {"m365_tenant": {"error": str(exc)}}
+
+    # M365 Active Intel Phase 3 (Checks 1/2/3). One single-probe account-state
+    # check per candidate, selected by provider + ADFS availability. The module
+    # enforces a hard one-probe-per-account guard, so there is no lockout risk.
+    # Additive and fully exception-guarded: an ``exists`` verdict strengthens
+    # the verification stamp and a ``not_found`` marks the address, but a
+    # failure here never weakens an existing verdict.
+    if provider is MailProvider.M365:
+        try:
+            await _attach_m365_active_intel(provider, emails, findings_by_email, summary)
+        except Exception as exc:  # noqa: BLE001 - additive enrichment only
+            _LOG.debug("M365 active intel failed: %s", exc)
     return summary
+
+
+#: Maps a selected active check to the config flag that gates it.
+_ACTIVE_PROBE_FLAG = {
+    "aadsts": "enable_aadsts_probe",
+    "activesync": "enable_activesync_probe",
+    "wstrust": "enable_wstrust_probe",
+}
+
+
+def _promote_email_to_verified(
+    email: str,
+    source_type: str | None,
+    confidence: float,
+    findings_by_email: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Stamp an active-probe ``exists`` verdict onto every finding for *email*."""
+    for finding in findings_by_email.get(email, []):
+        metadata = finding.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+            finding["metadata"] = metadata
+        metadata["verification_status"] = "verified"
+        metadata["is_provider_verified"] = True
+        metadata["provider_verification_status"] = "verified"
+        if source_type:
+            metadata["source_type"] = source_type
+            existing = metadata.get("source_types")
+            source_types = list(existing) if isinstance(existing, list) else []
+            if source_type not in source_types:
+                source_types.append(source_type)
+            metadata["source_types"] = source_types
+        metadata["active_probe"] = {
+            "status": "exists",
+            "source_type": source_type,
+            "confidence": confidence,
+        }
+
+
+def _mark_email_not_found(
+    email: str,
+    findings_by_email: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Stamp an active-probe ``not_found`` verdict onto every finding for *email*."""
+    for finding in findings_by_email.get(email, []):
+        metadata = finding.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+            finding["metadata"] = metadata
+        metadata["active_probe"] = {"status": "not_found"}
+        # Only downgrade when nothing stronger has already verified the address.
+        if metadata.get("verification_status") != "verified":
+            metadata["verification_status"] = "not_found"
+
+
+async def _attach_m365_active_intel(
+    provider: Any,
+    emails: list[str],
+    findings_by_email: dict[str, list[dict[str, Any]]],
+    summary: dict[str, Any],
+) -> None:
+    """Run one single-probe active check per candidate and fold in the verdict.
+
+    The ADFS ``AuthURL`` (surfaced and stashed by Phase 1 GetUserRealm) is read
+    back from the passive-intel infrastructure block on *summary*; a federated
+    tenant routes to WS-Trust, a cloud/managed tenant to AADSTS, everything
+    else to ActiveSync.
+    """
+    from backend.modules.m365_active_intel import run_active_probe, select_active_check
+
+    infra = summary.get("infrastructure")
+    adfs_url = (
+        infra.get("m365_tenant", {}).get("adfs_url") if isinstance(infra, dict) else None
+    )
+    probed = 0
+    for email in emails[: settings.smtp_verify_max_probes]:
+        check = select_active_check(provider=provider, adfs_url=adfs_url)
+        flag = _ACTIVE_PROBE_FLAG.get(check)
+        if flag is not None and not getattr(settings, flag, False):
+            continue
+        result = await run_active_probe(
+            email=email,
+            check=check,
+            adfs_url=adfs_url,
+            timeout=settings.active_probe_timeout,
+        )
+        probed += 1
+        if result.status == "exists":
+            _promote_email_to_verified(
+                email, result.source_type, result.confidence, findings_by_email
+            )
+        elif result.status == "not_found":
+            _mark_email_not_found(email, findings_by_email)
+        # inconclusive: leave unchanged.
+    summary["active_probe_checked"] = probed
+
+
+async def _attach_m365_passive_intel(
+    domain: str,
+    emails: list[str],
+    findings_by_email: dict[str, list[dict[str, Any]]],
+    summary: dict[str, Any],
+) -> None:
+    """Run the M365 passive checks and fold results into *summary* + findings.
+
+    * ``summary["infrastructure"]["m365_tenant"]`` gets the serialised tenant
+      intelligence (Checks 5 + 1) and OneDrive probe outcomes (Check 4).
+    * every on-domain finding's metadata carries ``m365_tenant`` and, when the
+      tenant is federated, ``m365_adfs_url`` for Phase 3 (WS-Trust).
+    * a ``provisioned`` OneDrive result contributes the ``onedrive_probe``
+      existence signal to that email's ``source_types``.
+    """
+    from ..modules.m365_passive_intel import run_m365_passive_intel
+
+    passive = await run_m365_passive_intel(
+        domain,
+        emails,
+        openid_timeout_seconds=settings.m365_openid_timeout_seconds,
+        realm_timeout_seconds=settings.m365_getuserrealm_timeout_seconds,
+        onedrive_timeout_seconds=settings.m365_onedrive_timeout_seconds,
+        max_onedrive_probes=settings.m365_onedrive_max_probes,
+    )
+    infra = passive.to_infrastructure_dict()
+    summary["infrastructure"] = {"m365_tenant": infra}
+
+    adfs_url = infra.get("adfs_url")
+    for findings in findings_by_email.values():
+        for finding in findings:
+            metadata = finding.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+                finding["metadata"] = metadata
+            metadata["m365_tenant"] = infra
+            if adfs_url:
+                # Phase 3 (WS-Trust) reads this without re-probing.
+                metadata["m365_adfs_url"] = adfs_url
+
+    # Check 4: a provisioned OneDrive is an independent existence signal.
+    for probe in passive.onedrive:
+        if probe.status != "provisioned":
+            continue
+        for finding in findings_by_email.get(probe.email, []):
+            metadata = finding.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+                finding["metadata"] = metadata
+            existing = metadata.get("source_types")
+            source_types = list(existing) if isinstance(existing, list) else []
+            if "onedrive_probe" not in source_types:
+                source_types.append("onedrive_probe")
+            metadata["source_types"] = source_types
+            metadata["onedrive_probe"] = {
+                "status": probe.status,
+                "http_status": probe.http_status,
+            }
+
+
+async def _attach_enterprise_net_intel(
+    domain: str,
+    module_results: dict[str, ModuleResult],
+) -> dict[str, Any]:
+    """Run the Phase 2 enterprise-net checks and fold them into the export.
+
+    Domain-level and provider-agnostic: both checks run once per domain in
+    the infrastructure-enrichment phase alongside Shodan / RIPE. The result
+    is stashed on a synthetic ``enterprise_net_intel`` module result whose
+    ``metadata.infrastructure`` is merged by the JSON exporter under
+    ``infrastructure.active_directory`` and
+    ``infrastructure.unified_communications``.
+    """
+    from ..modules.enterprise_net_intel import run_enterprise_net_intel
+
+    result = await run_enterprise_net_intel(
+        domain,
+        enable_ntlm=settings.enable_ntlm_challenge,
+        enable_lync=settings.enable_lync_discovery,
+        budget_seconds=settings.enterprise_net_intel_budget_seconds,
+    )
+    infra = result.to_infrastructure_dict()
+    module_results["enterprise_net_intel"] = ModuleResult(
+        status=ModuleStatus.SUCCESS,
+        findings=[],
+        metadata={
+            "infrastructure": {
+                "active_directory": infra["active_directory"],
+                "unified_communications": infra["unified_communications"],
+            },
+            "budget_exceeded": infra["budget_exceeded"],
+        },
+    )
+    return infra
 
 
 async def _attach_smtp_email_verification(
@@ -1826,9 +2123,11 @@ async def _attach_smtp_email_verification(
 
     async with SMTPVerifier(
         mx_records=resolved_mx_records,
-        sender_address=settings.smtp_sender_address or DEFAULT_SENDER,
+        sender_address=settings.smtp_sender_address,
         probe_delay_seconds=float(settings.smtp_probe_delay_seconds) or DEFAULT_PROBE_DELAY,
         connect_timeout_seconds=float(settings.smtp_connect_timeout_seconds),
+        probe_domain_pattern=settings.smtp_probe_domain_pattern,
+        probe_custom_domain=settings.smtp_probe_custom_domain,
     ) as verifier:
         batch = await verifier.verify_batch(
             domain,
@@ -1867,9 +2166,83 @@ async def _attach_smtp_email_verification(
                 metadata["verification_status"] = "verified"
                 if metadata.get("pattern_template"):
                     metadata["source_type"] = "permutation_verified"
+
+    # Phase 4 — IMAP single-probe fallback. Additive and fully
+    # exception-guarded: it only runs for self-hosted / shared-hosting /
+    # unknown providers on addresses SMTP left inconclusive, and an ``exists``
+    # verdict strengthens the stamp while a failure never weakens one.
+    if settings.enable_imap_probe:
+        try:
+            await _attach_imap_existence(
+                domain,
+                provider_detection.provider,
+                batch,
+                findings_by_email,
+                resolved_mx_records,
+                counts,
+            )
+        except Exception as exc:  # noqa: BLE001 - additive enrichment only
+            _LOG.debug("IMAP existence probe failed: %s", exc)
+
     if batch.error:
         counts["error"] = batch.error
     return counts
+
+
+async def _attach_imap_existence(
+    domain: str,
+    provider: Any,
+    batch: Any,
+    findings_by_email: dict[str, list[dict[str, Any]]],
+    mx_records: list[Any] | None,
+    counts: dict[str, int | str | bool | None],
+) -> None:
+    """Run the Phase 4 IMAP fallback on SMTP-inconclusive candidates.
+
+    Only self-hosted / shared-hosting / unknown providers are eligible, and
+    only addresses that SMTP left unresolved are probed (one guarded probe
+    each). ``exists`` promotes the address; ``not_found`` marks it.
+    """
+    from backend.modules.imap_existence import (
+        run_imap_existence_check,
+        should_run_imap_probe,
+    )
+
+    inconclusive_emails = [
+        result.email.lower()
+        for result in batch.results
+        if should_run_imap_probe(provider, result.verification_status)
+    ]
+    if not inconclusive_emails:
+        counts["imap_checked"] = 0
+        return
+
+    mx_hosts = [getattr(record, "host", None) for record in (mx_records or [])]
+    mx_hosts = [host for host in mx_hosts if host]
+
+    checked = exists = not_found = 0
+    for email in inconclusive_emails:
+        imap_result = await run_imap_existence_check(
+            email=email,
+            domain=domain,
+            timeout=settings.imap_probe_timeout,
+            port_check_timeout=settings.imap_port_check_timeout,
+            mx_hosts=mx_hosts,
+        )
+        checked += 1
+        if imap_result.status == "exists":
+            exists += 1
+            _promote_email_to_verified(
+                email, "imap_probe", imap_result.confidence, findings_by_email
+            )
+        elif imap_result.status == "not_found":
+            not_found += 1
+            _mark_email_not_found(email, findings_by_email)
+        # inconclusive: leave unchanged.
+
+    counts["imap_checked"] = checked
+    counts["imap_exists"] = exists
+    counts["imap_not_found"] = not_found
 
 
 async def _attach_m365_email_verification(
@@ -2814,7 +3187,7 @@ async def _run_hunter(
             metadata={"domain": domain, "skip_reason": "no_api_key"},
         )
     try:
-        results = await hunter_search(domain, api_key, limit=50)
+        results = await hunter_search(domain, api_key, limit=100)
     except Exception as exc:
         _LOG.warning("domain_harvest: Hunter search failed: %s", exc)
         return "hunter", ModuleResult(
@@ -2892,6 +3265,9 @@ async def _run_hunter(
                     "first_name": r.first_name,
                     "last_name": r.last_name,
                     "position": r.position,
+                    "department": r.department,
+                    "linkedin": r.linkedin,
+                    "organization": r.organization,
                     "source_type": source_type,
                     "confidence_score": round(ci.score, 4),
                     "confidence_breakdown": ci.breakdown,

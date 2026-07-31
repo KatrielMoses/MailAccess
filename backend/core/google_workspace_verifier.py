@@ -170,9 +170,11 @@ class GoogleWorkspaceVerifier:
 
         async with SMTPVerifier(
             mx_records=mx_records,
-            sender_address=settings.smtp_sender_address or DEFAULT_SENDER,
+            sender_address=settings.smtp_sender_address,
             probe_delay_seconds=float(settings.smtp_probe_delay_seconds) or DEFAULT_PROBE_DELAY,
             connect_timeout_seconds=float(settings.smtp_connect_timeout_seconds),
+            probe_domain_pattern=settings.smtp_probe_domain_pattern,
+            probe_custom_domain=settings.smtp_probe_custom_domain,
         ) as verifier:
             batch = await verifier.verify_batch(
                 domain,

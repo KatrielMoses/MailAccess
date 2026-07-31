@@ -61,9 +61,11 @@ _LOG = logging.getLogger(__name__)
 #: :meth:`SMTPVerifier.verify_batch`.
 MAX_PROBES_HARD_CAP = 10
 
-#: Anonymous sender address used in MAIL FROM.  Override only via
-#: the constructor ``sender_address`` parameter.
-DEFAULT_SENDER = "probe@mailaccess.invalid"
+#: Fallback MAIL FROM address, used only when a realistic per-probe
+#: sender cannot be derived (i.e. the probed address has no domain).
+#: The normal path derives ``verify-{uuid8}@{target_domain}`` per probe
+#: (see :meth:`SMTPVerifier._probe_identity`).
+DEFAULT_SENDER = "verify@example.com"
 
 #: Default delay between probes (seconds).  Override via config.
 DEFAULT_PROBE_DELAY = 2.5
@@ -73,9 +75,16 @@ DEFAULT_CONNECT_TIMEOUT = 10.0
 DEFAULT_GREYLIST_RETRY_DELAY = 30.0
 
 #: SMTP response codes that imply "this mailbox exists".
-#: Per RFC 5321: 250 is the canonical "accepted"; 251/252 are
-#: "user not local / will forward" — also valid "exists" signals.
-EXISTS_CODES: frozenset[int] = frozenset({250, 251, 252})
+#: Per RFC 5321: 250 is the canonical "accepted"; 251 is
+#: "user not local; will forward" — also a valid "exists" signal.
+#: 252 is deliberately EXCLUDED (see :data:`CATCHALL_HINT_CODES`).
+EXISTS_CODES: frozenset[int] = frozenset({250, 251})
+
+#: 252 = "cannot VRFY user, but will accept message and attempt
+#: delivery" (RFC 5321 §3.5.3).  This is catch-all / accept-anything
+#: behaviour, NOT confirmed mailbox existence.  A 252 must mark the
+#: domain as a catch-all rather than promote the address to verified.
+CATCHALL_HINT_CODES: frozenset[int] = frozenset({252})
 
 #: SMTP response codes that imply "this mailbox does NOT exist".
 NOT_EXISTS_CODES: frozenset[int] = frozenset({550, 551, 553})
@@ -109,16 +118,24 @@ _LINE_RE = re.compile(r"^(\d{3})([ -])\s?(.*)$")
 
 
 def _parse_smtp_reply(text: str) -> SMTPReply:
-    """Parse the final line of an SMTP multi-line reply.
+    """Parse an SMTP reply, honouring multi-line continuation syntax.
 
-    Single-line replies are like ``250 OK``.  Multi-line replies end
-    with ``250 OK`` (same digit) and look like ``250-Something\r\n250 OK``.
-    We only care about the code + last message text.
+    Per RFC 5321 §4.2.1 a multi-line reply repeats the code with a
+    hyphen (``250-Something``) on every continuation line and a SPACE
+    (``250 OK``) on the *terminating* line.  We only treat a reply as
+    complete once that terminating line is seen.
+
+    FIX 3B: the previous implementation latched ``final_code`` on the
+    FIRST line, so a truncated/non-terminated multi-line reply
+    (``250-FIRST`` with no terminator, e.g. a partial socket read) was
+    wrongly reported as a complete ``250``.  We now return code ``0``
+    (inconclusive) unless a terminating line is actually observed.
     """
     if not text:
         return SMTPReply()
     final_code: int | None = None
     final_msg = ""
+    saw_terminator = False
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -129,15 +146,19 @@ def _parse_smtp_reply(text: str) -> SMTPReply:
         code = int(match.group(1))
         cont = match.group(2)
         msg = match.group(3)
+        final_msg = msg
+        if cont == " ":
+            # Terminating line — this is the authoritative code.
+            final_code = code
+            saw_terminator = True
+            break
+        # Continuation line (``code-``): remember the code but keep
+        # reading until the terminator arrives.
         if final_code is None:
             final_code = code
-            final_msg = msg
-        elif code == final_code and cont == " ":
-            final_msg = msg
-        elif code != final_code:
-            # New code starts a new transaction.  Bail with what
-            # we have.
-            break
+    if not saw_terminator:
+        # Non-terminated / truncated reply — do not treat as final.
+        return SMTPReply(code=0, message=final_msg or "")
     return SMTPReply(code=final_code or 0, message=final_msg or "")
 
 
@@ -148,6 +169,7 @@ class SMTPVerificationResult:
     exists: bool | None = None  # True=yes, False=no, None=inconclusive
     response_code: int | None = 0
     blocked_signal: bool = False
+    catchall_hint: bool = False  # FIX 3A: set when a 252 accept-anything reply seen
     verification_status: str = "not_attempted"
     mx_host: str | None = None
     transport_error: str | None = None
@@ -198,14 +220,20 @@ class SMTPVerifier:
     def __init__(
         self,
         mx_records: list[MXRecord],
-        sender_address: str = DEFAULT_SENDER,
+        sender_address: str = "",
         probe_delay_seconds: float = DEFAULT_PROBE_DELAY,
         connect_timeout_seconds: float = DEFAULT_CONNECT_TIMEOUT,
         greylist_retry_delay: float = DEFAULT_GREYLIST_RETRY_DELAY,
         transport: _SMTPTransport | None = None,
+        probe_domain_pattern: str = "target",
+        probe_custom_domain: str = "",
     ) -> None:
         self._mx_records = list(mx_records)
-        self._sender = (sender_address or DEFAULT_SENDER).strip() or DEFAULT_SENDER
+        # An explicit ``sender_address`` (operator override) wins over the
+        # per-probe derived identity.  Empty string → derive per probe.
+        self._sender = (sender_address or "").strip()
+        self._probe_domain_pattern = (probe_domain_pattern or "target").strip().lower()
+        self._probe_custom_domain = (probe_custom_domain or "").strip().lower().lstrip("@")
         self._probe_delay = max(float(probe_delay_seconds), 0.0)
         self._connect_timeout = max(float(connect_timeout_seconds), 0.0)
         self._greylist_retry_delay = max(float(greylist_retry_delay), 0.0)
@@ -228,6 +256,28 @@ class SMTPVerifier:
         await self.aclose()
 
     # ------------------------------------------------------------------
+    # Probe identity (FIX 1)
+    # ------------------------------------------------------------------
+    def _probe_identity(self, target_domain: str) -> tuple[str, str]:
+        """Return ``(mail_from, ehlo_host)`` for a probe against *target_domain*.
+
+        Default policy makes the probe look like an internal bounce
+        check: ``MAIL FROM: <verify-{uuid8}@{target_domain}>`` and
+        ``EHLO mail.{target_domain}``.  An explicit ``sender_address``
+        override (if set) wins for the MAIL FROM value.
+        """
+        base = (target_domain or "").strip().lower().rstrip(".")
+        if self._probe_domain_pattern == "custom" and self._probe_custom_domain:
+            base = self._probe_custom_domain
+        if not base:
+            # No usable domain — fall back to the configured/default sender.
+            sender = self._sender or DEFAULT_SENDER
+            ehlo_host = "mail." + sender.rsplit("@", 1)[-1]
+            return sender, ehlo_host
+        sender = self._sender or f"verify-{uuid.uuid4().hex[:8]}@{base}"
+        return sender, f"mail.{base}"
+
+    # ------------------------------------------------------------------
     # Catch-all detection
     # ------------------------------------------------------------------
     async def check_catchall(self, domain: str) -> bool | None:
@@ -248,6 +298,11 @@ class SMTPVerifier:
             # Anti-probing firewall likely.  Surface as unknown —
             # caller must NOT proceed.
             return None
+        # FIX 3A: a 252 "accept anything" reply to a random address is a
+        # positive catch-all signal even though it is not a verified
+        # mailbox.  Treat it the same as a 250 to a random probe.
+        if result.catchall_hint:
+            return True
         if result.exists is None:
             return None
         return bool(result.exists)
@@ -300,13 +355,14 @@ class SMTPVerifier:
                 result = await self._smtp_rcpt(mx, email)
                 result.mx_host = mx.host
                 last_result = result
-                # Definitive answers and explicit blocks should not be
-                # contradicted by a lower-priority MX host. Continue only
-                # for ambiguous/inconclusive responses.
+                # Definitive answers, explicit blocks, and catch-all hints
+                # should not be contradicted by a lower-priority MX host.
+                # Continue only for ambiguous/inconclusive responses.
                 if (
                     result.exists is not None
                     or result.blocked_signal
-                    or result.verification_status in {"temporary_failure", "blocked"}
+                    or result.catchall_hint
+                    or result.verification_status in {"temporary_failure", "blocked", "catch_all"}
                 ):
                     return result
                 errors.append(
@@ -341,7 +397,11 @@ class SMTPVerifier:
 
     async def _smtp_rcpt(self, mx: MXRecord, email: str) -> SMTPVerificationResult:
         """Walk HELO / MAIL FROM / RCPT TO for a single address."""
-        ehlo_domain = "mailaccess-probe.invalid"
+        # FIX 1: derive a realistic sender + EHLO host from the target
+        # domain (verify-{uuid8}@{domain} / mail.{domain}) so the probe
+        # reads as an internal bounce check, not an OSINT tool.
+        target_domain = email.rsplit("@", 1)[-1] if "@" in email else ""
+        sender, ehlo_domain = self._probe_identity(target_domain)
         try:
             banner = await self._transport.send(mx.host, 25, "")
             if not banner:
@@ -372,7 +432,7 @@ class SMTPVerifier:
                 )
 
             mail_reply = await self._transport.send(
-                mx.host, 25, f"MAIL FROM:<{self._sender}>"
+                mx.host, 25, f"MAIL FROM:<{sender}>"
             )
             mail_code = _parse_smtp_reply(mail_reply).code
             if mail_code not in (250,):
@@ -404,6 +464,16 @@ class SMTPVerifier:
             if rcpt_code in EXISTS_CODES:
                 return SMTPVerificationResult(
                     email=email, exists=True, response_code=rcpt_code
+                )
+            if rcpt_code in CATCHALL_HINT_CODES:
+                # FIX 3A: 252 = accept-anything.  Not confirmed existence;
+                # flag as a catch-all hint and leave existence unknown.
+                return SMTPVerificationResult(
+                    email=email,
+                    exists=None,
+                    response_code=rcpt_code,
+                    catchall_hint=True,
+                    verification_status="catch_all",
                 )
             if rcpt_code in NOT_EXISTS_CODES:
                 return SMTPVerificationResult(

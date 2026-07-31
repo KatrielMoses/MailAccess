@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -56,26 +56,34 @@ class PGPKeyserverModule(BaseModule):
             )
 
         all_uids = key_data.get("all_uids", [])
+        # FIX 5B: surface the key's creation date and age. An 8-year-old
+        # key is far stronger identity evidence than one created
+        # yesterday, so the age is worth exposing to downstream scoring.
+        key_created = str(key_data.get("key_created") or "")
+        key_age_days = _key_age_days(key_created)
         for uid in key_data.get("uids", []):
             uid_name = str(uid.get("name") or "").strip()
             uid_email = str(uid.get("email") or "").strip()
             if not _valid_name(uid_name):
                 continue
+            metadata: dict[str, Any] = {
+                "uid_name": uid_name,
+                "uid_email": uid_email,
+                "key_id": key_data.get("key_id") or "",
+                "key_fingerprint": key_data.get("key_fingerprint") or "",
+                "key_created": key_created,
+                "key_algorithm": key_data.get("key_algorithm") or "",
+                "source": source,
+                "all_uids": all_uids,
+            }
+            if key_age_days is not None:
+                metadata["key_age_days"] = key_age_days
             findings.append(
                 {
                     "platform": "pgp_keyserver",
                     "profile_url": _OPENPGP_SEARCH.format(email=email),
                     "confidence": "high",
-                    "metadata": {
-                        "uid_name": uid_name,
-                        "uid_email": uid_email,
-                        "key_id": key_data.get("key_id") or "",
-                        "key_fingerprint": key_data.get("key_fingerprint") or "",
-                        "key_created": key_data.get("key_created") or "",
-                        "key_algorithm": key_data.get("key_algorithm") or "",
-                        "source": source,
-                        "all_uids": all_uids,
-                    },
+                    "metadata": metadata,
                 }
             )
 
@@ -228,6 +236,23 @@ class PGPKeyserverModule(BaseModule):
 def _valid_name(value: str) -> bool:
     value = " ".join(value.split())
     return bool(value and not any(ch.isdigit() for ch in value) and _NAME_RE.match(value))
+
+
+def _key_age_days(key_created: str) -> int | None:
+    """Return the age in days of an ISO-formatted key-creation date.
+
+    Accepts ``YYYY-MM-DD`` (from :func:`_iso_date` / :func:`_unix_to_iso`)
+    or a full ISO timestamp.  Returns ``None`` when unparseable.
+    """
+    if not key_created:
+        return None
+    try:
+        parsed = datetime.fromisoformat(key_created)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max((datetime.now(tz=timezone.utc) - parsed).days, 0)
 
 
 def _iso_date(value: Any) -> str:

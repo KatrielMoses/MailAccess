@@ -268,6 +268,18 @@ class Settings(BaseSettings):
     enable_domain_cluster: bool = True
     domain_cluster_cap: int = 20
 
+    # Phase 5 — breach aggregation. Four sources: Scylla.so (free), HIBP
+    # pastes (needs HIBP_API_KEY), Dehashed and Snusbase (both paid). Each
+    # source is skipped gracefully when its key/toggle is absent.
+    enable_scylla: bool = True
+    enable_hibp_pastes: bool = True
+    dehashed_api_key: str = ""
+    # Dehashed Basic auth uses the account holder's login email, not the
+    # target being searched. Leave empty to fall back to key-only auth.
+    dehashed_account_email: str = ""
+    snusbase_api_key: str = ""
+    breach_aggregator_timeout: float = 15.0
+
     # Deep breach probing: opt-in account-existence checks across top HIBP breach domains
     enable_breach_deep: bool = False
     breach_deep_limit: int = 100
@@ -408,10 +420,20 @@ class Settings(BaseSettings):
     enable_smtp_verification: bool = True
     smtp_max_probes_per_domain: int = 10
     smtp_probe_delay_seconds: float = 2.5
-    # Sender address used in MAIL FROM.  Spec requires this be a
-    # non-attributable, non-deliverable anonymous address; do not
-    # change it to anything that points back at the operator.
-    smtp_sender_address: str = "probe@mailaccess.invalid"
+    # Explicit MAIL FROM override.  Leave empty ("") to derive a
+    # realistic per-probe sender from ``smtp_probe_domain_pattern``
+    # (the default), which makes the probe look like an internal
+    # bounce check rather than an obvious OSINT tool.  Set a fixed
+    # address here only if you have a specific operator mailbox to use.
+    smtp_sender_address: str = ""
+    # Probe identity policy (FIX 1):
+    #   "target" — derive MAIL FROM <verify-{uuid8}@{target_domain}>
+    #              and HELO mail.{target_domain} from the domain being
+    #              verified (default).
+    #   "custom" — use ``smtp_probe_custom_domain`` instead of the
+    #              target domain for the sender/HELO hostname.
+    smtp_probe_domain_pattern: str = "target"
+    smtp_probe_custom_domain: str = ""
     smtp_connect_timeout_seconds: int = 10
     # A persona pivot is reactive only; it is never seeded as a normal module.
     persona_pivot_enabled: bool = True
@@ -431,6 +453,50 @@ class Settings(BaseSettings):
     m365_verification_delay_seconds: float = 0.1
     m365_verification_max_checks: int = 50
     m365_verification_timeout_seconds: float = 10.0
+    # Microsoft Autodiscover existence probe (FIX 2). Faster and
+    # unthrottled relative to GetCredentialType; runs first on M365.
+    enable_outlook_autodiscover: bool = True
+    autodiscover_timeout_seconds: float = 8.0
+    autodiscover_max_probes: int = 50
+    # M365 Passive Intelligence — Phase 1. Five unauthenticated passive
+    # checks against Microsoft infrastructure. All run by default on any
+    # domain/email that resolves to M365; none authenticate or risk lockout.
+    enable_m365_passive_intel: bool = True
+    # Check 3 — REST Autodiscover variant, run alongside the v1 probe.
+    enable_autodiscover_rest: bool = True
+    # Check 5 — OpenID configuration preflight (per domain).
+    m365_openid_timeout_seconds: float = 8.0
+    # Check 1 — GetUserRealm (getuserrealm.srf XML variant).
+    m365_getuserrealm_timeout_seconds: float = 10.0
+    # Check 4 — OneDrive personal-site probe (per email).
+    m365_onedrive_timeout_seconds: float = 8.0
+    m365_onedrive_max_probes: int = 25
+    # Hard overall budget for the passive-intel enrichment block. It is
+    # additive tenant intelligence, never worth stalling the harvest tail.
+    m365_passive_intel_budget_seconds: float = 20.0
+    # M365 Active Intelligence — Phase 3. Three single-probe account-state
+    # checks that each send exactly ONE probe per account with a deliberately
+    # invalid credential. A module-level guard enforces one probe per account
+    # per process; at one attempt each there is no lockout risk.
+    enable_aadsts_probe: bool = True
+    enable_activesync_probe: bool = True
+    enable_wstrust_probe: bool = True
+    active_probe_timeout: float = 10.0
+    # IMAP Single-Probe Existence — Phase 4. One guarded IMAP LOGIN per account
+    # for self-hosted / shared-hosting / unknown domains that SMTP left
+    # inconclusive. A module-level one-probe guard makes lockout impossible.
+    enable_imap_probe: bool = True
+    imap_probe_timeout: float = 8.0
+    imap_port_check_timeout: float = 5.0
+    # Enterprise Network Intelligence — Phase 2. Two unauthenticated,
+    # domain-level passive checks that extract internal Active Directory
+    # (NTLM Type-2 challenge reader) and unified-communications (Lync /
+    # Skype for Business discovery) infrastructure. Neither authenticates
+    # nor risks lockout; both run once per domain regardless of provider.
+    enable_ntlm_challenge: bool = True
+    enable_lync_discovery: bool = True
+    # Combined wall-clock cap for both checks (run concurrently).
+    enterprise_net_intel_budget_seconds: float = 15.0
     enable_yahoo_email_verification: bool = False
     yahoo_verification_delay_seconds: float = 1.2
     yahoo_verification_max_checks: int = 25
@@ -456,6 +522,15 @@ class Settings(BaseSettings):
     serpapi_key: str | None = None
     github_token: str | None = None
     companies_house_api_key: str | None = None
+
+    # Hunter.io usage tracking (Phase 6). Free tier is 25 searches/month and
+    # 25 verifications/month with no CC. ``hunter_usage_tracking`` gates the
+    # persistent monthly circuit breaker; when False, calls are neither counted
+    # nor capped. The two limits are enforced independently against separate
+    # counters in ``~/.mailaccess/hunter_usage.json``.
+    hunter_usage_tracking: bool = True
+    hunter_domain_search_limit: int = 25
+    hunter_verify_limit: int = 25
 
     # Proxy
     proxy_url: str | None = None
