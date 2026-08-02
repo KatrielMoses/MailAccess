@@ -226,6 +226,8 @@ async def search_scylla(
         data = res.json()
     except Exception as exc:  # noqa: BLE001 — sources must never raise
         _set_source_telemetry(telemetry, "error", error=str(exc))
+        if telemetry is not None:
+            telemetry["error_detail"] = str(exc)
         logger.debug("scylla_breach: error, returning empty (%s)", exc)
         return []
 
@@ -531,6 +533,8 @@ async def _run_breach_source(
         result = await func(*args, **kwargs)
     except Exception as exc:  # noqa: BLE001 - one source cannot stop others
         _set_source_telemetry(telemetry, "error", error=str(exc))
+        if source == "scylla":
+            telemetry["error_detail"] = str(exc)
         logger.debug("breach source %s raised: %s", source, exc)
         result = []
 

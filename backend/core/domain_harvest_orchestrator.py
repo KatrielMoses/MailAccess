@@ -1696,6 +1696,7 @@ async def _dispatch_provider_verifier(
         if not fallback:
             summary = {
                 "candidates_routed": 0,
+                "checked": 0,
                 "status": "no_candidates",
                 "provider": provider.value,
             }
@@ -1719,7 +1720,25 @@ async def _dispatch_provider_verifier(
         "candidates_routed": len(emails),
         "candidates": len(emails),
         "provider": provider.value,
+        "checked": 0,
     }
+    probed_emails: set[str] = set()
+
+    def record_probed_results(items: list[Any]) -> None:
+        """Record candidates that reached a real provider probe."""
+        for item in items:
+            email = str(getattr(item, "email", "")).strip().lower()
+            status = str(getattr(item, "status", "inconclusive"))
+            # M365's control probe can return synthetic candidate results
+            # when it detects a catch-all tenant; those candidates were not
+            # actually contacted.
+            error = str(getattr(item, "error", "") or "")
+            if (
+                email
+                and status != "not_attempted"
+                and error != "catchall_tenant"
+            ):
+                probed_emails.add(email)
     if provider is MailProvider.M365 and m365_context is not None:
         # The startup preflight already performed OpenID/GetUserRealm. Seed
         # the summary before active verification so ADFS/tenant routing uses
@@ -1760,6 +1779,7 @@ async def _dispatch_provider_verifier(
             session=None,
             max_checks=settings.smtp_verify_max_probes,
         )
+        record_probed_results(results)
         promoted_source = "permutation_verified_google"
     else:  # MailProvider.M365
         summary["method"] = "m365"
@@ -1791,6 +1811,7 @@ async def _dispatch_provider_verifier(
                 max_checks=settings.autodiscover_max_probes,
             )
             ad_results = await autodiscover.verify_batch(probe_emails)
+            record_probed_results(ad_results)
             v1_status_by_email = {ad.email: ad.status for ad in ad_results}
             ad_by_email = {ad.email: ad for ad in ad_results}
             # Check 3: REST Autodiscover variant runs alongside the v1 probe.
@@ -1810,6 +1831,7 @@ async def _dispatch_provider_verifier(
                     rest_results = []
                 rest_status_by_email = {r.email: r.status for r in rest_results}
                 rest_by_email = {r.email: r for r in rest_results}
+                record_probed_results(rest_results)
                 summary["autodiscover_rest_checked"] = len(rest_results)
             agreements = 0
             for email in probe_emails:
@@ -1844,7 +1866,9 @@ async def _dispatch_provider_verifier(
                 timeout_seconds=settings.m365_verification_timeout_seconds,
                 max_checks=settings.m365_verification_max_checks,
             )
-            results.extend(await verifier.verify_batch(remaining))
+            credential_results = await verifier.verify_batch(remaining)
+            record_probed_results(credential_results)
+            results.extend(credential_results)
 
     # ``gravatar_checked`` counts actual Gravatar lookups performed by the
     # Google verifier (bounded by the probe cap), never the candidates
@@ -1935,6 +1959,10 @@ async def _dispatch_provider_verifier(
             await _attach_m365_active_intel(provider, emails, findings_by_email, summary)
         except Exception as exc:  # noqa: BLE001 - additive enrichment only
             _LOG.debug("M365 active intel failed: %s", exc)
+    private_probes = summary.pop("_probed_emails", set())
+    if isinstance(private_probes, set):
+        probed_emails.update(private_probes)
+    summary["checked"] = len(probed_emails)
     return summary
 
 
@@ -2011,6 +2039,7 @@ async def _attach_m365_active_intel(
         infra.get("m365_tenant", {}).get("adfs_url") if isinstance(infra, dict) else None
     )
     probed = 0
+    probed_emails = summary.setdefault("_probed_emails", set())
     for email in emails[: settings.smtp_verify_max_probes]:
         check = select_active_check(provider=provider, adfs_url=adfs_url)
         flag = _ACTIVE_PROBE_FLAG.get(check)
@@ -2023,6 +2052,8 @@ async def _attach_m365_active_intel(
             timeout=settings.active_probe_timeout,
         )
         probed += 1
+        if isinstance(probed_emails, set):
+            probed_emails.add(email.strip().lower())
         if result.status == "exists":
             _promote_email_to_verified(
                 email, result.source_type, result.confidence, findings_by_email
@@ -2168,7 +2199,7 @@ async def _attach_smtp_email_verification(
         if not findings_by_email:
             summary = {"checked": 0, "status": "no_candidates", "is_catchall": None}
         else:
-            summary = {"checked": len(findings_by_email), "status": "no_mx_records"}
+            summary = {"checked": 0, "status": "no_mx_records"}
         if m365_context is not None:
             _apply_m365_passive_context(m365_context, findings_by_email, summary)
         return summary
@@ -2207,8 +2238,14 @@ async def _attach_smtp_email_verification(
             max_probes=min(int(settings.smtp_max_probes_per_domain), MAX_PROBES_HARD_CAP),
         )
 
+    smtp_probed_emails = {
+        str(result.email).strip().lower()
+        for result in batch.results
+        if str(getattr(result, "verification_status", "not_attempted"))
+        != "not_attempted"
+    }
     counts: dict[str, int | str | bool | None] = {
-        "checked": len(findings_by_email),
+        "checked": len(smtp_probed_emails),
         "probes_attempted": batch.probes_attempted,
         "is_catchall": None if shared_hosting else batch.is_catchall,
         "catchall_reliable": not shared_hosting,
@@ -2285,10 +2322,17 @@ async def _attach_imap_existence(
         for result in batch.results
         if should_run_imap_probe(provider, result.verification_status)
     ]
+    probed_emails = {
+        str(result.email).strip().lower()
+        for result in batch.results
+        if str(getattr(result, "verification_status", "not_attempted"))
+        != "not_attempted"
+    }
     if not inconclusive_emails:
         # imap_probe_count deprecated, use imap_checked. Remove in 0.15.0.
         counts["imap_probe_count"] = 0
         counts["imap_checked"] = 0
+        counts["checked"] = len(probed_emails)
         return
 
     mx_hosts = [getattr(record, "host", None) for record in (mx_records or [])]
@@ -2304,6 +2348,7 @@ async def _attach_imap_existence(
             mx_hosts=mx_hosts,
         )
         checked += 1
+        probed_emails.add(email)
         if imap_result.status == "exists":
             exists += 1
             _promote_email_to_verified(
@@ -2317,6 +2362,7 @@ async def _attach_imap_existence(
     # imap_probe_count deprecated, use imap_checked. Remove in 0.15.0.
     counts["imap_probe_count"] = checked
     counts["imap_checked"] = checked
+    counts["checked"] = len(probed_emails)
     counts["imap_exists"] = exists
     counts["imap_not_found"] = not_found
 

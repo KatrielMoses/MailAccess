@@ -243,7 +243,7 @@ def _derive_harvest_status(ctx: WorkerContext, *, timed_out: bool) -> str:
     """Classify termination from scheduler state, not wall-clock duration."""
     if not timed_out:
         return "terminated_early"
-    return "completed_saturated" if ctx.budget.track1_closed else "partial_timeout"
+    return "partial_timeout"
 
 
 def _hydrate_subdomain_source_telemetry(ctx: WorkerContext) -> None:
@@ -1728,7 +1728,18 @@ async def _run_subdomain_intel_with_hard_cap(
     hard_cap = float(
         getattr(ctx, "subdomain_intel_hard_cap", SUBDOMAIN_INTEL_HARD_CAP)
     )
+    started = time.perf_counter()
     subdomain_task = asyncio.ensure_future(run_subdomain_intel(ctx))
+
+    def write_duration() -> ModuleResult:
+        result = _ensure_subdomain_partial_result(ctx)
+        metadata = dict(result.metadata or {})
+        metadata["duration_seconds"] = round(time.perf_counter() - started, 3)
+        result.metadata = metadata
+        if ctx.module_results is not None:
+            ctx.module_results[MODULE_SUBDOMAIN_INTEL] = result
+        return result
+
     try:
         return await asyncio.wait_for(
             subdomain_task,
@@ -1744,7 +1755,7 @@ async def _run_subdomain_intel_with_hard_cap(
             "subdomain_intel cancelled at hard cap %ds",
             hard_cap,
         )
-        return _module_outputs(_ensure_subdomain_partial_result(ctx))
+        return _module_outputs(write_duration())
     except asyncio.CancelledError:
         # If the harvest itself is cancelled, do not leave the child task
         # running after its parent has unwound.
@@ -1753,6 +1764,7 @@ async def _run_subdomain_intel_with_hard_cap(
             await subdomain_task
         except asyncio.CancelledError:
             pass
+        write_duration()
         raise
 
 async def _run_module_with_payload(

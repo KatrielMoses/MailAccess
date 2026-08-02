@@ -1147,6 +1147,7 @@ class SubdomainIntelModule(BaseModule):
 
     def __init__(self) -> None:
         self._active_result: DiscoveryResult | None = None
+        self._run_started_at: float | None = None
         self._passive_started_at: float | None = None
         self._passive_finished_at: float | None = None
         self._passive_finished = False
@@ -1154,9 +1155,14 @@ class SubdomainIntelModule(BaseModule):
 
     def partial_metadata(self) -> dict[str, object]:
         """Return failure-atomic source telemetry for cancellation paths."""
+        duration = (
+            round(max(0.0, time.perf_counter() - self._run_started_at), 3)
+            if self._run_started_at is not None
+            else None
+        )
         result = self._active_result
         if result is None:
-            return {
+            metadata: dict[str, object] = {
                 "sources": {
                     source: {"status": "not_run", "count": 0}
                     for source in DISCOVERY_SOURCE_NAMES
@@ -1170,6 +1176,9 @@ class SubdomainIntelModule(BaseModule):
                     "crt_total_max_seconds": CRT_TOTAL_TIMEOUT_SECONDS,
                 },
             }
+            if duration is not None:
+                metadata["duration_seconds"] = duration
+            return metadata
         passive = {
             source: dict(result.sources.get(source) or {"status": "not_run", "count": 0})
             for source in DISCOVERY_SOURCE_NAMES
@@ -1181,7 +1190,7 @@ class SubdomainIntelModule(BaseModule):
             if self._passive_started_at is not None
             else 0.0
         )
-        return {
+        metadata = {
             "domain": result.domain,
             "sources": passive,
             "passive_phase": {
@@ -1198,6 +1207,9 @@ class SubdomainIntelModule(BaseModule):
                 "met": result.axfr_succeeded or healthy >= 2,
             },
         }
+        if duration is not None:
+            metadata["duration_seconds"] = duration
+        return metadata
 
     def partial_findings(self) -> list[dict[str, object]]:
         """Materialize hosts discovered before an outer task cancellation."""
@@ -1238,6 +1250,7 @@ class SubdomainIntelModule(BaseModule):
         source_telemetry: dict[str, dict[str, object]] | None = None,
     ) -> ModuleResult:
         domain = domain.strip().lower().rstrip(".")
+        self._run_started_at = time.perf_counter()
         if not domain or "." not in domain:
             return ModuleResult(
                 ModuleStatus.SKIPPED,
