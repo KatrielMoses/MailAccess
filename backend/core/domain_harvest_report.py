@@ -57,6 +57,7 @@ _LABEL_COLORS = {
 
 _STATUS_COLORS = {
     "success": "green",
+    "success_empty": "green",
     "complete": "green",
     "failed": "red",
     "pending": "cyan",
@@ -202,6 +203,7 @@ def _build_infrastructure(result: DomainHarvestResult) -> dict[str, Any]:
     asn_rows: dict[int, dict[str, Any]] = {}
     active_directory: dict[str, Any] | None = None
     unified_communications: dict[str, Any] | None = None
+    m365_tenant: dict[str, Any] | None = None
     for module_result in result.module_results.values():
         metadata = module_result.metadata or {}
         infrastructure = metadata.get("infrastructure")
@@ -215,6 +217,9 @@ def _build_infrastructure(result: DomainHarvestResult) -> dict[str, Any]:
         uc = infrastructure.get("unified_communications")
         if isinstance(uc, dict):
             unified_communications = uc
+        tenant = infrastructure.get("m365_tenant")
+        if isinstance(tenant, dict):
+            m365_tenant = tenant
         ips = infrastructure.get("ips")
         asns = infrastructure.get("asns")
         if not isinstance(ips, list) or not isinstance(asns, list):
@@ -248,6 +253,28 @@ def _build_infrastructure(result: DomainHarvestResult) -> dict[str, Any]:
             existing["prefixes"] = sorted(
                 {*existing.get("prefixes", []), *existing.get("cidrs", [])}
             )
+    # Provider verification stores the cached M365 passive result in its
+    # summary. Promote it to the export-level infrastructure block so
+    # consumers can read infrastructure.m365_tenant without traversing the
+    # verification tail.
+    result_metadata = result.metadata or {}
+    direct_tenant = result_metadata.get("m365_tenant")
+    if isinstance(direct_tenant, dict):
+        m365_tenant = direct_tenant
+    verification_summaries = [
+        result_metadata.get("smtp_email_verification"),
+        (result_metadata.get("verification_tail") or {}).get("smtp_email_verification"),
+    ]
+    for summary in verification_summaries:
+        if not isinstance(summary, dict):
+            continue
+        summary_infra = summary.get("infrastructure")
+        if not isinstance(summary_infra, dict):
+            continue
+        tenant = summary_infra.get("m365_tenant")
+        if isinstance(tenant, dict):
+            m365_tenant = tenant
+            break
     payload: dict[str, Any] = {
         "ips": [ip_rows[key] for key in sorted(ip_rows)],
         "asns": [asn_rows[key] for key in sorted(asn_rows)],
@@ -256,6 +283,8 @@ def _build_infrastructure(result: DomainHarvestResult) -> dict[str, Any]:
         payload["active_directory"] = active_directory
     if unified_communications is not None:
         payload["unified_communications"] = unified_communications
+    if m365_tenant is not None:
+        payload["m365_tenant"] = m365_tenant
     return payload
 
 
@@ -424,6 +453,7 @@ def _module_display_name(name: str) -> str:
         "email_identity_enrichment": "Identity Enrichment",
         "gravatar_lookup": "Gravatar",
         "github_commits": "GitHub Commits",
+        "breach_aggregator": "breach_aggregator",
     }
     return mapping.get(name, name.replace("_", " ").title())
 
@@ -1078,6 +1108,15 @@ def _build_sources_table(result: DomainHarvestResult) -> Table:
             # W5: the three new structured-source modules report the
             # unique-email count under ``total_unique_emails``.
             notes = f"{meta.get('total_unique_emails', 0)} found"
+        elif name == "breach_aggregator":
+            source_notes = []
+            for source, source_meta in (meta.get("sources") or {}).items():
+                if not isinstance(source_meta, dict):
+                    continue
+                source_status = source_meta.get("status", "not_run")
+                label = "ok" if source_status == "success" else source_status
+                source_notes.append(f"{source}:{label}")
+            notes = " ".join(source_notes)
 
         table.add_row(
             _module_display_name(name),

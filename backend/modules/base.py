@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 class ModuleStatus(str, Enum):
     SUCCESS = "success"
+    SUCCESS_EMPTY = "success_empty"
     PARTIAL = "partial"
     FAILED = "failed"
     SKIPPED = "skipped"

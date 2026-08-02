@@ -1,5 +1,13 @@
 # Changelog
 
+### 0.14.1
+
+- CRITICAL: `subdomain_intel` is hard-cancelled at 30% of the timing-profile budget.
+- M365 passive intel runs before `WorkScheduler` starts, outside the discovery budget.
+- Breach aggregator now records per-source telemetry and distinguishes empty, partial, failed, and skipped runs.
+- IMAP persists both `imap_probe_count` and `imap_checked` for backwards compatibility.
+- Email identity enrichment reports PARTIAL/FAILED when its sub-sources fail.
+
 ### 0.14.0
 
 - Phase 1: M365 passive intelligence

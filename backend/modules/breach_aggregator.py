@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import logging
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +52,23 @@ _STANDARD_UA = (
 
 # One-shot "key absent" log guards so a disabled source logs exactly once.
 _HIBP_PASTE_WARNED = False
+
+
+def _set_source_telemetry(
+    telemetry: dict[str, Any] | None,
+    status: str,
+    *,
+    http_status: int | None = None,
+    error: str | None = None,
+) -> None:
+    """Update an optional per-source telemetry record without affecting APIs."""
+    if telemetry is None:
+        return
+    telemetry["status"] = status
+    if http_status is not None:
+        telemetry["http_status"] = http_status
+    if error is not None:
+        telemetry["error"] = error
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +199,12 @@ def _has_value(item: dict[str, Any], *keys: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def search_scylla(email: str, *, timeout: float = 10.0) -> list[BreachFinding]:
+async def search_scylla(
+    email: str,
+    *,
+    timeout: float = 10.0,
+    telemetry: dict[str, Any] | None = None,
+) -> list[BreachFinding]:
     """Query Scylla.so for breach records mentioning *email*.
 
     Never raises.  Returns ``[]`` on 429, network error, or malformed data.
@@ -192,17 +216,21 @@ async def search_scylla(email: str, *, timeout: float = 10.0) -> list[BreachFind
         async with build_client(timeout=timeout) as client:
             res = await client.get(url, params=params, headers=headers)
         if res.status_code == 429:
+            _set_source_telemetry(telemetry, "rate_limited", http_status=429)
             logger.warning("scylla_breach: rate limited (429); returning empty")
             return []
         if res.status_code != 200:
+            _set_source_telemetry(telemetry, "error", http_status=res.status_code)
             logger.debug("scylla_breach: unexpected status %s", res.status_code)
             return []
         data = res.json()
     except Exception as exc:  # noqa: BLE001 — sources must never raise
+        _set_source_telemetry(telemetry, "error", error=str(exc))
         logger.debug("scylla_breach: error, returning empty (%s)", exc)
         return []
 
     if not isinstance(data, list):
+        _set_source_telemetry(telemetry, "error", error="malformed_response")
         return []
 
     findings: list[BreachFinding] = []
@@ -239,7 +267,11 @@ async def search_scylla(email: str, *, timeout: float = 10.0) -> list[BreachFind
 
 
 async def search_hibp_pastes(
-    email: str, api_key: str | None, *, timeout: float = 10.0
+    email: str,
+    api_key: str | None,
+    *,
+    timeout: float = 10.0,
+    telemetry: dict[str, Any] | None = None,
 ) -> list[BreachFinding]:
     """Query the HIBP paste-account endpoint for *email*.
 
@@ -249,6 +281,7 @@ async def search_hibp_pastes(
     """
     global _HIBP_PASTE_WARNED
     if not api_key:
+        _set_source_telemetry(telemetry, "skipped", error="missing_api_key")
         if not _HIBP_PASTE_WARNED:
             logger.info("HIBP_API_KEY not set — paste lookup disabled.")
             _HIBP_PASTE_WARNED = True
@@ -265,20 +298,25 @@ async def search_hibp_pastes(
         if res.status_code == 404:
             return []
         if res.status_code == 401:
+            _set_source_telemetry(telemetry, "error", http_status=401)
             logger.warning("hibp_paste: HIBP API key invalid (401).")
             return []
         if res.status_code == 429:
+            _set_source_telemetry(telemetry, "rate_limited", http_status=429)
             logger.warning("hibp_paste: rate limited (429); returning empty")
             return []
         if res.status_code != 200:
+            _set_source_telemetry(telemetry, "error", http_status=res.status_code)
             logger.debug("hibp_paste: unexpected status %s", res.status_code)
             return []
         data = res.json()
     except Exception as exc:  # noqa: BLE001
+        _set_source_telemetry(telemetry, "error", error=str(exc))
         logger.debug("hibp_paste: error, returning empty (%s)", exc)
         return []
 
     if not isinstance(data, list):
+        _set_source_telemetry(telemetry, "error", error="malformed_response")
         return []
 
     findings: list[BreachFinding] = []
@@ -312,7 +350,11 @@ async def search_hibp_pastes(
 
 
 async def search_dehashed(
-    email: str, api_key: str | None, *, timeout: float = 15.0
+    email: str,
+    api_key: str | None,
+    *,
+    timeout: float = 15.0,
+    telemetry: dict[str, Any] | None = None,
 ) -> list[BreachFinding]:
     """Query Dehashed for breach entries mentioning *email*.
 
@@ -320,6 +362,7 @@ async def search_dehashed(
     (invalid key, logged), on 429 (rate limited, logged), and on error.
     """
     if not api_key:
+        _set_source_telemetry(telemetry, "skipped", error="missing_api_key")
         return []
 
     url = "https://api.dehashed.com/search"
@@ -334,21 +377,26 @@ async def search_dehashed(
         async with build_client(timeout=timeout) as client:
             res = await client.get(url, params=params, headers=headers)
         if res.status_code == 401:
+            _set_source_telemetry(telemetry, "error", http_status=401)
             logger.warning("dehashed_breach: Dehashed API key invalid.")
             return []
         if res.status_code == 429:
+            _set_source_telemetry(telemetry, "rate_limited", http_status=429)
             logger.warning("dehashed_breach: rate limited (429); returning empty")
             return []
         if res.status_code != 200:
+            _set_source_telemetry(telemetry, "error", http_status=res.status_code)
             logger.debug("dehashed_breach: unexpected status %s", res.status_code)
             return []
         data = res.json()
     except Exception as exc:  # noqa: BLE001
+        _set_source_telemetry(telemetry, "error", error=str(exc))
         logger.debug("dehashed_breach: error, returning empty (%s)", exc)
         return []
 
     entries = data.get("entries") if isinstance(data, dict) else None
     if not isinstance(entries, list):
+        _set_source_telemetry(telemetry, "error", error="malformed_response")
         return []
 
     findings: list[BreachFinding] = []
@@ -379,7 +427,11 @@ async def search_dehashed(
 
 
 async def search_snusbase(
-    email: str, api_key: str | None, *, timeout: float = 15.0
+    email: str,
+    api_key: str | None,
+    *,
+    timeout: float = 15.0,
+    telemetry: dict[str, Any] | None = None,
 ) -> list[BreachFinding]:
     """Query Snusbase for breach entries mentioning *email*.
 
@@ -387,6 +439,7 @@ async def search_snusbase(
     (invalid key, logged), and on error.
     """
     if not api_key:
+        _set_source_telemetry(telemetry, "skipped", error="missing_api_key")
         return []
 
     url = "https://api.snusbase.com/data/search"
@@ -396,20 +449,27 @@ async def search_snusbase(
         async with build_client(timeout=timeout) as client:
             res = await client.post(url, headers=headers, json=body)
         if res.status_code == 401:
+            _set_source_telemetry(telemetry, "error", http_status=401)
             logger.warning("snusbase_breach: Snusbase API key invalid.")
             return []
         if res.status_code == 429:
+            _set_source_telemetry(telemetry, "rate_limited", http_status=429)
             logger.warning("snusbase_breach: rate limited (429); returning empty")
             return []
         if res.status_code != 200:
+            _set_source_telemetry(telemetry, "error", http_status=res.status_code)
             logger.debug("snusbase_breach: unexpected status %s", res.status_code)
             return []
         data = res.json()
     except Exception as exc:  # noqa: BLE001
+        _set_source_telemetry(telemetry, "error", error=str(exc))
         logger.debug("snusbase_breach: error, returning empty (%s)", exc)
         return []
 
     results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or not isinstance(results, list | dict):
+        _set_source_telemetry(telemetry, "error", error="malformed_response")
+        return []
     # Snusbase returns results either as a flat list or as a mapping of
     # database-name -> [entries]; normalise both into a flat entry list.
     entries: list[dict[str, Any]] = []
@@ -447,9 +507,51 @@ async def search_snusbase(
 # ---------------------------------------------------------------------------
 
 
+async def _run_breach_source(
+    source: str,
+    func: Any,
+    args: tuple[Any, ...],
+    *,
+    timeout: float,
+    telemetry: dict[str, Any],
+) -> list[BreachFinding]:
+    started = time.perf_counter()
+    try:
+        kwargs: dict[str, Any] = {"timeout": timeout}
+        try:
+            accepted = inspect.signature(func).parameters
+            accepts_telemetry = "telemetry" in accepted or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in accepted.values()
+            )
+        except (TypeError, ValueError):
+            accepts_telemetry = True
+        if accepts_telemetry:
+            kwargs["telemetry"] = telemetry
+        result = await func(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - one source cannot stop others
+        _set_source_telemetry(telemetry, "error", error=str(exc))
+        logger.debug("breach source %s raised: %s", source, exc)
+        result = []
+
+    if not isinstance(result, list):
+        _set_source_telemetry(telemetry, "error", error="invalid_result")
+        result = []
+    if telemetry.get("status") == "not_run":
+        telemetry["status"] = "success"
+    telemetry["checked"] = 1
+    telemetry["hits"] = len(result)
+    telemetry["duration_seconds"] = round(time.perf_counter() - started, 3)
+    telemetry.setdefault("http_status", None)
+    telemetry.setdefault("error", None)
+    return result
+
+
 async def run_breach_aggregator(
     email: str,
     settings: Settings | None = None,
+    *,
+    telemetry: dict[str, dict[str, Any]] | None = None,
 ) -> list[BreachFinding]:
     """Run every configured breach source concurrently for *email*.
 
@@ -469,20 +571,71 @@ async def run_breach_aggregator(
         return []
 
     timeout = float(getattr(settings, "breach_aggregator_timeout", 15.0))
+    source_telemetry = telemetry if telemetry is not None else {}
+    for source in ("scylla", "hibp_paste", "dehashed", "snusbase"):
+        source_telemetry.setdefault(
+            source,
+            {
+                "status": "not_run",
+                "checked": 0,
+                "hits": 0,
+                "http_status": None,
+                "duration_seconds": 0.0,
+                "error": None,
+            },
+        )
 
     tasks: list[Any] = []
     if getattr(settings, "enable_scylla", False):
-        tasks.append(search_scylla(cleaned, timeout=min(timeout, 10.0)))
+        tasks.append(
+            _run_breach_source(
+                "scylla",
+                search_scylla,
+                (cleaned,),
+                timeout=min(timeout, 10.0),
+                telemetry=source_telemetry["scylla"],
+            )
+        )
+    else:
+        source_telemetry["scylla"]["status"] = "skipped"
     if getattr(settings, "hibp_api_key", None) and getattr(
         settings, "enable_hibp_pastes", False
     ):
         tasks.append(
-            search_hibp_pastes(cleaned, settings.hibp_api_key, timeout=min(timeout, 10.0))
+            _run_breach_source(
+                "hibp_paste",
+                search_hibp_pastes,
+                (cleaned, settings.hibp_api_key),
+                timeout=min(timeout, 10.0),
+                telemetry=source_telemetry["hibp_paste"],
+            )
         )
+    else:
+        source_telemetry["hibp_paste"]["status"] = "skipped"
     if getattr(settings, "dehashed_api_key", None):
-        tasks.append(search_dehashed(cleaned, settings.dehashed_api_key, timeout=timeout))
+        tasks.append(
+            _run_breach_source(
+                "dehashed",
+                search_dehashed,
+                (cleaned, settings.dehashed_api_key),
+                timeout=timeout,
+                telemetry=source_telemetry["dehashed"],
+            )
+        )
+    else:
+        source_telemetry["dehashed"]["status"] = "skipped"
     if getattr(settings, "snusbase_api_key", None):
-        tasks.append(search_snusbase(cleaned, settings.snusbase_api_key, timeout=timeout))
+        tasks.append(
+            _run_breach_source(
+                "snusbase",
+                search_snusbase,
+                (cleaned, settings.snusbase_api_key),
+                timeout=timeout,
+                telemetry=source_telemetry["snusbase"],
+            )
+        )
+    else:
+        source_telemetry["snusbase"]["status"] = "skipped"
 
     if not tasks:
         return []
@@ -521,6 +674,7 @@ async def enrich_confirmed_emails(
     settings: Settings | None = None,
     *,
     max_emails: int = 25,
+    telemetry_by_email: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> dict[str, list[BreachFinding]]:
     """Run breach aggregation for every confirmed email in *emails*.
 
@@ -533,8 +687,24 @@ async def enrich_confirmed_emails(
         return {}
 
     addresses = [getattr(e, "email", str(e)) for e in confirmed]
+    async def _run_address(address: str) -> list[BreachFinding]:
+        telemetry: dict[str, dict[str, Any]] = {}
+        if telemetry_by_email is not None:
+            telemetry_by_email[address] = telemetry
+        try:
+            accepted = inspect.signature(run_breach_aggregator).parameters
+        except (TypeError, ValueError):
+            accepted = {}
+        if "telemetry" in accepted:
+            return await run_breach_aggregator(
+                address,
+                settings,
+                telemetry=telemetry,
+            )
+        return await run_breach_aggregator(address, settings)
+
     results = await asyncio.gather(
-        *(run_breach_aggregator(addr, settings) for addr in addresses),
+        *(_run_address(addr) for addr in addresses),
         return_exceptions=True,
     )
     enrichment: dict[str, list[BreachFinding]] = {}
@@ -566,12 +736,25 @@ class BreachAggregatorModule(BaseModule):
 
     async def run(self, email: str, force: bool = False) -> ModuleResult:
         del force
+        telemetry: dict[str, dict[str, Any]] = {}
         try:
-            breach_findings = await run_breach_aggregator(email, _global_settings)
+            try:
+                accepted = inspect.signature(run_breach_aggregator).parameters
+            except (TypeError, ValueError):
+                accepted = {}
+            if "telemetry" in accepted:
+                breach_findings = await run_breach_aggregator(
+                    email,
+                    _global_settings,
+                    telemetry=telemetry,
+                )
+            else:
+                breach_findings = await run_breach_aggregator(email, _global_settings)
         except Exception as exc:  # noqa: BLE001 — module must never crash the phase
             return ModuleResult(
                 status=ModuleStatus.FAILED,
                 errors=[f"breach_aggregator: {exc}"],
+                metadata={"sources": telemetry},
             )
 
         findings = [bf.to_finding() for bf in breach_findings]
@@ -582,9 +765,35 @@ class BreachAggregatorModule(BaseModule):
             "total_breach_records": len(breach_findings),
             "sources_with_password_data": sources_with_password,
             "source_types": sorted({bf.source_type for bf in breach_findings}),
+            "sources": telemetry,
         }
+        attempted = [
+            source
+            for source in telemetry.values()
+            if source.get("status") not in {"skipped", "not_run"}
+        ]
+        rate_limited = any(
+            source.get("status") == "rate_limited" for source in attempted
+        )
+        failed = any(source.get("status") == "error" for source in attempted)
+        if not telemetry:
+            # Compatibility path for legacy test doubles/integrations that
+            # still provide only the original list-returning API.
+            status = ModuleStatus.SUCCESS if breach_findings else ModuleStatus.SKIPPED
+        elif not attempted:
+            status = ModuleStatus.SKIPPED
+        elif rate_limited:
+            status = ModuleStatus.PARTIAL
+        elif breach_findings:
+            status = ModuleStatus.SUCCESS
+        elif all(source.get("status") == "success" for source in attempted):
+            status = ModuleStatus.SUCCESS_EMPTY
+        elif failed and all(source.get("status") == "error" for source in attempted):
+            status = ModuleStatus.FAILED
+        else:
+            status = ModuleStatus.PARTIAL
         return ModuleResult(
-            status=ModuleStatus.SUCCESS,
+            status=status,
             findings=findings,
             metadata=metadata,
         )

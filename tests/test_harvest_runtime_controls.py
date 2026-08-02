@@ -1,13 +1,27 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
+from backend.core import domain_harvest_orchestrator as orchestrator
+from backend.core import harvest_runner
 from backend.core.domain_harvest_orchestrator import (
     _run_with_soft_timeout,
     _safe_phase12_run,
 )
-from backend.core.harvest_runner import run_adaptive_harvest
+from backend.core.harvest_runner import WorkerContext, run_adaptive_harvest
+from backend.core.mail_provider import MailProvider
+from backend.core.work_scheduler import WorkScheduler
 from backend.modules.base import ModuleResult, ModuleStatus
+
+
+@pytest.fixture(autouse=True)
+def _disable_m365_preflight_for_runtime_tests(monkeypatch):
+    """Keep unrelated harvest-control tests offline and deterministic."""
+    async def no_preflight(_domain, _emails):
+        return None
+
+    monkeypatch.setattr(harvest_runner, "run_m365_passive_intel", no_preflight)
 
 
 def test_skip_modules_are_recorded_without_execution():
@@ -543,3 +557,201 @@ async def test_termination_handler_fires_once_for_every_exit_mode(
         assert snapshot.metadata["harvest_status"] == "partial_timeout"
     if mode == "soft_kill":
         assert snapshot.metadata["terminated_early"] is True
+
+
+@pytest.mark.asyncio
+async def test_m365_preflight_runs_before_scheduler(monkeypatch):
+    order = []
+
+    async def fake_preflight(domain, _emails):
+        order.append(("m365", domain))
+        return SimpleNamespace(tenant_type="managed", tenant_id="tenant-guid")
+
+    real_scheduler = WorkScheduler
+
+    class TrackingScheduler(real_scheduler):
+        def __init__(self, *args, **kwargs):
+            order.append(("scheduler", None))
+            super().__init__(*args, **kwargs)
+
+    async def no_seed(_ctx: WorkerContext):
+        return None
+
+    async def no_tracks(_ctx: WorkerContext):
+        return None
+
+    monkeypatch.setattr(harvest_runner.settings, "enable_m365_passive_intel", True)
+    monkeypatch.setattr(harvest_runner, "run_m365_passive_intel", fake_preflight)
+    monkeypatch.setattr(harvest_runner, "WorkScheduler", TrackingScheduler)
+    monkeypatch.setattr(harvest_runner, "_seed_scheduler", no_seed)
+    monkeypatch.setattr(harvest_runner, "_run_tracks", no_tracks)
+    monkeypatch.setattr(harvest_runner, "StealthSession", lambda **_kw: SimpleNamespace())
+
+    await run_adaptive_harvest(
+        "acme.com",
+        timeout_seconds=1,
+        timing_profile="t5",
+        enable_smtp=False,
+        module_overrides={"test": object()},
+    )
+
+    assert [entry[0] for entry in order] == ["m365", "scheduler"]
+
+
+@pytest.mark.asyncio
+async def test_m365_preflight_timeout_does_not_block_harvest(monkeypatch):
+    captured = {}
+
+    async def slow_preflight(_domain, _emails):
+        await asyncio.sleep(25)
+
+    async def no_seed(_ctx: WorkerContext):
+        return None
+
+    async def capture_tracks(ctx: WorkerContext):
+        captured["context"] = ctx.m365_context
+
+    monkeypatch.setattr(harvest_runner.settings, "enable_m365_passive_intel", True)
+    monkeypatch.setattr(harvest_runner, "run_m365_passive_intel", slow_preflight)
+    monkeypatch.setattr(harvest_runner, "_seed_scheduler", no_seed)
+    monkeypatch.setattr(harvest_runner, "_run_tracks", capture_tracks)
+    monkeypatch.setattr(harvest_runner, "StealthSession", lambda **_kw: SimpleNamespace())
+
+    started = asyncio.get_running_loop().time()
+    await run_adaptive_harvest(
+        "acme.com",
+        timeout_seconds=1,
+        timing_profile="t5",
+        enable_smtp=False,
+        module_overrides={"test": object()},
+    )
+
+    assert asyncio.get_running_loop().time() - started < 21
+    assert captured["context"] is None
+
+
+@pytest.mark.asyncio
+async def test_m365_context_available_to_provider_verifier(monkeypatch):
+    async def fake_resolve_mx(_domain):
+        return ["mx.example.com"]
+
+    async def fake_verify(self, emails):
+        return [
+            SimpleNamespace(
+                email=email,
+                status="inconclusive",
+                if_exists_result=None,
+                is_unmanaged=None,
+                throttle_status=None,
+                http_status=None,
+                error=None,
+            )
+            for email in emails
+        ]
+
+    async def should_not_rerun(*_args, **_kwargs):
+        raise AssertionError("M365 passive intel was re-run")
+
+    monkeypatch.setattr(orchestrator, "resolve_mx", fake_resolve_mx)
+    monkeypatch.setattr(orchestrator.M365Verifier, "verify_batch", fake_verify)
+    monkeypatch.setattr(orchestrator.settings, "enable_m365_passive_intel", True)
+    monkeypatch.setattr(
+        "backend.modules.m365_passive_intel.run_m365_passive_intel",
+        should_not_rerun,
+    )
+
+    module_results = {
+        "pattern_and_verify": ModuleResult(
+            status=ModuleStatus.SUCCESS,
+            findings=[
+                {
+                    "metadata": {
+                        "email": "bob@acme.com",
+                        "on_domain": True,
+                    }
+                }
+            ],
+        )
+    }
+    context = SimpleNamespace(
+        tenant_type="managed",
+        tenant_id="tenant-guid",
+        is_cloud=True,
+        adfs_url=None,
+    )
+
+    summary = await orchestrator._attach_smtp_email_verification(
+        "acme.com",
+        module_results,
+        provider_detection=SimpleNamespace(provider=MailProvider.M365),
+        m365_context=context,
+    )
+
+    tenant = summary["infrastructure"]["m365_tenant"]
+    assert tenant["tenant_type"] == "managed"
+    assert tenant["tenant_id"] == "tenant-guid"
+    assert tenant["is_cloud"] is True
+
+    m365_summary = await orchestrator._attach_m365_email_verification(
+        "acme.com",
+        module_results,
+        provider_detection=SimpleNamespace(
+            provider=MailProvider.M365,
+            primary_mx="mx.example.com",
+            matched_mx_hosts=("mx.example.com",),
+        ),
+        m365_context=context,
+    )
+    assert m365_summary["realm"]["namespace_type"] == "managed"
+
+
+def test_m365_context_is_promoted_to_export_infrastructure():
+    from backend.core.domain_harvest_report import _build_infrastructure
+
+    result = SimpleNamespace(
+        module_results={},
+        metadata={
+            "verification_tail": {
+                "smtp_email_verification": {
+                    "infrastructure": {
+                        "m365_tenant": {
+                            "tenant_type": "managed",
+                            "tenant_id": "tenant-guid",
+                            "is_cloud": True,
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    infrastructure = _build_infrastructure(result)
+    assert infrastructure["m365_tenant"]["tenant_type"] == "managed"
+
+
+def test_accumulated_enrichment_partial_status_is_preserved():
+    context = SimpleNamespace(module_results={})
+    partial = ModuleResult(
+        status=ModuleStatus.PARTIAL,
+        findings=[{"metadata": {"email": "alice@acme.com"}}],
+    )
+    success = ModuleResult(
+        status=ModuleStatus.SUCCESS,
+        findings=[{"metadata": {"email": "bob@acme.com"}}],
+    )
+
+    harvest_runner._record_module_result(
+        context,
+        harvest_runner.MODULE_EMAIL_IDENTITY_ENRICHMENT,
+        partial,
+    )
+    harvest_runner._record_module_result(
+        context,
+        harvest_runner.MODULE_EMAIL_IDENTITY_ENRICHMENT,
+        success,
+    )
+
+    assert (
+        context.module_results[harvest_runner.MODULE_EMAIL_IDENTITY_ENRICHMENT].status
+        is ModuleStatus.PARTIAL
+    )

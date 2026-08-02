@@ -12,11 +12,11 @@ import asyncio
 from typing import Any
 
 from .base import BaseModule, ModuleResult, ModuleStatus
+from .fediverse_discovery import FediverseDiscoveryModule
 from .github_commits import GitHubCommitsModule
 from .gravatar_lookup import GravatarLookupModule
 from .hackernews import HackerNewsModule
 from .keybase import KeybaseModule
-from .fediverse_discovery import FediverseDiscoveryModule
 
 
 class EmailIdentityEnrichmentModule(BaseModule):
@@ -49,6 +49,8 @@ class EmailIdentityEnrichmentModule(BaseModule):
         findings: list[dict[str, Any]] = []
         errors: list[str] = []
         statuses: dict[str, str] = {}
+        attempted_sources: list[str] = []
+        failed_sources: list[str] = []
         for source, result in (
             ("gravatar", gravatar),
             ("github_commits", github),
@@ -58,10 +60,27 @@ class EmailIdentityEnrichmentModule(BaseModule):
         ):
             if isinstance(result, Exception):
                 errors.append(f"{source}: {result}")
-                statuses[source] = "failed"
+                statuses[source] = "error"
+                attempted_sources.append(source)
+                failed_sources.append(source)
                 continue
-            statuses[source] = result.status.value
+            status_value = (
+                result.status.value
+                if hasattr(result.status, "value")
+                else str(result.status)
+            )
+            statuses[source] = status_value
+            if status_value != ModuleStatus.SKIPPED.value:
+                attempted_sources.append(source)
             errors.extend(f"{source}: {error}" for error in result.errors or [])
+            if result.errors or status_value in {
+                "error",
+                "timeout",
+                "blocked",
+                ModuleStatus.FAILED.value,
+                ModuleStatus.PARTIAL.value,
+            }:
+                failed_sources.append(source)
             for finding in result.findings or []:
                 if not isinstance(finding, dict):
                     continue
@@ -73,8 +92,19 @@ class EmailIdentityEnrichmentModule(BaseModule):
                 enriched["metadata"] = metadata
                 findings.append(enriched)
 
+        total_sources = len(attempted_sources)
+        failed_count = len(failed_sources)
+        if total_sources == 0:
+            module_status = ModuleStatus.SKIPPED
+        elif failed_count == total_sources:
+            module_status = ModuleStatus.FAILED
+        elif failed_count > 0:
+            module_status = ModuleStatus.PARTIAL
+        else:
+            module_status = ModuleStatus.SUCCESS
+
         return ModuleResult(
-            status=ModuleStatus.SUCCESS if findings else ModuleStatus.PARTIAL,
+            status=module_status,
             findings=findings,
             errors=errors,
             metadata={
@@ -82,5 +112,8 @@ class EmailIdentityEnrichmentModule(BaseModule):
                 "original_email": original_email,
                 "sources": statuses,
                 "findings_count": len(findings),
+                "source_failures": failed_count,
+                "source_total": total_sources,
+                "failed_sources": sorted(set(failed_sources)),
             },
         )

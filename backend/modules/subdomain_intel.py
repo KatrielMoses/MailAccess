@@ -331,11 +331,19 @@ async def discover_axfr(domain: str, *, resolver: object | None = None) -> set[s
                 continue
         return set()
 
-    results = await asyncio.gather(*(transfer(ns) for ns in nameservers))
+    try:
+        results = await asyncio.gather(
+            *(transfer(ns) for ns in nameservers),
+            return_exceptions=True,
+        )
+    except asyncio.CancelledError:
+        raise
+    if any(isinstance(result, asyncio.CancelledError) for result in results):
+        raise asyncio.CancelledError
     return {
         host if host.endswith(f".{domain}") else f"{host}.{domain}"
         for result in results
-        for host in result
+        for host in result if isinstance(result, set)
         if host not in {"@", ""}
     }
 
@@ -350,6 +358,8 @@ async def discover_crtsh(client: httpx.AsyncClient, domain: str) -> set[str]:
             raise asyncio.TimeoutError("crt.sh total retry budget exhausted")
         try:
             response = await asyncio.wait_for(client.get(url), timeout=remaining)
+        except asyncio.CancelledError:
+            raise
         except (httpx.TimeoutException, asyncio.TimeoutError):
             if attempt == 2:
                 raise
@@ -596,8 +606,22 @@ async def resolve_candidates(
         async with semaphore:
             return hostname, await resolve_doh(client, hostname)
 
-    resolved = await asyncio.gather(*(resolve_one(host) for host in candidates))
-    return {hostname: addresses for hostname, addresses in resolved if addresses}
+    try:
+        resolved = await asyncio.gather(
+            *(resolve_one(host) for host in candidates),
+            return_exceptions=True,
+        )
+    except asyncio.CancelledError:
+        raise
+    if any(isinstance(result, asyncio.CancelledError) for result in resolved):
+        raise asyncio.CancelledError
+    return {
+        hostname: addresses
+        for result in resolved
+        if isinstance(result, tuple)
+        for hostname, addresses in (result,)
+        if addresses
+    }
 
 
 def _txt_value(record: object) -> str:
@@ -672,10 +696,15 @@ async def aggregate_infrastructure(
             for source in finding.get("discovery_method") or []:
                 ip_sources.setdefault(ip, set()).add(str(source))
 
-    lookups = await asyncio.gather(
-        *(lookup_asn_team_cymru(ip, resolver=resolver) for ip in sorted(ip_hosts)),
-        return_exceptions=True,
-    )
+    try:
+        lookups = await asyncio.gather(
+            *(lookup_asn_team_cymru(ip, resolver=resolver) for ip in sorted(ip_hosts)),
+            return_exceptions=True,
+        )
+    except asyncio.CancelledError:
+        raise
+    if any(isinstance(record, asyncio.CancelledError) for record in lookups):
+        raise asyncio.CancelledError
     asn_ips: dict[int, list[str]] = {}
     asn_records: dict[int, dict[str, object]] = {}
     ip_asns: dict[str, int] = {}
@@ -687,10 +716,15 @@ async def aggregate_infrastructure(
         asn_ips.setdefault(asn, []).append(ip)
         asn_records.setdefault(asn, record)
 
-    orgs = await asyncio.gather(
-        *(lookup_asn_org(asn, resolver=resolver) for asn in sorted(asn_ips)),
-        return_exceptions=True,
-    )
+    try:
+        orgs = await asyncio.gather(
+            *(lookup_asn_org(asn, resolver=resolver) for asn in sorted(asn_ips)),
+            return_exceptions=True,
+        )
+    except asyncio.CancelledError:
+        raise
+    if any(isinstance(org, asyncio.CancelledError) for org in orgs):
+        raise asyncio.CancelledError
     asn_rows: list[dict[str, object]] = []
     for asn, org in zip(sorted(asn_ips), orgs):
         row = dict(asn_records[asn])
@@ -795,8 +829,22 @@ async def score_live_candidates(
             scored["url"] = probe["url"]
             return hostname, scored
 
-    outcomes = await asyncio.gather(*(score_one(host) for host in candidates))
-    return {hostname: scored for hostname, scored in outcomes if scored is not None}
+    try:
+        outcomes = await asyncio.gather(
+            *(score_one(host) for host in candidates),
+            return_exceptions=True,
+        )
+    except asyncio.CancelledError:
+        raise
+    if any(isinstance(result, asyncio.CancelledError) for result in outcomes):
+        raise asyncio.CancelledError
+    return {
+        hostname: scored
+        for result in outcomes
+        if isinstance(result, tuple)
+        for hostname, scored in (result,)
+        if scored is not None
+    }
 
 
 def _scrape_profile(tier: str, is_staging: bool) -> dict[str, object] | None:
@@ -921,14 +969,27 @@ async def scrape_scored_candidates(
     try:
         pairs = [(host, data) for host, data in scored.items() if budget is None or budget.can_start()]
         tasks = [asyncio.create_task(scrape_scored_subdomain(active_session, host, data, domain=domain)) for host, data in pairs]
-        if budget is None:
-            outcomes = await asyncio.gather(*tasks)
-        else:
-            done, pending = await asyncio.wait(tasks, timeout=budget.hard_remaining)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            outcomes = [task.result() for task in done if not task.cancelled() and task.exception() is None]
+        try:
+            if budget is None:
+                outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+                if any(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes):
+                    raise asyncio.CancelledError
+            else:
+                done, pending = await asyncio.wait(tasks, timeout=budget.hard_remaining)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                outcomes = [
+                    task.result()
+                    for task in done
+                    if not task.cancelled() and task.exception() is None
+                ]
+        except asyncio.CancelledError:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         return {host: records for (host, _), records in zip(pairs, outcomes) if records}
     finally:
         if own_session and hasattr(active_session, "close"):
@@ -1042,8 +1103,16 @@ async def discover_bruteforce(
             host = f"{prefix}.{domain}"
             return host if await resolve_doh(client, host) else None
 
-    results = await asyncio.gather(*(probe(prefix) for prefix in random_prefixes))
-    return {host for host in results if host}
+    try:
+        results = await asyncio.gather(
+            *(probe(prefix) for prefix in random_prefixes),
+            return_exceptions=True,
+        )
+    except asyncio.CancelledError:
+        raise
+    if any(isinstance(result, asyncio.CancelledError) for result in results):
+        raise asyncio.CancelledError
+    return {host for host in results if isinstance(host, str) and host}
 
 
 async def discover_github(client: httpx.AsyncClient, domain: str) -> set[str]:
@@ -1129,6 +1198,26 @@ class SubdomainIntelModule(BaseModule):
                 "met": result.axfr_succeeded or healthy >= 2,
             },
         }
+
+    def partial_findings(self) -> list[dict[str, object]]:
+        """Materialize hosts discovered before an outer task cancellation."""
+        result = self._active_result
+        if result is None:
+            return []
+        return [
+            {
+                "subdomain": host,
+                "discovery_method": sorted(result.candidates.get(host, set())),
+                "addresses": sorted(result.addresses.get(host, set())),
+                "resolved_ips": sorted(result.addresses.get(host, set())),
+                "score": 0.0,
+                "tier": "SKIP",
+                "is_staging": is_staging_hostname(host),
+                "evidence": ["cancelled_before_scoring"],
+                "scraped": [],
+            }
+            for host in sorted(result.hosts)
+        ]
 
     async def run(
         self,
@@ -1230,6 +1319,8 @@ class SubdomainIntelModule(BaseModule):
                     discover_axfr(domain, resolver=resolver),
                     timeout=PASSIVE_SOURCE_TIMEOUT_SECONDS,
                 )
+            except asyncio.CancelledError:
+                raise
             except asyncio.TimeoutError:
                 result.record_source("axfr", "timeout", 0, "per-source timeout")
                 axfr = set()
@@ -1273,9 +1364,15 @@ class SubdomainIntelModule(BaseModule):
                 ]
                 try:
                     await asyncio.wait_for(
-                        asyncio.gather(*tasks),
+                        asyncio.gather(*tasks, return_exceptions=True),
                         timeout=PASSIVE_PHASE_TIMEOUT_SECONDS,
                     )
+                except asyncio.CancelledError:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise
                 except asyncio.TimeoutError:
                     for task, (source, _discoverer) in zip(tasks, passive_sources):
                         if not task.done():

@@ -20,6 +20,7 @@ from ..modules.employee_name_discovery import EmployeeNameDiscoveryModule
 from ..modules.github_commits import GitHubDomainCommitsModule
 from ..modules.github_org_members import GitHubOrgMembersModule
 from ..modules.hackertarget_hosts import HackerTargetHostsModule
+from ..modules.m365_passive_intel import run_m365_passive_intel
 from ..modules.npm_email import NpmEmailModule
 from ..modules.package_ecosystems import PackageEcosystemsModule
 from ..modules.pattern_and_verify import PatternAndVerifyModule
@@ -43,7 +44,7 @@ from .pagination_handler import PaginationHandler
 from .signal_pool import AsyncSignalPool
 from .stealth_client import StealthSession, resolve_timing_profile
 from .structured_data_extractor import extract_people
-from .time_budget import TimeBudget
+from .time_budget import TimeBudget, budget_for_profile
 from .work_scheduler import (
     PRIORITY_ARCHIVE,
     PRIORITY_GUARANTEED,
@@ -59,6 +60,36 @@ from .work_scheduler import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _m365_context_infrastructure(context: Any | None) -> dict[str, Any] | None:
+    """Serialize startup M365 context for exports and timeout summaries."""
+    if context is None:
+        return None
+    if hasattr(context, "to_infrastructure_dict"):
+        return dict(context.to_infrastructure_dict())
+    source = getattr(context, "context", context)
+    return {
+        "is_cloud": getattr(source, "is_cloud", None),
+        "tenant_id": getattr(source, "tenant_id", None),
+        "tenant_type": getattr(source, "tenant_type", None),
+        "adfs_url": getattr(source, "adfs_url", None),
+        "federation_brand": getattr(source, "federation_brand", None),
+        "skipped_cloud_checks": bool(getattr(source, "skipped_cloud_checks", False)),
+        "openid_status": getattr(source, "openid_status", None),
+        "realm_status": getattr(source, "realm_status", None),
+        "onedrive": [],
+    }
+
+SUBDOMAIN_INTEL_HARD_CAP_FRACTION = 0.30
+# Default only; each harvest computes and stores its profile-specific value on
+# WorkerContext at the start of run_adaptive_harvest().
+SUBDOMAIN_INTEL_HARD_CAP = budget_for_profile("t2") * SUBDOMAIN_INTEL_HARD_CAP_FRACTION
+
+
+def subdomain_intel_hard_cap_for_profile(profile: str) -> float:
+    """Return the hard wall for subdomain_intel for a timing profile."""
+    return budget_for_profile(profile) * SUBDOMAIN_INTEL_HARD_CAP_FRACTION
 
 MODULE_COMMONCRAWL = "commoncrawl_email"
 MODULE_WAYBACK_DOMAIN = "wayback_domain_harvest"
@@ -86,6 +117,10 @@ MODULE_HUNTER = "hunter"
 MODULE_HACKERTARGET = "hackertarget_hosts"
 MODULE_RIPE_STAT_ASN = "ripe_stat_asn"
 MODULE_SHODAN_INTERNETDB = "shodan_internetdb"
+# The provider/validation tail is deliberately short: discovery owns the
+# profile budget, while the tail must not turn a 600-second harvest into a
+# second long-running phase.  Enrichment is dropped when this window closes.
+VERIFICATION_TAIL_SECONDS = 15.0
 
 # Seed dispatch priorities for the discovery scheduler. Insertion order is the
 # submission order; the scheduler pulls lower numbers first. Kept at module
@@ -189,6 +224,8 @@ class WorkerContext:
     provider_mx_records: list[Any] | None = None
     provider_detection_ready: asyncio.Event | None = None
     subdomain_source_telemetry: dict[str, dict[str, Any]] | None = None
+    subdomain_intel_hard_cap: float = SUBDOMAIN_INTEL_HARD_CAP
+    m365_context: Any | None = None
 
 
 def _is_obvious_non_person_name(name: str) -> bool:
@@ -362,12 +399,34 @@ async def run_adaptive_harvest(
     cleaned = _validate_domain(domain)
     if enable_smtp is None:
         enable_smtp = bool(getattr(settings, "smtp_verify_default", True))
+
+    # M365 GetUserRealm/OpenID are domain-level preflight checks. Run them
+    # before creating the scheduler and budget so they cannot compete with
+    # discovery work or consume the harvest clock.
+    m365_context: Any | None = None
+    if getattr(settings, "enable_m365_passive_intel", False):
+        try:
+            m365_context = await asyncio.wait_for(
+                run_m365_passive_intel(cleaned, []),
+                timeout=20.0,
+            )
+        except asyncio.TimeoutError:
+            logger.info("M365 preflight timed out — skipping")
+            m365_context = None
+        except Exception as exc:  # noqa: BLE001 - optional preflight
+            logger.info("M365 preflight failed: %s", exc)
+            m365_context = None
+
     started = datetime.now(timezone.utc)
     started_iso = started.isoformat().replace("+00:00", "Z")
     scheduler = WorkScheduler()
     signal_pool = AsyncSignalPool(export_threshold=0.0)
     signal_pool.set_scheduler(scheduler)
     budget = TimeBudget(timeout_seconds)
+    # subdomain_intel gets a profile-derived hard wall that is independent of
+    # the generic module soft timeout.  Store the computed value on the run
+    # context so concurrent harvests do not share mutable timing state.
+    subdomain_intel_hard_cap = subdomain_intel_hard_cap_for_profile(timing_profile)
     session = StealthSession(timing_profile=resolve_timing_profile(timing_profile))
     cache = ConcurrentFetchCache(session)
     page_cache = CachedFetch(cache)
@@ -405,6 +464,8 @@ async def run_adaptive_harvest(
         log_callback=log_callback,
         provider_detection_ready=asyncio.Event(),
         subdomain_source_telemetry={},
+        subdomain_intel_hard_cap=subdomain_intel_hard_cap,
+        m365_context=m365_context,
     )
     if ctx.module_overrides:
         ctx.provider_detection_ready.set()
@@ -497,6 +558,8 @@ async def run_adaptive_harvest(
                 attach_kwargs["provider_detection"] = ctx.provider_detection
             if "mx_records" in accepted:
                 attach_kwargs["mx_records"] = ctx.provider_mx_records
+            if "m365_context" in accepted:
+                attach_kwargs["m365_context"] = ctx.m365_context
             summary = await asyncio.wait_for(
                 _attach_smtp_email_verification(
                     cleaned,
@@ -533,6 +596,11 @@ async def run_adaptive_harvest(
                 "candidates_routed": smtp_candidate_count,
                 "status": "verification_timeout",
             }
+            if ctx.provider_detection is not None:
+                timeout_summary["provider"] = ctx.provider_detection.provider.value
+            m365_infra = _m365_context_infrastructure(ctx.m365_context)
+            if m365_infra is not None:
+                timeout_summary["infrastructure"] = {"m365_tenant": m365_infra}
             if ctx.log_callback is not None:
                 ctx.log_callback(
                     "SMTP",
@@ -546,6 +614,11 @@ async def run_adaptive_harvest(
                 "status": "verification_failed",
                 "error": str(exc),
             }
+            if ctx.provider_detection is not None:
+                failure_summary["provider"] = ctx.provider_detection.provider.value
+            m365_infra = _m365_context_infrastructure(ctx.m365_context)
+            if m365_infra is not None:
+                failure_summary["infrastructure"] = {"m365_tenant": m365_infra}
             if ctx.log_callback is not None:
                 ctx.log_callback("SMTP", "provider verification failed")
             return failure_summary
@@ -591,6 +664,7 @@ async def run_adaptive_harvest(
                         module_results,
                         provider_detection=detection,
                         mx_records=mx_records,
+                        m365_context=ctx.m365_context,
                     )
                 else:
                     tail["m365_email_verification"] = {"checked": 0, "status": "m365_disabled"}
@@ -678,7 +752,9 @@ async def run_adaptive_harvest(
             ):
                 if module_name in ctx.skip_modules:
                     continue
-                remaining = 120.0 - (asyncio.get_running_loop().time() - tail_started)
+                remaining = VERIFICATION_TAIL_SECONDS - (
+                    asyncio.get_running_loop().time() - tail_started
+                )
                 if remaining <= 1.0:
                     tail.setdefault("enrichment", {})[module_name] = "dropped_tail_budget"
                     continue
@@ -699,7 +775,9 @@ async def run_adaptive_harvest(
             ):
                 from .domain_harvest_orchestrator import _attach_enterprise_net_intel
 
-                remaining = 120.0 - (asyncio.get_running_loop().time() - tail_started)
+                remaining = VERIFICATION_TAIL_SECONDS - (
+                    asyncio.get_running_loop().time() - tail_started
+                )
                 if remaining <= 1.0:
                     tail.setdefault("enrichment", {})[
                         "enterprise_net_intel"
@@ -716,12 +794,15 @@ async def run_adaptive_harvest(
                         ] = f"failed: {exc}"
 
         try:
-            await asyncio.wait_for(_body(), timeout=120.0)
+            await asyncio.wait_for(_body(), timeout=VERIFICATION_TAIL_SECONDS)
             tail["tail_status"] = "completed"
         except (TimeoutError, asyncio.TimeoutError):
             tail["tail_status"] = "partial_timeout"
             tail.setdefault("low_email_validation", {"checked": 0, "status": "tail_timeout"})
-            logger.warning("Verification tail exhausted its dedicated 120s budget")
+            logger.warning(
+                "Verification tail exhausted its dedicated %.0fs budget",
+                VERIFICATION_TAIL_SECONDS,
+            )
         except Exception as exc:  # noqa: BLE001
             tail["tail_status"] = "failed"
             tail["error"] = str(exc)
@@ -788,6 +869,8 @@ async def run_adaptive_harvest(
                 shadow_profiles_out=shadow_profiles,
             )
             unique_emails.sort(key=_sort_key)
+            if not ctx.module_overrides:
+                await _attach_breach_enrichment(unique_emails, module_results, ctx)
             completed = datetime.now(timezone.utc)
             errors = [
                 f"[{name}] {err}"
@@ -806,6 +889,9 @@ async def run_adaptive_harvest(
                 "low_email_validation": tail.get("low_email_validation", {}),
                 "verification_tail": tail,
             }
+            m365_infra = _m365_context_infrastructure(ctx.m365_context)
+            if m365_infra is not None:
+                partial_metadata["m365_tenant"] = m365_infra
             final_result = DomainHarvestResult(
                 domain=cleaned,
                 started_at=started_iso,
@@ -897,7 +983,7 @@ async def run_adaptive_harvest(
             dns_signals = await resolve_domain_email_dns_signals(cleaned)
             apply_domain_email_dns_signals(unique_emails, dns_signals)
         if not ctx.module_overrides:
-            await _attach_breach_enrichment(unique_emails)
+            await _attach_breach_enrichment(unique_emails, module_results, ctx)
         unique_emails.sort(key=_sort_key)
         low_email_validation = tail.get("low_email_validation", {})
         completed = datetime.now(timezone.utc)
@@ -959,6 +1045,9 @@ async def run_adaptive_harvest(
             "low_email_validation": low_email_validation,
             "verification_tail": tail,
         }
+        m365_infra = _m365_context_infrastructure(ctx.m365_context)
+        if m365_infra is not None:
+            metadata["m365_tenant"] = m365_infra
         final_result = DomainHarvestResult(
             domain=cleaned,
             started_at=started_iso,
@@ -1297,21 +1386,24 @@ async def _execute_item(item: WorkItem, ctx: WorkerContext) -> WorkResult:
         elif item.kind == "fetch_page" and item.url:
             findings, new_items = await _fetch_and_extract(item.url, ctx)
         elif item.kind == "run_module" and item.module_name:
-            module = _get_module_instance(item.module_name, ctx)
-            if item.payload and hasattr(module, "run_with_payload"):
-                findings, new_items = await _run_module_with_payload(
-                    item.module_name,
-                    module,
-                    item.payload,
-                    ctx,
-                    soft_timeout,
-                )
+            if item.module_name == MODULE_SUBDOMAIN_INTEL:
+                findings, new_items = await _run_subdomain_intel_with_hard_cap(ctx)
             else:
-                findings, new_items = await _run_module(
-                    item.module_name,
-                    ctx,
-                    soft_timeout,
-                )
+                module = _get_module_instance(item.module_name, ctx)
+                if item.payload and hasattr(module, "run_with_payload"):
+                    findings, new_items = await _run_module_with_payload(
+                        item.module_name,
+                        module,
+                        item.payload,
+                        ctx,
+                        soft_timeout,
+                    )
+                else:
+                    findings, new_items = await _run_module(
+                        item.module_name,
+                        ctx,
+                        soft_timeout,
+                    )
         elif item.kind == "generate_patterns":
             findings, new_items = await _run_pattern_for_name(
                 item.payload, ctx
@@ -1353,9 +1445,19 @@ def _should_defer_for_yield(ctx: WorkerContext, module_name: str) -> bool:
     results = ctx.module_results or {}
     observed = [
         results.get(name)
-        for name in (MODULE_COMMONCRAWL, MODULE_WAYBACK_DOMAIN, MODULE_NPM_EMAIL, MODULE_PYPI_EMAIL, MODULE_PGP_DOMAIN_EMAIL)
+        for name in (
+            MODULE_COMMONCRAWL,
+            MODULE_WAYBACK_DOMAIN,
+            MODULE_NPM_EMAIL,
+            MODULE_PYPI_EMAIL,
+            MODULE_PGP_DOMAIN_EMAIL,
+        )
     ]
-    completed = [item for item in observed if item is not None and item.status in {ModuleStatus.SUCCESS, ModuleStatus.PARTIAL}]
+    completed = [
+        item
+        for item in observed
+        if item is not None and item.status in {ModuleStatus.SUCCESS, ModuleStatus.PARTIAL}
+    ]
     return len(completed) >= 2 and sum(len(item.findings or []) for item in completed) == 0
 
 
@@ -1408,7 +1510,9 @@ async def _fetch_and_extract(
             "source_type": person.source_type,
             "confidence_score": person.confidence,
             "source_url": person.page_url,
-            "on_domain": bool(person.email and person.email.lower().endswith("@" + ctx.domain.lower())),
+            "on_domain": bool(
+                person.email and person.email.lower().endswith("@" + ctx.domain.lower())
+            ),
         }
         if person.email:
             metadata["email"] = person.email
@@ -1442,40 +1546,108 @@ async def _run_module(
     ctx: WorkerContext,
     soft_timeout: float,
 ) -> tuple[list[dict[str, Any]], list[WorkItem]]:
+    return await _run_module_core(
+        module_name,
+        ctx,
+        soft_timeout=soft_timeout,
+        outer_timeout=True,
+    )
+
+
+def _partial_subdomain_result(module: Any, ctx: WorkerContext) -> ModuleResult:
+    """Build a cancellation result without discarding live discoveries."""
+    existing = (ctx.module_results or {}).get(MODULE_SUBDOMAIN_INTEL)
+    existing_findings = list(getattr(existing, "findings", None) or [])
+    partial_findings = list(
+        getattr(module, "partial_findings", lambda: [])() or []
+    )
+    findings = existing_findings or partial_findings
+    metadata = dict(
+        getattr(module, "partial_metadata", lambda: {})() or {}
+    )
+    metadata.setdefault("domain", ctx.domain)
+    return ModuleResult(
+        status=ModuleStatus.PARTIAL,
+        findings=findings,
+        errors=["Cancelled by subdomain_intel hard cap"],
+        metadata=metadata,
+    )
+
+
+def _module_outputs(
+    result: ModuleResult | None,
+) -> tuple[list[dict[str, Any]], list[WorkItem]]:
+    if result is None:
+        return [], []
+    findings = [dict(f) for f in (result.findings or []) if isinstance(f, dict)]
+    new_items = result.new_items if hasattr(result, "new_items") else []
+    return findings, new_items
+
+
+def _ensure_subdomain_partial_result(ctx: WorkerContext) -> ModuleResult:
+    """Publish a partial result when a test double or adapter owns the task."""
+    existing = (ctx.module_results or {}).get(MODULE_SUBDOMAIN_INTEL)
+    if existing is not None and existing.status is ModuleStatus.PARTIAL:
+        return existing
+    metadata = dict(getattr(existing, "metadata", None) or {})
+    metadata.setdefault("domain", ctx.domain)
+    result = ModuleResult(
+        status=ModuleStatus.PARTIAL,
+        findings=list(getattr(existing, "findings", None) or []),
+        errors=["Cancelled by subdomain_intel hard cap"],
+        metadata=metadata,
+    )
+    _record_module_result(ctx, MODULE_SUBDOMAIN_INTEL, result)
+    _emit_module_complete(ctx, MODULE_SUBDOMAIN_INTEL, result)
+    return result
+
+
+async def _run_module_core(
+    module_name: str,
+    ctx: WorkerContext,
+    *,
+    soft_timeout: float | None,
+    outer_timeout: bool,
+) -> tuple[list[dict[str, Any]], list[WorkItem]]:
     module = _get_module_instance(module_name, ctx)
     started = time.perf_counter()
     if ctx.progress_callback is not None:
         ctx.progress_callback(module_name, "Starting module...")
     result: ModuleResult | None = None
     try:
-        result = await asyncio.wait_for(
-            _run_module_instance(module_name, module, ctx, soft_timeout),
+        instance = _run_module_instance(module_name, module, ctx, soft_timeout)
+        if outer_timeout:
+            assert soft_timeout is not None
             # _run_module_instance applies the same soft timeout internally
             # and returns a PARTIAL result. A small grace window prevents the
             # outer guard from cancelling that result at the exact deadline.
-            timeout=soft_timeout + 1.0,
-        )
+            result = await asyncio.wait_for(instance, timeout=soft_timeout + 1.0)
+        else:
+            # subdomain_intel is governed by the explicit task hard wall. Do
+            # not install a second soft timeout around the module coroutine.
+            result = await instance
     except asyncio.TimeoutError:
         elapsed = round(time.perf_counter() - started, 3)
         partial_metadata = {}
         if module_name == MODULE_SUBDOMAIN_INTEL:
             partial_metadata = getattr(module, "partial_metadata", lambda: {})()
+        timeout_label = soft_timeout if soft_timeout is not None else elapsed
         result = ModuleResult(
             status=ModuleStatus.FAILED,
-            errors=[f"module timed out after {soft_timeout:.1f}s"],
+            errors=[f"module timed out after {timeout_label:.1f}s"],
             metadata={"domain": ctx.domain, **partial_metadata, "duration_seconds": elapsed},
         )
     except asyncio.CancelledError:
         elapsed = round(time.perf_counter() - started, 3)
-        partial_metadata = {}
         if module_name == MODULE_SUBDOMAIN_INTEL:
-            partial_metadata = getattr(module, "partial_metadata", lambda: {})()
-        result = ModuleResult(
-            status=ModuleStatus.PARTIAL,
-            findings=[],
-            errors=["Cancelled by budget timeout"],
-            metadata={"domain": ctx.domain, **partial_metadata, "duration_seconds": elapsed},
-        )
+            result = _partial_subdomain_result(module, ctx)
+        else:
+            result = ModuleResult(
+                status=ModuleStatus.PARTIAL,
+                findings=[],
+                errors=["Cancelled by budget timeout"],
+                metadata={"domain": ctx.domain, "duration_seconds": elapsed},
+            )
         raise
     finally:
         if result is not None:
@@ -1488,8 +1660,7 @@ async def _run_module(
                 _emit_finding(ctx.signal_pool, module_name, finding, ctx.domain)
 
     assert result is not None
-    out_findings = [dict(f) for f in (result.findings or []) if isinstance(f, dict)]
-    new_items = result.new_items if hasattr(result, "new_items") else []
+    out_findings, new_items = _module_outputs(result)
     if module_name == MODULE_EMPLOYEE_NAMES:
         names = [
             {
@@ -1533,6 +1704,56 @@ async def _ensure_provider_detection(ctx: WorkerContext) -> Any:
     if ctx.provider_detection_ready is not None:
         ctx.provider_detection_ready.set()
     return detection
+
+
+async def run_subdomain_intel(
+    ctx: WorkerContext,
+) -> tuple[list[dict[str, Any]], list[WorkItem]]:
+    """Run subdomain_intel without the generic module soft timeout."""
+    return await _run_module_core(
+        MODULE_SUBDOMAIN_INTEL,
+        ctx,
+        # _safe_phase12_run interprets None as "derive the generic soft
+        # timeout from ctx.budget". Infinity disables that inner boundary;
+        # _run_subdomain_intel_with_hard_cap owns the real wall.
+        soft_timeout=float("inf"),
+        outer_timeout=False,
+    )
+
+
+async def _run_subdomain_intel_with_hard_cap(
+    ctx: WorkerContext,
+) -> tuple[list[dict[str, Any]], list[WorkItem]]:
+    """Run subdomain_intel in a tracked task with a real cancellation wall."""
+    hard_cap = float(
+        getattr(ctx, "subdomain_intel_hard_cap", SUBDOMAIN_INTEL_HARD_CAP)
+    )
+    subdomain_task = asyncio.ensure_future(run_subdomain_intel(ctx))
+    try:
+        return await asyncio.wait_for(
+            subdomain_task,
+            timeout=hard_cap,
+        )
+    except asyncio.TimeoutError:
+        subdomain_task.cancel()
+        try:
+            await subdomain_task
+        except asyncio.CancelledError:
+            pass
+        logger.warning(
+            "subdomain_intel cancelled at hard cap %ds",
+            hard_cap,
+        )
+        return _module_outputs(_ensure_subdomain_partial_result(ctx))
+    except asyncio.CancelledError:
+        # If the harvest itself is cancelled, do not leave the child task
+        # running after its parent has unwound.
+        subdomain_task.cancel()
+        try:
+            await subdomain_task
+        except asyncio.CancelledError:
+            pass
+        raise
 
 async def _run_module_with_payload(
     module_name: str,
@@ -1632,18 +1853,38 @@ def _record_module_result(
         if key in {"per_person", "sources"} and isinstance(value, list):
             existing = metadata.get(key)
             metadata[key] = [*(existing if isinstance(existing, list) else []), *value]
-        elif key.endswith("_found") or key.endswith("_attempted") or key.endswith("_checked") or key == "findings_count":
+        elif (
+            key.endswith("_found")
+            or key.endswith("_attempted")
+            or key.endswith("_checked")
+            or key == "findings_count"
+        ):
             try:
                 metadata[key] = int(metadata.get(key, 0)) + int(value)
             except (TypeError, ValueError):
                 metadata[key] = value
         else:
             metadata[key] = value
-    status = ModuleStatus.SUCCESS if previous_findings or current_findings else (
-        ModuleStatus.PARTIAL
-        if previous.status == ModuleStatus.PARTIAL or result.status == ModuleStatus.PARTIAL
-        else result.status
-    )
+    if module_name == MODULE_EMAIL_IDENTITY_ENRICHMENT:
+        # Per-email enrichment can produce useful findings while one or more
+        # backing sources fail. Preserve that degraded health signal across
+        # the accumulating reactive runs instead of upgrading it to SUCCESS
+        # merely because a finding exists.
+        statuses = {previous.status, result.status}
+        if ModuleStatus.PARTIAL in statuses:
+            status = ModuleStatus.PARTIAL
+        elif ModuleStatus.SUCCESS in statuses:
+            status = ModuleStatus.SUCCESS
+        elif ModuleStatus.FAILED in statuses:
+            status = ModuleStatus.FAILED
+        else:
+            status = result.status
+    else:
+        status = ModuleStatus.SUCCESS if previous_findings or current_findings else (
+            ModuleStatus.PARTIAL
+            if previous.status == ModuleStatus.PARTIAL or result.status == ModuleStatus.PARTIAL
+            else result.status
+        )
     ctx.module_results[module_name] = ModuleResult(
         status=status,
         findings=[*previous_findings, *current_findings],
@@ -1873,7 +2114,11 @@ async def _run_module_instance(
         )
     if module_name == MODULE_RIPE_STAT_ASN:
         hackertarget = (ctx.module_results or {}).get(MODULE_HACKERTARGET)
-        infrastructure = (hackertarget.metadata or {}).get("infrastructure", {}) if hackertarget else {}
+        infrastructure = (
+            (hackertarget.metadata or {}).get("infrastructure", {})
+            if hackertarget
+            else {}
+        )
         ip_rows = infrastructure.get("ips", []) if isinstance(infrastructure, dict) else []
         resolved_ips = [
             str(row.get("ip"))
@@ -1883,7 +2128,11 @@ async def _run_module_instance(
         return await module.run(ctx.domain, resolved_ips=resolved_ips)
     if module_name == MODULE_SHODAN_INTERNETDB:
         hackertarget = (ctx.module_results or {}).get(MODULE_HACKERTARGET)
-        infrastructure = (hackertarget.metadata or {}).get("infrastructure", {}) if hackertarget else {}
+        infrastructure = (
+            (hackertarget.metadata or {}).get("infrastructure", {})
+            if hackertarget
+            else {}
+        )
         ip_rows = infrastructure.get("ips", []) if isinstance(infrastructure, dict) else []
         resolved_ips = [
             str(row.get("ip"))
@@ -2118,7 +2367,11 @@ def _emit_module_complete(
         logger.debug("on_module_complete(%s) raised", module_name, exc_info=True)
 
 
-async def _attach_breach_enrichment(unique_emails: list[Any]) -> None:
+async def _attach_breach_enrichment(
+    unique_emails: list[Any],
+    module_results: dict[str, ModuleResult] | None = None,
+    ctx: WorkerContext | None = None,
+) -> None:
     """Phase 5 — run breach aggregation on confirmed emails only.
 
     Post-confirmation enrichment: only SMTP-/provider-verified mailboxes
@@ -2130,17 +2383,107 @@ async def _attach_breach_enrichment(unique_emails: list[Any]) -> None:
     try:
         from ..modules.breach_aggregator import enrich_confirmed_emails
 
-        enrichment = await enrich_confirmed_emails(unique_emails, settings)
+        telemetry_by_email: dict[str, dict[str, dict[str, Any]]] = {}
+        enrichment = await enrich_confirmed_emails(
+            unique_emails,
+            settings,
+            telemetry_by_email=telemetry_by_email,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.debug("breach enrichment tail failed: %s", exc)
+        if module_results is not None:
+            module_results["breach_aggregator"] = ModuleResult(
+                status=ModuleStatus.FAILED,
+                errors=[f"breach_aggregator: {exc}"],
+                metadata={"sources": {}},
+            )
         return
-    if not enrichment:
-        return
+
     by_email = {getattr(e, "email", None): e for e in unique_emails}
     for address, findings in enrichment.items():
         entry = by_email.get(address)
         if entry is not None:
             entry.breach_enrichment = [bf.to_finding() for bf in findings]
+
+    if module_results is None:
+        return
+
+    source_names = ("scylla", "hibp_paste", "dehashed", "snusbase")
+    source_rows: dict[str, dict[str, Any]] = {}
+    for source in source_names:
+        rows = [
+            per_email.get(source, {})
+            for per_email in telemetry_by_email.values()
+            if isinstance(per_email.get(source), dict)
+        ]
+        statuses = [str(row.get("status", "not_run")) for row in rows]
+        attempted = [status for status in statuses if status not in {"skipped", "not_run"}]
+        if not rows or not attempted:
+            status = "skipped"
+        elif "rate_limited" in attempted:
+            status = "rate_limited"
+        elif "success" in attempted:
+            status = "success"
+        else:
+            status = "error"
+        source_rows[source] = {
+            "status": status,
+            "checked": sum(int(row.get("checked") or 0) for row in rows),
+            "hits": sum(int(row.get("hits") or 0) for row in rows),
+            "http_status": next(
+                (row.get("http_status") for row in rows if row.get("http_status") is not None),
+                None,
+            ),
+            "duration_seconds": round(
+                sum(float(row.get("duration_seconds") or 0.0) for row in rows),
+                3,
+            ),
+            "error": next(
+                (row.get("error") for row in rows if row.get("error")),
+                None,
+            ),
+        }
+
+    total_hits = sum(row["hits"] for row in source_rows.values())
+    attempted_rows = [
+        row for row in source_rows.values() if row["status"] not in {"skipped", "not_run"}
+    ]
+    if not attempted_rows:
+        status = ModuleStatus.SKIPPED
+    elif any(row["status"] == "rate_limited" for row in attempted_rows):
+        status = ModuleStatus.PARTIAL
+    elif total_hits:
+        status = ModuleStatus.SUCCESS
+    elif all(row["status"] == "success" for row in attempted_rows):
+        status = ModuleStatus.SUCCESS_EMPTY
+    elif all(row["status"] == "error" for row in attempted_rows):
+        status = ModuleStatus.FAILED
+    else:
+        status = ModuleStatus.PARTIAL
+
+    breach_findings = [
+        finding
+        for findings in enrichment.values()
+        for finding in findings
+    ]
+    metadata = {
+        "sources": source_rows,
+        "total_breach_records": len(breach_findings),
+        "sources_with_password_data": sum(
+            1
+            for finding in breach_findings
+            if finding.has_plaintext_password or finding.has_hash
+        ),
+        "source_types": sorted({finding.source_type for finding in breach_findings}),
+    }
+    result = ModuleResult(
+        status=status,
+        findings=[finding.to_finding() for finding in breach_findings],
+        metadata=metadata,
+    )
+    module_results["breach_aggregator"] = result
+    if ctx is not None:
+        _emit_module_complete(ctx, "breach_aggregator", result)
 
 
 def _employee_name_count(module_results: dict[str, ModuleResult]) -> int:
