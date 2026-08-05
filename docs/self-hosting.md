@@ -5,14 +5,12 @@
 ```bash
 pip install mailaccess
 
-# Option A: auto-start (simplest)
+# Investigations auto-start the backend when needed.
 mailaccess investigate you@example.com
-# Server starts automatically, runs investigation,
-# stops when done.
+# The server starts automatically, runs the investigation, and stops when done.
 
-# Option B: keep server running
-mailaccess serve  # in one terminal
-mailaccess investigate you@example.com  # in another
+# For multiple investigations, keep one persistent server running:
+mailaccess serve
 ```
 
 ---
@@ -468,9 +466,12 @@ mailaccess investigate user@example.com
 ### CLI only (no Docker)
 
 ```bash
-pip install 'mailaccess[harvest]'
+pip install mailaccess
 
-# Start the backend in a separate terminal before investigating
+# The backend auto-starts for a one-off investigation
+mailaccess investigate you@example.com
+
+# Or keep it running for multiple investigations
 mailaccess serve
 mailaccess investigate you@example.com
 

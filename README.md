@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.13.4&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
+[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.14.3&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
@@ -27,6 +27,10 @@ Built for security researchers, OSINT analysts, and penetration testers operatin
 pip install mailaccess
 mailaccess investigate you@example.com
 ```
+
+The CLI auto-starts and stops the backend for each investigation. Use
+`mailaccess serve` when you want a persistent server, or install
+`mailaccess[ml]` for optional spaCy-based name classification.
 
 Full install options (Docker, persistent server, self-hosting) -> [docs/self-hosting.md](docs/self-hosting.md).
 

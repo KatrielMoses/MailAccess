@@ -151,7 +151,7 @@ def _try_build_stealth_session() -> StealthSession | None:
         # we just log at debug level (one line) and return None.
         _LOG.debug(
             "employee_name_discovery: curl-cffi unavailable; "
-            "falling back to httpx (install 'mailaccess[harvest]')",
+            "falling back to httpx (install mailaccess)",
         )
         return None
 

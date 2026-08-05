@@ -102,7 +102,7 @@ def _require_cffi() -> None:
         return
     raise ImportError(
         "curl-cffi is required for stealth harvest mode but is not installed. "
-        "Install harvest extras: pip install 'mailaccess[harvest]'"
+        "Install the base package: pip install mailaccess"
     ) from _CFFI_IMPORT_ERROR
 
 

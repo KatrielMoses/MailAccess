@@ -600,8 +600,8 @@ def run_harvest_emails(
 
     if not _CFFI_AVAILABLE:
         console.print(
-            "harvest-emails requires the harvest extra. Run: "
-            "pip install 'mailaccess[harvest]' then retry.",
+            "harvest-emails requires curl-cffi. Run: "
+            "pip install mailaccess then retry.",
             markup=False,
         )
         return 2

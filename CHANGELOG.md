@@ -1,5 +1,13 @@
 # Changelog
 
+### 0.14.3
+
+- `mailaccess investigate` now auto-starts the backend when it is not already
+  running and terminates that managed server after the investigation.
+- The base `mailaccess` install now includes harvest support and PDF export;
+  `mailaccess[ml]` remains optional for spaCy-based name classification.
+- Self-hosting, README, and doctor guidance now use the single-install flow.
+
 ### 0.14.1
 
 - CRITICAL: `subdomain_intel` is hard-cancelled at 30% of the timing-profile budget.

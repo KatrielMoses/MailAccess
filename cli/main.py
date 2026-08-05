@@ -6,7 +6,9 @@ import getpass
 import importlib.util
 import json
 import os
+import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -129,6 +131,35 @@ def _print_invalid_email(value: str) -> None:
             border_style="red",
         )
     )
+
+
+async def _save_investigate_export(
+    client: httpx.AsyncClient,
+    investigation_id: str,
+    output_format: str,
+    output_file: str,
+    out: Console,
+    success_message: str | None = None,
+) -> None:
+    """Write an investigation export, treating unavailable PDF support as optional."""
+    try:
+        export_resp = await client.get(
+            f"/api/report/{investigation_id}/export",
+            params={"format": output_format},
+        )
+        if output_format == "pdf" and export_resp.status_code == 422:
+            out.print(
+                "PDF export skipped — weasyprint not available. "
+                "Install with: pip install mailaccess[pdf]",
+                style="dim",
+                markup=False,
+            )
+            return
+        export_resp.raise_for_status()
+        Path(output_file).write_bytes(export_resp.content)
+        out.print(success_message or f"[green]✓ Report saved to {output_file}[/green]")
+    except Exception as exc:
+        out.print(f"[red]Failed to save report:[/] {exc}")
 
 
 def _read_scrapingant_last_configured() -> str | None:
@@ -1253,10 +1284,10 @@ async def _collect_doctor_checks() -> list[DoctorCheck]:
     checks.append(
         DoctorCheck(
             "Installation",
-            "mailaccess[harvest] (curl-cffi)",
+            "mailaccess (curl-cffi)",
             curl_ok,
             "installed" if curl_ok else "not installed",
-            "pip install 'mailaccess[harvest]'",
+            "pip install mailaccess",
             "error",
         )
     )
@@ -2063,7 +2094,112 @@ def _format_duration(run: dict[str, Any]) -> str:
 # ── Investigate ───────────────────────────────────────────────────────────────
 
 
+async def _ensure_server_running(
+    base_url: str,
+    email: str,
+) -> subprocess.Popen | None:
+    """Ensure the backend is healthy and return only a process we started."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{base_url}/health", timeout=3.0)
+            response.raise_for_status()
+            return None
+    except Exception:
+        pass
+
+    console.print("[dim]Starting backend server...[/dim]")
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "cli.main", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        err_console.print("Error: backend server failed to start.", markup=False)
+        err_console.print("Try running manually: mailaccess serve", markup=False)
+        return None
+
+    try:
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(f"{base_url}/health", timeout=2.0)
+                    response.raise_for_status()
+                console.print("[dim]Backend ready.[/dim]")
+                return proc
+            except Exception:
+                if proc.poll() is not None:
+                    err_console.print("Error: backend server failed to start.", markup=False)
+                    err_console.print("Try running manually: mailaccess serve", markup=False)
+                    return None
+
+        _stop_managed_server(proc)
+        err_console.print("Error: backend server did not start within 15s.", markup=False)
+        err_console.print("Try running manually: mailaccess serve", markup=False)
+        return None
+    except BaseException:
+        _stop_managed_server(proc)
+        raise
+
+
+def _stop_managed_server(proc: subprocess.Popen) -> None:
+    """Terminate a process started by :func:`_ensure_server_running`."""
+    with contextlib.suppress(Exception):
+        proc.terminate()
+    try:
+        proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(Exception):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5.0)
+
+
 async def _investigate(
+    email: str,
+    output_format: str,
+    modules: str | None,
+    timeout: int,
+    output_file: str | None,
+    force: bool = False,
+    show_collisions: bool = False,
+    enable: str | None = None,
+    no_brief: bool = False,
+    scrapingant_transport_override: str | None = None,
+    proxy_fallback_ok: bool = False,
+) -> int:
+    base_url = get_backend_url()
+    managed_proc = await _ensure_server_running(base_url, email)
+    if managed_proc is None:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{base_url}/health", timeout=2.0)
+                response.raise_for_status()
+        except Exception:
+            return 3
+
+    try:
+        return await _investigate_run(
+            email,
+            output_format,
+            modules,
+            timeout,
+            output_file,
+            force,
+            show_collisions,
+            enable,
+            no_brief,
+            scrapingant_transport_override,
+            proxy_fallback_ok,
+        )
+    finally:
+        if managed_proc is not None:
+            _stop_managed_server(managed_proc)
+
+
+async def _investigate_run(
     email: str,
     output_format: str,
     modules: str | None,
@@ -2104,22 +2240,6 @@ async def _investigate(
     if enable_modules_list:
         payload["enable_modules"] = enable_modules_list
         err_console.print(f"[dim]Opt-in modules enabled: {', '.join(enable_modules_list)}[/dim]")
-
-    try:
-        async with httpx.AsyncClient() as check_client:
-            response = await check_client.get(f"{base_url}/health", timeout=3.0)
-            response.raise_for_status()
-    except Exception:
-        err_console.print(
-            "Error: mailaccess investigate requires the backend server.",
-            markup=False,
-        )
-        err_console.print("Run in a separate terminal: mailaccess serve", markup=False)
-        err_console.print(
-            f"Then retry: mailaccess investigate {email}",
-            markup=False,
-        )
-        return 3
 
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
         err_console.print(f"[dim]Backend: {base_url}[/dim]")
@@ -3142,6 +3262,23 @@ async def _investigate(
             out.print("[red]Error:[/] Report is empty — investigation may have failed.")
             return 3
 
+        if output_file is None and output_format == "table":
+            auto_pdf_path = (
+                Path.home()
+                / ".mailaccess"
+                / "results"
+                / f"mailaccess_{email}_{inv_id}.pdf"
+            )
+            auto_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+            await _save_investigate_export(
+                client,
+                inv_id,
+                "pdf",
+                str(auto_pdf_path),
+                out,
+                success_message=f"[dim]PDF saved: {auto_pdf_path}[/dim]",
+            )
+
         if output_file:
             ext = Path(output_file).suffix.lower()
             if ext not in _EXPORT_FORMATS:
@@ -3150,41 +3287,15 @@ async def _investigate(
                 )
             else:
                 fmt = ext.lstrip(".")
-                try:
-                    export_resp = await client.get(
-                        f"/api/report/{inv_id}/export",
-                        params={"format": fmt},
-                    )
-                    export_resp.raise_for_status()
-                    Path(output_file).write_bytes(export_resp.content)
-                    out.print(f"[green]✓ Report saved to {output_file}[/green]")
-                except Exception as e:
-                    out.print(f"[red]Failed to save report:[/] {e}")
+                await _save_investigate_export(client, inv_id, fmt, output_file, out)
 
         # Determine exit code
         findings_count = len(report_data.get("findings", []))
-        breaches_found = False
-        for f in report_data.get("findings", []):
-            if isinstance(f, dict):
-                src = str(f.get("source", "")).lower()
-                plat = str(f.get("platform", "")).lower()
-                mod = str(f.get("module_name", "")).lower()
-                breach_markers = (
-                    "hibp",
-                    "breachdirectory",
-                    "hudson_rock",
-                    "haveibeenpwned",
-                    "breach_deep",
-                )
-                if any(marker in (src, plat, mod) for marker in breach_markers):
-                    breaches_found = True
-                    break
-
-        exit_code = 0
-        if breaches_found:
-            exit_code = 2
-        elif findings_count > 0:
-            exit_code = 1
+        # Module-level findings and partial failures are expected outcomes of
+        # an OSINT sweep. They do not mean that the investigation command
+        # failed; only an investigation whose terminal status is ``failed``
+        # gets the investigation-failure exit code.
+        exit_code = 1 if str(report_data.get("status", "")).lower() == "failed" else 0
 
         if output_format == "jsonl":
             for mod, findings in report_data.get("findings_by_module", {}).items():
@@ -3858,7 +3969,7 @@ def investigate(
     ),
 ) -> None:
     """Run a full OSINT investigation against an email address.
-    Exit codes: 0=clean 1=findings 2=breaches 3=error"""
+    Exit codes: 0=completed 1=failed 2=invalid input 3=server unavailable"""
     if use_scraping_api and use_proxies:
         raise typer.BadParameter("--use-scraping-api and --use-proxies are mutually exclusive")
     if proxy_type is not None and not use_proxies:
@@ -3886,7 +3997,7 @@ def investigate(
     for target_email in emails:
         if not validate_email(target_email):
             _print_invalid_email(target_email)
-            raise typer.Exit(1)
+            raise typer.Exit(2)
 
     if output_file:
         output_path = Path(output_file)

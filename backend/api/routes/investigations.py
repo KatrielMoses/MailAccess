@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -122,8 +123,22 @@ async def export_report(
     exporter = EXPORTERS[format]()
     if format == "pdf":
         from ...exporters.pdf_exporter import PdfExporter
+
         assert isinstance(exporter, PdfExporter)
-        content = await exporter.generate(investigation_id, data)
+        try:
+            content = await exporter.generate(investigation_id, data)
+        except (ImportError, OSError):
+            print(traceback.format_exc())
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": "PDF export requires weasyprint.",
+                    "install": "pip install mailaccess[pdf]",
+                },
+            )
+        except Exception:
+            print(traceback.format_exc())
+            raise
     else:
         content = exporter.export(investigation_id, data)
     return Response(

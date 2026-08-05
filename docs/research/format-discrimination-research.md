@@ -643,8 +643,8 @@ anti-bot checks for team pages. The gap is **rendering JS to read
 the DOM**, not bypassing anti-bot.
 
 **If you must add JS rendering: Playwright Chromium only**, gated
-behind a `pip install mailaccess[browser]` extra (same pattern as
-the `mailaccess[harvest]` extra that gates curl-cffi). Per-page
+behind a `pip install mailaccess[browser]` extra. curl-cffi is included
+in the base `mailaccess` install. Per-page
 trigger, not per-harvest.
 
 ### c) Honest answer for rootaccess.tech

@@ -253,7 +253,7 @@ class EmailSearchDorkModule(BaseModule):
             except ImportError as exc:
                 _LOG.debug(
                     "email_search_dork: curl-cffi unavailable; using httpx "
-                    "fallback (install 'mailaccess[harvest]'): %s",
+                    "fallback (install mailaccess): %s",
                     exc,
                 )
                 stealth_session = None

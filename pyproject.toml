@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mailaccess"
-version = "0.14.2"
+version = "0.14.3"
 description = "Open-source OSINT email intelligence tool"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,6 +27,7 @@ dependencies = [
     "pydantic[email]>=2.0",
     "pydantic-settings>=2.3",
     "httpx>=0.27",
+    "curl-cffi>=0.7",
     "imagehash>=4.3",
     "Pillow>=10.0",
     "websockets>=12",
@@ -34,7 +35,6 @@ dependencies = [
     "python-whois>=0.9",
     "typer[all]>=0.25.1",
     "rich>=13",
-    "weasyprint>=62",
     "stix2>=3.0",
     "holehe>=1.61",
     "user-scanner>=1.0",
@@ -50,11 +50,11 @@ Documentation = "https://github.com/YOUR_USERNAME/mailaccess/docs"
 Issues = "https://github.com/YOUR_USERNAME/mailaccess/issues"
 
 [project.optional-dependencies]
-harvest = [
-    "curl-cffi>=0.7",
-]
 ml = [
     "spacy>=3.7,<4.0",
+]
+pdf = [
+    "weasyprint>=60.0",
 ]
 ghunt = [
     "ghunt>=2.3",
