@@ -97,7 +97,18 @@ _SCRAPINGANT_KEYS: list[tuple[str, str, str]] = [
 ]
 _SCRAPINGANT_KEY_NAMES = {key_name for key_name, _, _ in _SCRAPINGANT_KEYS}
 
-_EXPORT_FORMATS = {".json", ".csv", ".md", ".pdf", ".stix", ".mtgx"}
+# Map output-file extensions to backend exporter format names. These differ:
+# ``.md`` -> "markdown" and ``.mtgx`` -> "maltego"; sending the bare extension
+# yields a 422 from the export endpoint.
+_EXTENSION_TO_FORMAT = {
+    ".json": "json",
+    ".csv": "csv",
+    ".md": "markdown",
+    ".pdf": "pdf",
+    ".stix": "stix",
+    ".mtgx": "maltego",
+}
+_EXPORT_FORMATS = set(_EXTENSION_TO_FORMAT)
 _SCRAPINGANT_PROXY_TYPES = {"residential", "datacenter"}
 
 
@@ -3286,7 +3297,7 @@ async def _investigate_run(
                     f"[red]Unsupported extension:[/] {ext}. Supported: {', '.join(sorted(_EXPORT_FORMATS))}"
                 )
             else:
-                fmt = ext.lstrip(".")
+                fmt = _EXTENSION_TO_FORMAT[ext]
                 await _save_investigate_export(client, inv_id, fmt, output_file, out)
 
         # Determine exit code
