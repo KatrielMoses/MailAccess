@@ -173,6 +173,51 @@ async def _save_investigate_export(
         out.print(f"[red]Failed to save report:[/] {exc}")
 
 
+# A full investigation runs many modules server-side and can take several
+# minutes; the client must wait well past any single module's budget. The
+# server persists the report either way, so this is only the live-wait bound.
+_POLL_INTERVAL_S = 2.0
+_POLL_TIMEOUT_S = 600.0
+
+
+async def _poll_report_until_done(
+    client: httpx.AsyncClient,
+    investigation_id: str,
+    status: str,
+    report_data: dict[str, Any],
+    live: Any | None = None,
+) -> tuple[str, dict[str, Any], bool]:
+    """Poll the report endpoint until the investigation completes or fails.
+
+    Returns ``(status, report_data, timed_out)``. ``timed_out`` is True only
+    when the server is still working after ``_POLL_TIMEOUT_S`` — a completed or
+    failed run returns ``timed_out=False`` regardless of how long the wait was,
+    so a slow-but-successful investigation is never misreported as a failure.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _POLL_TIMEOUT_S
+    while status not in ("complete", "failed"):
+        if loop.time() >= deadline:
+            # One last fetch: the run may have finished during the final sleep.
+            with contextlib.suppress(Exception):
+                resp = await client.get(f"/api/report/{investigation_id}")
+                resp.raise_for_status()
+                report_data = resp.json()
+                status = report_data.get("status", status)
+            if status not in ("complete", "failed"):
+                return status, report_data, True
+            break
+        await asyncio.sleep(_POLL_INTERVAL_S)
+        with contextlib.suppress(Exception):
+            resp = await client.get(f"/api/report/{investigation_id}")
+            resp.raise_for_status()
+            report_data = resp.json()
+            status = report_data.get("status", status)
+            if live is not None:
+                live.update(update_progress_table(report_data))
+    return status, report_data, False
+
+
 def _read_scrapingant_last_configured() -> str | None:
     value = os.environ.get("SCRAPINGANT_LAST_CONFIGURED")
     if value:
@@ -3147,8 +3192,6 @@ async def _investigate_run(
                 # Fallback to normal polling if immediate report fetch fails.
                 status = "pending"
 
-        _MAX_POLL_ATTEMPTS = 60  # 60 × 2 s = 120 s hard timeout
-
         if output_format not in ("json", "jsonl") and not cached:
             ws_base = base_url.replace("https://", "wss://").replace("http://", "ws://")
             ws_url = f"{ws_base}/ws/investigate/{inv_id}"
@@ -3217,40 +3260,30 @@ async def _investigate_run(
                     err_console.print(f"[dim]Tried: {ws_url}[/dim]")
                     err_console.print("[dim]Is the backend running?[/dim]")
                 if status not in ("complete", "failed"):
-                    _attempts = 0
-                    while status not in ("complete", "failed"):
-                        if _attempts >= _MAX_POLL_ATTEMPTS:
-                            err_console.print(
-                                "[red]Timed out waiting for investigation to complete (120 s)[/red]"
-                            )
-                            return 3
-                        await asyncio.sleep(2)
-                        _attempts += 1
-                        with contextlib.suppress(Exception):
-                            resp = await client.get(f"/api/report/{inv_id}")
-                            resp.raise_for_status()
-                            report_data = resp.json()
-                            status = report_data.get("status", status)
-                            if _live:
-                                _live.update(update_progress_table(report_data))
+                    status, report_data, _timed_out = await _poll_report_until_done(
+                        client, inv_id, status, report_data, live=_live
+                    )
+                    if _timed_out:
+                        err_console.print(
+                            "[yellow]Investigation still running after "
+                            f"{int(_POLL_TIMEOUT_S)} s; it continues server-side and is "
+                            "saved. Retrieve it later with: mailaccess history[/yellow]"
+                        )
+                        return 3
             finally:
                 if _live:
                     _live.stop()
         else:
-            _attempts = 0
-            while status not in ("complete", "failed"):
-                if _attempts >= _MAX_POLL_ATTEMPTS:
-                    err_console.print(
-                        "[red]Timed out waiting for investigation to complete (120 s)[/red]"
-                    )
-                    return 3
-                await asyncio.sleep(2)
-                _attempts += 1
-                with contextlib.suppress(Exception):
-                    resp = await client.get(f"/api/report/{inv_id}")
-                    resp.raise_for_status()
-                    report_data = resp.json()
-                    status = report_data.get("status", status)
+            status, report_data, _timed_out = await _poll_report_until_done(
+                client, inv_id, status, report_data
+            )
+            if _timed_out:
+                err_console.print(
+                    "[yellow]Investigation still running after "
+                    f"{int(_POLL_TIMEOUT_S)} s; it continues server-side and is "
+                    "saved. Retrieve it later with: mailaccess history[/yellow]"
+                )
+                return 3
 
         if output_format not in ("json", "jsonl") and cached:
             module_runs = report_data.get("module_runs", [])
