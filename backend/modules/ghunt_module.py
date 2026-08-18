@@ -30,6 +30,16 @@ async def _is_google_domain(domain: str) -> bool:
 
 def _load_creds(creds_path: str) -> Any:
     """Load GHunt credentials from disk (sync — called via asyncio.to_thread)."""
+    # ghunt >=2.x: credentials load via the GHuntCreds object (base64 .m file)
+    try:
+        from ghunt.objects.base import GHuntCreds
+        creds = GHuntCreds(creds_path=creds_path)
+        creds.load_creds(silent=True)
+        return creds
+    except (ImportError, AttributeError, TypeError):
+        pass
+
+    # Legacy fallback: older ghunt helpers.auth.load_creds(creds, file=...)
     from ghunt.objects.base import SmartObj
 
     creds = SmartObj()
@@ -40,7 +50,7 @@ def _load_creds(creds_path: str) -> Any:
     except (ImportError, TypeError, AttributeError):
         pass
 
-    # Fallback for builds where load_creds signature differs
+    # Last resort for builds that wrote plain-JSON creds
     raw = json.loads(Path(creds_path).read_text(encoding="utf-8"))
     for k, v in raw.items():
         setattr(creds, k, v)

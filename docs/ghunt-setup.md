@@ -42,14 +42,15 @@ GHunt will open a browser tab. Sign into the Google account you want to use as t
 authenticating session, then click the GHunt Companion extension icon and copy the
 token it shows. Paste it back into the terminal when prompted.
 
-GHunt writes a credentials file to disk (default: `~/.config/ghunt/creds.m` or
-`ghunt_creds.json` in the current directory, depending on version).
+GHunt writes a base64 credentials file to disk. On ghunt 2.x the default location is
+`~/.malfrats/ghunt/creds.m` (older builds used `~/.config/ghunt/creds.m`). Note the
+file is a base64 blob, not JSON — point `GHUNT_CREDS_PATH` at it directly.
 
 ## 4. Set the credentials path in `.env`
 
 ```dotenv
 ENABLE_GHUNT=true
-GHUNT_CREDS_PATH=/absolute/path/to/ghunt_creds.json
+GHUNT_CREDS_PATH=/home/you/.malfrats/ghunt/creds.m
 ```
 
 Use the exact path printed by `ghunt login` at the end of the setup.
