@@ -88,6 +88,14 @@ def _make_finding(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _holehe_platform_name(fn: Any) -> str:
+    """Best-effort platform label for a Holehe probe function."""
+    module = getattr(fn, "__module__", "") or ""
+    if module:
+        return module.rsplit(".", 1)[-1]
+    return getattr(fn, "__name__", None) or "unknown"
+
+
 class AccountDiscoveryModule(BaseModule):
     name = "account_discovery"
     description = (
@@ -120,15 +128,22 @@ class AccountDiscoveryModule(BaseModule):
             for i in range(0, len(funcs), _BATCH_SIZE)
         ]
 
+        probe_failures: list[str] = []
+
         async with build_client(timeout=15.0, follow_redirects=True) as client:
             for idx, batch in enumerate(batches):
                 out_lists: list[list[dict[str, Any]]] = [[] for _ in batch]
                 coros = [fn(email, client, out) for fn, out in zip(batch, out_lists)]
                 gathered = await asyncio.gather(*coros, return_exceptions=True)
 
-                for exc_or_none, out in zip(gathered, out_lists):
+                for fn, exc_or_none, out in zip(batch, gathered, out_lists):
                     if isinstance(exc_or_none, Exception):
-                        errors.append(str(exc_or_none))
+                        # Individual Holehe site probes break as sites change.
+                        # Isolate and attribute them instead of surfacing bare,
+                        # unlabelled exception text (e.g. "" or "'found'").
+                        platform = _holehe_platform_name(fn)
+                        detail = str(exc_or_none).strip() or type(exc_or_none).__name__
+                        probe_failures.append(f"{platform}: {detail}")
                         continue
                     for r in out:
                         if r.get("rateLimit"):
@@ -146,14 +161,18 @@ class AccountDiscoveryModule(BaseModule):
                 f"Rate-limited by {len(rate_limited)} platform(s): "
                 + ", ".join(rate_limited)
             )
+        if probe_failures:
+            errors.append(
+                f"{len(probe_failures)} platform probe(s) errored: "
+                + ", ".join(probe_failures[:10])
+                + (" ..." if len(probe_failures) > 10 else "")
+            )
 
-        hard_errors = [e for e in errors if not e.startswith("Rate-limited")]
-        status = ModuleStatus.SUCCESS
-        if hard_errors:
-            # If at least some probes returned a definitive "not registered" result,
-            # the module ran meaningfully — report PARTIAL rather than FAILED.
-            had_results = bool(findings) or not_found_count > 0
-            status = ModuleStatus.PARTIAL if had_results else ModuleStatus.FAILED
+        # Per-site probe failures and rate limits are expected noise across 120+
+        # platforms; the module ran meaningfully as long as any probe returned a
+        # definitive result. Only a total washout is a real failure.
+        had_results = bool(findings) or not_found_count > 0
+        status = ModuleStatus.SUCCESS if had_results else ModuleStatus.FAILED
 
         result = ModuleResult(
             status=status,
