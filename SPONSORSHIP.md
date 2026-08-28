@@ -14,12 +14,12 @@
 | Metric | Current |
 |---|---|
 | GitHub stars | 1,000+ |
-| PyPI downloads | 50,000+ |
+| PyPI downloads | 35,000+ |
 | Independent security audits | 3 |
 | Sister tool — VoidAccess | 650+ stars |
 | Primary users | OSINT analysts, red teams / pentesters, security researchers, threat intel |
 
-_Figures reviewed and updated each quarter. Live counts: [PyPI](https://pypi.org/project/mailaccess/) · [GitHub](https://github.com/KatrielMoses/MailAccess)._
+_Figures reviewed and updated each quarter. Live counts: [pepy.tech](https://pepy.tech/projects/mailaccess) · [PyPI](https://pypi.org/project/mailaccess/) · [GitHub](https://github.com/KatrielMoses/MailAccess)._
 
 ---
 

@@ -10,7 +10,7 @@
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11%2B-0D0D0D.svg" alt="Python 3.11+"></a>
   <a href="docker-compose.yml"><img src="https://img.shields.io/badge/Docker-Compose-0D0D0D.svg" alt="Docker Compose"></a>
   <a href="https://pypi.org/project/mailaccess/"><img src="https://img.shields.io/static/v1?label=PyPI&message=0.14.3&color=8A1C2B&logo=pypi&logoColor=white" alt="PyPI version"></a>
-  <a href="https://pypi.org/project/mailaccess/"><img src="https://img.shields.io/pypi/dm/mailaccess?color=8A1C2B" alt="PyPI downloads"></a>
+  <a href="https://pepy.tech/projects/mailaccess"><img src="https://img.shields.io/pepy/dt/mailaccess?color=8A1C2B&amp;label=downloads" alt="PyPI downloads"></a>
 </p>
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
