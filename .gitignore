@@ -143,3 +143,6 @@ results/
 !tests/test_toolchain_output.py
 !tests/test_budget_regression.py
 !tests/test_cross_domain_filter.py
+
+# Brand identity kit source bundle (design file, not a shipped asset)
+/assets/mailaccess Identity Kit.html

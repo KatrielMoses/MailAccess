@@ -1,3 +1,10 @@
+<a href="../README.md">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../assets/brand/mailaccess-logo-reversed.svg">
+    <img src="../assets/brand/mailaccess-logo.svg" alt="MailAccess" height="28">
+  </picture>
+</a>
+
 # GHunt Setup Guide
 
 GHunt extracts deep Google account intelligence from a Gmail address: GAIA ID, display

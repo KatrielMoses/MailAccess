@@ -1,17 +1,17 @@
-<pre align="center">
-███╗   ███╗ █████╗ ██╗██╗      █████╗  ██████╗ ██████╗███████╗███████╗███████╗
-████╗ ████║██╔══██╗██║██║     ██╔══██╗██╔════╝██╔════╝██╔════╝██╔════╝██╔════╝
-██╔████╔██║███████║██║██║     ███████║██║     ██║     █████╗  ███████╗███████╗
-██║╚██╔╝██║██╔══██║██║██║     ██╔══██║██║     ██║     ██╔══╝  ╚════██║╚════██║
-██║ ╚═╝ ██║██║  ██║██║███████╗██║  ██║╚██████╗╚██████╗███████╗███████║███████║
-╚═╝     ╚═╝╚═╝  ╚═╝╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚══════╝╚══════╝╚══════╝
-</pre>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/mailaccess-logo-reversed.svg">
+    <img src="assets/brand/mailaccess-logo.svg" alt="MailAccess" width="440">
+  </picture>
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
-[![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)](docker-compose.yml)
-[![PyPI version](https://img.shields.io/static/v1?label=PyPI&message=0.14.3&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/mailaccess/)
-[![PyPI Downloads](https://img.shields.io/pypi/dm/mailaccess)](https://pypi.org/project/mailaccess/)
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-0D0D0D.svg" alt="License: MIT"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11%2B-0D0D0D.svg" alt="Python 3.11+"></a>
+  <a href="docker-compose.yml"><img src="https://img.shields.io/badge/Docker-Compose-0D0D0D.svg" alt="Docker Compose"></a>
+  <a href="https://pypi.org/project/mailaccess/"><img src="https://img.shields.io/static/v1?label=PyPI&message=0.14.3&color=8A1C2B&logo=pypi&logoColor=white" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/mailaccess/"><img src="https://img.shields.io/pypi/dm/mailaccess?color=8A1C2B" alt="PyPI downloads"></a>
+</p>
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
 
@@ -134,9 +134,11 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 | [API reference](docs/api.md) | REST endpoints, WebSocket events, authentication |
 | [Export formats](docs/exports.md) | Supported formats, MIME types, filename conventions |
 | [Integrations](docs/integrations.md) | Maltego, Slack, Discord, generic webhooks |
+| [Brand assets](docs/brand.md) | Logo lockups, palette, typography, clearspace, downloadable SVGs |
+| [Sponsors](docs/sponsors.md) | Current partners and open category slots |
 | [Contributing](CONTRIBUTING.md) | Adding modules, adding exporters, code style, PR checklist |
 | [PyPI](https://pypi.org/project/mailaccess/) | `pip install mailaccess` |
-| [GitHub](https://github.com/YOUR_USERNAME/mailaccess) | Source code, issues, releases |
+| [GitHub](https://github.com/KatrielMoses/MailAccess) | Source code, issues, releases |
 
 ## License
 

@@ -1,3 +1,10 @@
+<a href="../README.md">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../assets/brand/mailaccess-logo-reversed.svg">
+    <img src="../assets/brand/mailaccess-logo.svg" alt="MailAccess" height="28">
+  </picture>
+</a>
+
 # Self-Hosting Guide
 
 ## CLI-only install (no Docker needed)
