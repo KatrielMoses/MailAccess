@@ -38,7 +38,7 @@ The flow:
    ```
 3. Our docs and CLI output route them **directly to the sponsor's signup page** for that category — at the moment they have already decided they need the capability.
 
-The user isn't browsing. They are mid-investigation, blocked on a missing key, actively looking for a provider. That is the highest-converting traffic a data vendor can buy — and it is category-exclusive, so there is no comparison shopping in the moment.
+The user isn't browsing. They are mid-investigation, blocked on a missing key, actively looking for a provider. That is the highest-converting traffic a data vendor can buy — and the provider we name first is the one they reach for first.
 
 Touchpoints in the funnel: `docs/api-keys.md`, `docs/self-hosting.md`, `docs/modules.md`, the `mailaccess keys` CLI surface, module skip messages, and the hosted dashboard's integrations panel.
 
@@ -46,16 +46,16 @@ Touchpoints in the funnel: `docs/api-keys.md`, `docs/self-hosting.md`, `docs/mod
 
 ## Categories
 
-One vendor per category. Exclusive for the duration of the sponsorship.
+Multiple providers can be featured per category. Placement priority — order, prominence, and the “recommended” tag — goes to the highest commitment.
 
-| # | Category | Status | Current partner | Integration surface |
-|---|---|---|---|---|
-| 1 | **Proxies / Residential IPs** | 🔴 TAKEN | **ScrapingAnt** | `SCRAPINGANT_API_KEY`, residential + datacenter proxy routing |
-| 2 | **Breach / Compromised-Credential Data** | 🟢 OPEN | — | `breach_aggregator` module (`DEHASHED_API_KEY`, `SNUSBASE_API_KEY` slots) |
-| 3 | **IP Intelligence** | 🟢 OPEN | — | `domain_intel` / enterprise network intel modules |
-| 4 | **Email / Identity Verification** | 🟢 OPEN | — | SMTP + deliverability verification pipeline |
+| # | Category | Featured partners | Integration surface |
+|---|---|---|---|
+| 1 | **Proxies / Residential IPs** | ScrapingAnt | `SCRAPINGANT_API_KEY`, residential + datacenter proxy routing |
+| 2 | **Breach / Compromised-Credential Data** | *Accepting partners* | `breach_aggregator` module (`DEHASHED_API_KEY`, `SNUSBASE_API_KEY` keys) |
+| 3 | **IP Intelligence** | *Accepting partners* | `domain_intel` / enterprise network intel modules |
+| 4 | **Email / Identity Verification** | *Accepting partners* | SMTP + deliverability verification pipeline |
 
-**3 of 4 slots are currently open.** Current partners: [docs/sponsors.md](docs/sponsors.md).
+Every category is accepting new partners, including those already featured. Current partners: [docs/sponsors.md](docs/sponsors.md).
 
 ---
 
@@ -65,8 +65,8 @@ One vendor per category. Exclusive for the duration of the sponsorship.
 - **Logo + link across the docs** — including `docs/api-keys.md`, the page every user lands on when configuring integrations.
 - **CLI banner placement** — your name appears in the tool operators run daily.
 - **Hosted dashboard placement** — logo + link in the integrations panel.
-- **Named as the recommended provider for your category** — your signup URL is the one we point users to when a module needs that capability.
-- **Category exclusivity** — no competing vendor occupies your slot while the sponsorship is active.
+- **Recommended-provider placement** — available to the top sponsor in each category; your signup URL is the one we point users to when a module needs that capability.
+- **Placement priority** — higher commitment means top position, more prominence, and the “recommended” tag within your category.
 - **Referral / affiliate links honored** — we use your tracking URL so you can attribute conversions.
 
 ---
@@ -75,7 +75,7 @@ One vendor per category. Exclusive for the duration of the sponsorship.
 
 **$150–220 / month**, or annual equivalent (**~$2,000 / year**).
 
-- One tier. One vendor per category.
+- One tier. Multiple providers per category welcome — placement order and prominence scale with commitment level.
 - Rate within the band is set by category and placement scope.
 - Annual is preferred and discounted relative to monthly.
 

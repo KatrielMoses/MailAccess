@@ -21,23 +21,25 @@ MailAccess is supported by the following partners.
 
 Rotating residential and datacenter proxies for platform checks and search dorking.
 
+> **Accepting partners in this category** — [become a sponsor](../SPONSORSHIP.md)
+
 ---
 
 ## Breach / Compromised-Credential Data
 
-> **Available** — [become a sponsor](../SPONSORSHIP.md)
+> **Accepting partners in this category** — [become a sponsor](../SPONSORSHIP.md)
 
 ---
 
 ## IP Intelligence
 
-> **Available** — [become a sponsor](../SPONSORSHIP.md)
+> **Accepting partners in this category** — [become a sponsor](../SPONSORSHIP.md)
 
 ---
 
 ## Email / Identity Verification
 
-> **Available** — [become a sponsor](../SPONSORSHIP.md)
+> **Accepting partners in this category** — [become a sponsor](../SPONSORSHIP.md)
 
 ---
 

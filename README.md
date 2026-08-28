@@ -135,7 +135,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 | [Export formats](docs/exports.md) | Supported formats, MIME types, filename conventions |
 | [Integrations](docs/integrations.md) | Maltego, Slack, Discord, generic webhooks |
 | [Brand assets](docs/brand.md) | Logo lockups, palette, typography, clearspace, downloadable SVGs |
-| [Sponsors](docs/sponsors.md) | Current partners and open category slots |
+| [Sponsors](docs/sponsors.md) | Current partners and categories accepting sponsors |
 | [Contributing](CONTRIBUTING.md) | Adding modules, adding exporters, code style, PR checklist |
 | [PyPI](https://pypi.org/project/mailaccess/) | `pip install mailaccess` |
 | [GitHub](https://github.com/KatrielMoses/MailAccess) | Source code, issues, releases |
