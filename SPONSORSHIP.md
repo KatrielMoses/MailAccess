@@ -83,6 +83,6 @@ Every category is accepting new partners, including those already featured. Curr
 
 ## Contact
 
-**sponsors@rootaccess.tech**
+**[katriel@rootaccess.tech](mailto:katriel@rootaccess.tech)**
 
 Invoicing, custom terms, purchase orders, and annual contracts are available on request. Tell us your category and preferred start date and we'll send a placement mockup and an invoice.
