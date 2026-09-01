@@ -1,0 +1,139 @@
+{
+  "lms": {
+    "keywords": [
+      "course catalog",
+      "course syllabus",
+      "coursework",
+      "ctf",
+      "capture the flag",
+      "curriculum",
+      "cyber range",
+      "cybersecurity",
+      "dfir",
+      "enroll now",
+      "giac",
+      "infosec",
+      "instructor",
+      "instructors",
+      "learn online",
+      "lesson plan",
+      "lms",
+      "module outline",
+      "oscp",
+      "osep",
+      "oswe",
+      "penetration testing",
+      "pentest",
+      "pentesting",
+      "red team",
+      "redteam",
+      "blue team",
+      "blueteam",
+      "soc analyst",
+      "syllabus",
+      "threat hunt",
+      "threat hunting"
+    ],
+    "url_candidates": [
+      "/instructors",
+      "/faculty",
+      "/teachers",
+      "/authors",
+      "/instructor",
+      "/profiles",
+      "/people",
+      "/meet-the-team",
+      "/learning/instructors",
+      "/courses"
+    ]
+  },
+  "legal": {
+    "keywords": [
+      "areas of practice",
+      "attorney",
+      "attorneys at law",
+      "law firm",
+      "legal counsel",
+      "litigation",
+      "our partners",
+      "practice areas"
+    ],
+    "url_candidates": ["/partners", "/attorneys", "/lawyers", "/practice-areas"]
+  },
+  "medical": {
+    "keywords": [
+      "appointment",
+      "clinic",
+      "our providers",
+      "patient portal",
+      "physician",
+      "primary care",
+      "specialty care"
+    ],
+    "url_candidates": ["/providers", "/doctors", "/specialists"]
+  },
+  "real_estate": {
+    "keywords": [
+      "brokerage",
+      "listings",
+      "mls",
+      "open house",
+      "property listings",
+      "real estate agent",
+      "realtor"
+    ],
+    "url_candidates": ["/agents", "/listings", "/brokers"]
+  },
+  "agency": {
+    "keywords": [
+      "case study",
+      "case studies",
+      "creative studio",
+      "digital agency",
+      "our work",
+      "portfolio"
+    ],
+    "url_candidates": ["/work", "/case-studies", "/portfolio"]
+  },
+  "ecommerce": {
+    "keywords": [
+      "add to cart",
+      "free shipping",
+      "our products",
+      "shop now",
+      "shopping cart"
+    ],
+    "url_candidates": ["/products", "/shop", "/collections"]
+  },
+  "saas": {
+    "keywords": [
+      "free trial",
+      "platform pricing",
+      "pricing plans",
+      "request a demo",
+      "sign up free"
+    ],
+    "url_candidates": ["/pricing", "/customers", "/docs"]
+  },
+  "nonprofit": {
+    "keywords": [
+      "donate now",
+      "make a donation",
+      "our mission",
+      "our donors",
+      "volunteer",
+      "your impact"
+    ],
+    "url_candidates": ["/team", "/staff", "/board"]
+  },
+  "university": {
+    "keywords": [
+      "academic department",
+      "admissions office",
+      "alumni",
+      "faculty directory",
+      "office of the provost"
+    ],
+    "url_candidates": ["/faculty", "/people", "/staff"]
+  }
+}

@@ -11,6 +11,7 @@ ENV PYTHONUNBUFFERED=1
 COPY pyproject.toml README.md ./
 COPY backend/ ./backend/
 COPY cli/ ./cli/
+COPY data/ ./data/
 
 # WeasyPrint runtime libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -20,9 +21,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install dependencies (using --no-cache-dir to reduce image size)
 RUN pip install --no-cache-dir .
-
-# Create data directory for SQLite persistence
-RUN mkdir -p /app/data
 
 EXPOSE 8000
 
