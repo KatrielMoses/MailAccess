@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from .domain_validation import is_public_clearnet_domain
+
 _LOG = logging.getLogger(__name__)
 
 _HIBP_BREACHES_URL = "https://haveibeenpwned.com/api/v3/breaches"
@@ -53,6 +55,9 @@ def _site_from_hibp(raw: dict[str, Any]) -> BreachSite | None:
     domain = str(raw.get("Domain") or "").strip().lower()
     breach_name = str(raw.get("Name") or "").strip()
     if not domain and not breach_name:
+        return None
+    if not is_public_clearnet_domain(domain):
+        _LOG.debug("Skipping non-clearnet breach domain: %s", domain)
         return None
     breach_date = str(raw.get("BreachDate") or "").strip()
     try:

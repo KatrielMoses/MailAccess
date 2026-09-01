@@ -1,5 +1,12 @@
 # Changelog
 
+### 0.14.4 (security)
+
+- SECURITY: Deep-breach probes now accept only public clearnet FQDNs from the
+  HIBP breach corpus; `.onion`, `.i2p`, IP, and malformed domains are excluded.
+- Deep-breach probes do not follow redirects, and the reset-probe request layer
+  independently refuses non-clearnet targets.
+
 ### 0.14.3
 
 - `mailaccess investigate` now auto-starts the backend when it is not already

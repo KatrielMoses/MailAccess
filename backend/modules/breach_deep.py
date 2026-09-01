@@ -97,7 +97,7 @@ class BreachDeepModule(BaseModule):
 
         # scrapingant: keep for mixed profile/account-existence probes with anti-bot variance
         async with build_client(
-            scrapingant_zone="platforms", timeout=10.0, follow_redirects=True
+            scrapingant_zone="platforms", timeout=10.0, follow_redirects=False
         ) as client:
 
             async def check_site(site: BreachSite) -> tuple[str, dict[str, Any] | None, str | None]:

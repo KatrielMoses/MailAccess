@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import logging
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import httpx
 
+from .domain_validation import is_public_clearnet_domain
 from .platform_health import get_health_db
 
 _ENDPOINT_PATTERNS = (
@@ -48,6 +50,7 @@ _BLOCKED_STATUSES = {403, 429}
 _DEFAULT_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 _SIGNAL_CORPUS_PATH = Path(__file__).resolve().parents[2] / "data" / "reset_signals.json"
 _SIGNAL_CORPUS: dict[str, dict[str, list[str]]] | None = None
+_LOG = logging.getLogger(__name__)
 
 
 def _english_signal_defaults() -> dict[str, dict[str, list[str]]]:
@@ -200,7 +203,13 @@ async def probe(domain: str, email: str, client: httpx.AsyncClient) -> bool | No
     Return True when reset flow implies an account, False when it denies one,
     or None when the domain is blocked, absent, or inconclusive.
     """
-    clean_domain = domain.strip().lower().removeprefix("www.")
+    clean_domain = domain.strip().lower()
+    if not is_public_clearnet_domain(clean_domain):
+        _LOG.warning(
+            "reset_prober: refusing non-clearnet target: %s", clean_domain
+        )
+        return None
+    clean_domain = clean_domain.removeprefix("www.")
     health_key = f"reset_prober:{clean_domain}"
 
     try:

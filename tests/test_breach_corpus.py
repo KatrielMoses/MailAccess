@@ -86,6 +86,36 @@ def test_site_from_hibp_skips_when_no_domain_no_name() -> None:
     assert _site_from_hibp({"Domain": "", "Name": ""}) is None
 
 
+@pytest.mark.parametrize(
+    "domain", ["example.onion", "example.i2p", "192.168.1.1", "example.com/evil"]
+)
+def test_site_from_hibp_rejects_non_clearnet_domains(domain: str) -> None:
+    assert _site_from_hibp(_raw(domain=domain)) is None
+
+
+def test_site_from_hibp_accepts_valid_clearnet_domain() -> None:
+    site = _site_from_hibp(_raw(domain="linkedin.com"))
+
+    assert site is not None
+    assert site.domain == "linkedin.com"
+
+
+def test_freedom_hosting_onion_is_excluded_from_probe_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus = BreachCorpus(tmp_path / "cache.json")
+    monkeypatch.setattr(
+        corpus,
+        "_fetch",
+        lambda: [
+            _raw("fhostingesps6bly.onion", "Freedom Hosting II"),
+            _raw("linkedin.com", "LinkedIn"),
+        ],
+    )
+
+    assert [site.domain for site in corpus.get_top()] == ["linkedin.com"]
+
+
 def test_site_from_hibp_invalid_pwn_count() -> None:
     site = _site_from_hibp(_raw(pwn_count="not-a-number"))  # type: ignore[arg-type]
 

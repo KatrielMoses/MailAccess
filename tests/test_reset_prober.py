@@ -113,3 +113,38 @@ async def test_probe_uses_first_definitive_result_and_cancels_pending(
     assert result is True
     assert len(started) == len(reset_prober._ENDPOINT_PATTERNS)
     assert len(cancelled) == len(reset_prober._ENDPOINT_PATTERNS) - 1
+
+
+async def test_probe_refuses_onion_target_without_request() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await reset_prober.probe("example.onion", "user@example.com", client)
+
+    assert result is None
+    assert requests == []
+
+
+async def test_probe_does_not_follow_cross_domain_redirect() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            302,
+            headers={"Location": "https://different.example/reset"},
+            request=request,
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=False
+    ) as client:
+        result = await reset_prober.probe("example.com", "user@example.com", client)
+
+    assert result is None
+    assert requests
+    assert {request.url.host for request in requests} <= {"example.com", "accounts.example.com"}

@@ -77,8 +77,11 @@ def _install(
         async def check(self, platform: Any, email: str, client: Any) -> dict[str, Any]:
             return await check(platform, email, client)
 
+    client_kwargs: dict[str, Any] = {}
+
     @asynccontextmanager
     async def client_context(**kwargs: Any):
+        client_kwargs.update(kwargs)
         yield object()
 
     monkeypatch.setattr(settings, "enable_breach_deep", True)
@@ -89,7 +92,7 @@ def _install(
     monkeypatch.setattr(breach_deep_module, "PlatformExecutor", Executor)
     monkeypatch.setattr(breach_deep_module, "reset_probe", reset)
     monkeypatch.setattr(breach_deep_module, "build_client", client_context)
-    return SimpleNamespace(corpus=corpus, check=check, reset=reset)
+    return SimpleNamespace(corpus=corpus, check=check, reset=reset, client_kwargs=client_kwargs)
 
 
 async def test_run_skipped_when_disabled_no_force(
@@ -139,6 +142,16 @@ async def test_run_uses_generic_reset_when_no_slug(
 
     state.reset.assert_awaited_once()
     state.check.assert_not_awaited()
+
+
+async def test_run_disables_redirect_following_for_deep_breach_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _install(monkeypatch, [_site("unknown-domain.com")])
+
+    await breach_deep_module.BreachDeepModule().run("person@example.com")
+
+    assert state.client_kwargs["follow_redirects"] is False
 
 
 async def test_run_yaml_finding_has_high_confidence(
