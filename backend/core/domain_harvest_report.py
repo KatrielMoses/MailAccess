@@ -110,6 +110,11 @@ def _build_shadow_profiles(result: DomainHarvestResult) -> list[dict[str, Any]]:
 
 
 def _build_subdomains(result: DomainHarvestResult) -> list[dict[str, Any]]:
+    # Phase 2A — domain-scope suppression excludes a suppressed (sub)domain from
+    # subdomains.txt / nuclei_targets.txt / report.md at the export boundary.
+    from .suppression import load_index_sync
+
+    suppression = load_index_sync()
     values: dict[str, dict[str, Any]] = {}
     for module_result in result.module_results.values():
         for finding in module_result.findings or []:
@@ -121,6 +126,8 @@ def _build_subdomains(result: DomainHarvestResult) -> list[dict[str, Any]]:
             if isinstance(subdomain, str) and subdomain.strip():
                 item = dict(finding)
                 item["subdomain"] = subdomain.strip().lower()
+                if suppression.is_suppressed(domain=item["subdomain"]):
+                    continue
                 existing = values.get(item["subdomain"])
                 if existing is None or item.get("tier") is not None:
                     values[item["subdomain"]] = item
@@ -129,9 +136,7 @@ def _build_subdomains(result: DomainHarvestResult) -> list[dict[str, Any]]:
 
 def _format_subdomain_panel(result: DomainHarvestResult) -> Panel | Text:
     entries = _build_subdomains(result)
-    module = result.module_results.get("subdomain_intel") or result.module_results.get(
-        "subdomain_surface"
-    )
+    module = result.module_results.get("subdomain_intel")
     metadata = (module.metadata if module else {}) or {}
     if not entries and (not metadata or metadata.get("skip_reason")):
         return Text()
@@ -323,9 +328,18 @@ def _format_infrastructure_panel(infrastructure: dict[str, list[dict[str, Any]]]
 
 
 def _sanitised_export_emails(emails: list[HarvestedEmail]) -> list[HarvestedEmail]:
+    # Phase 2A — irreversible suppression at the export boundary. Every harvest
+    # serializer, counter and text file routes through here, so a suppressed
+    # subject cannot appear in any export format. Checked at read time, so an
+    # objection added after collection retroactively filters prior data.
+    from .suppression import load_index_sync
+
+    suppression = load_index_sync()
     out: list[HarvestedEmail] = []
     for entry in emails:
         if _is_placeholder_export_email(entry.email):
+            continue
+        if suppression.is_suppressed(email=entry.email):
             continue
         variants = [
             variant
@@ -336,6 +350,52 @@ def _sanitised_export_emails(emails: list[HarvestedEmail]) -> list[HarvestedEmai
             entry = replace(entry, subaddress_variants=variants)
         out.append(entry)
     return out
+
+
+def _row_eligibility(
+    entry: HarvestedEmail, mode: str, policy_status: str, evaluate: Any
+) -> dict:
+    """Phase 2D — the eligibility verdict for one export row. Suppressed rows are
+    already removed upstream (`_sanitised_export_emails`), so ``suppressed`` is
+    False here; the verdict is otherwise mode + policy + confidence."""
+    confidence: Any = (
+        entry.confidence_score
+        if entry.confidence_score is not None
+        else entry.confidence_label
+    )
+    verdict = evaluate(
+        mode=mode,
+        policy_status=policy_status,
+        suppressed=False,
+        confidence=confidence,
+        # Phase 3D — the deliverability grade gates eligibility (Invalid/Catch-all
+        # can never be eligible for outreach).
+        deliverability_grade=getattr(entry, "deliverability_grade", None),
+    )
+    return {
+        "eligibility": verdict.verdict.value,
+        "eligibility_reason": verdict.reason,
+    }
+
+
+#: Phase 3A person-field keys surfaced on every export row (nested under
+#: ``person`` in JSON/NDJSON; flattened as ``person_*`` columns in CSV). Kept in
+#: one place so all three serialisers stay in sync.
+_PERSON_FIELDS = (
+    "full_name", "first", "last", "job_title", "seniority",
+    "department", "linkedin_url", "phone", "location",
+)
+
+
+def _person_export(entry: HarvestedEmail) -> dict[str, Any]:
+    """The Phase 3A person block for one lead (all-null for email-only leads).
+
+    Backward-compatible: this is a *new* nested key; existing email-only
+    consumers ignore it. ``field_provenance`` carries the per-field evidence link
+    so a consumer can audit why any attribute is present."""
+    person = {name: getattr(entry, name, None) for name in _PERSON_FIELDS}
+    person["field_provenance"] = dict(getattr(entry, "person_field_provenance", None) or {})
+    return person
 
 
 def _export_summary_counts(emails: list[HarvestedEmail]) -> dict[str, int]:
@@ -756,6 +816,9 @@ def _build_people(
                 "is_role": entry.is_role,
                 "subaddress_variants": list(entry.subaddress_variants),
                 "subaddress_annotations": _subaddress_annotations(entry),
+                # Phase 3A — the evidence-backed person attribution for this
+                # address (all-null for email-only leads).
+                "person": _person_export(entry),
             },
         )
         if reason not in detail["match_reasons"]:
@@ -1567,6 +1630,16 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
     """
     emails_out: list[dict[str, Any]] = []
     export_emails = _sanitised_export_emails(result.unique_emails)
+    # Phase 2D — the run's mode fixes the policy basis; each row carries an
+    # eligibility verdict (orthogonal to, and surfaced alongside, its confidence).
+    from .eligibility import evaluate as _eligibility_evaluate
+    from .product_mode import policy_status_for_mode
+
+    _mode = str(
+        (getattr(result, "metadata", None) or {}).get("mode")
+        or "security-investigation"
+    )
+    _policy_status = policy_status_for_mode(_mode)
     for entry in export_emails:
         # MUST-FIX S4: every email in the JSON export MUST carry a
         # non-null confidence_breakdown — downstream tooling relies on
@@ -1636,6 +1709,19 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
                 "confidence_breakdown": entry.confidence_breakdown,
                 # MUST-FIX S4: compact rationale chip rendered in CLI.
                 "rationale_chip": _rationale_chip(entry),
+                # Phase 3A — person-centric Lead block (evidence-backed, all-null
+                # for email-only leads; a new nested key, so old consumers are
+                # unaffected).
+                "person": _person_export(entry),
+                # Phase 3C/3D — deliverability score + grade (present once those
+                # passes populate them; None-safe until then). ``deliverability``
+                # carries the full reasons+evidence for both.
+                "deliverability_score": getattr(entry, "deliverability_score", None),
+                "deliverability_grade": getattr(entry, "deliverability_grade", None),
+                "deliverability": getattr(entry, "deliverability", None),
+                # Phase 2D — eligibility verdict + reason, independent of the
+                # confidence score above (both surfaced).
+                **_row_eligibility(entry, _mode, _policy_status, _eligibility_evaluate),
             }
         )
 
@@ -1684,10 +1770,16 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
         for name, mod in result.module_results.items()
         if (mod.metadata or {}).get("skip_reason")
     }
+    # Phase 2E — export watermark: which run / mode / policy produced this file.
+    from .run_manifest import manifest_dict as _manifest_dict
+
+    _watermark = _manifest_dict(run_id=result.domain, pipeline="harvest", mode=_mode)
+    _watermark["policy_status"] = _policy_status
     payload = {
         "domain": result.domain,
         "harvested_at": result.completed_at,
         "duration_seconds": result.duration_seconds,
+        "watermark": _watermark,
         "summary": {
             **summary_counts,
             "smtp_verification_used": result.smtp_verification_used,
@@ -1752,13 +1844,20 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
         # way (renaming a top-level key, removing a field, changing a
         # type). Downstream tooling should ``assert schema_version <= X``
         # before consuming.
-        "schema_version": 1,
+        # v2 (Phase 3): additive per-email ``person`` block +
+        # ``deliverability_score``/``deliverability_grade``. Backward-compatible
+        # (only new keys), but bumped so consumers can gate on the enrichment.
+        "schema_version": 2,
     }
     export_metadata = result.metadata or {}
     if isinstance(export_metadata, dict):
         for key in ("harvest_status", "timed_out", "timeout_at_seconds"):
             if key in export_metadata:
                 payload[key] = export_metadata[key]
+        # Phase 5D — surface technographic tags (mail provider / CMS / analytics /
+        # ecommerce / framework) as a filterable, domain-level export dimension.
+        if export_metadata.get("technographics"):
+            payload["technographics"] = export_metadata["technographics"]
     return payload
 
 
@@ -1794,6 +1893,17 @@ _CSV_COLUMNS = [
     "last_seen_timestamp",
     "subaddress_variants",
     "rationale_chip",
+    # Phase 3A person fields + 3C/3D deliverability — appended (never reordered)
+    # so existing CSV consumers that index by earlier columns keep working.
+    "person_full_name",
+    "person_job_title",
+    "person_seniority",
+    "person_department",
+    "person_linkedin_url",
+    "person_phone",
+    "person_location",
+    "deliverability_score",
+    "deliverability_grade",
 ]
 
 
@@ -1825,6 +1935,17 @@ def format_harvest_csv_export(result: DomainHarvestResult) -> str:
             "last_seen_timestamp": entry.last_seen_timestamp or "",
             "subaddress_variants": ",".join(entry.subaddress_variants or []),
             "rationale_chip": _rationale_chip(entry),
+            "person_full_name": getattr(entry, "full_name", None) or "",
+            "person_job_title": getattr(entry, "job_title", None) or "",
+            "person_seniority": getattr(entry, "seniority", None) or "",
+            "person_department": getattr(entry, "department", None) or "",
+            "person_linkedin_url": getattr(entry, "linkedin_url", None) or "",
+            "person_phone": getattr(entry, "phone", None) or "",
+            "person_location": getattr(entry, "location", None) or "",
+            "deliverability_score": getattr(entry, "deliverability_score", None)
+            if getattr(entry, "deliverability_score", None) is not None
+            else "",
+            "deliverability_grade": getattr(entry, "deliverability_grade", None) or "",
         }
         writer.writerow(row)
     return buf.getvalue()
@@ -1879,8 +2000,15 @@ def format_harvest_ndjson_export(result: DomainHarvestResult) -> str:
             "subaddress_variants": entry.subaddress_variants,
             "confidence_breakdown": entry.confidence_breakdown,
             "rationale_chip": _rationale_chip(entry),
+            # Phase 3A/3C/3D — person block + deliverability, mirroring the JSON
+            # export's per-email shape.
+            "person": _person_export(entry),
+            "deliverability_score": getattr(entry, "deliverability_score", None),
+            "deliverability_grade": getattr(entry, "deliverability_grade", None),
+            "deliverability": getattr(entry, "deliverability", None),
             # MUST-FIX S12: schema version applies to NDJSON rows too.
-            "schema_version": 1,
+            # v2 (Phase 3): + person + deliverability.
+            "schema_version": 2,
         }
         out_lines.append(json.dumps(payload, default=str))
     if not out_lines:
@@ -1892,6 +2020,42 @@ def format_harvest_ndjson_export(result: DomainHarvestResult) -> str:
 # MUST-FIX S11: format dispatcher — picks the right serialiser from the
 # export filename extension. Returns (text, error). ``error`` is None on
 # success; non-None describes the unknown-extension condition.
+def format_harvest_orgchart_export(
+    result: DomainHarvestResult, *, outreach: bool = True
+) -> dict[str, Any]:
+    """Phase 7C — derive an org chart (department x seniority) from this harvest.
+
+    Reuses the same row/eligibility machinery as the JSON export, so the chart
+    inherits the run's mode + per-row eligibility exactly. Role mailboxes are
+    excluded (they are not people), suppressed rows are already stripped upstream
+    by ``_sanitised_export_emails``, and when ``outreach`` is True research-only
+    rows are dropped by :func:`org_chart.build_org_chart`.
+    """
+    from . import org_chart
+    from .eligibility import evaluate as _eligibility_evaluate
+    from .product_mode import policy_status_for_mode
+
+    _mode = str((getattr(result, "metadata", None) or {}).get("mode") or "security-investigation")
+    _policy_status = policy_status_for_mode(_mode)
+    rows: list[dict[str, Any]] = []
+    for entry in _sanitised_export_emails(result.unique_emails):
+        if entry.is_role:
+            continue
+        rows.append(
+            {
+                "email": entry.email,
+                "confidence_score": entry.confidence_score,
+                "person": _person_export(entry),
+                **_row_eligibility(entry, _mode, _policy_status, _eligibility_evaluate),
+            }
+        )
+    chart = org_chart.build_org_chart(
+        rows, domain=getattr(result, "domain", None), outreach=outreach
+    )
+    chart["mode"] = _mode
+    return chart
+
+
 def serialise_harvest_for_export(
     result: DomainHarvestResult,
     export_path: str | Path,
@@ -1906,6 +2070,14 @@ def serialise_harvest_for_export(
     surface a clear message rather than silently defaulting to JSON.
     """
     p = str(export_path).lower()
+    # Phase 7C — org-chart artifacts. Checked before ``.json`` because
+    # ``.orgchart.json`` also ends with ``.json``.
+    if p.endswith(".orgchart.json"):
+        return json.dumps(format_harvest_orgchart_export(result), indent=2, default=str), None
+    if p.endswith(".orgchart.html"):
+        from . import org_chart
+
+        return org_chart.render_org_chart_html(format_harvest_orgchart_export(result)), None
     if p.endswith(".csv"):
         return format_harvest_csv_export(result), None
     if p.endswith(".ndjson"):

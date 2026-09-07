@@ -168,6 +168,131 @@ class Settings(BaseSettings):
     # Per-module timeout overrides: MODULE_TIMEOUT_OVERRIDES={"whatsmyname": 120}
     module_timeout_overrides: dict[str, int] = {}
 
+    # Investigate mode — overall wall-clock completion budget (Phase 1B).
+    # The whole investigation (all phases/modules) must finish within this many
+    # seconds. When the budget is reached, modules still in flight are cut short
+    # and not-yet-started ones are skipped — both recorded as budget_truncated —
+    # so the run completes with partial results instead of hanging or failing.
+    # The default is generous enough that the full default module set completes
+    # on normal targets (it only bites pathological runs). CLI --budget and the
+    # API budget_seconds override per-run; a value <= 0 means unlimited.
+    investigation_budget_seconds: float = 420.0
+    # Minimum budget a module needs left to be worth starting; below this it is
+    # skipped as budget_truncated instead of started for a sliver of time.
+    investigation_budget_min_module_seconds: float = 2.0
+    # Optionally pin a fast primary module set for investigate (the Phase-0
+    # fast-run workaround, persisted). When non-empty AND the caller passes no
+    # explicit --modules, the primary phase is restricted to these module names.
+    # JSON list, e.g. INVESTIGATION_FAST_MODULES=["hibp","gravatar_lookup"].
+    # Empty = full default module set.
+    investigation_fast_modules: list[str] = []
+
+    # Phase 2B — product mode (the governance keystone). Selects a per-run module
+    # allowlist, retention policy and export schema. Default = today's full
+    # capability, renamed (zero regression). CLI --mode and the API `mode` field
+    # override per-run. One of: security-investigation, public-business-contact,
+    # org-authorized-verification. See backend/core/product_mode.py.
+    product_mode: str = "security-investigation"
+
+    # Phase 2D — eligibility (≠ confidence). Outreach export requires BOTH a
+    # confidence threshold AND a policy verdict. Per-mode confidence thresholds
+    # for the "eligible" verdict, plus the floor above which a below-threshold
+    # record is "review" (rather than "research-only"). Scores are 0..1.
+    eligibility_confidence_threshold_public: float = 0.7
+    eligibility_confidence_threshold_org: float = 0.6
+    eligibility_review_floor: float = 0.4
+
+    # Phase 2F — API safe-by-default. Per-principal request quota on the
+    # investigation-triggering endpoints (embedded/in-process; no shared infra).
+    api_quota_enabled: bool = True
+    api_quota_per_principal: int = 60
+    api_quota_window_seconds: float = 60.0
+
+    # Phase 1C — canonical evidence ledger (the immutable `observations` store).
+    # Both pipelines dual-write observations alongside their existing outputs.
+    # Master switch (safety escape hatch); the write is always fully guarded so a
+    # ledger failure can never break investigate/harvest.
+    enable_observation_ledger: bool = True
+    # Default time-to-live for a ledger observation (days) → sets expires_at.
+    # Per-source-type TTLs are a Phase 2 refinement; 0 or negative = no expiry.
+    ledger_default_ttl_days: int = 180
+    # Optional raw-payload storage (Doc-1 #2): OFF by default. The content hash is
+    # always stored; the raw evidence bytes are stored (expiry-bound) only when
+    # this is enabled AND a module supplies them.
+    ledger_store_raw_payloads: bool = False
+
+    # Phase 4A — self-calibrating scoring: ground-truth & feature capture. Every
+    # deliverability score is snapshotted (immutable, ledger-linked) so the
+    # Phase-4B trainer has data to learn from; an objective outcome that later
+    # arrives is joined as a new linked row. Master switch; the capture is fully
+    # guarded so it can never break a harvest. Retention obeys ledger_default_ttl_days.
+    enable_scoring_capture: bool = True
+    # Phase 4D — run the calibrated model in shadow (log prediction + delta vs the
+    # hand-tuned scorer) without affecting live output. Shadow logging only; the
+    # calibrated model becomes authoritative only after the 4B promotion gate
+    # passes (see backend/core/shadow_scorer.py). Independent of promotion state.
+    enable_shadow_scoring: bool = True
+    # Phase 4C — per-source accounting (marginal unique/confirmed contribution,
+    # latency, failure/FP rate) + explainable, reversible auto-demotion of sources
+    # that no longer earn their runtime. Recording is always on when enabled; a
+    # demotion only ever fires on the strict dead-source criteria and is reversible.
+    enable_source_accounting: bool = True
+
+    # Phase 6A — confidence decay in the corpus (Doc-2 A4). B2B contact data rots
+    # ~25–30%/yr; the read-first corpus is compounding, so an aging row must be
+    # down-weighted at serve time and flagged for re-verification rather than
+    # served stale-but-fast at full confidence. Applied purely at read time over
+    # the servable `contacts` projection — stored confidence is never mutated and
+    # the parity-preserving crawl reconstruction is untouched, so fresh rows never
+    # regress. See backend/core/corpus_decay.py.
+    enable_corpus_decay: bool = True
+    # Fraction of confidence lost after one year without re-verification (the
+    # geometric decay rate). 0.28 ≈ the middle of the 25–30%/yr B2B rot estimate.
+    corpus_decay_annual_rot: float = 0.28
+    # Floor below which the decay multiplier never falls (a very old row is
+    # down-weighted, not zeroed — it may still be worth re-verifying).
+    corpus_decay_min_factor: float = 0.3
+    # Age (days) past which a served row is flagged needs_reverification.
+    corpus_decay_stale_after_days: int = 180
+
+    # Phase 6C — corpus-derived Bayesian pattern priors (Doc-2 A5). Aggregates
+    # verified per-provider/per-industry email-pattern distributions from the
+    # corpus and feeds them as an explainable prior into pattern inference
+    # (a small, bounded boost for the corpus-favored template, analogous to the
+    # Hunter pattern boost). Privacy-safe: aggregate distributions only, never a
+    # raw contact. No-op on an empty corpus (uniform prior → zero change). See
+    # backend/core/pattern_priors.py.
+    enable_corpus_pattern_priors: bool = True
+
+    # Phase 6F — change intelligence. Diffs consecutive corpus crawls into
+    # first-seen / disappeared / title-change / verification-drift signals →
+    # likely-new-hire / likely-departure detection, plus surfacing "likely stale"
+    # rows (6A) rather than silently retaining them. Read-only over the corpus
+    # history; guarded. See backend/core/change_intelligence.py.
+    enable_change_intelligence: bool = True
+
+    # Phase 6D/6E — the shared-corpus distribution + contribution machinery. This
+    # is the ONLY point at which corpus data could leave the local machine, and
+    # the governing principle is private-by-default, publish-never-without-explicit-
+    # approval. The machinery (artifact format, signing, sharding, delta, rollback,
+    # batching) is built and testable now but INERT: it does not publish unless the
+    # operator (a) turns the master switch on, (b) configures a concrete sync
+    # adapter (none ships), and (c) explicitly opts in / approves a batch. Only
+    # 6B-safe artifacts are ever eligible; contact-level artifacts require explicit
+    # per-batch human review. Left off pending the infra decision.
+    enable_corpus_distribution: bool = False
+    enable_corpus_contribution: bool = False
+    # Number of domain-hash shards a published corpus update is split into.
+    corpus_distribution_shards: int = 256
+    # HMAC signing secret for corpus bundles (a local key file is generated when
+    # unset). A future Ed25519 signer drops in behind the same Signer interface.
+    corpus_signing_key: str | None = None
+    # Contribution batching caps (rate-limiting): max safe artifacts per batch and
+    # max batches per rolling window.
+    corpus_contribution_max_per_batch: int = 500
+    corpus_contribution_max_per_window: int = 5
+    corpus_contribution_window_seconds: float = 3600.0
+
     # Account discovery — probes 120+ platforms via Holehe
     enable_account_discovery: bool = True
 
@@ -304,10 +429,35 @@ class Settings(BaseSettings):
     harvest_results_max_per_domain: int = 50
     harvest_results_max_age_days: int = 30
 
+    # Phase 5A — bulk / list harvest mode. ``harvest-emails --file domains.csv``
+    # fans out over a domain list with a bounded concurrency governor,
+    # resumable per-domain checkpoints, corpus-backed cross-batch dedup, and one
+    # merged evidence-preserving export. ``bulk_max_concurrent_domains`` bounds
+    # how many domains harvest at once (each domain is itself internally
+    # concurrent); keep it modest so the batch does not self-DoS shared sources
+    # (Phase 5B unifies the throttle across both transport stacks). Checkpoints
+    # land under ``bulk_checkpoint_dir`` keyed by the input-list fingerprint.
+    bulk_max_concurrent_domains: int = 3
+    bulk_checkpoint_dir: Path = Path.home() / ".mailaccess" / "bulk"
+    bulk_results_dir: Path = Path.home() / ".mailaccess" / "results" / "bulk"
+
     # Common Crawl email harvesting (domain harvest mode only — Phase A of 0.10.0).
     # Master kill switch; the module itself is opt-in via domain harvest
     # mode, this is the global enable flag for the underlying fetcher too.
     enable_commoncrawl_email: bool = True
+    # Phase 5B — Common-Crawl-first posture. When on (default), the harvest
+    # prefers the already-crawled web (CC index/page fetch) and treats live
+    # search scraping as the FALLBACK, invoked only when CC under-delivers. This
+    # is the single biggest block-reduction lever at volume: it avoids hitting
+    # DDG/Bing (the 202/CAPTCHA walls) for domains CC already covers.
+    cc_first: bool = True
+    # Hard fallback: once at least this many on-domain emails have already been
+    # discovered (from Common Crawl / archive / other on-domain sources), the
+    # block-prone live-search email dork is SKIPPED entirely — it never touches
+    # DDG/Bing. This is what turns CC-first into a measurable block reduction
+    # (not just a reordering): live search runs only when the cheap sources
+    # under-deliver. Set to 0 to always run the live-search dork.
+    cc_first_min_emails: int = 3
     cc_max_records: int = 100
     cc_fetch_concurrency: int = 10
     cc_fetch_timeout_seconds: int = 8
@@ -349,6 +499,12 @@ class Settings(BaseSettings):
     brave_search_api_key: str | None = None
     google_cse_api_key: str | None = None
     google_cse_cx: str | None = None
+    # Phase 5B — search-provider failover. A provider that returns a hard block
+    # (202/403/429/CAPTCHA) is benched for ``search_provider_cooldown_seconds``
+    # and the router rolls to the next provider in the chain (Brave→DDG→Bing),
+    # instead of the old behaviour where a Brave block short-circuited the whole
+    # chain. Health is tracked per-provider across the run.
+    search_provider_cooldown_seconds: float = 300.0
 
     # Code + certificate-transparency email harvest (Phase B2 of 0.10.0).
     # Master kill switch for the GitHub + crt.sh + certspotter module.
@@ -532,9 +688,42 @@ class Settings(BaseSettings):
     hunter_domain_search_limit: int = 25
     hunter_verify_limit: int = 25
 
-    # Proxy
+    # Phase 7A/7B — enrichment waterfall + BYO free-tier connector keys. All
+    # keys are the OPERATOR's own (never ours); a connector skips itself when
+    # its key is absent or its enable flag is off, so enrichment is inert by
+    # default and never changes yield until the operator opts in. Per-provider
+    # monthly free-tier caps are enforced by ``provider_budget`` so no tier is
+    # silently overrun. The waterfall tries connectors in priority order,
+    # stopping at the first confident hit per field.
+    enable_enrichment_waterfall: bool = True  # master switch; inert without keys
+    enrichment_min_confidence: float = 0.5  # a connector hit at/above this fills a field
+    enrichment_max_lookups: int = 50  # cap enrichment API calls per harvest run
+    # Apollo — lawful-public business contact data (allowed in every mode).
+    apollo_api_key: str | None = None
+    enable_apollo: bool = False
+    apollo_monthly_limit: int = 10000  # documented free-tier size; operator-tunable
+    # People Data Labs — aggregated/data-broker data (security-investigation only).
+    pdl_api_key: str | None = None
+    enable_pdl: bool = False
+    pdl_monthly_limit: int = 1000
+
+    # Proxy (single static endpoint — legacy; superseded by the Phase 5B egress
+    # pool below, which treats a single configured proxy as a pool of one).
     proxy_url: str | None = None
     proxy_enabled: bool = False
+
+    # Phase 5B — egress rotation pool. ``egress_proxies`` is a BYO/config-driven
+    # list of proxy URLs (socks5/http(s)) — point it at the Hetzner box or a
+    # self-supplied endpoint list; empty means direct egress (no hardcoded paid
+    # dependency). Both transport stacks (httpx + curl-cffi stealth) rotate over
+    # it and report success/failure; an endpoint that fails ``egress_max_failures``
+    # times in a row is benched for ``egress_cooldown_seconds`` then re-admitted
+    # on probation. ``egress_health_check_url`` is the target the optional
+    # health-check probes through each proxy.
+    egress_proxies: list[str] = []
+    egress_max_failures: int = 3
+    egress_cooldown_seconds: float = 300.0
+    egress_health_check_url: str = "https://www.google.com/generate_204"
 
     # ScrapingAnt - optional off-by-default clearnet proxy (referral partnership)
     scrapingant_enabled: bool = True
@@ -552,12 +741,17 @@ class Settings(BaseSettings):
     # ``harvest_timing_profile`` selects one of the six T0..T5 pacing
     # profiles defined in :mod:`backend.core.stealth_client`.  The
     # ``T2 Balanced`` default keeps the harvest at human-like
-    # cadence.  ``harvest_impersonate_browser`` is the curl-cffi
-    # impersonation target — only ``"chrome120"`` is currently
-    # exercised; the field exists so future Chrome fingerprints
-    # can be opted into via env without a code change.
+    # cadence.
+    # Phase 5B — ``harvest_fingerprint_rotation`` (default on) rotates a small
+    # pool of internally-consistent desktop fingerprints (UA + sec-ch-ua +
+    # curl-cffi impersonate target all agree) per stealth session, replacing the
+    # previously-hardcoded single Chrome-120. ``harvest_impersonate_browser``, if
+    # set to a specific target (e.g. "chrome124"), PINS the fingerprint and
+    # disables rotation; empty (default) means rotate. See
+    # :mod:`backend.core.fingerprints`.
     harvest_timing_profile: str = "t2"
-    harvest_impersonate_browser: str = "chrome120"
+    harvest_impersonate_browser: str = ""
+    harvest_fingerprint_rotation: bool = True
 
     # 0.11.1 Phase 2 — Site Intelligence Rebuild.
     # ``harvest_aggressive`` enables the low-confidence body-text
@@ -589,6 +783,27 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_cors_origins(cls, value: Any) -> list[str]:
         return _coerce_cors_origins(value)
+
+    @field_validator("product_mode", mode="before")
+    @classmethod
+    def _validate_product_mode(cls, value: Any) -> str:
+        # Fail closed on an unknown mode: a bad mode is a hard error, never a
+        # silent fallback to a more-permissive default. Kept in sync with
+        # backend/core/product_mode.ProductMode (literals inlined to avoid an
+        # import cycle at settings-construction time).
+        allowed = {
+            "security-investigation",
+            "public-business-contact",
+            "org-authorized-verification",
+        }
+        if value is None or value == "":
+            return "security-investigation"
+        text = str(value).strip()
+        if text not in allowed:
+            raise ValueError(
+                f"unknown product_mode {value!r}; expected one of {sorted(allowed)}"
+            )
+        return text
 
     def with_overrides(self, **kwargs: Any):
         from .core._phase_runner import settings_override

@@ -393,6 +393,23 @@ class ConcurrentFetchCache:
             ),
         }
 
+    async def peek(self, url: str) -> CachedResponse | None:
+        """Return a cached response for *url* WITHOUT ever fetching (Phase 5D).
+
+        Cache-only: a miss returns ``None`` — the cache is never populated by a
+        peek. This is the strict "no new network request" accessor the
+        technographic pass uses to read already-fetched bytes (e.g. the homepage
+        that ``ContextRouter`` fetched earlier in the run)."""
+        if not isinstance(url, str) or not url:
+            return None
+        key = normalize_url(url)
+        async with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                self._hits += 1
+                return self._materialise(key)
+        return None
+
     # -- internals ---------------------------------------------------------
     def _materialise(self, key: str) -> CachedResponse:
         """Build a :class:`CachedResponse` from the per-entry maps.

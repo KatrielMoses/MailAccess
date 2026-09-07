@@ -76,6 +76,28 @@ from backend.core.name_classifier import is_ml_available
 from backend.core.stealth_client import _CFFI_AVAILABLE
 
 
+async def _record_harvest_ledger(domain: str, result: Any) -> None:
+    """Phase 1C — write harvest findings into the canonical evidence ledger.
+
+    Harvest runs in-process and (unlike investigate) does not go through
+    ``serve``/``init_db``, so ensure the schema exists first. Idempotent and
+    fully guarded by the caller — the ledger must never break the harvest.
+    """
+    from backend.core.observation_ledger import (
+        observations_from_harvest,
+        record_observations,
+    )
+    from backend.db.database import init_db
+
+    await init_db()  # ensure the observations table exists (harvest skips serve)
+    # Phase 2B — carry the run's product mode (stamped onto result.metadata by
+    # run_domain_harvest) onto every harvest observation.
+    meta = getattr(result, "metadata", None)
+    mode = str((meta or {}).get("mode") or "security-investigation")
+    records = observations_from_harvest(domain, result, mode=mode)
+    await record_observations(records)
+
+
 def _resolve_export_path(export: str) -> Path:
     p = Path(export)
     if p.is_absolute():
@@ -550,6 +572,7 @@ def run_harvest_emails(
     clear_all_cache: bool = False,
     no_export: bool = False,
     no_extras: bool = False,
+    mode: str | None = None,
 ) -> int:
     """Run the domain email harvest and render / export results.
 
@@ -561,7 +584,11 @@ def run_harvest_emails(
 
     cache = HarvestCache()
     if clear_all_cache:
-        cache.invalidate_all()
+        cache.invalidate_all()  # legacy JSON cache (harmless if already empty)
+        with contextlib.suppress(Exception):
+            from backend.core.corpus_store import invalidate_all as _corpus_invalidate_all
+
+            asyncio.run(_corpus_invalidate_all())  # Phase 1D corpus
         console.print("[green]✓ Cleared all harvest cache entries.[/green]")
         return 0
 
@@ -592,11 +619,17 @@ def run_harvest_emails(
         return 2
 
     if clear_cache:
-        cache.invalidate(cleaned_domain)
+        cache.invalidate(cleaned_domain)  # legacy JSON cache
+        with contextlib.suppress(Exception):
+            from backend.core.corpus_store import invalidate as _corpus_invalidate
+
+            asyncio.run(_corpus_invalidate(cleaned_domain))  # Phase 1D corpus
         console.print(f"[green]✓ Cleared harvest cache for {cleaned_domain}.[/green]")
         return 0
     if force:
-        cache.invalidate(cleaned_domain)
+        cache.invalidate(cleaned_domain)  # legacy JSON cache; corpus read-first
+        # is bypassed by the orchestrator's own `force` guard, so no corpus
+        # delete is needed here (the fresh run overwrites via write-back).
 
     if not _CFFI_AVAILABLE:
         console.print(
@@ -765,6 +798,7 @@ def run_harvest_emails(
             display_subscriber=display.signal,
             force=force,
             on_harvest_end=_on_harvest_end,
+            mode=mode,
         )
 
     drive_error: BaseException | None = None
@@ -808,6 +842,25 @@ def run_harvest_emails(
             return 130
         console.print(f"[red]Error:[/] harvest failed: {drive_error}")
         return 3
+
+    # Phase 1C — dual-write the canonical evidence ledger alongside the export.
+    # Skip read-first (corpus) hits: nothing new was collected, and the ledger is
+    # append-only, so re-writing would duplicate observations. Fully guarded.
+    if settings.enable_observation_ledger and not getattr(result, "from_cache", False):
+        with contextlib.suppress(Exception):
+            asyncio.run(_record_harvest_ledger(cleaned_domain, result))
+
+    # Phase 2E — persist the reproducible run manifest + audit the collection.
+    if not getattr(result, "from_cache", False):
+        with contextlib.suppress(Exception):
+            from backend.core.run_manifest import record_run_manifest
+
+            _mode = str((result.metadata or {}).get("mode") or "security-investigation")
+            asyncio.run(
+                record_run_manifest(
+                    run_id=cleaned_domain, pipeline="harvest", mode=_mode
+                )
+            )
 
     timeout_metadata = result.metadata or {}
     if isinstance(timeout_metadata, dict) and timeout_metadata.get("harvest_status") == "partial_timeout":

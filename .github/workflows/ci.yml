@@ -1,0 +1,57 @@
+name: clean-room CI
+
+# Phase 0 (0A) clean-install gate: a fresh runner installs the LOCKED project
+# from uv.lock into a fresh venv, then runs ruff + the pytest baseline-diff gate.
+# The gate fails a PR only on NEW failures vs the committed baseline
+# (eval/baseline/), so real regressions are separated from pre-existing noise.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clean-room:
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-latest is the reference OS the baseline is captured on.
+        # ubuntu-latest is an additional reproducibility check.
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Pin Python (from .python-version) and install locked deps
+        # --frozen: fail if uv.lock is out of date with pyproject.toml, proving
+        # the lock is authoritative and the install is reproducible.
+        run: |
+          uv python install
+          uv sync --extra dev --frozen
+
+      - name: Show resolved environment (reproducibility manifest)
+        run: uv run python -m eval.harness.manifest
+
+      - name: Ruff + pytest baseline-diff gate
+        # Fails only on NEW ruff findings or NEW test failures vs eval/baseline/.
+        run: uv run python -m eval.harness.gate check
+
+      - name: Upload gate baselines + this run's candidate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-${{ matrix.os }}
+          path: eval/baseline/
+          if-no-files-found: ignore

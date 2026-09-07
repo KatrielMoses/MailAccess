@@ -31,6 +31,13 @@ async def email_investigate(
     session: AsyncSession = Depends(get_db),
 ) -> Response:
     """TRX transform: run a full email investigation and return Maltego entities."""
+    # Phase 2F — the Maltego full-investigation path is expensive; cap it per
+    # principal (auth itself is enforced by the API-key middleware, which no
+    # longer bypasses /maltego/).
+    from ..security import enforce_quota
+
+    enforce_quota(request)
+
     body = await request.body()
 
     try:

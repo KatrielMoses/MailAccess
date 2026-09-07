@@ -134,6 +134,14 @@ _ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 # ---------------------------------------------------------------------------
 # Header builder
 # ---------------------------------------------------------------------------
+def _host_of(url: str) -> str:
+    """Return the hostname of *url* (for the unified per-host throttle)."""
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
 def _registrable_domain(host: str) -> str:
     """Best-effort registrable domain extraction.
 
@@ -190,6 +198,7 @@ def build_chrome_headers(
     url: str,
     referrer: str | None = None,
     navigation_type: str = "navigate",
+    fingerprint: Any | None = None,
 ) -> dict[str, str]:
     """Return the full Chrome 120+ header set in Chrome's document order.
 
@@ -218,14 +227,23 @@ def build_chrome_headers(
     is_navigate = navigation_type == "navigate"
     sec_fetch_site = _classify_sec_fetch_site(url, referrer)
 
+    # Phase 5B — when a rotated fingerprint is supplied, its UA + client-hints
+    # replace the module defaults so the header set stays internally consistent
+    # with the curl-cffi impersonate target. ``None`` keeps the legacy Chrome-120
+    # constants (unchanged behaviour).
+    ua = getattr(fingerprint, "user_agent", None) or _CHROME_UA
+    ch_ua = getattr(fingerprint, "sec_ch_ua", None) or _SEC_CH_UA
+    ch_ua_platform = getattr(fingerprint, "sec_ch_ua_platform", None) or _SEC_CH_UA_PLATFORM
+    ch_ua_mobile = getattr(fingerprint, "sec_ch_ua_mobile", None) or _SEC_CH_UA_MOBILE
+
     headers: dict[str, str] = {
-        "sec-ch-ua": _SEC_CH_UA,
-        "sec-ch-ua-mobile": _SEC_CH_UA_MOBILE,
-        "sec-ch-ua-platform": _SEC_CH_UA_PLATFORM,
+        "sec-ch-ua": ch_ua,
+        "sec-ch-ua-mobile": ch_ua_mobile,
+        "sec-ch-ua-platform": ch_ua_platform,
     }
     if is_navigate:
         headers["Upgrade-Insecure-Requests"] = "1"
-    headers["User-Agent"] = _CHROME_UA
+    headers["User-Agent"] = ua
     headers["Accept"] = _ACCEPT_HTML
     headers["Sec-Fetch-Site"] = sec_fetch_site
     headers["Sec-Fetch-Mode"] = "navigate" if is_navigate else "no-cors"
@@ -406,6 +424,11 @@ class StealthSession:
 
     timing_profile: TimingProfile = T2_BALANCED
     impersonate: str = "chrome120"
+    # Phase 5B — a self-consistent rotated fingerprint (UA + client-hints +
+    # impersonate target). When None a fingerprint is chosen at session
+    # construction from the pool (unless ``impersonate`` was explicitly pinned to
+    # a non-default target, which is honoured). See :mod:`backend.core.fingerprints`.
+    fingerprint: Any = field(default=None)
     # Per-request timeout (seconds) applied to all curl-cffi get() calls.
     # Default 10s prevents a single unreachable/blocked host from hanging
     # the entire harvest for libcurl's 21s default connection timeout.
@@ -442,11 +465,37 @@ class StealthSession:
         if cffi_requests is None:  # defensive — already checked, but mypy-friendly
             raise ImportError("curl-cffi unavailable")
         self._session = cffi_requests.Session()
-        # Coerce the impersonate string to the right shape for
-        # curl-cffi.  Accepts "chrome120" / "chrome-120" / "chrome_120"
-        # — the library is happy with the un-hyphenated form.
-        self._impersonate_value = self.impersonate.replace("-", "").replace("_", "")
+        # Phase 5B — resolve the session fingerprint. Precedence:
+        # 1. an explicitly-supplied ``fingerprint``;
+        # 2. an explicitly-pinned non-default ``impersonate`` target (honour it,
+        #    default headers underneath);
+        # 3. otherwise pick from the rotation pool (honours config: rotation
+        #    on/off and any ``harvest_impersonate_browser`` pin).
+        from .fingerprints import Fingerprint, pick_fingerprint
+
+        if self.fingerprint is not None:
+            self._fp = self.fingerprint
+        elif self.impersonate and self.impersonate != "chrome120":
+            self._fp = Fingerprint(
+                impersonate=self.impersonate,
+                user_agent=_CHROME_UA,
+                sec_ch_ua=_SEC_CH_UA,
+                sec_ch_ua_platform=_SEC_CH_UA_PLATFORM,
+            )
+        else:
+            self._fp = pick_fingerprint()
+        # Coerce the impersonate string to the right shape for curl-cffi.
+        self._impersonate_value = self._fp.normalized_impersonate
         self.cookie_jar = getattr(self._session, "cookies", None)
+        # Phase 5B — bind this session to one egress endpoint from the rotation
+        # pool (a session keeps a stable IP; rotation happens across sessions,
+        # i.e. across domains in a bulk run). None means direct egress.
+        try:
+            from .egress_pool import egress_pool
+
+            self._egress_url: str | None = egress_pool.next_proxy()
+        except Exception:
+            self._egress_url = None
         # T0 Ghost and T1 Stealth get the navigation graph simulation.
         self._nav_graph_enabled = self.timing_profile in (T0_GHOST, T1_STEALTH)
         # Track how many nav-graph hops have been fired this session.
@@ -525,12 +574,13 @@ class StealthSession:
         delay = self.timing_profile.get_delay()
         if delay > 0:
             _time.sleep(delay)
-        headers = build_chrome_headers(url, referrer=self.last_url)
+        headers = build_chrome_headers(url, referrer=self.last_url, fingerprint=self._fp)
         try:
             self._session.get(
                 url,
                 headers=headers,
                 impersonate=self._impersonate_value,
+                **self._egress_kwargs(),
             )
         finally:
             self.request_count += 1
@@ -567,12 +617,13 @@ class StealthSession:
         delay = self._resolve_delay()
         if delay > 0:
             _time.sleep(delay)
-        headers = build_chrome_headers(url, referrer=self.last_url)
+        headers = build_chrome_headers(url, referrer=self.last_url, fingerprint=self._fp)
         # Caller-supplied headers win, but we still apply our
         # Chrome-shaped defaults underneath so e.g. a custom UA
         # override still gets a Chrome Sec-Fetch-Site etc.
         merged = dict(headers)
         merged.update(kwargs.pop("headers", {}) or {})
+        egress = self._egress_kwargs()
         # The outer ``try``/``finally`` guarantees
         # ``self.request_count += 1`` runs exactly once per call,
         # regardless of which branch (normal / retry / re-raise) the
@@ -586,6 +637,7 @@ class StealthSession:
                     headers=merged,
                     impersonate=self._impersonate_value,
                     timeout=self.timeout,
+                    **egress,
                     **kwargs,
                 )
             except CurlError as exc:
@@ -605,14 +657,43 @@ class StealthSession:
                         impersonate=self._impersonate_value,
                         http_version=CurlHttpVersion.V1_1,
                         timeout=self.timeout,
+                        **egress,
                         **kwargs,
                     )
                 else:
+                    self._report_egress(False)
                     raise
+            except Exception:
+                # Any transport failure through the egress proxy is a health
+                # signal (Phase 5B eviction). Non-proxy failures report against
+                # None, which is a no-op.
+                self._report_egress(False)
+                raise
         finally:
             self.request_count += 1
+        self._report_egress(True)
         self.last_url = url
         return response
+
+    # -- Phase 5B egress helpers -----------------------------------------
+    def _egress_kwargs(self) -> dict[str, Any]:
+        """curl-cffi kwargs routing this session through its egress proxy."""
+        if not self._egress_url:
+            return {}
+        return {"proxies": {"http": self._egress_url, "https": self._egress_url}}
+
+    def _report_egress(self, ok: bool) -> None:
+        if not self._egress_url:
+            return
+        try:
+            from .egress_pool import egress_pool
+
+            if ok:
+                egress_pool.report_success(self._egress_url)
+            else:
+                egress_pool.report_failure(self._egress_url)
+        except Exception:
+            pass
 
     def _resolve_delay(self) -> float:
         """First request fires immediately; everything else paces.
@@ -637,6 +718,20 @@ class StealthSession:
         same shape.
         """
         import asyncio
+
+        # Phase 5B — unified throttle. The shared DomainRateLimiter previously
+        # governed ONLY the httpx stack (via its request hook); the curl-cffi
+        # stealth path was uncovered, so bulk runs could hammer a single host
+        # across both stacks. Acquiring here puts BOTH transports behind one
+        # per-host throttle — the root-cause fix for the audit's "rate limiter
+        # doesn't cover the stealth path". Guarded so a limiter issue never
+        # blocks a fetch.
+        try:
+            from .rate_limiter import rate_limiter
+
+            await rate_limiter.acquire(_host_of(url))
+        except Exception:
+            pass
 
         return await asyncio.to_thread(self._get_sync_inner, url, **kwargs)
 

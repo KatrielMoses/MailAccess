@@ -213,9 +213,21 @@ class QueueEvent:
 
 
 class InvestigationEngine:
-    def __init__(self, timeout: int = 30, max_concurrency: int = 10) -> None:
+    def __init__(
+        self,
+        timeout: int = 30,
+        max_concurrency: int = 10,
+        budget_seconds: float | None = None,
+        min_module_seconds: float = 2.0,
+        mode: str | None = None,
+    ) -> None:
         self._timeout = timeout
         self._max_concurrency = max_concurrency
+        self._budget_seconds = budget_seconds
+        self._min_module_seconds = min_module_seconds
+        # Phase 2B — per-run product mode; None means fall back to the config
+        # default (resolved in investigate()).
+        self._mode = mode
         self.status = InvestigationStatus.PENDING
 
     async def investigate(
@@ -240,7 +252,31 @@ class InvestigationEngine:
 
                 from ..config import settings as config
                 from ._phase_runner import settings_override
+                from .investigation_budget import InvestigationBudget
                 from .phases import PHASE_DAG
+                from .product_mode import normalize_mode
+
+                # Phase 2B — resolve the product mode (per-run override else the
+                # config default), mirroring the budget resolution below. A bad
+                # mode raises here rather than silently downgrading.
+                resolved_mode = normalize_mode(
+                    self._mode if self._mode is not None else config.product_mode
+                )
+
+                # Phase 1B — resolve the wall-clock budget and (optionally) a
+                # pinned fast primary module set. Both fall back to config so the
+                # server default applies when the CLI/API don't override them.
+                budget_seconds = (
+                    self._budget_seconds
+                    if self._budget_seconds is not None
+                    else config.investigation_budget_seconds
+                )
+                budget = InvestigationBudget(
+                    budget_seconds, min_module_seconds=self._min_module_seconds
+                )
+                effective_modules = module_names
+                if effective_modules is None and config.investigation_fast_modules:
+                    effective_modules = list(config.investigation_fast_modules)
 
                 opt_in_overrides = {
                     _OPT_IN_FLAG_BY_MODULE[name]: True
@@ -257,12 +293,16 @@ class InvestigationEngine:
                             queue=queue,
                             semaphore=semaphore,
                             config=config,
+                            budget=budget,
                             explicit_modules=(
-                                set(module_names) if module_names is not None else None
+                                set(effective_modules)
+                                if effective_modules is not None
+                                else None
                             ),
                             enable_modules=(
                                 set(enable_modules) if enable_modules is not None else None
                             ),
+                            mode=resolved_mode.value,
                         )
                         if phase.name == "email_credibility":
                             credibility = collected.get("email_credibility")
@@ -294,7 +334,26 @@ class InvestigationEngine:
                         current_email,
                         email,
                         graph_data,
+                        mode=resolved_mode.value,
                     )
+                    # Phase 1C — dual-write the canonical evidence ledger. Runs
+                    # after _persist in its own transaction so a ledger failure
+                    # can never roll back or otherwise disturb the findings.
+                    await self._record_observations(
+                        investigation_id, current_email, final, mode=resolved_mode.value
+                    )
+                    # Phase 2E — persist the reproducible run manifest + audit the
+                    # collection. Guarded internally; never breaks the run.
+                    try:
+                        from .run_manifest import record_run_manifest
+
+                        await record_run_manifest(
+                            run_id=investigation_id,
+                            pipeline="investigate",
+                            mode=resolved_mode.value,
+                        )
+                    except Exception:
+                        logger.exception("run manifest skipped for %s", investigation_id)
                     await self._dispatch_webhooks(investigation_id, email, final)
             except Exception:
                 logger.exception("Investigation %s failed", investigation_id)
@@ -351,6 +410,31 @@ class InvestigationEngine:
         except Exception:
             logger.exception("Webhook dispatch failed")
 
+    async def _record_observations(
+        self,
+        investigation_id: str,
+        canonical_email: str,
+        final: dict[str, ModuleResult],
+        mode: str = "security-investigation",
+    ) -> None:
+        """Phase 1C — write investigate findings into the evidence ledger."""
+        try:
+            from .observation_ledger import observations_from_results, record_observations
+
+            records = observations_from_results(
+                pipeline="investigate",
+                activity_id=investigation_id,
+                subject=canonical_email,
+                subject_type="email",
+                results=final,
+                mode=mode,
+            )
+            await record_observations(records)
+        except Exception:
+            logger.exception(
+                "Ledger dual-write skipped for investigation %s", investigation_id
+            )
+
     async def _set_status(
         self, investigation_id: str, status: InvestigationStatus
     ) -> None:
@@ -373,6 +457,7 @@ class InvestigationEngine:
         canonical_email: str,
         original_email: str,
         graph_data: dict | None = None,
+        mode: str = "security-investigation",
     ) -> None:
         now = datetime.now(timezone.utc)
         safe_collected = {
@@ -413,6 +498,7 @@ class InvestigationEngine:
                     "status": InvestigationStatus.COMPLETE,
                     "completed_at": now,
                     "canonical_email": canonical_email,
+                    "mode": mode,
                     "exposure_score": score,
                     "credential_risk_score": credential_risk.score,
                     "confirmed_name": name_result.confirmed_name,

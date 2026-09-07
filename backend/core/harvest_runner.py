@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -51,6 +52,7 @@ from .work_scheduler import (
     PRIORITY_HIGH_SIGNAL,
     PRIORITY_REGISTRY,
     PRIORITY_ROUTER_EXPANSION,
+    PRIORITY_SEARCH,
     PRIORITY_UNIVERSAL,
     TRACK_GUARANTEED,
     TRACK_OPPORTUNISTIC,
@@ -151,6 +153,25 @@ _MODULE_PRIORITIES: dict[str, int] = {
     # test path). In real harvests it also fires via signal emission.
     MODULE_PATTERN_VERIFY: PRIORITY_UNIVERSAL,
 }
+def _seed_priorities(cc_first: bool) -> dict[str, int]:
+    """Return the seed priority map, adjusted for the Phase 5B CC-first posture.
+
+    When ``cc_first`` (default), the already-crawled web (Common Crawl + Wayback)
+    is preferred over live search scraping: the archive sources are promoted to
+    the guaranteed tier and the live-search dork drops back to the search tier as
+    the fallback. This is the biggest block-reduction lever at volume — it avoids
+    hitting the DDG/Bing 202/CAPTCHA walls for domains the archive already covers.
+    """
+    prios = dict(_MODULE_PRIORITIES)
+    if cc_first:
+        prios[MODULE_COMMONCRAWL] = PRIORITY_GUARANTEED
+        prios[MODULE_WAYBACK_DOMAIN] = PRIORITY_GUARANTEED
+        # Undo the 0.13.3 promotion of the live-search dork so it runs AFTER the
+        # archive sources (fallback), not alongside the high-signal seeds.
+        prios[MODULE_EMAIL_DORK] = PRIORITY_SEARCH
+    return prios
+
+
 _PERSON_PIVOT_MODULES = frozenset(
     {
         MODULE_EMPLOYEE_NAMES,
@@ -422,6 +443,19 @@ async def run_adaptive_harvest(
     scheduler = WorkScheduler()
     signal_pool = AsyncSignalPool(export_threshold=0.0)
     signal_pool.set_scheduler(scheduler)
+    # Phase 6C — seed corpus-derived pattern priors into the pool so
+    # pattern_and_verify can nudge its guesses toward provider/industry-calibrated
+    # templates. Guarded, and skipped under module injection (the deterministic
+    # test seam); a no-op on an empty corpus (uniform prior → zero change).
+    if getattr(settings, "enable_corpus_pattern_priors", True) and not module_overrides:
+        try:
+            from .pattern_priors import build_priors_from_corpus
+
+            _priors = await build_priors_from_corpus()
+            if not _priors.is_empty:
+                signal_pool.emit_corpus_pattern_priors(_priors.provider_prior_map())
+        except Exception:
+            logger.debug("corpus pattern prior seeding unavailable", exc_info=True)
     budget = TimeBudget(timeout_seconds)
     # subdomain_intel gets a profile-derived hard wall that is independent of
     # the generic module soft timeout.  Store the computed value on the run
@@ -869,8 +903,17 @@ async def run_adaptive_harvest(
                 shadow_profiles_out=shadow_profiles,
             )
             unique_emails.sort(key=_sort_key)
+            timeout_enrichment: dict[str, Any] | None = None
             if not ctx.module_overrides:
                 await _attach_breach_enrichment(unique_emails, module_results, ctx)
+                # Phase 7A/7B — enrichment waterfall before grading, parity with
+                # the normal path.
+                timeout_enrichment = await _enrich_leads_waterfall(cleaned, unique_emails)
+                # Phase 3C/3D + 4A — grade + capture on the partial-timeout path
+                # too, so a timed-out bulk domain still contributes calibration
+                # volume and carries deliverability grades (parity with normal).
+                await _grade_leads_and_capture(cleaned, unique_emails, module_results)
+            technographics = await _compute_technographics(ctx, cache)
             completed = datetime.now(timezone.utc)
             errors = [
                 f"[{name}] {err}"
@@ -883,6 +926,8 @@ async def run_adaptive_harvest(
                 "timed_out": True,
                 "timeout_at_seconds": timeout_seconds,
                 "budget": budget.stats,
+                "technographics": technographics,
+                "enrichment": timeout_enrichment,
                 "smtp_email_verification": smtp_validation,
                 "m365_email_verification": tail.get("m365_email_verification", {}),
                 "yahoo_email_verification": tail.get("yahoo_email_verification", {}),
@@ -985,6 +1030,21 @@ async def run_adaptive_harvest(
         if not ctx.module_overrides:
             await _attach_breach_enrichment(unique_emails, module_results, ctx)
         unique_emails.sort(key=_sort_key)
+        # Phase 3C/3D + 4A — grade every lead from non-SMTP signals and snapshot
+        # its feature vector for calibration. This is invoked on the LIVE adaptive
+        # path (the legacy ``_orchestrate`` also does it, but the CLI/API run
+        # through here), so single-domain AND Phase-5A bulk harvests populate
+        # deliverability grades and accrue the 4A capture volume the promotion
+        # gate needs — identically, preserving per-domain parity. Additive,
+        # guarded; skipped for injected-module test/embedder paths.
+        enrichment_summary: dict[str, Any] | None = None
+        if not ctx.module_overrides:
+            # Phase 7A/7B — enrichment waterfall runs before grading so graded
+            # fields see any enrichment-filled person/company data.
+            enrichment_summary = await _enrich_leads_waterfall(cleaned, unique_emails)
+            await _grade_leads_and_capture(cleaned, unique_emails, module_results)
+        # Phase 5D — technographic tags from already-fetched bytes (no new I/O).
+        technographics = await _compute_technographics(ctx, cache)
         low_email_validation = tail.get("low_email_validation", {})
         completed = datetime.now(timezone.utc)
         completed_iso = completed.isoformat().replace("+00:00", "Z")
@@ -1027,6 +1087,8 @@ async def run_adaptive_harvest(
             "harvest_status": "completed",
             "timed_out": False,
             "budget": budget.stats,
+            "technographics": technographics,
+            "enrichment": enrichment_summary,
             "identity_clusters": [
                 {
                     "canonical_key": list(cluster.canonical_key),
@@ -1146,13 +1208,21 @@ async def _seed_scheduler(ctx: WorkerContext) -> None:
         )
     )
 
-    seeds = tuple(_MODULE_PRIORITIES.items())
+    # Phase 5B — CC-first posture: prefer the already-crawled web (Common Crawl
+    # + Wayback) over live search scraping. Under cc_first the archive sources
+    # join the guaranteed track (run first, reliably) while the live-search dork
+    # drops to the search-tier fallback (see _seed_priorities).
+    cc_first = bool(getattr(ctx.settings, "cc_first", True))
+    guaranteed_modules = {MODULE_PUBLIC_SURFACE, MODULE_HACKERTARGET}
+    if cc_first:
+        guaranteed_modules = guaranteed_modules | {MODULE_COMMONCRAWL, MODULE_WAYBACK_DOMAIN}
+    seeds = tuple(_seed_priorities(cc_first).items())
     for module_name, priority in seeds:
         if module_name in ctx.skip_modules:
             continue
         seed_track = (
             TRACK_GUARANTEED
-            if module_name in {MODULE_PUBLIC_SURFACE, MODULE_HACKERTARGET}
+            if module_name in guaranteed_modules
             else TRACK_OPPORTUNISTIC
         )
         await ctx.scheduler.submit(
@@ -1309,6 +1379,30 @@ async def _track2_loop(ctx: WorkerContext, concurrency: int = 5) -> None:
                 logger.error("Opportunistic harvest task failed: %r", outcome)
 
 
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+")
+
+
+def _on_domain_email_count(ctx: WorkerContext) -> int:
+    """Unique on-domain emails discovered so far.
+
+    Phase 5B — the CC-first best-effort fallback reads this to decide whether the
+    block-prone live-search dork is still needed. Robust to how each module
+    surfaces addresses: regex-extracts any ``…@domain`` token from each recorded
+    finding rather than assuming a fixed key.
+    """
+    domain_suffix = "@" + ctx.domain.lower()
+    seen: set[str] = set()
+    for res in (ctx.module_results or {}).values():
+        for finding in getattr(res, "findings", None) or []:
+            if not isinstance(finding, dict):
+                continue
+            for token in _EMAIL_RE.findall(str(finding)):
+                addr = token.lower()
+                if addr.endswith(domain_suffix):
+                    seen.add(addr)
+    return len(seen)
+
+
 async def _execute_item(item: WorkItem, ctx: WorkerContext) -> WorkResult:
     start = asyncio.get_event_loop().time()
     # Phase 3 fix: track-2 modules (employee_name_discovery, pattern_and_verify)
@@ -1338,6 +1432,39 @@ async def _execute_item(item: WorkItem, ctx: WorkerContext) -> WorkResult:
                 findings=[],
                 new_items=[],
                 errors=["skipped by runtime policy"],
+                duration_seconds=0.0,
+            )
+        # Phase 5B — CC-first best-effort fallback. When cc_first and the cheap
+        # (non-search) on-domain sources have ALREADY recorded enough on-domain
+        # emails by the time the live-search dork is pulled, skip the dork — it
+        # never touches DDG/Bing. Zero-latency and side-effect-free: it reads the
+        # yield recorded so far and skips only when the cheap sources genuinely
+        # sufficed (on CC-covered domains). When they under-deliver, the dork
+        # runs as the fallback. (Per-module circuit-breaking already bounds the
+        # block count when it does run.)
+        if (
+            item.module_name == MODULE_EMAIL_DORK
+            and bool(getattr(ctx.settings, "cc_first", True))
+            and int(getattr(ctx.settings, "cc_first_min_emails", 3)) > 0
+            and _on_domain_email_count(ctx)
+            >= int(getattr(ctx.settings, "cc_first_min_emails", 3))
+        ):
+            skip_result = ModuleResult(
+                status=ModuleStatus.SKIPPED,
+                metadata={
+                    "domain": ctx.domain,
+                    "skip_reason": "cc_first_sufficient_yield",
+                    "on_domain_emails": _on_domain_email_count(ctx),
+                },
+            )
+            _record_module_result(ctx, item.module_name, skip_result)
+            _emit_module_complete(ctx, item.module_name, skip_result)
+            return WorkResult(
+                item=item,
+                success=True,
+                findings=[],
+                new_items=[],
+                errors=["skipped: cc-first sufficient on-domain yield"],
                 duration_seconds=0.0,
             )
         if (
@@ -2377,6 +2504,94 @@ def _emit_module_complete(
             ctx.on_module_complete(module_name, status_value)
     except Exception:  # noqa: BLE001
         logger.debug("on_module_complete(%s) raised", module_name, exc_info=True)
+
+
+async def _grade_leads_and_capture(
+    domain: str,
+    unique_emails: list[Any],
+    module_results: dict[str, ModuleResult],
+) -> None:
+    """Phase 3C/3D + 4A — grade leads (non-SMTP) and capture calibration features.
+
+    Thin adapter over the orchestrator's ``_apply_deliverability_grade`` so the
+    live adaptive harvest path populates the deliverability grade/score fields and
+    writes the Phase-4A feature snapshots. Extracts the domain catch-all verdict
+    from ``pattern_and_verify`` metadata (as the legacy ``_orchestrate`` path
+    does). Fully guarded — a grading failure leaves leads ungraded, never breaks
+    the harvest, and never changes yield (additive fields only).
+    """
+    try:
+        from .domain_harvest_orchestrator import _apply_deliverability_grade
+
+        catchall: bool | None = None
+        pv = module_results.get(MODULE_PATTERN_VERIFY)
+        if pv is not None and isinstance(pv.metadata, dict) and "is_catchall" in pv.metadata:
+            catchall = pv.metadata.get("is_catchall")
+        await _apply_deliverability_grade(
+            unique_emails, domain, catchall_detected=catchall
+        )
+    except Exception:
+        logger.debug("deliverability grading/capture unavailable for %s", domain, exc_info=True)
+
+
+async def _enrich_leads_waterfall(
+    domain: str, unique_emails: list[Any]
+) -> dict[str, Any] | None:
+    """Phase 7A/7B — fill missing person fields via the enrichment waterfall.
+
+    Runs BEFORE deliverability grading (grading reads the person/company fields
+    enrichment may fill) and AFTER aggregation (so we know which fields are
+    actually missing). Governed by the run's active product mode: only
+    mode-allowed connectors run, and PDL (data-broker) is gated to
+    security-investigation. Enrichment only appends evidence, so person
+    attribution is re-run to fold the new evidence through the 1E resolver —
+    native evidenced claims still win, enrichment only fills gaps. Fully guarded:
+    a failure leaves leads exactly as aggregated (no yield/parity change).
+    """
+    try:
+        from .domain_harvest_orchestrator import _apply_person_attribution
+        from .enrichment_waterfall import enrich_leads
+        from .product_mode import get_active_mode
+
+        summary = await enrich_leads(unique_emails, mode=get_active_mode())
+        if summary.get("enriched"):
+            _apply_person_attribution(unique_emails)
+        return summary
+    except Exception:
+        logger.debug("enrichment waterfall unavailable for %s", domain, exc_info=True)
+        return None
+
+
+async def _compute_technographics(ctx: WorkerContext, cache: Any) -> dict[str, Any] | None:
+    """Phase 5D — tag the domain's tech stack from ALREADY-fetched bytes.
+
+    Mail provider comes from the MX the harvest already resolved
+    (``ctx.provider_detection``); CMS/analytics/ecommerce/framework tags come from
+    the homepage HTML already in the shared fetch cache, read via ``cache.peek``
+    (cache-only — a miss returns None, never a new request). Introduces zero
+    network I/O. Guarded → None on any failure; skipped for injected-module paths.
+    """
+    if ctx.module_overrides:
+        return None
+    try:
+        from .context_router import _homepage_url_for
+        from .technographics import detect
+
+        html: str | None = None
+        if cache is not None and hasattr(cache, "peek"):
+            resp = await cache.peek(_homepage_url_for(ctx.domain))
+            if resp is not None:
+                html = getattr(resp, "text", None)
+        provider = None
+        detection = getattr(ctx, "provider_detection", None)
+        if detection is not None:
+            provider = getattr(detection, "provider", None)
+        if html is None and not provider:
+            return None
+        return detect(html=html, mail_provider=provider).as_dict()
+    except Exception:
+        logger.debug("technographic tagging unavailable for %s", ctx.domain, exc_info=True)
+        return None
 
 
 async def _attach_breach_enrichment(

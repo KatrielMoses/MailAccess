@@ -1,0 +1,34 @@
+# TRUTH LABEL SCHEMA — investigate target (one file per email target)
+# Filename convention: eval/truth/<target_id>.email.yaml   (gitignored)
+#
+# Rule: label ONLY what you can independently verify. Anything you cannot
+# verify stays `unknown` — never guess a label. Every label records HOW you
+# verified it (evidence) and whether it is current (freshness).
+
+target_id: corp_own_1              # must match the id in eval/targets.yaml
+email: user@your-domain.example
+kind: email
+
+identity:
+  real_name: unknown              # the real person's name, or `unknown`
+  name_confidence: unknown        # high | medium | low | unknown (your MANUAL confidence)
+  verification: ""                # how you know (e.g. "own account", "public bio at <url>")
+  freshness: ""                   # is this current? note date checked
+
+# Discovered accounts/profiles the tool surfaces. Label each TP/FP/unknown.
+# `key` should be a stable "<module_or_platform>:<identifier>" you can match to
+# a tool finding (e.g. "github:someuser", "gravatar:<hash>").
+accounts:
+  - key: "platform:identifier"
+    verdict: unknown              # true_positive | false_positive | unknown
+    evidence: ""
+    freshness: ""
+
+# Breach / exposure claims. Mark which are REAL.
+breaches:
+  - key: "BreachName YYYY"
+    verdict: unknown              # real | false | unknown
+    evidence: ""
+    freshness: ""
+
+notes: ""

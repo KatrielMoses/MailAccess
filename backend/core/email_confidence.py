@@ -33,6 +33,12 @@ SOURCE_WEIGHTS: dict[str, float] = {
     "hunter_verified": 0.85,  # 0.11.1 Phase 4 — Hunter confidence >= 90
     "hunter_high": 0.70,  # 0.11.1 Phase 4 — Hunter confidence 70-89
     "hunter_low": 0.45,  # 0.11.1 Phase 4 — Hunter confidence < 70
+    # Phase 7A/7B — enrichment-waterfall connectors. Deliberately BELOW the
+    # neutral default (0.30) so an evidenced native person-field claim always
+    # outranks enrichment: the waterfall only fills fields that have no native
+    # claim, and these weights just order apollo-vs-pdl when both answer.
+    "apollo": 0.28,  # lawful-public business data
+    "pdl": 0.24,  # data-broker (security-only)
     "github_code_match": 0.45,
     "permutation_verified": 0.65,
     "permutation_catchall": 0.10,
@@ -143,6 +149,11 @@ SOURCE_CLASS: dict[str, str] = {
     "hunter_verified": "api",
     "hunter_high": "api",
     "hunter_low": "api",
+    # Phase 7A/7B enrichment connectors — third-party data APIs, grouped with
+    # the other paid-API providers so every weighted source has a source *class*
+    # for per-source-FP calibration accounting (invariant: SOURCE_WEIGHTS ⊆ SOURCE_CLASS).
+    "apollo": "api",
+    "pdl": "api",
     "press_release": "press",
     "permutation_verified": "verification",
     "permutation_catchall": "verification",

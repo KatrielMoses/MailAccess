@@ -60,6 +60,20 @@ async def ws_investigate(investigation_id: str, websocket: WebSocket) -> None:
           "timeline": { ... }
         }
     """
+    # Phase 2F — the WebSocket is authenticated here (BaseHTTPMiddleware does not
+    # run for WS). With a key configured it is required (via ?api_key=… or the
+    # X-API-Key header); with no key, only local callers are allowed.
+    from ..config import settings
+    from .security import is_local, key_ok
+
+    if settings.mailaccess_api_key:
+        if not key_ok(websocket):
+            await websocket.close(code=1008)
+            return
+    elif not is_local(websocket):
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
 
     # The queue is registered before the HTTP 202 response is sent, but poll

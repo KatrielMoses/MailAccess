@@ -131,7 +131,6 @@ def _candidate_values(module_name: str, payload: dict[str, Any]) -> Iterable[tup
         "account_discovery",
         "user_scanner",
         "username_pivot",
-        "google_search",
     }:
         for key in ("display_name", "full_name", "real_name", "name"):
             value = payload.get(key)

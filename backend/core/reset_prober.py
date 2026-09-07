@@ -204,6 +204,17 @@ async def probe(domain: str, email: str, client: httpx.AsyncClient) -> bool | No
     or None when the domain is blocked, absent, or inconclusive.
     """
     clean_domain = domain.strip().lower()
+    # Phase 2C — defense in depth: active account-reset probing is a security-only
+    # behavior. reset_prober only runs via breach_deep, which the product-mode
+    # gate already blocks outside security-investigation; this refuses at the
+    # probe itself as a second, independent guard.
+    from .product_mode import is_security_mode
+
+    if not is_security_mode():
+        _LOG.warning(
+            "reset_prober: refusing reset probe outside security-investigation mode"
+        )
+        return None
     if not is_public_clearnet_domain(clean_domain):
         _LOG.warning(
             "reset_prober: refusing non-clearnet target: %s", clean_domain

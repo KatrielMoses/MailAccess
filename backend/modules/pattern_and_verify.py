@@ -66,6 +66,31 @@ _TOP_THREE_TEMPLATES = [
 HUNTER_PATTERN_BOOST: float = 0.30
 HUNTER_PATTERN_PENALTY: float = -0.12
 
+# Phase 6C — corpus-derived pattern prior. A prior is weaker evidence than a
+# Hunter-observed pattern, so it applies a small *bounded* nudge proportional to
+# how far the corpus prior for a template sits above/below the uniform baseline.
+# Seeded into the signal pool as {template: prob} for the domain's provider.
+PRIOR_PATTERN_BOOST_SCALE: float = 0.15
+PRIOR_PATTERN_MAX_ADJUST: float = 0.10
+
+
+def _corpus_prior_adjustment(
+    template: str, prior_map: dict[str, float] | None
+) -> float:
+    """Bounded confidence nudge for ``template`` from a corpus prior distribution.
+
+    Positive when the corpus favors this template above the uniform baseline,
+    slightly negative when it is disfavored; zero when no prior is available.
+    """
+    if not prior_map:
+        return 0.0
+    prob = prior_map.get(template)
+    if prob is None:
+        return 0.0
+    uniform = 1.0 / max(1, len(prior_map))
+    raw = PRIOR_PATTERN_BOOST_SCALE * (float(prob) - uniform)
+    return max(-PRIOR_PATTERN_MAX_ADJUST, min(PRIOR_PATTERN_MAX_ADJUST, raw))
+
 
 @dataclass
 class EmployeeNameResult:
@@ -639,6 +664,18 @@ class PatternAndVerifyModule(BaseModule):
         verified_count = 0
         hunter_match_count = 0
         hunter_mismatch_count = 0
+        # Phase 6C — pull the corpus prior distribution for this domain's detected
+        # provider (falls back to the global distribution inside the pool). None
+        # when priors are disabled or the corpus is empty → no adjustment.
+        corpus_prior_map: dict[str, float] | None = None
+        corpus_prior_applied = 0
+        if signal_pool is not None and hasattr(signal_pool, "get_corpus_pattern_prior"):
+            try:
+                corpus_prior_map = signal_pool.get_corpus_pattern_prior(
+                    batch_meta.get("mail_provider")
+                )
+            except Exception:  # a prior lookup must never break emission
+                corpus_prior_map = None
         for cand in candidates:
             if cand.verification_status == "not_found":
                 continue
@@ -654,6 +691,18 @@ class PatternAndVerifyModule(BaseModule):
                 oldest_timestamp=None,
             )
             final_score = max(cand.confidence_score, float(breakdown.score))
+            # Phase 6C — nudge unverified candidates by the corpus prior for their
+            # template. SMTP-verified candidates are ground truth and untouched.
+            corpus_prior_adjustment: float | None = None
+            if (
+                corpus_prior_map
+                and cand.source_type != _SOURCE_TYPE_VERIFIED
+            ):
+                adj = _corpus_prior_adjustment(cand.pattern_template, corpus_prior_map)
+                if adj:
+                    corpus_prior_adjustment = adj
+                    final_score = min(1.0, max(0.0, final_score + adj))
+                    corpus_prior_applied += 1
             label = label_for_score(final_score)
             # P1: compute the hunter adjustment at emission time so
             # the breakdown carries the exact delta.  We recompute
@@ -682,6 +731,11 @@ class PatternAndVerifyModule(BaseModule):
             if hunter_adjustment is not None:
                 finding_metadata["hunter_pattern"] = hunter_pattern_template
                 finding_metadata["hunter_pattern_adjustment"] = round(hunter_adjustment, 4)
+            if corpus_prior_adjustment is not None:
+                finding_metadata["corpus_prior_adjustment"] = round(corpus_prior_adjustment, 4)
+                finding_metadata["corpus_prior_prob"] = round(
+                    float(corpus_prior_map.get(cand.pattern_template, 0.0)), 4
+                )
             findings.append(
                 {
                     "platform": "pattern_and_verify",
@@ -735,6 +789,9 @@ class PatternAndVerifyModule(BaseModule):
                 "hunter_pattern_template": hunter_pattern_template,
                 "hunter_pattern_match_count": hunter_match_count,
                 "hunter_pattern_mismatch_count": hunter_mismatch_count,
+                # Phase 6C — corpus prior feed.
+                "corpus_prior_available": corpus_prior_map is not None,
+                "corpus_prior_applied_count": corpus_prior_applied,
             },
         )
 

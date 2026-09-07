@@ -99,6 +99,12 @@ _SCRAPINGANT_KEY_NAMES = {key_name for key_name, _, _ in _SCRAPINGANT_KEYS}
 
 _EXPORT_FORMATS = {".json", ".csv", ".md", ".pdf", ".stix", ".mtgx"}
 _SCRAPINGANT_PROXY_TYPES = {"residential", "datacenter"}
+# Phase 2B — product modes selectable via --mode (see backend/core/product_mode.py).
+_PRODUCT_MODES = (
+    "security-investigation",
+    "public-business-contact",
+    "org-authorized-verification",
+)
 
 
 def _secure_mailaccess_dir() -> None:
@@ -198,7 +204,6 @@ _HARDCODED_MODULES = [
     ),
     ("wayback", "Wayback", "—", "No", "Find historical archived pages mentioning the email"),
     ("github_commits", "GitHub", "GITHUB_TOKEN", "No", "Search commit authorship history by email"),
-    ("google_search", "Google", "—", "No", "General Google search for email mentions"),
     ("shodan", "Shodan", "SHODAN_API_KEY", "No", "IP/domain intelligence via Shodan"),
     ("dns_lookup", "DNS", "—", "No", "DNS record enumeration for email domain"),
     ("whois_lookup", "WHOIS", "—", "No", "WHOIS registration data for email domain"),
@@ -840,6 +845,117 @@ from cli.platform_health import platform_health_app  # noqa: E402
 app.add_typer(platform_health_app)
 
 
+# ── Suppression (Phase 2A) ──────────────────────────────────────────────────
+suppress_app = typer.Typer(
+    name="suppress",
+    help=(
+        "Manage the suppression store — subjects that must never appear in any "
+        "export, in any mode. Email/domain are stored hashed (minimum retention)."
+    ),
+    invoke_without_command=True,
+    no_args_is_help=True,
+)
+app.add_typer(suppress_app)
+
+
+@suppress_app.command("add")
+def suppress_add(
+    email: str | None = typer.Option(None, "--email", help="Email to suppress."),
+    domain: str | None = typer.Option(None, "--domain", help="Domain to suppress."),
+    company: str | None = typer.Option(None, "--company", help="Company to suppress."),
+    reason: str | None = typer.Option(None, "--reason", help="Why (optional)."),
+    source: str = typer.Option("manual", "--source", help="Provenance of the objection."),
+) -> None:
+    """Add a subject to the suppression store."""
+    from backend.core.suppression import add_suppression
+
+    if not (email or domain or company):
+        raise typer.BadParameter("provide at least one of --email/--domain/--company")
+    added = asyncio.run(
+        add_suppression(
+            email=email, domain=domain, company=company, reason=reason, source=source
+        )
+    )
+    console.print(f"[green]✓ Added {added} suppression record(s).[/green]")
+
+
+@suppress_app.command("import")
+def suppress_import(
+    file: str | None = typer.Option(
+        None, "--file", "-f", help="CSV file with email/domain/company/reason/source columns. '-' = stdin."
+    ),
+) -> None:
+    """Import suppression records from a CSV file or stdin."""
+    import csv as _csv
+
+    from backend.core.suppression import import_suppression
+
+    if file in (None, "-"):
+        reader = _csv.DictReader(sys.stdin)
+    else:
+        fh = open(file, newline="", encoding="utf-8")
+        reader = _csv.DictReader(fh)
+    rows = [{k.strip().lower(): (v or "").strip() for k, v in row.items()} for row in reader]
+    added = asyncio.run(import_suppression(rows))
+    console.print(f"[green]✓ Imported {added} new suppression record(s) from {len(rows)} row(s).[/green]")
+
+
+@suppress_app.command("list")
+def suppress_list() -> None:
+    """List suppression records (keys are hashes for email/domain)."""
+    from backend.core.suppression import list_suppression
+
+    rows = asyncio.run(list_suppression())
+    if not rows:
+        console.print("[dim]No suppression records.[/dim]")
+        return
+    for r in rows:
+        console.print(f"{r['scope']:8} {r['key'][:16]}… reason={r['reason']} source={r['source']}")
+
+
+# ── Retention & governance (Phase 2E) ───────────────────────────────────────
+retention_app = typer.Typer(
+    name="retention",
+    help="Retention & governance: expire old evidence, verify the audit log.",
+    invoke_without_command=True,
+    no_args_is_help=True,
+)
+app.add_typer(retention_app)
+
+
+@retention_app.command("run")
+def retention_run(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Count what would be purged without deleting."
+    ),
+) -> None:
+    """Purge expired ledger observations and raw payloads (honors expires_at)."""
+    from backend.core.retention import run_retention
+
+    summary = asyncio.run(run_retention(dry_run=dry_run))
+    verb = "would purge" if dry_run else "purged"
+    console.print(
+        f"[green]✓ Retention: {verb} {summary['observations_expired']} observation(s) "
+        f"and {summary['raw_payloads_expired']} raw payload(s).[/green]"
+    )
+
+
+@retention_app.command("verify-audit")
+def retention_verify_audit() -> None:
+    """Verify the tamper-evident audit-log hash chain."""
+    from backend.core.audit_log import verify
+
+    result = asyncio.run(verify())
+    if result.ok:
+        console.print(f"[green]✓ Audit log intact ({result.entries} entries).[/green]")
+    else:
+        console.print(
+            f"[red]✗ Audit log BROKEN at seq {result.broken_at_seq} "
+            f"({result.entries} entries).[/red]"
+        )
+        raise typer.Exit(1)
+
+
 # TODO(0.10.0): when a `mailaccess doctor` command is added, migrate this to
 # `mailaccess doctor --platforms` and keep `mailaccess platform-audit` as an
 # alias. Tracked alongside the rest of the doctor surface (config validation,
@@ -1110,6 +1226,53 @@ def harvest_emails_command(
             "The main JSON is still written."
         ),
     ),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help=(
+            "Product mode for this run: security-investigation (default, full "
+            "capability), public-business-contact (lawful lead-gen), or "
+            "org-authorized-verification. Default: server config (product_mode)."
+        ),
+    ),
+    file: str | None = typer.Option(
+        None,
+        "--file",
+        help=(
+            "Phase 5A bulk mode: harvest a LIST of domains (CSV or newline "
+            "file; '-' reads stdin) in one governed, resumable, deduplicated "
+            "run with a single merged export. Takes precedence over --domain."
+        ),
+    ),
+    concurrency: int | None = typer.Option(
+        None,
+        "--concurrency",
+        help="Bulk mode: max domains harvested concurrently (default from config).",
+    ),
+    checkpoint: str | None = typer.Option(
+        None,
+        "--checkpoint",
+        help="Bulk mode: checkpoint file path (default: derived from list fingerprint).",
+    ),
+    merged_export: str | None = typer.Option(
+        None,
+        "--merged-export",
+        help="Bulk mode: path for the single merged export (default: results/bulk/).",
+    ),
+    no_resume: bool = typer.Option(
+        False,
+        "--no-resume",
+        help="Bulk mode: ignore an existing checkpoint and re-harvest every domain.",
+    ),
+    tech: list[str] = typer.Option(
+        [],
+        "--tech",
+        help=(
+            "Bulk mode: filter the merged lead list by technographics "
+            "(e.g. --tech cms=shopify --tech mail_provider=google). Repeatable; "
+            "ANDed. Dimensions: mail_provider, cms, analytics, ecommerce, framework."
+        ),
+    ),
 ) -> None:
     """Harvest email addresses associated with a domain.
 
@@ -1119,6 +1282,8 @@ def harvest_emails_command(
 
     SMTP RCPT TO verification runs by default. Use --no-verify to skip.
     """
+    if mode is not None and mode not in _PRODUCT_MODES:
+        raise typer.BadParameter(f"--mode must be one of: {', '.join(_PRODUCT_MODES)}")
     # 0.11.1 Phase 1: resolve the stealth timing profile.
     # Explicit --timing wins.  Then --stealth / --fast.  Otherwise
     # the existing setting (default T2 Balanced) applies.
@@ -1141,6 +1306,57 @@ def harvest_emails_command(
         selected_profile = "t3"
     elif fast:
         selected_profile = "t4"
+
+    # ------------------------------------------------------------------
+    # Phase 5A — bulk / list harvest mode. When --file is given we fan the
+    # domain list through the governed, resumable bulk orchestrator instead
+    # of the single-domain path. Timing/aggressive globals are set ONCE for
+    # the whole batch (the concurrency-safe posture the M3 note requires).
+    # ------------------------------------------------------------------
+    if file is not None:
+        from backend.config import settings as _bulk_settings
+        from cli.harvest_bulk import run_bulk_harvest_emails
+
+        _orig_profile = _bulk_settings.harvest_timing_profile
+        _orig_aggr = bool(_bulk_settings.harvest_aggressive)
+        if selected_profile is not None:
+            _bulk_settings.harvest_timing_profile = selected_profile
+        _bulk_settings.harvest_aggressive = bool(aggressive)
+        try:
+            bulk_exit = run_bulk_harvest_emails(
+                file,
+                no_verify=no_verify,
+                verify_m365=verify_m365,
+                verify_yahoo=verify_yahoo,
+                use_proxies=use_proxies,
+                proxy_fallback_ok=proxy_fallback_ok,
+                lite=lite,
+                skip_modules=tuple(skip_module),
+                max_cc_records=max_cc_records,
+                cc_max_collections=cc_max_collections,
+                aggressive=aggressive,
+                timeout_seconds=timeout,
+                with_subdomains=with_subdomains,
+                subdomain_deep=subdomain_deep,
+                no_subdomains=no_subdomains,
+                subdomain_calibrate=subdomain_calibrate,
+                enable_ml=enable_ml,
+                force=force,
+                no_export=no_export,
+                mode=mode,
+                concurrency=concurrency,
+                checkpoint=checkpoint,
+                merged_export=merged_export,
+                resume=not no_resume,
+                tech_filters=tuple(tech),
+                console=console,
+            )
+        finally:
+            _bulk_settings.harvest_timing_profile = _orig_profile
+            _bulk_settings.harvest_aggressive = _orig_aggr
+        if bulk_exit != 0:
+            raise typer.Exit(bulk_exit)
+        return
 
     if selected_profile is not None:
         # Mutate the runtime setting for this run only.  This is a
@@ -1194,6 +1410,7 @@ def harvest_emails_command(
                 clear_all_cache=clear_all_cache,
                 no_export=no_export,
                 no_extras=no_extras,
+                mode=mode,
             )
         finally:
             settings.harvest_timing_profile = original_profile
@@ -1244,9 +1461,47 @@ def harvest_emails_command(
                 clear_all_cache=clear_all_cache,
                 no_export=no_export,
                 no_extras=no_extras,
+                mode=mode,
             )
         finally:
             _settings.harvest_aggressive = original_aggressive
+    if exit_code != 0:
+        raise typer.Exit(exit_code)
+
+
+@app.command(name="discover")
+def discover_command(
+    industry: str = typer.Option(..., "--industry", help="Target industry / segment keywords."),
+    geo: str = typer.Option("", "--geo", help="Geography filter (e.g. 'Germany', 'Berlin', 'UK')."),
+    size: str = typer.Option("", "--size", help="Company size hint (e.g. '50-200 employees')."),
+    limit: int = typer.Option(25, "--limit", help="Max candidate domains to return."),
+    mode: str | None = typer.Option(
+        None, "--mode",
+        help="Product mode (default: public-business-contact — lawful lead-gen).",
+    ),
+    output: str | None = typer.Option(
+        None, "--output",
+        help="Write ranked domains to a CSV that 'harvest-emails --file' consumes.",
+    ),
+    json_output: str | None = typer.Option(
+        None, "--json", help="Write the full discovery result (with per-stage review) to JSON.",
+    ),
+) -> None:
+    """Phase 5C — discover candidate company domains for a market segment.
+
+    Turns industry / geo / size into a ranked candidate-domain list from $0
+    lawful-public sources (search dorking, OpenCorporates, Common Crawl), each
+    domain carrying its own DISCOVERY confidence (distinct from contact/email
+    confidence). The output feeds the bulk harvester directly.
+    """
+    if mode is not None and mode not in _PRODUCT_MODES:
+        raise typer.BadParameter(f"--mode must be one of: {', '.join(_PRODUCT_MODES)}")
+    from cli.discover import run_discover
+
+    exit_code = run_discover(
+        industry, geo=geo, size=size, limit=limit, mode=mode,
+        output=output, json_output=json_output, console=console,
+    )
     if exit_code != 0:
         raise typer.Exit(exit_code)
 
@@ -1342,7 +1597,15 @@ async def _collect_doctor_checks() -> list[DoctorCheck]:
             )
         )
         cache = HarvestCache()
-        cache_domains = cache.list_domains()
+        # Phase 1D — the corpus DB is the source of truth; include its domains
+        # (legacy JSON cache domains are merged in for backward visibility).
+        from backend.core.corpus_store import list_domains as _corpus_list_domains
+
+        try:
+            corpus_domains = await _corpus_list_domains()
+        except Exception:  # noqa: BLE001
+            corpus_domains = []
+        cache_domains = sorted(set(corpus_domains) | set(cache.list_domains()))
         cache_names = ", ".join(cache_domains[:8]) or "none"
         checks.append(
             DoctorCheck(
@@ -2157,6 +2420,30 @@ def _stop_managed_server(proc: subprocess.Popen) -> None:
             proc.wait(timeout=5.0)
 
 
+_INVESTIGATION_WAIT_MARGIN_SECONDS = 90
+_INVESTIGATION_UNLIMITED_WAIT_SECONDS = 3600.0
+
+
+def _investigation_wait_ceiling(budget: int | None) -> float:
+    """Client-side wait ceiling (seconds) derived from the effective budget.
+
+    The server enforces the wall-clock budget, so the client waits ``budget`` +
+    a margin (finalization/graph enrichment + network) before giving up. Falls
+    back to the server config default when ``--budget`` is not given.
+    """
+    effective: float | None = float(budget) if budget is not None else None
+    if effective is None:
+        try:
+            from backend.config import settings as _settings
+
+            effective = float(_settings.investigation_budget_seconds)
+        except Exception:
+            effective = 420.0
+    if effective is None or effective <= 0:
+        return _INVESTIGATION_UNLIMITED_WAIT_SECONDS
+    return effective + _INVESTIGATION_WAIT_MARGIN_SECONDS
+
+
 async def _investigate(
     email: str,
     output_format: str,
@@ -2169,6 +2456,8 @@ async def _investigate(
     no_brief: bool = False,
     scrapingant_transport_override: str | None = None,
     proxy_fallback_ok: bool = False,
+    budget: int | None = None,
+    mode: str | None = None,
 ) -> int:
     base_url = get_backend_url()
     managed_proc = await _ensure_server_running(base_url, email)
@@ -2193,6 +2482,8 @@ async def _investigate(
             no_brief,
             scrapingant_transport_override,
             proxy_fallback_ok,
+            budget,
+            mode,
         )
     finally:
         if managed_proc is not None:
@@ -2211,6 +2502,8 @@ async def _investigate_run(
     no_brief: bool = False,
     scrapingant_transport_override: str | None = None,
     proxy_fallback_ok: bool = False,
+    budget: int | None = None,
+    mode: str | None = None,
 ) -> int:
     _apply_scrapingant_transport_override(scrapingant_transport_override)
     base_url = get_backend_url()
@@ -2237,9 +2530,21 @@ async def _investigate_run(
         payload["modules"] = [m.strip() for m in modules.split(",") if m.strip()]
     if force:
         payload["force"] = True
+    if budget is not None:
+        payload["budget_seconds"] = budget
+    if mode is not None:
+        payload["mode"] = mode
     if enable_modules_list:
         payload["enable_modules"] = enable_modules_list
         err_console.print(f"[dim]Opt-in modules enabled: {', '.join(enable_modules_list)}[/dim]")
+
+    # How long the client should wait for the server to finish. The server
+    # enforces the wall-clock budget and always completes by ~budget, so we wait
+    # a margin beyond it (finalization/graph enrichment + network) before giving
+    # up. Sized from the effective budget so raising --budget also lets the
+    # client wait longer, and so the old hardcoded 120 s cap no longer truncates
+    # a long-but-healthy run.
+    _wait_ceiling = _investigation_wait_ceiling(budget)
 
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
         err_console.print(f"[dim]Backend: {base_url}[/dim]")
@@ -3136,7 +3441,10 @@ async def _investigate_run(
                 # Fallback to normal polling if immediate report fetch fails.
                 status = "pending"
 
-        _MAX_POLL_ATTEMPTS = 60  # 60 × 2 s = 120 s hard timeout
+        # Poll cap derived from the effective time budget (Phase 1B): the old
+        # fixed 60 × 2 s = 120 s cap truncated healthy long runs.
+        _MAX_POLL_ATTEMPTS = max(1, int(_wait_ceiling // 2))
+        _wait_ceiling_s = int(_wait_ceiling)
 
         if output_format not in ("json", "jsonl") and not cached:
             ws_base = base_url.replace("https://", "wss://").replace("http://", "ws://")
@@ -3151,12 +3459,13 @@ async def _investigate_run(
             try:
                 try:
                     async with websockets.connect(ws_url, open_timeout=10) as ws:
-                        _deadline = asyncio.get_running_loop().time() + 360
+                        _deadline = asyncio.get_running_loop().time() + _wait_ceiling
                         while True:
                             remaining = _deadline - asyncio.get_running_loop().time()
                             if remaining <= 0:
                                 err_console.print(
-                                    "[yellow]WS deadline reached (360 s), falling back to polling[/yellow]"
+                                    f"[yellow]WS deadline reached ({_wait_ceiling_s} s), "
+                                    "falling back to polling[/yellow]"
                                 )
                                 break
                             try:
@@ -3210,7 +3519,8 @@ async def _investigate_run(
                     while status not in ("complete", "failed"):
                         if _attempts >= _MAX_POLL_ATTEMPTS:
                             err_console.print(
-                                "[red]Timed out waiting for investigation to complete (120 s)[/red]"
+                                f"[red]Timed out waiting for investigation to complete "
+                                f"({_wait_ceiling_s} s)[/red]"
                             )
                             return 3
                         await asyncio.sleep(2)
@@ -3296,6 +3606,20 @@ async def _investigate_run(
         # failed; only an investigation whose terminal status is ``failed``
         # gets the investigation-failure exit code.
         exit_code = 1 if str(report_data.get("status", "")).lower() == "failed" else 0
+
+        # Phase 1B — a run truncated by the time budget still completed (exit 0);
+        # surface which modules were cut short so the partial result is honest.
+        _budget_info = report_data.get("budget") or {}
+        if output_format not in ("json", "jsonl") and _budget_info.get("truncated"):
+            _trunc = _budget_info.get("truncated_modules") or []
+            out.print(
+                f"[yellow]⏱ Time budget reached — {len(_trunc)} module(s) truncated: "
+                f"{', '.join(_trunc)}[/yellow]"
+            )
+            out.print(
+                "[dim]Partial results below. Raise --budget (or "
+                "investigation_budget_seconds) to run them to completion.[/dim]"
+            )
 
         if output_format == "jsonl":
             for mod, findings in report_data.get("findings_by_module", {}).items():
@@ -3926,6 +4250,16 @@ def investigate(
     ),
     modules: str = typer.Option(None, "--modules", help="Comma-separated list of modules to run."),
     timeout: int = typer.Option(30, "--timeout", "-t", help="Timeout in seconds for API calls."),
+    budget: int | None = typer.Option(
+        None,
+        "--budget",
+        help=(
+            "Overall investigation time budget in seconds. When reached, "
+            "in-flight modules are cut short and the run completes with partial "
+            "results (truncated modules are reported). Default: server config "
+            "(investigation_budget_seconds). 0 = unlimited."
+        ),
+    ),
     output_file: str | None = typer.Option(
         None, "--output", "-o", help="Save report to file (.json .csv .md .pdf .stix .mtgx)"
     ),
@@ -3967,9 +4301,20 @@ def investigate(
         "--proxy-type",
         help="ScrapingAnt proxy transport: residential or datacenter.",
     ),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help=(
+            "Product mode for this run: security-investigation (default, full "
+            "capability), public-business-contact (lawful lead-gen), or "
+            "org-authorized-verification. Default: server config (product_mode)."
+        ),
+    ),
 ) -> None:
     """Run a full OSINT investigation against an email address.
     Exit codes: 0=completed 1=failed 2=invalid input 3=server unavailable"""
+    if mode is not None and mode not in _PRODUCT_MODES:
+        raise typer.BadParameter(f"--mode must be one of: {', '.join(_PRODUCT_MODES)}")
     if use_scraping_api and use_proxies:
         raise typer.BadParameter("--use-scraping-api and --use-proxies are mutually exclusive")
     if proxy_type is not None and not use_proxies:
@@ -4023,6 +4368,8 @@ def investigate(
                 no_brief,
                 scrapingant_transport_override,
                 proxy_fallback_ok,
+                budget,
+                mode,
             )
         )
         if code > max_code:

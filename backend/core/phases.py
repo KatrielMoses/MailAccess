@@ -8,6 +8,7 @@ from typing import Any
 from ..modules.base import BaseModule, ModuleResult, ModuleStatus
 from ._phase_runner import run_one_module
 from .engine import QueueEvent
+from .investigation_budget import InvestigationBudget
 from .policy import (
     _BREACH_MODULES,
     _MODULE_DEFAULT_TIMEOUTS,
@@ -39,9 +40,11 @@ async def _run_and_record(
     queue: asyncio.Queue,
     semaphore: asyncio.Semaphore,
     config: Any,
+    budget: InvestigationBudget | None = None,
     explicit_module: bool = False,
     findings_input: dict[str, ModuleResult] | None = None,
     use_canonical_email: bool = True,
+    mode: str = "security-investigation",
 ) -> tuple[str, ModuleResult]:
     default_timeout = _MODULE_DEFAULT_TIMEOUTS.get(
         mod.name, config.module_timeout_seconds
@@ -56,6 +59,8 @@ async def _run_and_record(
             queue=queue,
             canonical_email=canonical_email if use_canonical_email else None,
             collected=findings_input,
+            budget=budget,
+            mode=mode,
         )
     collected[mod.name] = result
     await queue.put(_event_result(mod.name, result))
@@ -79,6 +84,8 @@ class InvestigationPhase(ABC):
         config: Any,
         explicit_modules: set[str] | None,
         enable_modules: set[str] | None,
+        budget: InvestigationBudget | None = None,
+        mode: str = "security-investigation",
     ) -> dict[str, ModuleResult]: ...
 
 
@@ -102,10 +109,12 @@ class PrimaryPhase(InvestigationPhase):
 
     async def run(self, **kwargs: Any) -> dict[str, ModuleResult]:
         from ..modules import get_all_modules
+        from .product_mode import is_module_allowed
 
         explicit_modules = kwargs["explicit_modules"]
         enable_modules = kwargs["enable_modules"] or set()
         collected = kwargs["collected"]
+        mode = kwargs.get("mode", "security-investigation")
         classes = list(get_all_modules())
         if explicit_modules is not None:
             classes = [cls for cls in classes if cls.name in explicit_modules]
@@ -115,6 +124,9 @@ class PrimaryPhase(InvestigationPhase):
             if cls.name not in _POST_PRIMARY_ONLY
             and cls.name not in {"emailrep", "email_credibility"}
             and (cls.name != "press_intel" or cls.name in enable_modules)
+            # Phase 2C — prune modules not permitted in this product mode so
+            # they never instantiate (the run_one_module gate is the backstop).
+            and is_module_allowed(cls.name, mode)
         ]
         credibility = collected.get("email_credibility")
         if credibility and bool((credibility.metadata or {}).get("is_disposable")):
@@ -311,8 +323,12 @@ class PhonePhase(InvestigationPhase):
             from .phone_extractor import extract_phones
 
             phones = extract_phones(_flat_findings(collected))
-            if phones:
+            budget = kwargs.get("budget")
+            if phones and (budget is None or budget.can_start_module()):
                 messaging = MessagingHintsModule()
+                hint_timeout = float(config.module_timeout_seconds)
+                if budget is not None:
+                    hint_timeout = budget.cap(hint_timeout)
                 try:
                     extra = await asyncio.wait_for(
                         messaging.run(
@@ -320,7 +336,7 @@ class PhonePhase(InvestigationPhase):
                             phone_hints=phones,
                             collected=collected,
                         ),
-                        timeout=config.module_timeout_seconds,
+                        timeout=hint_timeout,
                     )
                     if extra.findings:
                         previous = collected.get(messaging.name)
@@ -350,6 +366,8 @@ def _runner_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         "queue": kwargs["queue"],
         "semaphore": kwargs["semaphore"],
         "config": kwargs["config"],
+        "budget": kwargs.get("budget"),
+        "mode": kwargs.get("mode", "security-investigation"),
     }
 
 

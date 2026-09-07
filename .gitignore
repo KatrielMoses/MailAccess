@@ -1,3 +1,17 @@
+# --- Phase 0 evaluation harness: authorized-only, LOCAL data ---
+# The real target set, hand-verified truth labels, and scorecards contain
+# third-party PII and live findings. Keep them out of git. Only the harness
+# code, schema, docs, and the *.example templates are committed.
+/eval/targets.yaml
+# Filled truth labels live directly in eval/truth/ as *.yaml — ignore those.
+# README.md (not yaml) and the _schema/ subdir stay tracked.
+/eval/truth/*.yaml
+/eval/scorecards/*
+!/eval/scorecards/.gitkeep
+# Phase 0D frozen baseline: real run data, raw outputs, and report contain
+# third-party PII. LOCAL ONLY — never committed (user decision, 2026-09-05).
+/baseline/
+
 # Python
 __pycache__/
 *.pyc

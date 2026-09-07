@@ -28,7 +28,6 @@ _SOCIAL_MODULES = frozenset(
     {
         "gravatar",
         "social_links",
-        "google_search",
         "ghunt",
         "social",
         "twitter_profile",

@@ -39,14 +39,38 @@ class ProxyConfig:
 
     @property
     def is_enabled(self) -> bool:
-        return self._enabled and bool(self._url)
+        # Phase 5B — enabled when the legacy single proxy is on OR the egress
+        # rotation pool is configured (BYO list). Either way requests egress
+        # through a proxy, so the error path should treat failures as proxy
+        # failures.
+        if self._enabled and bool(self._url):
+            return True
+        try:
+            from .egress_pool import egress_pool
+
+            return egress_pool.is_configured()
+        except Exception:
+            return False
 
     @property
     def is_tor(self) -> bool:
-        return self.is_enabled and self._url == _TOR_URL
+        return self._enabled and bool(self._url) and self._url == _TOR_URL
 
     def proxy_url(self) -> str | None:
-        return self._url if self.is_enabled else None
+        """Return the egress endpoint for the next request.
+
+        Phase 5B — prefer the rotation pool (which already folds in the legacy
+        single proxy as a pool-of-one), rotating + health-aware. Falls back to
+        the legacy single URL only if the pool is somehow unavailable.
+        """
+        try:
+            from .egress_pool import egress_pool
+
+            if egress_pool.is_configured():
+                return egress_pool.next_proxy()
+        except Exception:
+            pass
+        return self._url if (self._enabled and bool(self._url)) else None
 
     def random_ua(self) -> str:
         return random.choice(_UA_POOL)  # noqa: S311

@@ -189,6 +189,27 @@ class HarvestedEmail:
     # SMTP-/provider-confirmed emails; each entry is a privacy-safe breach
     # finding dict (password existence as a boolean flag, never the value).
     breach_enrichment: list[dict[str, Any]] = field(default_factory=list)
+    # Phase 3A — person-centric Lead fields, promoted from existing evidence via
+    # the 1E claim resolver (see lead_person.resolve_person_fields). Each is
+    # evidence-or-null: populated only when an evidenced claim resolves for it,
+    # and then it carries a provenance entry in person_field_provenance. A lead
+    # with an email but no person fields is still a lead (quantity preserved).
+    full_name: str | None = None
+    first: str | None = None
+    last: str | None = None
+    job_title: str | None = None
+    seniority: str | None = None  # Phase 3B band; None until a title resolves
+    department: str | None = None
+    linkedin_url: str | None = None
+    phone: str | None = None
+    location: str | None = None
+    person_field_provenance: dict[str, Any] = field(default_factory=dict)
+    # Phase 3C/3D — non-SMTP deliverability score (probability) + unified grade
+    # (Valid/Risky/Catch-all/Invalid/Unknown). ``deliverability`` carries the
+    # full reasons+evidence for both. None until the deliverability pass runs.
+    deliverability_score: float | None = None
+    deliverability_grade: str | None = None
+    deliverability: dict[str, Any] | None = None
 
 
 # MUST-FIX M4: cap on aggregated_source_urls to keep JSON export
@@ -1000,10 +1021,275 @@ def _aggregate(
     _apply_signal_pool_correlation(final, signal_pool)
     _apply_identity_cluster_snapshot(final, identity_clusters)
     _infer_confirmed_pattern_from_emails(final, signal_pool)
+    _apply_person_attribution(final)
     if shadow_profiles_out is not None:
         shadow_profiles_out.clear()
         shadow_profiles_out.extend(grouped_shadow[key] for key in sorted(grouped_shadow))
     return final
+
+
+def _apply_person_attribution(emails: list[HarvestedEmail]) -> None:
+    """Phase 3A — promote evidence into first-class person fields on each lead.
+
+    Runs after aggregation, over the assembled evidence, resolving each person
+    field through the 1E claim layer and honouring the run's product mode. Fully
+    guarded and additive: it only *sets* typed fields (email-only leads are
+    untouched, so yield never regresses), and every field it sets traces to an
+    evidence entry (lead_person enforces the invariant).
+    """
+    try:
+        from .lead_person import resolve_person_fields
+        from .product_mode import get_active_mode
+
+        mode = get_active_mode()
+    except Exception:
+        _LOG.exception("person attribution unavailable; leaving leads email-only")
+        return
+
+    for entry in emails:
+        try:
+            person = resolve_person_fields(entry, mode=mode)
+        except Exception:
+            _LOG.exception("person attribution failed for %s", entry.email)
+            continue
+        if person.is_empty():
+            continue
+        entry.full_name = person.full_name
+        entry.first = person.first
+        entry.last = person.last
+        entry.job_title = person.job_title
+        entry.seniority = person.seniority
+        entry.department = person.department
+        entry.linkedin_url = person.linkedin_url
+        entry.phone = person.phone
+        entry.location = person.location
+        entry.person_field_provenance = person.field_provenance
+
+
+def _email_verification_signals(entry: HarvestedEmail) -> dict[str, Any]:
+    """Extract per-email SMTP/provider signals the grade fuser needs, from the
+    already-assembled evidence + typed fields. No new probing."""
+    smtp_status: str | None = None
+    for ev in entry.evidence or []:
+        meta = ev.get("metadata") if isinstance(ev, dict) else None
+        if isinstance(meta, dict):
+            s = meta.get("smtp_verification_status")
+            if isinstance(s, str) and s:
+                smtp_status = s
+    smtp_exists: bool | None = None
+    if entry.is_smtp_verified:
+        smtp_exists = True
+    elif smtp_status == "not_found":
+        smtp_exists = False
+    return {
+        "smtp_status": smtp_status,
+        "smtp_exists": smtp_exists,
+        "provider_status": entry.provider_verification_status,
+        "provider_name": entry.provider_verification_provider,
+    }
+
+
+def _history_recent_verified(history: list[dict[str, Any]] | None) -> bool:
+    from datetime import datetime, timezone
+
+    if not history:
+        return False
+    now = datetime.now(timezone.utc)
+    for row in history:
+        if str(row.get("status") or "").lower() != "verified":
+            continue
+        ts = row.get("verified_at")
+        parsed: datetime | None = None
+        if isinstance(ts, str) and ts.strip():
+            try:
+                parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                parsed = None
+        if parsed is None:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        if (now - parsed).days <= 365:
+            return True
+    return False
+
+
+def _record_source_accounting(
+    domain: str, emails: list[HarvestedEmail], module_results: dict[str, Any]
+) -> None:
+    """Phase 4C — record per-source contribution accounting for this harvest.
+
+    Reduces the graded leads + module telemetry to a plain shape and appends one
+    accounting record (append-only JSONL). Fully guarded — accounting must never
+    break a harvest."""
+    from ..config import settings
+
+    if not getattr(settings, "enable_source_accounting", True):
+        return
+    try:
+        from .source_accounting import account_run, record_run_accounting
+
+        email_rows = [
+            {
+                "email": e.email,
+                "found_by_modules": list(getattr(e, "found_by_modules", None) or []),
+                "confidence_label": getattr(e, "confidence_label", None),
+                "deliverability_grade": getattr(e, "deliverability_grade", None),
+            }
+            for e in emails
+        ]
+        module_timings: dict[str, float] = {}
+        module_status: dict[str, str] = {}
+        for name, res in (module_results or {}).items():
+            meta = getattr(res, "metadata", None) or {}
+            duration = meta.get("duration_seconds") if isinstance(meta, dict) else None
+            if isinstance(duration, int | float):
+                module_timings[name] = float(duration)
+            status = getattr(res, "status", None)
+            module_status[name] = getattr(status, "value", None) or str(status or "")
+        accounting = account_run(
+            email_rows, module_timings=module_timings, module_status=module_status
+        )
+        record_run_accounting(domain, accounting)
+    except Exception:
+        _LOG.debug("source accounting unavailable for %s", domain, exc_info=True)
+
+
+def _shadow_live_score(score: Any) -> tuple[float, dict[str, Any] | None]:
+    """Phase 4D — resolve the LIVE deliverability score, running the calibrated
+    model in shadow.
+
+    Returns ``(live_score, shadow_info)``. The live score is the hand-tuned
+    ``score.score`` unless the calibrated model has been promoted through the 4B
+    gate; ``shadow_info`` (or ``None``) is monitoring metadata surfaced under
+    ``deliverability.shadow``. Fully guarded — any failure yields the hand-tuned
+    score with no shadow info, so live output is never at risk."""
+    try:
+        from .shadow_scorer import live_deliverability_score
+
+        return live_deliverability_score(score)
+    except Exception:
+        return float(score.score), None
+
+
+async def _apply_deliverability_grade(
+    emails: list[HarvestedEmail], domain: str, *, catchall_detected: bool | None
+) -> None:
+    """Phase 3C/3D — score + grade every lead from non-SMTP signals.
+
+    Resolves the domain-level signals once (MX / SPF / DMARC / provider), reads
+    prior corpus verification history, then for each lead computes the 3C
+    probability and fuses it with provider/SMTP/catch-all/disposable/role into
+    the 3D grade. The provider-confirmation-on-catch-all bust is policy-gated
+    (3E): trusted only in authorized modes. Every scored lead is logged for
+    Phase-4 calibration. Fully guarded — a failure leaves leads ungraded rather
+    than breaking the harvest, and yield is untouched (additive fields only)."""
+    try:
+        from . import corpus_store
+        from .catchall_buster import trust_provider_confirmation_on_catchall
+        from .deliverability_grade import grade_email
+        from .deliverability_score import compute_deliverability_score, log_score_sample
+        from .disposable_domains import is_disposable_domain, is_disposable_email
+        from .mail_provider import detect_provider_from_mx
+        from .mx_resolver import resolve_mx
+        from .product_mode import get_active_mode
+
+        mode = get_active_mode()
+        mx = await resolve_mx(domain)
+        mx_present = bool(mx)
+        provider = detect_provider_from_mx(mx, target_domain=domain).provider
+        dns = await resolve_domain_email_dns_signals(domain)
+        spf_present = bool(dns.get("spf_present"))
+        dmarc_strict = bool(dns.get("dmarc_strict"))
+        domain_disposable = is_disposable_domain(domain)
+
+        history_rows = await corpus_store.read_verification_history(domain=domain)
+        history_by_email: dict[str, list[dict[str, Any]]] = {}
+        for row in history_rows:
+            history_by_email.setdefault(str(row.get("email") or "").lower(), []).append(row)
+    except Exception:
+        _LOG.exception("deliverability pass unavailable for %s; leads left ungraded", domain)
+        return
+
+    # Phase 4A/4D — accumulate a feature snapshot per lead for calibration capture,
+    # written once after the loop (one txn beats one-per-email at harvest scale).
+    capture_records: list[dict[str, Any]] = []
+    for entry in emails:
+        try:
+            history = history_by_email.get(entry.email.lower(), [])
+            is_disposable = domain_disposable or is_disposable_email(entry.email)
+            score = compute_deliverability_score(
+                mx_present=mx_present,
+                spf_present=spf_present,
+                dmarc_strict=dmarc_strict,
+                provider=provider.value,
+                is_role=entry.is_role,
+                is_disposable=is_disposable,
+                history=history,
+            )
+            sig = _email_verification_signals(entry)
+            provider_status = sig["provider_status"]
+            mailbox_confirmed = False
+            # Phase 3E policy gate: a provider "verified" verdict may bust a
+            # catch-all (→ Valid) only in an authorized mode with an oracle-capable
+            # provider. In public-business-contact it must NOT, so we neutralise
+            # the provider confirmation for the catch-all fuser there.
+            if catchall_detected and str(provider_status or "").lower() == "verified":
+                if trust_provider_confirmation_on_catchall(mode, provider):
+                    mailbox_confirmed = True
+                else:
+                    provider_status = "inconclusive_public_mode"
+
+            grade = grade_email(
+                score=score,
+                is_disposable=is_disposable,
+                mx_present=mx_present,
+                is_role=entry.is_role,
+                catchall=catchall_detected,
+                smtp_status=sig["smtp_status"],
+                smtp_exists=sig["smtp_exists"],
+                provider_status=provider_status,
+                provider_name=sig["provider_name"],
+                mailbox_confirmed=mailbox_confirmed,
+                history_recent_verified=_history_recent_verified(history),
+            )
+            known = "verified" if _history_recent_verified(history) else None
+            # Phase 4D — the calibrated model scores in SHADOW alongside the
+            # hand-tuned scorer. Until the 4B promotion gate fires, the live score
+            # is exactly the hand-tuned one (asserted in tests); the shadow delta
+            # is logged for monitoring and surfaced under ``deliverability.shadow``.
+            live_score, shadow_info = _shadow_live_score(score)
+            entry.deliverability_score = round(live_score, 4)
+            entry.deliverability_grade = grade.grade
+            deliv: dict[str, Any] = {"score": score.as_dict(), "grade": grade.as_dict()}
+            if shadow_info is not None:
+                deliv["shadow"] = shadow_info
+            entry.deliverability = deliv
+            log_score_sample(entry.email, domain, score, known_outcome=known)
+            capture_records.append(
+                {
+                    "subject": entry.email,
+                    "subject_domain": domain,
+                    "activity_id": domain,
+                    "features": score.features,
+                    "hand_score": round(score.score, 4),
+                    "model_version": score.model_version,
+                    "pipeline": "harvest",
+                    "mode": mode.value,
+                    "known_outcome": known,
+                }
+            )
+        except Exception:
+            _LOG.exception("deliverability grading failed for %s", entry.email)
+            continue
+
+    if capture_records:
+        try:
+            from .scoring_capture import capture_batch
+
+            await capture_batch(capture_records)
+        except Exception:
+            _LOG.debug("scoring capture unavailable for %s", domain, exc_info=True)
 
 
 def _select_verifier_for_provider(provider: MailProvider) -> str:
@@ -3158,6 +3444,7 @@ async def run_domain_harvest(
     display_subscriber: Any | None = None,
     force: bool = False,
     on_harvest_end: Any | None = None,
+    mode: str | None = None,
 ) -> DomainHarvestResult:
     """Run all nine harvest modules in the recommended sequence.
 
@@ -3218,7 +3505,6 @@ async def run_domain_harvest(
         0.11.1 Phase 3 injection point for Wayback domain harvest.
         Defaults to a real :class:`WaybackDomainHarvestModule`.
     """
-    from .harvest_cache import HarvestCache
     from .harvest_runner import run_adaptive_harvest
 
     if enable_smtp is None:
@@ -3244,14 +3530,17 @@ async def run_domain_harvest(
         if module is not None
     }
 
-    # Explicit module injection is the deterministic test/embedder seam. It
-    # must not consume or overwrite a user's normal on-disk harvest cache.
-    cache = HarvestCache()
-    cache_enabled = bool(getattr(settings, "harvest_cache_enabled", True)) and not bool(
+    # Phase 1D — read-first from the unified corpus DB (replaces the per-domain
+    # JSON cache as the source of truth). Explicit module injection is the
+    # deterministic test/embedder seam and must not consume or overwrite a real
+    # corpus, so it disables the corpus entirely.
+    corpus_enabled = bool(getattr(settings, "harvest_cache_enabled", True)) and not bool(
         module_overrides
     )
-    if cache_enabled and not force and not cache.is_stale(domain):
-        cached = cache.get(domain)
+    if corpus_enabled and not force:
+        from .corpus_store import read_fresh_crawl
+
+        cached = await read_fresh_crawl(domain)
         if cached is not None:
             return cached
 
@@ -3299,6 +3588,36 @@ async def run_domain_harvest(
         }
         effective_skip_modules.update(all_injected_capable - set(module_overrides))
 
+    # Phase 2C — the lawful-public-data gate for harvest: translate the product
+    # mode into skip_modules by unioning in every module the mode disallows. In
+    # security-investigation the blocked set is empty (zero regression). Resolved
+    # once here and reused for the run-manifest stamp below.
+    from .product_mode import (
+        active_mailbox_probing_allowed,
+        blocked_modules,
+        normalize_mode,
+        set_active_mode,
+    )
+
+    resolved_mode = normalize_mode(mode if mode is not None else settings.product_mode)
+    set_active_mode(resolved_mode)
+    effective_skip_modules |= {str(name) for name in blocked_modules(resolved_mode)}
+    # Phase 4C — skip sources auto-demoted for no longer earning their runtime.
+    # Reversible and env-overridable (MAILACCESS_FORCE_SOURCE_<NAME>); the demoted
+    # set is empty until a source earns demotion, so live behavior is unchanged.
+    if getattr(settings, "enable_source_accounting", True):
+        try:
+            from .source_accounting import demoted_source_names
+
+            effective_skip_modules |= demoted_source_names()
+        except Exception:
+            _LOG.debug("source demotion consult unavailable", exc_info=True)
+    # Phase 2C — no active mailbox probing for growth in public-business-contact
+    # mode (the FTC line). Candidates may still be generated from evidenced
+    # people/patterns, but active SMTP verification is disabled.
+    if not active_mailbox_probing_allowed(resolved_mode):
+        enable_smtp = False
+
     result = await run_adaptive_harvest(
         domain=domain,
         timeout_seconds=total,
@@ -3324,8 +3643,15 @@ async def run_domain_harvest(
         display_subscriber=display_subscriber,
         on_harvest_end=on_harvest_end,
     )
-    if cache_enabled:
-        cache.set(domain, result)
+    # Phase 2B — stamp the run's product mode onto the result (the harvest run
+    # manifest) before write-back, so the corpus snapshot and the ledger record
+    # the collection mode. ``resolved_mode`` was computed above with the gate.
+    if isinstance(getattr(result, "metadata", None), dict):
+        result.metadata["mode"] = resolved_mode.value
+    if corpus_enabled:
+        from .corpus_store import write_back
+
+        await write_back(domain, result)
     return result
 
 
@@ -3844,6 +4170,17 @@ async def _orchestrate(
         if confirmed_pattern is None:
             pool_patterns = signal_pool.get_confirmed_patterns()
             confirmed_pattern = pool_patterns[0] if pool_patterns else None
+
+        # Phase 3C/3D — score + grade every lead from non-SMTP signals (uses the
+        # domain catch-all verdict just resolved). Guarded; additive only.
+        await _apply_deliverability_grade(
+            unique_emails, domain, catchall_detected=catchall_detected
+        )
+
+        # Phase 4C — per-source accounting: what each module actually earned this
+        # run (marginal-unique / incremental-confirmed contribution, latency,
+        # failure/FP rate). Append-only; guarded; drives reversible auto-demotion.
+        _record_source_accounting(domain, unique_emails, module_results)
 
         # 0.11.1 Phase 3 cache: snapshot stats before teardown so the
         # CLI can print hits / misses / evictions at the end of the run.

@@ -462,6 +462,28 @@ class AsyncSignalPool:
         """Return the Hunter-derived pattern template (or ``None``)."""
         return getattr(self, "_hunter_pattern_template", None)
 
+    def emit_corpus_pattern_priors(self, prior_map: Mapping[str, Mapping[str, float]]) -> None:
+        """Seed corpus-derived pattern priors (Phase 6C).
+
+        ``prior_map`` is ``{provider: {template: prob}}`` with a ``""`` key for
+        the provider-agnostic global distribution — exactly
+        :meth:`PatternPriors.provider_prior_map`. :mod:`pattern_and_verify` reads
+        the entry for the domain's detected provider (falling back to global) and
+        applies a small bounded boost to the corpus-favored templates. An empty
+        map clears the slot. Aggregate distributions only — never a raw contact.
+        """
+        self._corpus_pattern_priors = {
+            str(k): dict(v) for k, v in (prior_map or {}).items()
+        } or None
+
+    def get_corpus_pattern_prior(self, provider: str | None = None) -> dict[str, float] | None:
+        """The seeded per-template prior for ``provider`` (or the global one)."""
+        priors = getattr(self, "_corpus_pattern_priors", None)
+        if not priors:
+            return None
+        key = str(provider or "").strip().lower()
+        return priors.get(key) or priors.get("") or None
+
     def get_confirmed_patterns(self) -> list[str]:
         """Return confirmed templates in first-seen priority order."""
         return list(self._confirmed_patterns)

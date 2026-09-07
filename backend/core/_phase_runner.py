@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from ..modules.base import BaseModule, ModuleResult, ModuleStatus
+from .investigation_budget import InvestigationBudget
 from .policy import _MODULE_TIMEOUT_FLOORS
 
 _ERROR_LIMIT = 200
@@ -48,8 +49,56 @@ async def run_one_module(
     queue: asyncio.Queue | None = None,
     canonical_email: str | None = None,
     collected: dict[str, ModuleResult] | None = None,
+    budget: InvestigationBudget | None = None,
+    mode: str = "security-investigation",
 ) -> ModuleResult:
+    # Phase 2C — the lawful-public-data gate, enforced at the single universal
+    # module-execution point and ABOVE the force/explicit bypass: a mode-policy
+    # denial is not something --force or an opt-in flag may override. In
+    # security-investigation every module is allowed, so this is a no-op there
+    # (zero regression). Fail closed: an unclassified module is denied in the two
+    # non-security modes.
+    from .product_mode import is_module_allowed, set_active_mode
+
+    # Mark this module task's active mode for defense-in-depth guards deeper in
+    # the call graph (e.g. reset_prober). Task-local; does not leak to siblings.
+    set_active_mode(mode)
+
+    if not is_module_allowed(mod.name, mode):
+        if queue is not None:
+            from .engine import QueueEvent
+
+            await queue.put(QueueEvent(type="module_start", module_name=mod.name))
+        return ModuleResult(
+            status=ModuleStatus.SKIPPED,
+            metadata={"skip_reason": "policy_mode", "mode": mode},
+            errors=[f"Skipped: module '{mod.name}' not permitted in mode '{mode}'"],
+        )
+
     timeout = resolve_timeout(mod.name, default_timeout, overrides)
+
+    # Phase 1B — investigation time budget. If the run is out of budget, skip
+    # the module rather than start it; if there is budget left but less than the
+    # module's own timeout, cap the timeout to the remaining budget. Either way,
+    # record the truncation so the partial result is reported honestly.
+    if budget is not None and not budget.can_start_module():
+        budget.note_truncated(mod.name)
+        logger.info(
+            "Module %s skipped: investigation time budget exhausted", mod.name
+        )
+        return ModuleResult(
+            status=ModuleStatus.SKIPPED,
+            metadata={"budget_truncated": True},
+            errors=["Skipped: investigation time budget exhausted"],
+        )
+
+    budget_capped = False
+    if budget is not None:
+        effective_timeout = budget.cap(timeout)
+        budget_capped = effective_timeout < timeout
+    else:
+        effective_timeout = float(timeout)
+
     if queue is not None:
         from .engine import QueueEvent
 
@@ -71,9 +120,19 @@ async def run_one_module(
                 coroutine = mod.run(target_email, original_email=email)
             else:
                 coroutine = mod.run(target_email)
-        result = await asyncio.wait_for(coroutine, timeout=timeout)
+        result = await asyncio.wait_for(coroutine, timeout=effective_timeout)
         return _normalize_module_result(mod.name, result)
     except asyncio.TimeoutError:
+        if budget_capped and budget is not None:
+            budget.note_truncated(mod.name)
+            return ModuleResult(
+                status=ModuleStatus.PARTIAL,
+                metadata={"budget_truncated": True},
+                errors=[
+                    f"Truncated by investigation time budget after "
+                    f"{effective_timeout:.0f}s (module timeout {timeout}s)"
+                ],
+            )
         return ModuleResult(
             status=ModuleStatus.PARTIAL,
             errors=[f"Module timed out after {timeout}s"],

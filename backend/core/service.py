@@ -39,10 +39,50 @@ def _build_summary(data: dict) -> str:
     partial = sum(1 for r in runs if r["status"] == "partial")
     failed = sum(1 for r in runs if r["status"] == "failed")
     skipped = sum(1 for r in runs if r["status"] == "skipped")
-    return (
+    base = (
         f"Ran {total} modules ({success} success, {partial} partial, "
         f"{failed} failed, {skipped} skipped). Found {len(findings)} data points."
     )
+    truncated = _budget_truncated_modules(runs)
+    if truncated:
+        base += (
+            f" Time budget reached: {len(truncated)} module(s) truncated "
+            f"({', '.join(truncated)})."
+        )
+    return base
+
+
+def _budget_truncated_modules(module_runs: list[dict]) -> list[str]:
+    """Modules cut short or skipped by the Phase 1B investigation time budget."""
+    names = [
+        str(run.get("module_name") or "")
+        for run in module_runs
+        if isinstance(run, dict)
+        and isinstance(run.get("run_metadata"), dict)
+        and run["run_metadata"].get("budget_truncated")
+    ]
+    return sorted(n for n in names if n)
+
+
+def _build_budget_report(data: dict) -> dict:
+    """Explicit completed-vs-truncated record for the run's time budget."""
+    runs = [r for r in data.get("module_runs", []) if isinstance(r, dict)]
+    truncated = _budget_truncated_modules(runs)
+    truncated_set = set(truncated)
+    completed = sorted(
+        str(r.get("module_name") or "")
+        for r in runs
+        if str(r.get("status") or "").lower() in ("success", "partial")
+        and str(r.get("module_name") or "") not in truncated_set
+        and str(r.get("module_name") or "")
+    )
+    return {
+        "truncated": bool(truncated),
+        "truncated_modules": truncated,
+        "truncated_count": len(truncated),
+        "completed_modules": completed,
+        "completed_count": len(completed),
+    }
 
 
 def _exposure_score_pct(score: int | None, module_runs: list[dict]) -> int | None:
@@ -101,6 +141,7 @@ def enrich_report(data: dict) -> dict:
     findings = collapse_breach_findings(data.get("findings", []))
     data["findings"] = findings
     data["summary"] = _build_summary(data)
+    data["budget"] = _build_budget_report(data)
     timeline = data.get("timeline_json") or data.get("timeline")
     if not isinstance(timeline, dict):
         timeline = asdict(build_timeline(findings))
@@ -150,6 +191,58 @@ def enrich_report(data: dict) -> dict:
         )
     data.pop("defenders_brief_json", None)
 
+    # Phase 2A — irreversible suppression at the report boundary. enrich_report
+    # feeds both the raw report API (get_report) and all six exporters, so one
+    # read-time filter here excludes a suppressed subject from every output.
+    try:
+        from .suppression import redact_report
+
+        data = redact_report(data)
+    except Exception:  # suppression must never crash report assembly
+        import logging
+
+        logging.getLogger(__name__).exception("suppression redaction skipped")
+
+    # Phase 2D — attach the eligibility verdict (orthogonal to the exposure /
+    # confidence scores, which are left untouched). An investigate run has no
+    # per-address deliverability score, so under the default security mode this
+    # is "research-only"; a suppressed subject is "suppressed".
+    try:
+        from .eligibility import Eligibility, evaluate
+        from .product_mode import policy_status_for_mode
+
+        mode = data.get("mode") or "security-investigation"
+        if data.get("suppressed"):
+            data["eligibility"] = Eligibility.SUPPRESSED.value
+            data["eligibility_reason"] = "subject is suppressed"
+        else:
+            verdict = evaluate(
+                mode=mode,
+                policy_status=policy_status_for_mode(mode),
+                suppressed=False,
+                confidence=None,
+            )
+            data["eligibility"] = verdict.verdict.value
+            data["eligibility_reason"] = verdict.reason
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("eligibility verdict skipped")
+
+    # Phase 2E — export watermark: which run/mode/policy produced this report.
+    try:
+        from .run_manifest import manifest_dict
+
+        data["watermark"] = manifest_dict(
+            run_id=str(data.get("id") or "unknown"),
+            pipeline="investigate",
+            mode=str(data.get("mode") or "security-investigation"),
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("watermark skipped")
+
     return data
 
 class InvestigationService:
@@ -197,6 +290,8 @@ class InvestigationService:
         module_names: list[str] | None = None,
         force: bool = False,
         enable_modules: list[str] | None = None,
+        budget_seconds: float | None = None,
+        mode: str | None = None,
     ) -> tuple[str, datetime, asyncio.Queue | None, bool]:
         """
         Persist a new Investigation (PENDING), launch the engine in the
@@ -235,6 +330,9 @@ class InvestigationService:
         engine = InvestigationEngine(
             timeout=settings.module_timeout_seconds,
             max_concurrency=settings.max_concurrent_modules,
+            budget_seconds=budget_seconds,
+            min_module_seconds=settings.investigation_budget_min_module_seconds,
+            mode=mode,
         )
         queue = await engine.investigate(email, investigation_id, module_names, enable_modules)
         return investigation_id, created_at, queue, False

@@ -1,0 +1,54 @@
+# MailAccess Phase 0 — Evaluation Target Set (EXAMPLE / template)
+#
+# Copy this file to `eval/targets.yaml` (which is gitignored) and fill in the
+# real, AUTHORIZED targets. The real target values are deliberately NOT committed:
+# they contain third-party email addresses and are for local, authorized
+# evaluation only — never distributed, never contributed to any corpus, and the
+# harness never passes `--contribute`.
+#
+# The category spread is intentional and must stay stable across phases so the
+# baseline is comparable: corporate vs free vs edu, small vs large, and at least
+# one likely catch-all domain (a stress case).
+
+version: 1
+
+# investigate mode: email -> identity / exposure
+emails:
+  - id: corp_own_1          # corporate, own domain
+    value: user@your-domain.example
+    category: corporate
+    note: own domain
+
+  - id: free_1             # free / personal
+    value: someone@gmail.example
+    category: free
+
+  - id: free_2             # free / personal
+    value: another@gmail.example
+    category: free
+
+  - id: edu_1              # educational, roll-number-style localpart
+    value: rollno@college.example
+    category: educational
+
+  - id: corp_own_2         # corporate, own domain
+    value: user@your-other-domain.example
+    category: corporate
+    note: own domain
+
+# harvest mode: domain -> emails
+domains:
+  - id: corp_small_1       # own, small corporate
+    value: your-domain.example
+    category: corporate_small
+    note: own
+
+  - id: corp_small_2       # own, small corporate
+    value: your-other-domain.example
+    category: corporate_small
+    note: own
+
+  - id: large_catchall     # large public co (volume + catch-all stress case)
+    value: bigco.example
+    category: corporate_large
+    note: likely catch-all — verify independently

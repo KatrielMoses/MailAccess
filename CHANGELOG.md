@@ -1,5 +1,94 @@
 # Changelog
 
+### 0.14.5
+
+Re-architecture across governance, lead generation, deliverability, calibration,
+scale, and a shared-corpus flywheel. Validated end-to-end against the v0.14.4
+baseline (8 targets × 3 runs, both pipelines, keyless) with no default-mode
+yield/quality regression; `security-investigation` mode is behaviorally
+unchanged from v0.14.4.
+
+Substrate & data model:
+
+- Alembic migrations (`0001`–`0009`) replace the hand-rolled startup `ALTER`
+  sequence; a fresh database builds from baseline and an existing one is
+  stamped/reconciled — both converge on head. Async SQLite and PostgreSQL
+  (`postgresql+asyncpg://`) are supported.
+- Configurable investigation time budget (`--budget`, default 420s) replaces the
+  fixed 120s cap. Over-budget runs report a graceful partial with the truncated
+  modules listed instead of failing (fixes prior exit-3 timeouts on slow targets).
+- Immutable observation ledger with full provenance (source, capture time,
+  deterministic content hash, module + version, policy status, expiry); both
+  pipelines dual-write.
+- DB-backed corpus store (read-first / write-back) replaces the JSON harvest
+  cache; a repeat harvest is materially faster with byte-identical results.
+- Field-level claim resolver: explainable, recency × source-weight conflict
+  resolution; losing claims are retained and queryable.
+
+Governance (safe-by-default):
+
+- Product modes (`security-investigation` / `public-business-contact` /
+  `research`) with exhaustive, fail-closed module classification, recorded on the
+  run manifest and every observation.
+- Lawful gate enforces the mode at the module boundary; enforced suppression
+  store filters all six export formats retroactively; eligibility verdicts
+  (`eligible` / `review` / `suppressed` / `research-only`) are orthogonal to
+  confidence and gate the outreach export.
+- Retention/expiry, takedown-blocks-recollection, tamper-evident hash-chain
+  audit log, reproducible run manifests, and W3C PROV-DM export.
+- API safe-by-default: mandatory auth off-localhost, authenticated WebSocket and
+  Maltego endpoints, per-principal request quota (HTTP 429), and CORS that is
+  never wildcard-with-credentials. Local CLI use is unaffected.
+
+Lead model & deliverability:
+
+- Evidenced person fields (name / title / seniority / department) resolved
+  through the claim resolver with per-field provenance, populated only from an
+  evidenced claim (evidence-or-null).
+- Non-SMTP deliverability score with reasons and a unified grade
+  (`Valid` / `Risky` / `Catch-all` / `Invalid` / `Unknown`). A catch-all accept
+  never grades `Valid` without a per-mailbox oracle; `Invalid`/`Catch-all` map to
+  `research-only`.
+
+Calibration (shadow; inert until earned):
+
+- Feature-snapshot + outcome capture, a pure-stdlib logistic-regression trainer,
+  a metric suite (precision/recall/Brier/per-source FP), and a promotion gate
+  that refuses an underpowered (<200 labels) or worse model. Per-source
+  auto-demotion is reversible; the shadow scorer serves the hand-tuned score
+  until the gate fires.
+
+Scale, discovery & flywheel:
+
+- Bulk harvest (`harvest-emails --file`) with checkpoint/resume, cross-batch
+  dedup, and one merged evidence-preserving export.
+- Unified throttle across transport stacks, fingerprint/egress rotation,
+  search-provider failover, and a Common-Crawl-first posture.
+- Company discovery (`discover --industry/--geo/--size`) with discovery
+  confidence kept distinct from contact confidence; technographic tagging derived
+  from already-fetched bytes (`--tech` filter).
+- Corpus decay and per-provider/industry priors; change intelligence
+  (new-hire / departure / verification-drift / stale) via
+  `GET /api/leads/{domain}/changes`; distribution/contribution machinery is
+  built private-by-default and inert (no transport wired).
+
+Enrichment & hygiene:
+
+- Enrichment waterfall fills only missing fields and never outranks an evidenced
+  native claim; BYO Apollo/PDL connectors are mode-gated (PDL security-only) with
+  a provider budget; org-chart export (JSON/HTML), empty in security mode.
+- Removed dead modules `google_search`, `haveibeenpwned`, and `subdomain_surface`.
+- Harvest lead exports now carry `schema_version: 2`.
+
+Fixes:
+
+- `apollo`/`pdl` enrichment source types are now classified in `SOURCE_CLASS`,
+  restoring the invariant that every weighted source has a source class for
+  per-source calibration accounting.
+- The in-process harvest path now ensures the database schema exists before its
+  first corpus read, fixing a cold-start `no such table: crawl_snapshots` on
+  read-first and a related silent no-op of the Phase-4A calibration capture.
+
 ### 0.14.4 (security)
 
 - SECURITY: Deep-breach probes now accept only public clearnet FQDNs from the

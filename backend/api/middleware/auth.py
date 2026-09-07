@@ -24,26 +24,43 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
+    """Phase 2F — safe-by-default authentication.
+
+    * ``/health`` is always open (liveness).
+    * With **no** API key configured, local (loopback) callers are allowed as a
+      dev convenience, but non-local callers are **refused** — the open bypass
+      never applies off-localhost.
+    * With a key configured it is enforced on every protected surface, now
+      **including** the Maltego transform route (previously bypassed). The
+      WebSocket is authenticated in its own handler (middleware does not run for
+      WS connections).
+    """
+
+    _PROTECTED_PREFIXES = ("/api/", "/maltego/")
+
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Awaitable]
     ):
+        from ..security import is_local, key_ok
+
         path = request.url.path
-        
-        # Bypass authentication for /health, websocket, and Maltego transform routes
-        if path.startswith("/health") or path.startswith("/ws/") or path.startswith("/maltego/"):
+        if path.startswith("/health"):
             return await call_next(request)
 
-        # If API key is not configured, bypass authentication entirely
         if not settings.mailaccess_api_key:
-            return await call_next(request)
+            # Dev convenience for localhost only; remote access requires a key.
+            if is_local(request):
+                return await call_next(request)
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "authentication required",
+                    "detail": "set MAILACCESS_API_KEY to expose MailAccess to non-local clients",
+                },
+            )
 
-        # For /api/ routes, enforce the API key header
-        if path.startswith("/api/"):
-            api_key = request.headers.get("X-API-Key")
-            if not api_key or api_key != settings.mailaccess_api_key:
-                return JSONResponse(
-                    status_code=401,
-                    content={"error": "unauthorized"}
-                )
+        if any(path.startswith(prefix) for prefix in self._PROTECTED_PREFIXES):
+            if not key_ok(request):
+                return JSONResponse(status_code=401, content={"error": "unauthorized"})
 
         return await call_next(request)

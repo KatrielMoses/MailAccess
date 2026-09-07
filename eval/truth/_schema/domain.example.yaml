@@ -1,0 +1,41 @@
+# TRUTH LABEL SCHEMA — harvest target (one file per domain target)
+# Filename convention: eval/truth/<target_id>.domain.yaml   (gitignored)
+#
+# Rule: label ONLY what you can independently verify. `known_contacts` is your
+# reference "known-good" set — it does NOT need to be exhaustive, but every row
+# must be correct. Recall in the scorecard is measured "of what we know is true".
+
+target_id: corp_small_1            # must match the id in eval/targets.yaml
+domain: your-domain.example
+kind: domain
+
+# The true email pattern, e.g. "{first}", "{first}.{last}", "{f}{last}", or unknown.
+# Must match the tool's `summary.confirmed_pattern` token format to score as correct.
+email_pattern: unknown
+
+# Is the domain catch-all? VERIFY INDEPENDENTLY (critical for the large target).
+# true | false | unknown
+catch_all: unknown
+catch_all_verification: ""         # how you verified (e.g. "SMTP RCPT to random localpart accepted")
+
+# Hand-verified, currently-deliverable business contacts that genuinely exist.
+known_contacts:
+  - name: ""
+    title: ""
+    email: person@your-domain.example
+    title_source: ""               # where the title came from (attribution)
+    verification: ""               # how you verified the person/email
+    currently_deliverable: unknown # true | false | unknown
+    # Phase 3B — the true seniority band for `title` (used to score the
+    # title→seniority classifier). One of: c-level | vp | director | manager |
+    # ic | unknown. Leave `unknown` if the title is genuinely ambiguous.
+    seniority: unknown
+    # Phase 3C — optional explicit deliverability outcome for Brier calibration
+    # (defaults to `currently_deliverable` when omitted). true | false | unknown
+    deliverability_outcome: unknown
+
+# Emails the tool is KNOWN to surface incorrectly for this domain (collisions,
+# wrong-person, stale). Used as explicit false-positive labels for precision.
+false_positive_emails: []
+
+notes: ""

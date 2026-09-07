@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import traceback
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +30,13 @@ class InvestigateRequest(BaseModel):
     modules: list[str] | None = None
     force: bool = False
     enable_modules: list[str] = []
+    # Phase 1B — overall wall-clock completion budget (seconds). None = server
+    # default (settings.investigation_budget_seconds); <= 0 = unlimited.
+    budget_seconds: float | None = None
+    # Phase 2B — product mode for this run. None = server default
+    # (settings.product_mode). One of: security-investigation,
+    # public-business-contact, org-authorized-verification.
+    mode: str | None = None
 
 
 class InvestigateResponse(BaseModel):
@@ -66,6 +73,7 @@ class PaginatedInvestigations(BaseModel):
 @router.post("/investigate", response_model=InvestigateResponse, status_code=202)
 async def start_investigation(
     body: InvestigateRequest,
+    request: Request,
     session: AsyncSession = Depends(get_db),
 ) -> InvestigateResponse:
     """Create a new investigation and kick off the engine in the background.
@@ -73,9 +81,18 @@ async def start_investigation(
     Returns `cached=true` when a recent COMPLETE investigation for the same
     email is reused; in that case no engine run is started.
     """
+    # Phase 2F — per-principal quota on this investigation-triggering endpoint.
+    from ..security import enforce_quota
+
+    enforce_quota(request)
     service = InvestigationService(session)
     investigation_id, created_at, queue, cached = await service.create_investigation(
-        body.email, body.modules, force=body.force, enable_modules=body.enable_modules
+        body.email,
+        body.modules,
+        force=body.force,
+        enable_modules=body.enable_modules,
+        budget_seconds=body.budget_seconds,
+        mode=body.mode,
     )
     if not cached and queue is not None:
         queue_registry.put(investigation_id, queue)
@@ -101,7 +118,20 @@ async def get_report(
     if data is None:
         raise HTTPException(status_code=404, detail="Investigation not found")
 
-    return enrich_report(data)
+    enriched = enrich_report(data)
+    # Phase 1E — attach ledger-derived field provenance (conflict resolution).
+    # Additive and fully guarded: never alters existing keys or fails the report.
+    try:
+        from ...core.claim_resolver import resolve_report_fields
+
+        subject = enriched.get("canonical_email") or enriched.get("email")
+        if subject:
+            provenance = await resolve_report_fields(str(subject), session=session)
+            if provenance:
+                enriched["field_provenance"] = provenance
+    except Exception:
+        pass
+    return enriched
 
 
 @router.get("/report/{investigation_id}/export")
@@ -188,9 +218,27 @@ async def delete_investigation(
     investigation_id: str,
     session: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Hard-delete an investigation and all associated findings."""
+    """Take down an investigation: delete it and all associated findings, then
+    record the takedown (Phase 2E) so the subject cannot silently re-enter — a
+    companion suppression row blocks re-collection and the action is written to
+    the tamper-evident audit log."""
     service = InvestigationService(session)
+    # Capture the subject before deletion so the takedown can suppress it.
+    existing = await service.get_investigation(investigation_id)
+    subject_email = None
+    if existing:
+        subject_email = existing.get("canonical_email") or existing.get("email")
+
     deleted = await service.delete_investigation(investigation_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Investigation not found")
+
+    if subject_email:
+        from backend.core.takedown import record_takedown
+
+        await record_takedown(
+            email=subject_email,
+            removed_ref=investigation_id,
+            reason="investigation deleted via API",
+        )
     return Response(status_code=204)

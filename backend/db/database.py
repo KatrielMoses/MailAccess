@@ -3,15 +3,22 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from sqlalchemy import func, inspect, text
+from sqlalchemy import func, inspect
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from ..config import settings
-from .models import Base
+
+if TYPE_CHECKING:
+    from alembic.config import Config
 
 engine = create_async_engine(settings.database_url, echo=settings.debug)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+# Alembic migration environment lives beside this module (backend/db/migrations).
+_MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
 
 def _ensure_db_dir() -> None:
@@ -21,116 +28,56 @@ def _ensure_db_dir() -> None:
         Path(m.group(1)).parent.mkdir(parents=True, exist_ok=True)
 
 
-def _migrate_add_graph_data(sync_conn) -> None:
-    """Add graph_data JSON column to investigations if missing (existing DBs)."""
-    inspector = inspect(sync_conn)
-    if "investigations" not in inspector.get_table_names():
-        return
-    columns = {col["name"] for col in inspector.get_columns("investigations")}
-    if "graph_data" not in columns:
-        sync_conn.execute(
-            text("ALTER TABLE investigations ADD COLUMN graph_data JSON")
-        )
+def _alembic_config(connection: Connection) -> Config:
+    """Build an Alembic Config bound to a live (sync) connection.
+
+    Constructed programmatically with an absolute ``script_location`` rather than
+    read from ``alembic.ini`` so it is independent of the current working
+    directory (investigate/harvest runs can execute under an isolated cwd). The
+    shared connection is what lets migrations run on the app's async engine via
+    ``run_sync`` without a second engine or a nested event loop.
+    """
+    from alembic.config import Config
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
+    cfg.attributes["connection"] = connection
+    return cfg
 
 
-def _migrate_add_credential_risk_score(sync_conn) -> None:
-    """Add credential_risk_score column to investigations if missing."""
-    inspector = inspect(sync_conn)
-    if "investigations" not in inspector.get_table_names():
-        return
-    columns = {col["name"] for col in inspector.get_columns("investigations")}
-    if "credential_risk_score" not in columns:
-        sync_conn.execute(
-            text("ALTER TABLE investigations ADD COLUMN credential_risk_score INTEGER")
-        )
+def _apply_migrations(connection: Connection) -> None:
+    """Bring the database up to the head revision (runs inside ``run_sync``)."""
+    from alembic import command
 
+    cfg = _alembic_config(connection)
+    tables = set(inspect(connection).get_table_names())
 
-def _migrate_add_canonical_email(sync_conn) -> None:
-    """Add canonical_email column to investigations if missing."""
-    inspector = inspect(sync_conn)
-    if "investigations" not in inspector.get_table_names():
-        return
-    columns = {col["name"] for col in inspector.get_columns("investigations")}
-    if "canonical_email" not in columns:
-        sync_conn.execute(
-            text("ALTER TABLE investigations ADD COLUMN canonical_email VARCHAR")
-        )
+    if "alembic_version" not in tables and "investigations" in tables:
+        # Pre-Alembic database: the tables already exist from the legacy
+        # create_all + ADD COLUMN startup path. Stamp it at the baseline so
+        # 0001's create_table is skipped; the guarded 0002 then reconciles any
+        # missing enrichment columns / indexes idempotently up to head.
+        command.stamp(cfg, "0001")
 
-
-def _migrate_add_timeline_json(sync_conn) -> None:
-    """Add timeline_json column to investigations if missing."""
-    inspector = inspect(sync_conn)
-    if "investigations" not in inspector.get_table_names():
-        return
-    columns = {col["name"] for col in inspector.get_columns("investigations")}
-    if "timeline_json" not in columns:
-        sync_conn.execute(
-            text("ALTER TABLE investigations ADD COLUMN timeline_json JSON")
-        )
-
-
-def _migrate_add_defenders_brief(sync_conn) -> None:
-    """Add defenders_brief_json column to investigations if missing."""
-    inspector = inspect(sync_conn)
-    if "investigations" not in inspector.get_table_names():
-        return
-    columns = {col["name"] for col in inspector.get_columns("investigations")}
-    if "defenders_brief_json" not in columns:
-        sync_conn.execute(
-            text("ALTER TABLE investigations ADD COLUMN defenders_brief_json JSON")
-        )
-
-
-def _migrate_add_name_consensus(sync_conn) -> None:
-    """Add name consensus columns to investigations if missing."""
-    inspector = inspect(sync_conn)
-    if "investigations" not in inspector.get_table_names():
-        return
-    columns = {col["name"] for col in inspector.get_columns("investigations")}
-    if "confirmed_name" not in columns:
-        sync_conn.execute(
-            text("ALTER TABLE investigations ADD COLUMN confirmed_name VARCHAR")
-        )
-    if "name_confidence" not in columns:
-        sync_conn.execute(
-            text("ALTER TABLE investigations ADD COLUMN name_confidence VARCHAR")
-        )
-    if "name_reasoning" not in columns:
-        sync_conn.execute(
-            text("ALTER TABLE investigations ADD COLUMN name_reasoning VARCHAR")
-        )
-    if "name_sources" not in columns:
-        sync_conn.execute(
-            text("ALTER TABLE investigations ADD COLUMN name_sources JSON")
-        )
-
-
-def _migrate_add_recovery_fields(sync_conn) -> None:
-    """Add investigation lifecycle fields used by startup recovery."""
-    inspector = inspect(sync_conn)
-    if "investigations" not in inspector.get_table_names():
-        return
-    columns = {col["name"] for col in inspector.get_columns("investigations")}
-    if "started_at" not in columns:
-        sync_conn.execute(
-            text("ALTER TABLE investigations ADD COLUMN started_at DATETIME")
-        )
-    if "error" not in columns:
-        sync_conn.execute(text("ALTER TABLE investigations ADD COLUMN error VARCHAR"))
+    command.upgrade(cfg, "head")
 
 
 async def init_db() -> None:
-    """Create all tables if they don't exist. Called once at app startup."""
+    """Apply schema migrations, then recover zombie investigations.
+
+    Replaces the former ``create_all`` + hand-rolled ``ALTER TABLE`` startup
+    sequence with versioned Alembic migrations. A fresh database is built from
+    the ``0001`` baseline forward; an existing (pre-Alembic) v0.14.x database is
+    stamped and reconciled to head — both converge on the same schema.
+    """
     _ensure_db_dir()
+    # engine.begin() (not connect()): we introspect the connection to decide
+    # whether to stamp a pre-Alembic DB, which autobegins a transaction in
+    # SQLAlchemy 2.0. begin() owns that transaction and commits it on exit, so
+    # Alembic's writes (the version table + DDL) are durably committed; a bare
+    # connect() would leave them to be rolled back at context exit.
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await conn.run_sync(_migrate_add_graph_data)
-        await conn.run_sync(_migrate_add_credential_risk_score)
-        await conn.run_sync(_migrate_add_canonical_email)
-        await conn.run_sync(_migrate_add_timeline_json)
-        await conn.run_sync(_migrate_add_defenders_brief)
-        await conn.run_sync(_migrate_add_name_consensus)
-        await conn.run_sync(_migrate_add_recovery_fields)
+        await conn.run_sync(_apply_migrations)
     await _clean_stale_investigations()
 
 
@@ -139,16 +86,24 @@ async def _clean_stale_investigations() -> None:
 
     Called on every server startup to prevent stale investigation records from
     accumulating in the database after crashes or hangs.
+
+    Multi-process caveat: this is a best-effort startup sweep with a 10-minute
+    grace window. Under a future multi-process deployment two workers could both
+    run it, but the ``UPDATE`` is idempotent (it only ever flips RUNNING ->
+    FAILED for rows past the cutoff) so a double run is harmless. It does *not*
+    guard against a healthy long-running investigation on another live worker;
+    tightening that (e.g. an owner/heartbeat column) is deferred, not solved
+    here.
     """
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import update
+
     from .models import Investigation, InvestigationStatus
 
     stale_threshold_minutes = 10
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            from datetime import datetime, timedelta, timezone
-
-            from sqlalchemy import update
-
             cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_threshold_minutes)
             result = await session.execute(
                 update(Investigation)

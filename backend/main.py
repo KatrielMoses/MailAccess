@@ -78,10 +78,14 @@ app = FastAPI(
 
 app.add_middleware(APIKeyMiddleware)
 app.add_middleware(RequestIDMiddleware)
+# Phase 2F — a wildcard origin with credentials is unsafe (and spec-forbidden):
+# the browser would attach cookies/credentials to any site's requests. Only send
+# Access-Control-Allow-Credentials when the origin list is an explicit allowlist.
+_cors_allow_credentials = "*" not in settings.cors_origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_credentials=True,
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

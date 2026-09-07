@@ -393,7 +393,7 @@ The `postgres` service uses `postgres:16-alpine` with a named volume (`postgres_
 
 **Manual / external Postgres:**
 
-Set `DATABASE_URL` to any valid `postgresql+asyncpg://` connection string pointing at your database. MailAccess creates tables on startup via `init_db()` — no manual migration step required for a fresh database.
+Set `DATABASE_URL` to any valid `postgresql+asyncpg://` connection string pointing at your database (the `+asyncpg` async driver is required; a plain `postgresql://` URL will fail at startup). MailAccess applies its schema on startup via `init_db()`, which runs versioned Alembic migrations automatically — no manual migration step is required for a fresh database, and an existing MailAccess database is upgraded in place.
 
 ---
 
