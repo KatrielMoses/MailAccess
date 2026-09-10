@@ -102,6 +102,9 @@ packages = ["backend", "cli"]
 "data/subdomain_wordlist.json" = "data/subdomain_wordlist.json"
 
 [tool.hatch.build.targets.sdist]
+# Pin to Core Metadata 2.4 — PyPI (and current twine/packaging) reject the 2.5
+# that hatchling >=1.29 emits by default. Matches the wheel target above.
+core-metadata-version = "2.4"
 exclude = [
   "/venv-ner",
   "/frontend",
