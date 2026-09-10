@@ -4247,31 +4247,6 @@
    "disabled": true,
    "disabled_reason": "LOUD: on a hit (existing account) the signinup/code endpoint sends a sign-in OTP email to the target. Module docstring explicitly warns of this. Treat as disabled-loud."
   },
-  "justwatch": {
-   "id": "justwatch",
-   "name": "JustWatch",
-   "domain": "justwatch.com",
-   "dedup_key": "justwatch.com",
-   "category": "entertainment",
-   "check_type": "email-existence",
-   "flow": "login",
-   "uri_check": "https://identitytoolkit.googleapis.com/v1/accounts:createAuthUri?key=AIzaSyDv6JIzdDvbTBS-JWdR4Kl22UvgWGAyuo8",
-   "requestMethod": "POST",
-   "headers": {
-    "Content-Type": "application/json",
-    "x-client-version": "Chrome/JsCore/10.14.1/FirebaseCore-web",
-    "origin": "https://www.justwatch.com",
-    "referer": "https://www.justwatch.com/"
-   },
-   "requestPayload": {
-    "identifier": "{email}",
-    "continueUri": "https://www.justwatch.com/"
-   },
-   "e_code": 200,
-   "e_string": "\"registered\":true",
-   "m_code": 200,
-   "m_string": "\"registered\":false"
-  },
   "letterboxd": {
    "id": "letterboxd",
    "name": "Letterboxd",
@@ -4672,30 +4647,6 @@
    "e_string": "EMAIL_STATUS_TAKEN",
    "m_code": 200,
    "m_string": "EMAIL_STATUS_AVAILABLE"
-  },
-  "crazygames": {
-   "id": "crazygames",
-   "name": "CrazyGames",
-   "domain": "crazygames.com",
-   "dedup_key": "crazygames.com",
-   "category": "gaming",
-   "check_type": "email-existence",
-   "flow": "login",
-   "uri_check": "https://identitytoolkit.googleapis.com/v1/accounts:createAuthUri?key=AIzaSyAkBGn9sKEUBSMQ9CTFyHHxXas0tdcpts8",
-   "requestMethod": "POST",
-   "headers": {
-    "Content-Type": "application/json",
-    "origin": "https://www.crazygames.com",
-    "referer": "https://www.crazygames.com/"
-   },
-   "requestPayload": {
-    "identifier": "{email}",
-    "continueUri": "https://www.crazygames.com/"
-   },
-   "e_code": 200,
-   "e_string": "\"registered\":true",
-   "m_code": 200,
-   "m_string": "\"registered\":false"
   },
   "medal": {
    "id": "medal",
@@ -5301,30 +5252,6 @@
    "e_string": "already in use",
    "m_code": 200,
    "m_string": "$errors"
-  },
-  "aljazeera": {
-   "id": "aljazeera",
-   "name": "Al Jazeera",
-   "domain": "aljazeera.com",
-   "dedup_key": "aljazeera.com",
-   "category": "news",
-   "check_type": "email-existence",
-   "flow": "register",
-   "uri_check": "https://identitytoolkit.googleapis.com/v1/accounts:createAuthUri?key=AIzaSyDWz9TZvPscN7qFdG6z1bvLh98eXVBSUPM",
-   "requestMethod": "POST",
-   "headers": {
-    "Content-Type": "application/json",
-    "Origin": "https://www.aljazeera.com",
-    "Referer": "https://www.aljazeera.com/"
-   },
-   "requestPayload": {
-    "identifier": "{email}",
-    "continueUri": "https://www.aljazeera.com/account/sign-up"
-   },
-   "e_code": 200,
-   "e_string": "\"registered\": true",
-   "m_code": 200,
-   "m_string": "\"registered\": false"
   },
   "bbc": {
    "id": "bbc",
@@ -6274,32 +6201,6 @@
    "disabled": true,
    "disabled_reason": "LOUD: send_password_renewal_code with force_new=true sends a real password-renewal code to registered accounts (module docstring confirms). No --allow-loud guard."
   },
-  "whering": {
-   "id": "whering",
-   "name": "Whering",
-   "domain": "whering.app",
-   "dedup_key": "whering.app",
-   "category": "social_media",
-   "check_type": "email-existence",
-   "flow": "login",
-   "uri_check": "https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key=AIzaSyBuo23oVhkHuZ_P7rKU1jUrMD8gJ95yVwk",
-   "requestMethod": "POST",
-   "headers": {
-    "Content-Type": "application/json",
-    "X-Android-Package": "com.whering.app",
-    "X-Firebase-GMPID": "1:182334734580:android:b55d5ff0601be7971e5ea1"
-   },
-   "requestPayload": {
-    "email": "{email}",
-    "password": "igoh8h8g89y",
-    "returnSecureToken": true,
-    "clientType": "CLIENT_TYPE_ANDROID"
-   },
-   "e_code": 400,
-   "e_string": "INVALID_PASSWORD",
-   "m_code": 400,
-   "m_string": "EMAIL_NOT_FOUND"
-  },
   "aiscore": {
    "id": "aiscore",
    "name": "AiScore",
@@ -6592,31 +6493,6 @@
    "m_code": 200,
    "m_string": "\"valid\":1",
    "high_value": true
-  },
-  "iyoni": {
-   "id": "iyoni",
-   "name": "Iyoni",
-   "domain": "googleapis.com",
-   "dedup_key": "googleapis.com",
-   "category": "health",
-   "check_type": "email-existence",
-   "flow": "login",
-   "uri_check": "https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key=AIzaSyCBpmgku8MoHzusfTQlPwMcUObhPGUHc-w",
-   "requestMethod": "POST",
-   "headers": {
-    "Content-Type": "application/json",
-    "X-Android-Package": "pl.lifebite.iyoni"
-   },
-   "requestPayload": {
-    "email": "{email}",
-    "password": "generic_password_123",
-    "returnSecureToken": true,
-    "clientType": "CLIENT_TYPE_ANDROID"
-   },
-   "e_code": 400,
-   "e_string": "INVALID_PASSWORD",
-   "m_code": 400,
-   "m_string": "EMAIL_NOT_FOUND"
   },
   "meetyou": {
    "id": "meetyou",
