@@ -24,7 +24,7 @@ scorecard shape. (Full artifacts live under `eval/scorecards/<run_id>/`, gitigno
   (`cli/main.py` `_MAX_POLL_ATTEMPTS = 60 × 2 s`), so the CLI returns exit code 3
   ("server unavailable") with no report. Reproduced twice (~133–140 s wall).
 - **Root cause (baseline observation, not a harness bug):** the default module set
-  includes `maigret_platforms` (opt-in but ON by default) plus many live
+  includes `username_platforms` (opt-in but ON by default) plus many live
   platform-probing modules; collectively they exceed 120 s under live conditions.
   The 120 s cap is not CLI-configurable at v0.14.4.
 - The harness records this correctly as `ok=false, exit_code=3, timed_out=false`

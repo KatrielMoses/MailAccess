@@ -1,5 +1,95 @@
 # Changelog
 
+### 0.15.0 (2026-09-10)
+
+Two thrusts in one release: (1) a **de-vendor + de-brand** program that reimplements every
+third-party OSINT tool natively over one shared site corpus (`data/mailaccess_sites.json`),
+removing all runtime dependencies and tool names; and (2) a **correctness, evidence-integrity
+& output-trust** pass that makes the output defensible — an investigation now reports what it
+can *prove*, and never presents a speculative guess as a confirmed fact.
+
+#### Correctness, evidence integrity & output trust
+
+The governing principle across this pass: **unverified ≠ confirmed.** A speculative or
+low-confidence hit must not enter the identity graph, the Defender's Brief, name consensus, or
+the scores as if it were established fact.
+
+- **One predicate gates every "confirmed account" surface.** A username or account hit is
+  treated as a real account only when it is corroborated, or non-speculative *and* backed by a
+  user-discriminating URL. A bare-domain `200` (e.g. `https://femometer.com` with no profile
+  path) or a search-results page no longer counts as an account — so the graph, the brief's
+  "confirmed accounts" list, and the name candidates all agree and a single false positive can
+  no longer leak into one surface after being kept out of another.
+- **Evidence-first username probing.** Investigations no longer blast the email localpart across
+  thousands of sites. A two-wave, evidence-seeded sweep with a precision tail-drop probes a
+  bounded, high-precision subset first, then expands only on corroboration — fewer false
+  "accounts" and an honest coverage funnel (discovered → probed → retained → scored, with
+  rejection reasons) instead of an inflated platform count.
+- **Names must be corroborated.** "Real identity confirmed and public" now requires a name
+  source *independent* of the localpart guess and the username sweep; page navigation/UI words
+  are no longer mistaken for names; a single-token localpart is no longer echoed back as a
+  person's name.
+- **Trustworthy scoring brain.** Scores are order-independent (same evidence → same score
+  regardless of arrival order), name-match boosts are bounded, different accounts on one host
+  are no longer merged into one false identity, and one canonical assessment object drives both
+  the score and its explanation (no more scalar-vs-breakdown divergence).
+- **Provider availability is separated from target evidence.** A transport error, DNS failure,
+  rate-limit, or anti-bot challenge is now *inconclusive*, never a target hit or miss. Platform
+  health backs off on an expiring window driven by control accounts, not by target misses (so a
+  popular platform can no longer be permanently disabled just because targets had no account).
+- **Governance holds across boundaries.** Scope and suppression are enforced at every serving
+  boundary and fail closed; a run owns its own observations and termination state; per-run config
+  is immutable so concurrent investigations cannot cross-contaminate, and the result cache is
+  mode-aware so a security-mode run can never be served to a public-business-contact request.
+- **Honest signals.** SMTP "verification" reports actual probe attempts (not merely that the
+  feature was enabled) and flags when the provider was unavailable; exposure and risk are
+  reconciled so the headline matches the brief; WHOIS/registrar contacts are tagged as domain
+  infrastructure and never drive a personal-phone advisory; exporters report format fidelity
+  and whether PDF rendering is available.
+
+#### Native engine & dependency removal
+
+Every account-discovery, username, and email-existence check now runs on MailAccess's
+own native engine over a single bundled site corpus (`data/mailaccess_sites.json`,
+~5,365 platform definitions). All external OSINT runtime dependencies are removed, and
+no external dataset is fetched over the network at runtime — the corpus loads offline
+from the package.
+
+- **One native username-platform engine.** `username_platforms` covers the entire
+  `username-url` corpus through a single probe detector, replacing the previous
+  patchwork of separate per-source modules and their duplicate double-probes;
+  `username_pivot` reads the same local corpus. A committed virtualenv that had shipped
+  an external package was removed from the tree.
+- **One unified probe detector.** Every probe runs through the single neutral
+  `probe_detector`, with two-marker precision (a hit requires the existence marker
+  present *and* the absence marker gone, read from one response — no extra request), a
+  shared WAF/bot-wall guard (`waf_fingerprints.py`; challenge pages are inconclusive
+  rather than false hits), and a consistent `mailaccess/{version}` User-Agent on every
+  request.
+- **Native account-existence + profile extraction.** Email-existence checks and a
+  native profile extractor (`profile_extractor.py` — display-name / bio / avatar /
+  location) feed the identity graph and, at low weight, name consensus.
+- **Native Google-account intelligence** (`google_account_intel`) — unauthenticated and
+  on by default: Gmail/Workspace account existence via MX/domain plus a best-effort
+  public profile (name/avatar), health-registered so a provider change degrades
+  gracefully.
+- **Native subdomain sources.** `domain_harvester` bundles its keyless subdomain sources
+  (`data/harvester_sources.json`) with native collectors and no external dependency; two
+  additional keyless sources roughly **2.5× the unique subdomain yield** on the baseline
+  domains (python.org 69→176, postgresql.org 116→295). Parser refinements
+  (crt.sh `exclude=expired&deduplicate=Y`; a resilient RapidDNS regex) and one dead
+  source retired.
+- **Self-contained corpus provenance.** The site data is a MailAccess-assembled,
+  independently-verifiable compilation; the corpus `_meta` is source-agnostic and carries
+  no external references.
+
+**BREAKING (0.15.0):** legacy per-source platform toggles are consolidated into
+`ENABLE_USERNAME_PLATFORMS` and `ENABLE_USERNAME_WAVE2`, and the per-platform force
+override is `USERNAME_FORCE_<PLATFORM>`. Google-account intelligence is controlled by
+`ENABLE_GOOGLE_ACCOUNT_INTEL` (on by default; optional `GOOGLE_INTEL_API_KEY` for
+public-profile enrichment). A legacy optional-install extra was removed — the capability
+is native and always available.
+
 ### 0.14.5
 
 Re-architecture across governance, lead generation, deliverability, calibration,
@@ -141,6 +231,12 @@ Fixes:
 
 ### Unreleased
 
+- Native account-existence engine (0.15.0): email→account existence checks are
+  reimplemented as a native, data-driven engine (`backend/core/account_probe.py`)
+  over a single unified site corpus (`data/mailaccess_sites.json`), with no external
+  runtime dependencies. The former standalone account-scanner module was folded into
+  `account_discovery` (deduped to one row per platform), which now covers 250+
+  platforms.
 - New `enterprise_net_intel` module (Enterprise Network Intelligence — Phase 2):
   two unauthenticated, domain-level passive checks that extract internal
   infrastructure without any auth attempt or lockout risk.
@@ -183,7 +279,7 @@ Fixes:
   Wayback variants collapse to one corroboration family each (a single page
   indexed by multiple crawlers no longer inflates the multi-source multiplier);
   removed three never-emitted dead booster keys.
-- `user_scanner` now preserves per-platform `extras` (bio, display name,
+- The account-scanner module now preserves per-platform `extras` (bio, display name,
   avatar, location, join date, follower count, website) under
   `metadata.profile_extras`; `pgp_keyserver` surfaces `key_created` and
   `key_age_days`.
@@ -330,8 +426,7 @@ Fixes:
 
 ### 0.12.2
 
-Audit-preparation release for controlled comparison against Blackbird, Holehe,
-Maigret, Sherlock, and theHarvester.
+Audit-preparation release for controlled comparison against external OSINT tooling.
 
 - Calibrated active email-existence probes for Spotify, Eventbrite, Chess.com,
   Adobe, and El Mundo against current live response markers.
@@ -345,7 +440,7 @@ Maigret, Sherlock, and theHarvester.
 ### 0.12.1
 
 - Added optional cookie/CSRF pre-check negotiation for platform probes.
-- Added nine Blackbird email-existence platform definitions.
+- Added nine additional email-existence platform definitions.
 - PDF exports now include an authorized-research disclaimer and inline avatar thumbnails with failure-safe placeholders.
 
 ### 0.12.0
@@ -505,9 +600,7 @@ This is a maintenance / quality release — no new modules, no new public APIs. 
 
 **PHASE 3 — Platform Expansion**
 
-- Sherlock native engine (~300 platforms)
-- Nexfil native engine (~300 platforms)
-- Blackbird native engine (social focus)
+- Native username-platform engines (~600 general and social platforms)
 - `SOURCE_PRIORITY` dedup hierarchy
 
 **PHASE 4 — Output Hardening**
@@ -532,19 +625,19 @@ This is a maintenance / quality release — no new modules, no new public APIs. 
 - All platform-health calls made async
 
 ### 0.8.1
-- maigret_platforms now default-on (2500+ platforms checked in every investigation)
-- Wave 2 remains opt-in via ENABLE_MAIGRET_WAVE2
-- ENABLE_MAIGRET_PLATFORMS=false to disable if investigation speed is a priority
+- Native username-platform engine now default-on (2500+ platforms checked in every investigation)
+- Wave 2 remains opt-in via `ENABLE_USERNAME_WAVE2`
+- `ENABLE_USERNAME_PLATFORMS=false` to disable if investigation speed is a priority
 
 ### 0.8.0
-- Native Maigret platform engine: 2500+ platforms without Maigret runtime dependency
+- Native username-platform engine: 2500+ platforms with no external runtime dependency
 - Two-wave architecture: Wave 1 is the fast default when enabled; Wave 2 adds slower and more fragile platforms
 - Catch-all detection: validates platforms against known-unclaimed usernames before sweep
-- Platform deduplication: WMN + Maigret merged by URL domain, dual-confirmed findings marked high confidence
+- Platform deduplication: sources merged by URL domain, dual-confirmed findings marked high confidence
 - Custom platform additions via `data/mailaccess-extra-sites.json`
-- `ENABLE_MAIGRET_PLATFORMS` env var, default `false`
-- `ENABLE_MAIGRET_WAVE2` env var, default `false`
-- Platform database auto-refreshed every 24h from Maigret GitHub (MIT licensed)
+- `ENABLE_USERNAME_PLATFORMS` env var, default `false`
+- `ENABLE_USERNAME_WAVE2` env var, default `false`
+- Platform database auto-refreshed every 24h from an MIT-licensed upstream dataset
 
 ### 0.7.0
 - Name Consensus Engine: synthesizes name signals from all profile modules into Confirmed/Probable/Possible/Unknown with reasoning and source list
@@ -575,7 +668,7 @@ This is a maintenance / quality release — no new modules, no new public APIs. 
   on timeout — shows dim fallback message instead
 - Hardcoded minimum timeout floors for pip-installed users:
   account_discovery 120s, username_pivot 60s,
-  user_scanner 180s, whatsmyname 200s
+  account-scanner module 180s, username sweep 200s
 - .env overrides still win if set higher
 
 ### 0.5.2
@@ -607,8 +700,8 @@ This is a maintenance / quality release — no new modules, no new public APIs. 
 
 ### 0.4.2
 
-- Default modules now run without any flags: `whatsmyname`, `account_discovery`, `user_scanner`, `username_pivot`, `permutation_discovery`, `phone_intel`, `messaging_hints`
-- `-m` / `--enable` flag for opt-in modules per run (`breach_deep`, `ghunt`, `email_discovery`)
+- Default modules now run without any flags: `username_platforms`, `account_discovery`, `username_pivot`, `permutation_discovery`, `phone_intel`, `messaging_hints`
+- `-m` / `--enable` flag for opt-in modules per run (`breach_deep`, `google_account_intel`, `email_discovery`)
 - `-m all` enables all three opt-in modules
 - Invalid `-m` module name shows helpful warning
 

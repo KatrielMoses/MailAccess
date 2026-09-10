@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import APP_VERSION
 from backend.db.database import get_db
-from backend.modules import get_all_modules
+from backend.modules import loaded_module_names
 
 router = APIRouter()
 
@@ -19,7 +19,11 @@ async def health_check(session: AsyncSession = Depends(get_db)):
     except Exception:
         pass
 
-    modules_loaded = [mod.name for mod in get_all_modules()]
+    # T4 — readiness must not block on the ~3s module-discovery sweep (that would race
+    # the CLI's /health poll timeout and spuriously exit 3 on a cold start). Report the
+    # modules discovered so far WITHOUT forcing discovery; the first investigation warms
+    # the registry within its own budget.
+    modules_loaded = loaded_module_names()
 
     return {
         "status": "ok",

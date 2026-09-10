@@ -7,7 +7,7 @@ confirms the ``real`` bucket before trusting it.
 
 Buckets:
   env-only            : timeouts, network/DNS/connection errors, missing optional
-                        deps (spacy/weasyprint/ghunt) — noise from THIS environment,
+                        deps (spacy/weasyprint) — noise from THIS environment,
                         not a code defect.
   pre-existing-known  : import/collection errors from known-broken modules, and
                         anything already in the committed baseline.
@@ -44,7 +44,6 @@ ENV_SIGNALS = (
     "ssl.SSLError",
     "No module named 'spacy'",
     "No module named 'weasyprint'",
-    "No module named 'ghunt'",
     "en_core_web",
     # Windows/filesystem environment artifacts (temp-dir perms, cleanup races).
     "PermissionError",

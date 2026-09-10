@@ -45,13 +45,11 @@ except Exception:  # pragma: no cover - defensive: tool import should not block 
         "SCRAPINGANT_API_KEY",
     ]
 
-# Opt-in module settings that are OFF by default (the brief's four + maigret).
+# Opt-in module settings that are OFF by default.
 _OPT_IN_SETTINGS = [
     "enable_breach_deep",
-    "enable_ghunt",
     "enable_email_discovery",
     "enable_press_intel",
-    "enable_maigret_platforms",
 ]
 
 
@@ -194,7 +192,6 @@ def build_manifest(
         # Keyless runs strip every dotenv-defined name, so the tool falls back to
         # code defaults. Report those, not the harness parent's dotenv values.
         config["enable_breach_deep"] = False
-        config["enable_ghunt"] = False
         config["enable_email_discovery"] = False
         config["enable_press_intel"] = False
         config["_note"] = "keyless: dotenv/keys stripped; opt-in toggles shown as code defaults"

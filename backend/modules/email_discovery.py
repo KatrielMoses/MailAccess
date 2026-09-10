@@ -97,7 +97,9 @@ class EmailDiscoveryModule(BaseModule):
     async def run(
         self, email: str, collected: dict[str, ModuleResult] | None = None
     ) -> ModuleResult:
-        if not settings.enable_email_discovery:
+        from ..config import opt_in_active
+
+        if not opt_in_active("enable_email_discovery", settings.enable_email_discovery):
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
                 errors=["Set ENABLE_EMAIL_DISCOVERY=true to run this module"],

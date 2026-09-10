@@ -12,6 +12,10 @@
 # third-party PII. LOCAL ONLY — never committed (user decision, 2026-09-05).
 /baseline/
 
+# Local read-only reference material and scratch clones kept outside the shipped
+# codebase. Never committed and never linted/tested as our code.
+native/
+
 # Python
 __pycache__/
 *.pyc
@@ -23,6 +27,7 @@ dist/
 build/
 .venv/
 venv/
+venv-ner/
 .env
 
 # Node
@@ -45,6 +50,7 @@ data/
 !data/
 data/*
 !data/mailaccess-extra-sites.json
+!data/mailaccess_sites.json
 !data/breach_aliases.json
 !data/common_names.json
 !data/disposable_domains.json
@@ -52,11 +58,8 @@ data/*
 !data/harvester_sources.json
 !data/reset_signals.json
 !data/role_prefixes.json
-!data/sherlock_sites.json
 !data/service_categories.yaml
-!data/nexfil_sites.json
 !data/subdomain_wordlist.txt
-!data/wmn_sites.json
 !data/harvest_benchmark_domains.json
 !data/industry_vocabulary.json
 maltego/*.mtz
@@ -78,8 +81,11 @@ test_*.py
 !tests/test_live_progress.py
 !tests/test_persona_email_pivot.py
 !tests/test_name_consensus.py
+!tests/test_account_probe.py
 !tests/test_timeline.py
-!tests/test_maigret_platforms.py
+!tests/test_username_platforms.py
+!tests/test_probe_detector.py
+!tests/test_profile_extractor.py
 !tests/test_disposable_domains.py
 !tests/test_reset_prober.py
 !tests/test_avatar_hasher.py
@@ -87,8 +93,6 @@ test_*.py
 !tests/test_identity_graph.py
 !tests/test_bio_similarity.py
 !tests/test_bio_clusters.py
-!tests/test_sherlock_detector.py
-!tests/test_sherlock_platforms.py
 !tests/test_rate_limiter.py
 !tests/test_breach_corpus.py
 !tests/test_breach_deep.py
@@ -132,9 +136,15 @@ results/
 /*.json
 /debug*.json
 /report.*
+/report-*.md
 /emails.*
 /*.txt
 .last_inv.json
+
+# Internal audit / eval artifacts — never publish (authorized-test target data +
+# internal review methodology). The one already-tracked audit doc is kept.
+docs/audit/
+!docs/audit/email-osint-audit-2026-07-29.md
 
 # SQLite databases in root
 /mailaccess*.db

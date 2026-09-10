@@ -70,7 +70,7 @@ def clean_twitter_display_name(value: str | None) -> str:
 
 
 def _find_twitter_username(collected: dict[str, Any]) -> str | None:
-    for module_name in ("whatsmyname", "username_pivot"):
+    for module_name in ("username_platforms", "username_pivot"):
         result = collected.get(module_name)
         if not result or not hasattr(result, "findings"):
             continue

@@ -160,8 +160,8 @@ Before a report is returned or persisted, the engine enriches the prepared resul
 - `backend/core/bio_analyzer.py` extracts phones, emails, URLs, and links from 25
   supported link-in-bio domains. `backend/core/bio_similarity.py` supplies
   RapidFuzz token-set similarity for cross-platform bio comparison.
-- `backend/core/platform_dedup.py` merges WhatsMyName, Maigret, Sherlock, and Nexfil
-  findings by normalized profile domain. Corroboration by at least two enumeration
+- `backend/core/platform_dedup.py` merges native username-platform findings by
+  normalized profile domain. Corroboration by at least two enumeration
   sources sets `metadata.dual_confirmed: true` and `confidence: "high"`; agreement
   from more than two sources emits a warning for overlap review.
 

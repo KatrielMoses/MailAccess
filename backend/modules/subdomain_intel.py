@@ -471,10 +471,23 @@ async def _run_passive_source(
 
 
 async def discover_subdomain_center(client: httpx.AsyncClient, domain: str) -> set[str]:
-    response = await client.get(f"https://subdomain.center/?domain={quote(domain)}")
+    # The data lives on the ``api.`` host and returns a JSON array of hostnames. The bare
+    # ``subdomain.center/?domain=`` URL now serves the marketing site's HTML (0 hosts),
+    # so it must not be used. Endpoint kept in sync with ``collect_subdomaincenter``.
+    response = await client.get(f"https://api.subdomain.center/?domain={quote(domain)}")
     if response.status_code != 200:
         raise PassiveSourceHTTPError(response.status_code)
-    return _hosts_from_text(response.text, domain)
+    try:
+        data = response.json()
+    except ValueError:
+        return set()
+    if not isinstance(data, list):
+        return set()
+    hosts: set[str] = set()
+    for name in data:
+        if isinstance(name, str) and name.strip():
+            hosts |= _hosts_from_text(name, domain)
+    return hosts
 
 
 async def discover_wayback(client: httpx.AsyncClient, domain: str) -> set[str]:

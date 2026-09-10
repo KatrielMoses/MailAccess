@@ -108,8 +108,17 @@ def extract_phones(findings: list[dict[str, Any]]) -> list[str]:
     for finding in findings:
         if not isinstance(finding, dict):
             continue
-        _scan_value(finding, found)
         meta = finding.get("metadata")
+        # RC3 (Output-Trust): a WHOIS/RDAP registrar or abuse phone is DOMAIN
+        # infrastructure, not the subject's personal number — never surface it as a
+        # personal phone or feed it to messaging / phone-intel checks as the person's.
+        if isinstance(meta, dict) and (
+            meta.get("is_infrastructure")
+            or meta.get("not_personal_pii")
+            or str(meta.get("attribution") or "").lower() == "domain_infrastructure"
+        ):
+            continue
+        _scan_value(finding, found)
         if isinstance(meta, dict):
             _scan_value(meta, found)
     return sorted(found.keys())

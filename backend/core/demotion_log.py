@@ -13,7 +13,7 @@ Design rules:
 * ``stats`` captures the snapshot that triggered the action so analysts can
   reconstruct why a platform was skipped/demoted/upgraded.
 * ``reversible_via`` names the env var that disables this auto-action, e.g.
-  ``MAIGRET_FORCE_NOISYSITECOM=true`` for ``NoisySite.com``.
+  ``USERNAME_FORCE_NOISYSITECOM=true`` for ``NoisySite.com``.
 """
 
 from __future__ import annotations
@@ -49,16 +49,16 @@ def env_var_key_for(platform: str) -> str:
 
     Examples:
       >>> env_var_key_for("NoisySite.com")
-      'MAIGRET_FORCE_NOISYSITECOM'
+      'USERNAME_FORCE_NOISYSITECOM'
       >>> env_var_key_for("github")
-      'MAIGRET_FORCE_GITHUB'
+      'USERNAME_FORCE_GITHUB'
     """
     stripped = _NON_ALNUM_RE.sub("", platform or "").upper()
     if not stripped:
         # Degenerate platform names still need *some* key. Use a placeholder so
         # the audit trail never silently drops the override hint.
         stripped = "UNKNOWN"
-    return f"MAIGRET_FORCE_{stripped}"
+    return f"USERNAME_FORCE_{stripped}"
 
 
 def log_event(
@@ -80,7 +80,7 @@ def log_event(
             ``total_probes``. Other keys are preserved verbatim.
         reason: short human-readable string explaining why this action fired.
         reversible_via: env var name that disables this auto-action. Defaults
-            to the standard ``MAIGRET_FORCE_{KEY}`` derived from ``platform``.
+            to the standard ``USERNAME_FORCE_{KEY}`` derived from ``platform``.
         path: override the log file path (mostly for tests). Defaults to
             ``~/.mailaccess/platform_demotion.log``.
 

@@ -25,7 +25,10 @@ class BioClusterer:
                 from rapidfuzz import process
 
                 raw = process.cdist(bios, bios, scorer=fuzz.token_set_ratio)
-                return [list(row) for row in raw]
+                # cdist returns a numpy float32 matrix; coerce to native Python
+                # floats so downstream scores stay JSON-serializable (numpy
+                # scalars break the graph_data JSON column at persist time).
+                return [[float(v) for v in row] for row in raw]
             except Exception:
                 pass
 

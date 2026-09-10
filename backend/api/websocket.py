@@ -8,8 +8,13 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..core.credential_risk import credential_risk_band
 from ..core.engine import QueueEvent
+from ..core.suppression import (
+    SuppressionUnavailable,
+    filter_findings,
+    load_index_sync,
+)
 from ..db.database import AsyncSessionLocal
-from ..db.models import Investigation
+from ..db.models import Investigation, InvestigationStatus
 from . import queue_registry
 
 router = APIRouter()
@@ -22,6 +27,52 @@ def _safe_payload(size_hint: int, extra: dict | None = None) -> dict:
     return {"_truncated": True, "findings_count": size_hint, **extra}
 
 
+def _terminal_frame(inv: Investigation | None) -> dict:
+    """Build the WS terminal frame from the PERSISTED investigation status (L4).
+
+    The engine's ``queue.put(None)`` sentinel fires on both success and failure, so
+    outcome must be read from the row: a missing row or ``FAILED`` status yields an
+    ``investigation_failed`` frame rather than a success frame with null scores.
+    """
+    if inv is None or inv.status == InvestigationStatus.FAILED:
+        return {
+            "type": "investigation_failed",
+            "error": (
+                (inv.error if inv and inv.error else "investigation failed")
+                if inv is not None
+                else "investigation not found"
+            ),
+        }
+    score = inv.exposure_score
+    credential_score = inv.credential_risk_score
+    frame = {
+        "type": "investigation_complete",
+        "canonical_email": inv.canonical_email,
+        "exposure_score": score,
+        "risk_level": "unknown" if score is None else (
+            "low" if score <= 20 else "medium" if score <= 50 else "high" if score <= 80 else "critical"
+        ),
+        "credential_risk_score": credential_score,
+        "credential_risk_band": credential_risk_band(credential_score),
+        "timeline": inv.timeline_json or {},
+    }
+    # R2 (S1) — the terminal frame emits the subject's canonical email + timeline;
+    # withhold both if the subject is suppressed, and fail closed (withhold) if
+    # the suppression store cannot be read.
+    try:
+        index = load_index_sync()
+    except SuppressionUnavailable:
+        frame["canonical_email"] = None
+        frame["timeline"] = {}
+        frame["_suppression_unavailable"] = True
+        return frame
+    if inv.canonical_email and index.hit(email=inv.canonical_email):
+        frame["canonical_email"] = None
+        frame["timeline"] = {}
+        frame["suppressed"] = True
+    return frame
+
+
 def _prepare_module_result_payload(item: QueueEvent) -> dict:
     assert item.result is not None
     base = {
@@ -29,11 +80,19 @@ def _prepare_module_result_payload(item: QueueEvent) -> dict:
         "module": item.module_name,
         "status": item.result.status.value,
     }
-    raw = json.dumps({"findings": item.result.findings})
+    # R2 (S1) — live module findings are streamed raw; redact suppressed subjects
+    # before they reach the socket. Fail closed: if the store is unreadable,
+    # withhold findings for this frame rather than stream them unfiltered.
+    try:
+        findings = filter_findings(item.result.findings)
+    except SuppressionUnavailable:
+        base["_suppression_unavailable"] = True
+        return base
+    raw = json.dumps({"findings": findings})
     if len(raw.encode("utf-8")) <= _MAX_WS_PAYLOAD_BYTES:
-        base["findings"] = item.result.findings
+        base["findings"] = findings
     else:
-        base.update(_safe_payload(len(item.result.findings)))
+        base.update(_safe_payload(len(findings)))
     return base
 
 @router.websocket("/ws/investigate/{investigation_id}")
@@ -50,6 +109,9 @@ async def ws_investigate(investigation_id: str, websocket: WebSocket) -> None:
 
         { "type": "module_start",  "module": "hibp", "timestamp": "..." }
         { "type": "module_result", "module": "hibp", "findings": [...], "status": "success" }
+        # oversized frame (R9): no `findings`, carries the truncation marker
+        { "type": "module_result", "module": "hibp", "status": "success",
+          "_truncated": true, "findings_count": 5000 }
         { "type": "module_error",  "module": "social", "error": "...", "status": "failed" }
         {
           "type": "investigation_complete",
@@ -59,6 +121,13 @@ async def ws_investigate(investigation_id: str, websocket: WebSocket) -> None:
           "credential_risk_band": "CRITICAL",
           "timeline": { ... }
         }
+        # terminal FAILURE frame (R9 / L4) — read from the persisted row, so the
+        # client leaves the "running" state instead of hanging:
+        { "type": "investigation_failed", "error": "..." }
+
+    The terminal frame (complete/failed) is authoritative for lifecycle, but the
+    client should fetch the persisted report to converge its view (R9): live
+    frames may have been partial or truncated.
     """
     # Phase 2F — the WebSocket is authenticated here (BaseHTTPMiddleware does not
     # run for WS). With a key configured it is required (via ?api_key=… or the
@@ -97,25 +166,12 @@ async def ws_investigate(investigation_id: str, websocket: WebSocket) -> None:
             item: QueueEvent | None = await queue.get()
 
             if item is None:
-                # Sentinel: engine finished and persisted — fetch final score from DB.
+                # Sentinel: the engine finished — but it fires on BOTH the success and
+                # failure paths, so it carries no outcome. Read the PERSISTED status
+                # (L4) instead of assuming success.
                 async with AsyncSessionLocal() as db:
                     inv = await db.get(Investigation, investigation_id)
-                score = inv.exposure_score if inv else None
-                credential_score = inv.credential_risk_score if inv else None
-                timeline = inv.timeline_json if inv else None
-                await websocket.send_json(
-                    {
-                        "type": "investigation_complete",
-                        "canonical_email": inv.canonical_email if inv else None,
-                        "exposure_score": score,
-                        "risk_level": "unknown" if score is None else (
-                            "low" if score <= 20 else "medium" if score <= 50 else "high" if score <= 80 else "critical"
-                        ),
-                        "credential_risk_score": credential_score,
-                        "credential_risk_band": credential_risk_band(credential_score),
-                        "timeline": timeline or {},
-                    }
-                )
+                await websocket.send_json(_terminal_frame(inv))
                 # Give the client 5 s to drain the frame before we close.
                 await asyncio.sleep(5)
                 break

@@ -33,8 +33,7 @@ _SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 _BREACH_MODULES = {"hibp", "haveibeenpwned", "breachdirectory", "breach_deep", "xposedornot", "leakcheck", "breach_aggregator"}
 _ACCOUNT_MODULES = {
     "account_discovery",
-    "user_scanner",
-    "whatsmyname",
+    "username_platforms",
     "social",
     "github_commits",
     "twitter_profile",
@@ -42,6 +41,34 @@ _ACCOUNT_MODULES = {
     "keybase",
     "gravatar",
 }
+
+# Map raw platform / source labels emitted by the account modules to the real
+# platform name shown in the brief. A module often labels findings after its
+# evidence type (github_commits emits ``platform: "github_commit"``) — the brief
+# should name the PLATFORM the target has a presence on ("GitHub"), not the
+# evidence class. Unlisted values fall back to ``title()``-casing.
+_PLATFORM_DISPLAY = {
+    "github_commit": "GitHub",
+    "github_user": "GitHub",
+    "github_commits": "GitHub",
+    "twitter_profile": "Twitter",
+    "linkedin_serp": "LinkedIn",
+}
+
+# T2 (Output-Trust final): name sources that are DERIVED FROM the localpart guess or
+# from a speculative username sweep, so they are not independent evidence that a real
+# identity is publicly linked to the address. The "Real identity confirmed and public"
+# HIGH finding must be backed by at least one source OUTSIDE this set — otherwise a
+# localpart echo plus its own username-enum reflection could over-claim a confirmed
+# public identity.
+_NON_CORROBORATING_NAME_SOURCES = frozenset({"email_localpart", "username_platforms"})
+
+
+def _name_has_independent_corroboration(name_consensus: NameConsensusResult) -> bool:
+    return any(
+        str(source) not in _NON_CORROBORATING_NAME_SOURCES
+        for source in (name_consensus.name_sources or [])
+    )
 
 
 def generate_defenders_brief(
@@ -264,6 +291,14 @@ def _phone_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
         payload = _payload(row)
         meta = _meta(payload)
+        # RC3 (Output-Trust): a WHOIS/RDAP registrar or abuse phone is DOMAIN
+        # INFRASTRUCTURE, not the subject's personal number — it must never drive a
+        # personal vishing / SIM-swap finding or advisory. Skip anything tagged as
+        # infrastructure / not-personal-PII.
+        if meta.get("is_infrastructure") or meta.get("not_personal_pii"):
+            continue
+        if str(meta.get("attribution") or "").lower() == "domain_infrastructure":
+            continue
         signal = str(payload.get("signal_type") or "").lower()
         if signal in {"phone_in_bio", "phone_number"} or meta.get("phone") or meta.get("phone_number"):
             matches.append(row)
@@ -358,7 +393,14 @@ def _finding_candidates(
             year,
         ))
 
-    if name_consensus.confirmed_name and name_consensus.name_confidence in {"confirmed", "probable"}:
+    if (
+        name_consensus.confirmed_name
+        and name_consensus.name_confidence in {"confirmed", "probable"}
+        # T2 — do not claim a confirmed public identity when the only name sources
+        # are the localpart guess and/or a speculative username sweep (neither is
+        # independent evidence). Requires at least one corroborating source.
+        and _name_has_independent_corroboration(name_consensus)
+    ):
         source_count = len(name_consensus.name_sources or [])
         candidates.append(_candidate(
             3,
@@ -464,17 +506,32 @@ def _recent_plaintext_breach(rows: list[dict[str, Any]]) -> dict[str, Any] | Non
 
 
 def _confirmed_platforms(rows: list[dict[str, Any]]) -> list[str]:
+    from .probe_detector import is_confirmed_account_hit
+
     platforms: list[str] = []
     for row in rows:
         module = str(row.get("module_name") or "").lower()
         if module not in _ACCOUNT_MODULES:
             continue
         payload = _payload(row)
-        if str(payload.get("confidence") or "high").lower() == "low":
+        # M1 (Output-Trust) — a platform is a "confirmed account" only when its hit is
+        # genuinely confirmed/corroborated. The shared predicate rejects unverified /
+        # low-confidence username_platforms guesses AND bare-domain account_discovery
+        # FPs (e.g. Femometer/Mastodon with a bare https://<domain> URL, user_id 0),
+        # keeping the graph and the brief consistent.
+        if not is_confirmed_account_hit(payload):
             continue
         platform = str(payload.get("platform") or payload.get("service") or module).strip()
-        if platform and platform not in platforms:
-            platforms.append(platform.replace("_", " ").title())
+        if not platform:
+            continue
+        # Normalise BEFORE the dedup check — otherwise the raw name ("github_commit")
+        # is compared against an already-title-cased list ("Github Commit") and never
+        # matches, so the same platform is listed once per finding
+        # ("Github Commit, Github Commit, …"). Map known source-labels to their real
+        # platform name so the brief reads a platform, not a module/source.
+        platform = _PLATFORM_DISPLAY.get(platform.lower(), platform.replace("_", " ").title())
+        if platform not in platforms:
+            platforms.append(platform)
     return sorted(platforms)
 
 

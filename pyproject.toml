@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mailaccess"
-version = "0.14.5"
+version = "0.15.0"
 description = "Open-source OSINT email intelligence tool"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,8 +36,6 @@ dependencies = [
     "typer[all]>=0.25.1",
     "rich>=13",
     "stix2>=3.0",
-    "holehe>=1.61",
-    "user-scanner>=1.0",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
     "rapidfuzz>=3.0",
@@ -56,9 +54,6 @@ ml = [
 ]
 pdf = [
     "weasyprint>=60.0",
-]
-ghunt = [
-    "ghunt>=2.3",
 ]
 dev = [
     "pytest>=8",
@@ -84,14 +79,12 @@ packages = ["backend", "cli"]
 "data/harvester_sources.json" = "data/harvester_sources.json"
 "data/industry_vocabulary.json" = "data/industry_vocabulary.json"
 "data/mailaccess-extra-sites.json" = "data/mailaccess-extra-sites.json"
-"data/nexfil_sites.json" = "data/nexfil_sites.json"
+"data/mailaccess_sites.json" = "data/mailaccess_sites.json"
 "data/reset_signals.json" = "data/reset_signals.json"
 "data/role_prefixes.json" = "data/role_prefixes.json"
 "data/service_categories.yaml" = "data/service_categories.yaml"
-"data/sherlock_sites.json" = "data/sherlock_sites.json"
 "data/subdomain_wordlist.txt" = "data/subdomain_wordlist.txt"
 "data/subdomain_wordlist.json" = "data/subdomain_wordlist.json"
-"data/wmn_sites.json" = "data/wmn_sites.json"
 
 [tool.hatch.build.targets.sdist.force-include]
 "data/breach_aliases.json" = "data/breach_aliases.json"
@@ -101,14 +94,12 @@ packages = ["backend", "cli"]
 "data/harvester_sources.json" = "data/harvester_sources.json"
 "data/industry_vocabulary.json" = "data/industry_vocabulary.json"
 "data/mailaccess-extra-sites.json" = "data/mailaccess-extra-sites.json"
-"data/nexfil_sites.json" = "data/nexfil_sites.json"
+"data/mailaccess_sites.json" = "data/mailaccess_sites.json"
 "data/reset_signals.json" = "data/reset_signals.json"
 "data/role_prefixes.json" = "data/role_prefixes.json"
 "data/service_categories.yaml" = "data/service_categories.yaml"
-"data/sherlock_sites.json" = "data/sherlock_sites.json"
 "data/subdomain_wordlist.txt" = "data/subdomain_wordlist.txt"
 "data/subdomain_wordlist.json" = "data/subdomain_wordlist.json"
-"data/wmn_sites.json" = "data/wmn_sites.json"
 
 [tool.hatch.build.targets.sdist]
 exclude = [
@@ -129,6 +120,11 @@ exclude = [
 
 [tool.ruff]
 line-length = 100
+# native/ holds read-only third-party reference clones for the 0.15.0 de-vendor
+# (behavioral reference only — not our code). Never lint them.
+# docs/audit/artifacts/ holds external-audit evidence (repro scripts, captures) —
+# throwaway reproduction code, not shipped source. Never lint it.
+extend-exclude = ["native", "docs/audit/artifacts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]

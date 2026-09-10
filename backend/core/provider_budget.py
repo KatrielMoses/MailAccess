@@ -27,17 +27,45 @@ disabled and :func:`reserve` returns ``False``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import tempfile
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 _LOG = logging.getLogger(__name__)
+
+
+# R14 (S5) — cross-process reservation lock. The per-provider threading.Lock only
+# serializes threads WITHIN one process; two processes (e.g. the API and a CLI
+# harvest, or two workers) would each read the same count and both reserve. An
+# OS-level advisory lock on a per-provider lock file serializes the whole
+# read-modify-write across processes on a shared filesystem.
+try:  # POSIX
+    import fcntl
+
+    def _os_lock(fh: Any) -> None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+
+    def _os_unlock(fh: Any) -> None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+except ImportError:  # Windows
+    import msvcrt
+
+    def _os_lock(fh: Any) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+
+    def _os_unlock(fh: Any) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
 
 #: Base directory for per-provider usage files (mirrors Hunter's location).
 _DEFAULT_USAGE_DIR = "~/.mailaccess"
@@ -69,6 +97,39 @@ def _lock_for(provider: str) -> threading.Lock:
             lock = threading.Lock()
             _LOCKS[provider] = lock
         return lock
+
+
+@contextlib.contextmanager
+def _interprocess_lock(provider: str) -> Iterator[None]:
+    """Best-effort cross-process exclusive lock for a provider's reservation.
+
+    Serializes the read-modify-write across processes on a shared filesystem so
+    two processes can't both reserve the same slot. Degrades gracefully (yields
+    without the OS lock) when file locking is unavailable — the in-process lock
+    still serializes threads in this process.
+    """
+    path = _resolve_usage_path(provider).with_suffix(".lock")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(path, "a+")  # noqa: SIM115 - closed in finally
+    except OSError:
+        yield
+        return
+    locked = False
+    try:
+        try:
+            _os_lock(fh)
+            locked = True
+        except OSError as exc:
+            _LOG.warning("%s: interprocess quota lock unavailable: %s", provider, exc)
+        yield
+    finally:
+        try:
+            if locked:
+                _os_unlock(fh)
+        except OSError:
+            pass
+        fh.close()
 
 
 def _resolve_usage_path(provider: str) -> Path:
@@ -134,14 +195,17 @@ def _read_usage(provider: str) -> _Usage:
     )
 
 
-def _write_usage(provider: str, usage: _Usage) -> None:
-    """Persist *usage* atomically; never raises."""
+def _write_usage(provider: str, usage: _Usage) -> bool:
+    """Persist *usage* atomically. Returns True on success, False on failure.
+
+    R14 (S5): the return value matters — a reservation whose increment could not
+    be durably persisted must NOT be granted (the caller fails closed)."""
     path = _resolve_usage_path(provider)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         _LOG.warning("%s usage dir creation failed: %s", provider, exc)
-        return
+        return False
     try:
         fd, tmp = tempfile.mkstemp(prefix=f"{provider}-usage-", dir=str(path.parent))
         try:
@@ -159,6 +223,8 @@ def _write_usage(provider: str, usage: _Usage) -> None:
             raise
     except OSError as exc:
         _LOG.warning("%s usage file write failed: %s", provider, exc)
+        return False
+    return True
 
 
 def reserve(provider: str, limit: int) -> bool:
@@ -174,7 +240,10 @@ def reserve(provider: str, limit: int) -> bool:
         limit = 0
     if limit <= 0:
         return False
-    with _lock_for(provider):
+    # R14 (S5): hold BOTH the in-process lock and the cross-process file lock so
+    # the read-modify-write is atomic across threads AND processes — two workers
+    # can't both read the same count and double-reserve.
+    with _lock_for(provider), _interprocess_lock(provider):
         current = _current_month()
         usage = _read_usage(provider)
         if usage.month != current:
@@ -183,7 +252,14 @@ def reserve(provider: str, limit: int) -> bool:
             _LOG.warning("%s: monthly free-tier quota exhausted (%d).", provider, limit)
             return False
         usage.calls += 1
-        _write_usage(provider, usage)
+        # R14: failure-to-persist ⇒ UNAVAILABLE. If the durable write fails we
+        # cannot guarantee the slot was reserved, so we refuse it rather than
+        # grant an unpersisted (and therefore double-spendable) call.
+        if not _write_usage(provider, usage):
+            _LOG.error(
+                "%s: quota reservation could not be persisted — refusing the slot", provider
+            )
+            return False
         remaining = limit - usage.calls
     if 0 <= remaining <= 2:
         _LOG.warning(

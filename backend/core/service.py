@@ -16,6 +16,7 @@ from .defenders_brief import defenders_brief_to_dict, generate_defenders_brief_f
 from .email_credibility import normalize_email_address
 from .engine import InvestigationEngine
 from .policy import module_weight
+from .suppression import SuppressionUnavailable
 from .timeline import build_timeline
 
 
@@ -113,10 +114,35 @@ def _email_credibility_from_report(data: dict) -> dict | None:
     return metadata if isinstance(metadata, dict) else first
 
 
+def _report_reference_date(data: dict) -> datetime | None:
+    """The investigation's original assessment date, for stable historical recompute.
+
+    Prefers ``completed_at`` (when scoring ran), falls back to ``created_at``. Returns
+    ``None`` (→ assessor defaults to today) only when neither is a parseable ISO string,
+    e.g. a brand-new in-flight report.
+    """
+    for key in ("completed_at", "created_at"):
+        raw = data.get(key)
+        if isinstance(raw, datetime):
+            return raw
+        if isinstance(raw, str) and raw.strip():
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+    return None
+
+
 def enrich_report(data: dict) -> dict:
     score = data.get("exposure_score")
     data["risk_level"] = _risk_level(score)
-    data["exposure_score_pct"] = _exposure_score_pct(
+    # RC4 (Output-Trust): the exposure_score is ALREADY a 0-100 severity, so it IS
+    # the percentage — presenting it as "100" alongside a separately
+    # coverage-normalized "59%" was self-contradicting. The headline percentage is
+    # the score itself; the coverage-of-achievable-signal diagnostic is kept under
+    # its own explicit name.
+    data["exposure_score_pct"] = score if isinstance(score, int) else None
+    data["exposure_signal_coverage_pct"] = _exposure_score_pct(
         score if isinstance(score, int) else None,
         [
             run
@@ -171,7 +197,14 @@ def enrich_report(data: dict) -> dict:
         if data.get("canonical_email") is None:
             data["canonical_email"] = data.get("email")
 
-    credential_assessment = assess_credential_risk_from_report(data)
+    # L6 — recompute the drivers against the investigation's ORIGINAL reference date
+    # (its completion time), not wall-clock "now". The numeric score is stored and
+    # fixed; recomputing recency-dependent drivers with today's date made an old
+    # report's explanation drift away from its own stored score ("within the last
+    # year" quietly becoming "about 2 years ago"). Pinning the reference date keeps
+    # the recomputed drivers/actions consistent with the persisted score.
+    reference_dt = _report_reference_date(data)
+    credential_assessment = assess_credential_risk_from_report(data, as_of=reference_dt)
     stored_credential_score = data.get("credential_risk_score")
     credential_score = (
         stored_credential_score
@@ -182,6 +215,7 @@ def enrich_report(data: dict) -> dict:
     data["credential_risk_band"] = credential_risk_band(credential_score)
     data["score_drivers"] = credential_assessment.score_drivers
     data["recommended_actions"] = credential_assessment.recommended_actions
+    data["credential_risk_insufficient_evidence"] = credential_assessment.insufficient_evidence
     stored_brief = data.get("defenders_brief_json")
     if isinstance(stored_brief, dict) and stored_brief.get("risk_level"):
         data["defenders_brief"] = stored_brief
@@ -191,6 +225,24 @@ def enrich_report(data: dict) -> dict:
         )
     data.pop("defenders_brief_json", None)
 
+    # RC4 (Output-Trust): reconcile the two risk systems into ONE authoritative
+    # level. The exposure-derived level (breadth of what was found) and the
+    # Defender's-Brief level (actionable credential/threat assessment) routinely
+    # disagreed (critical/HIGH, HIGH/LOW). The Brief is the authoritative security
+    # assessment, so the headline ``risk_level`` follows it; the exposure-derived
+    # level is preserved, clearly labelled, as ``exposure_level`` (breadth).
+    brief_risk = str((data.get("defenders_brief") or {}).get("risk_level") or "").upper()
+    if brief_risk:
+        data["exposure_level"] = data.get("risk_level")
+        data["risk_level"] = {
+            "CRITICAL": "critical",
+            "HIGH": "high",
+            "MEDIUM": "medium",
+            "LOW": "low",
+            "MINIMAL": "low",
+            "UNKNOWN": "unknown",
+        }.get(brief_risk, data.get("risk_level"))
+
     # Phase 2A — irreversible suppression at the report boundary. enrich_report
     # feeds both the raw report API (get_report) and all six exporters, so one
     # read-time filter here excludes a suppressed subject from every output.
@@ -198,7 +250,13 @@ def enrich_report(data: dict) -> dict:
         from .suppression import redact_report
 
         data = redact_report(data)
-    except Exception:  # suppression must never crash report assembly
+    except SuppressionUnavailable:
+        # R2 (S1): FAIL CLOSED. The store is unreadable, so we cannot prove the
+        # report is suppression-clean — propagate so the boundary returns an
+        # unavailable response rather than an unfiltered report. (Previously a
+        # blanket ``except Exception`` swallowed this into a fail-open skip.)
+        raise
+    except Exception:  # any OTHER assembly hiccup must not crash the report
         import logging
 
         logging.getLogger(__name__).exception("suppression redaction skipped")
@@ -229,15 +287,22 @@ def enrich_report(data: dict) -> dict:
 
         logging.getLogger(__name__).exception("eligibility verdict skipped")
 
-    # Phase 2E — export watermark: which run/mode/policy produced this report.
+    # Phase 2E / R12 — export watermark: which run/mode/policy produced this
+    # report. Prefer the RECORDED manifest (attached by get_investigation) so an
+    # old report shows its own run's time/version, not the current process/time;
+    # fall back to a freshly generated manifest only when none was recorded.
     try:
-        from .run_manifest import manifest_dict
+        recorded = data.get("run_manifest")
+        if isinstance(recorded, dict) and recorded:
+            data["watermark"] = recorded
+        else:
+            from .run_manifest import manifest_dict
 
-        data["watermark"] = manifest_dict(
-            run_id=str(data.get("id") or "unknown"),
-            pipeline="investigate",
-            mode=str(data.get("mode") or "security-investigation"),
-        )
+            data["watermark"] = manifest_dict(
+                run_id=str(data.get("id") or "unknown"),
+                pipeline="investigate",
+                mode=str(data.get("mode") or "security-investigation"),
+            )
     except Exception:
         import logging
 
@@ -264,21 +329,31 @@ class InvestigationService:
         self,
         email: str,
         canonical_email: str | None = None,
+        mode: str | None = None,
     ) -> Investigation | None:
         """Return the most recent COMPLETE investigation for `email` within the
-        configured cache window, or None if none qualifies."""
+        configured cache window, or None if none qualifies.
+
+        L2 governance fix: reuse is scoped to the *same product mode*. A result
+        produced under one mode (e.g. ``security-investigation``) must never be
+        served to a request in another mode (e.g. ``public-business-contact``),
+        which would leak security-scope data past the governance gate.
+        """
         window = timedelta(minutes=settings.investigation_cache_window_minutes)
         cutoff = datetime.now(timezone.utc) - window
         candidates = [email]
         if canonical_email and canonical_email not in candidates:
             candidates.append(canonical_email)
+        conditions = [
+            Investigation.email.in_(candidates),
+            Investigation.status == InvestigationStatus.COMPLETE,
+            Investigation.created_at >= cutoff,
+        ]
+        if mode is not None:
+            conditions.append(Investigation.mode == mode)
         result = await self._session.execute(
             select(Investigation)
-            .where(
-                Investigation.email.in_(candidates),
-                Investigation.status == InvestigationStatus.COMPLETE,
-                Investigation.created_at >= cutoff,
-            )
+            .where(*conditions)
             .order_by(Investigation.created_at.desc())
             .limit(1)
         )
@@ -305,14 +380,24 @@ class InvestigationService:
         The caller is responsible for storing the queue in the registry so
         WebSocket handlers can consume it (skip when cached=True).
         """
+        from .product_mode import normalize_mode
+
         canonical_email = normalize_email_address(email).canonical_email
+        # Resolve the effective mode exactly as the engine does (per-run override
+        # else the server default) so the cache key matches the mode actually
+        # persisted on a completed investigation.
+        resolved_mode = normalize_mode(
+            mode if mode is not None else settings.product_mode
+        ).value
         if (
             not force
             and settings.enable_investigation_cache
             and module_names is None
             and not enable_modules
         ):
-            recent = await self._find_recent_complete(email, canonical_email)
+            recent = await self._find_recent_complete(
+                email, canonical_email, mode=resolved_mode
+            )
             if recent is not None:
                 return recent.id, recent.created_at, None, True
 
@@ -320,6 +405,7 @@ class InvestigationService:
             email=email,
             canonical_email=canonical_email,
             status=InvestigationStatus.PENDING,
+            mode=resolved_mode,
         )
         self._session.add(inv)
         await self._session.flush()
@@ -351,12 +437,24 @@ class InvestigationService:
         if inv is None:
             return None
 
+        # R12 (S1) — attach the RECORDED run manifest (this run's own time /
+        # version / config), so enrich_report's watermark reflects the run rather
+        # than the current process. Guarded → None when nothing was recorded.
+        from .run_manifest import read_run_manifest
+
+        recorded_manifest = await read_run_manifest(inv.id, session=self._session)
+
         return {
             "id": inv.id,
             "email": inv.email,
             "canonical_email": inv.canonical_email,
             "status": inv.status.value,
             "error": inv.error,
+            "run_manifest": recorded_manifest,
+            # R12 (S1) — carry the run's product mode into the serialized report
+            # so eligibility, watermark and provenance are scoped to the mode the
+            # run was collected under (not the default).
+            "mode": inv.mode,
             "exposure_score": inv.exposure_score,
             "credential_risk_score": inv.credential_risk_score,
             "confirmed_name": inv.confirmed_name,

@@ -304,7 +304,7 @@ def _render_show_demotions(
     console.print()
     console.print(
         "  [dim]To permanently disable auto-actions for a platform, set the "
-        "MAIGRET_FORCE_<PLATFORM>=true env var (any truthy value).[/dim]"
+        "USERNAME_FORCE_<PLATFORM>=true env var (any truthy value).[/dim]"
     )
     console.print()
 
@@ -485,7 +485,7 @@ def run_platform_audit(
         console.print("[yellow]No platform health data found.[/yellow]")
         console.print(
             "[dim]Run an investigation first to populate "
-            "(results from maigret / sherlock / nexfil / blackbird feed this DB).[/dim]"
+            "(results from the username platform sweep feed this DB).[/dim]"
         )
         if export:
             # Still write an empty report so downstream tooling has a stable shape.

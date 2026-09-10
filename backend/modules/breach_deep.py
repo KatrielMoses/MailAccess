@@ -63,7 +63,9 @@ class BreachDeepModule(BaseModule):
     requires_key = False
 
     async def run(self, email: str, *, force: bool = False) -> ModuleResult:
-        if not force and not settings.enable_breach_deep:
+        from ..config import opt_in_active
+
+        if not force and not opt_in_active("enable_breach_deep", settings.enable_breach_deep):
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
                 errors=["Set ENABLE_BREACH_DEEP=true or run with --modules breach_deep"],

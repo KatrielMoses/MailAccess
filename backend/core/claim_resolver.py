@@ -80,6 +80,7 @@ class ClaimObservation:
     freshness: float
     score: float
     extraction_method: str
+    source_url: str | None = None
 
 
 @dataclass
@@ -93,6 +94,7 @@ class CandidateValue:
     most_recent: datetime
     support_count: int
     observation_ids: list[str] = dataclass_field(default_factory=list)
+    best_source_url: str | None = None
     is_winner: bool = False
 
 
@@ -163,6 +165,7 @@ def _score_observation(obs: dict[str, Any], value: Any) -> ClaimObservation:
         freshness=fresh,
         score=round(weight * fresh, 6),
         extraction_method=str(obs.get("extraction_method") or ""),
+        source_url=obs.get("source_url"),
     )
 
 
@@ -203,6 +206,7 @@ def resolve_field(
                 most_recent=max(c.capture_time for c in members),
                 support_count=len(members),
                 observation_ids=[c.observation_id for c in members],
+                best_source_url=best.source_url,
             )
         )
 
@@ -238,6 +242,7 @@ def _candidate_dict(candidate: CandidateValue) -> dict[str, Any]:
         "value": candidate.value,
         "score": candidate.score,
         "source_type": candidate.best_source_type,
+        "source_url": candidate.best_source_url,
         "source_weight": candidate.best_source_weight,
         "most_recent": candidate.most_recent.isoformat(),
         "support_count": candidate.support_count,
@@ -274,23 +279,53 @@ def _build_reasoning_text(
     return f"{head}; beat {beaten}."
 
 
-async def gather_observations(subject: str, session: Any | None = None) -> list[dict[str, Any]]:
-    """Fetch all ledger observations for a subject as resolution-ready dicts."""
-    from sqlalchemy import select
+async def gather_observations(
+    subject: str,
+    session: Any | None = None,
+    *,
+    mode: str | None = None,
+    as_of: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch ledger observations for a subject as resolution-ready dicts.
+
+    R12 (S1): scope the observations to a *run* rather than "everything ever
+    recorded for this subject", so a later (e.g. security-mode) run cannot leak a
+    name/title into an older/public report:
+
+    * ``mode`` — restrict to observations collected under that product mode
+      (cross-mode evidence isolation);
+    * ``as_of`` — restrict to observations that already existed at the report's
+      run time (a later run's facts can't retroactively appear);
+    * always drop observations whose retention has expired.
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy import or_, select
 
     from ..db.models import Observation
 
     async def _query(s: Any) -> list[dict[str, Any]]:
+        conditions = [Observation.subject == subject]
+        if mode is not None:
+            conditions.append(Observation.mode == str(mode))
+        if as_of is not None:
+            conditions.append(Observation.created_at <= as_of)
+        now = datetime.now(timezone.utc)
+        conditions.append(
+            or_(Observation.expires_at.is_(None), Observation.expires_at > now)
+        )
         rows = (
-            await s.execute(select(Observation).where(Observation.subject == subject))
+            await s.execute(select(Observation).where(*conditions))
         ).scalars().all()
         return [
             {
                 "id": r.id,
                 "claim": r.claim,
                 "source_type": r.source_type,
+                "source_url": r.source_url,
                 "capture_time": r.capture_time,
                 "extraction_method": r.extraction_method,
+                "mode": r.mode,
             }
             for r in rows
         ]
@@ -321,7 +356,11 @@ _REPORT_FIELDS = ("name", "source_type", "title", "company")
 
 
 async def resolve_report_fields(
-    subject: str, session: Any | None = None
+    subject: str,
+    session: Any | None = None,
+    *,
+    mode: str | None = None,
+    as_of: Any | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Resolve the standard report fields for a subject from the ledger.
 
@@ -329,10 +368,16 @@ async def resolve_report_fields(
     claim, where each entry carries the resolved value, the machine-readable
     "why this won / what it beat", and the full candidate list (losers included,
     with their observation ids — nothing is discarded). Fully guarded → {}.
+
+    R12 (S1): ``mode`` and ``as_of`` scope the provenance to the report's own run
+    (see :func:`gather_observations`) so it can't be polluted by a later or
+    different-mode run's observations.
     """
     result: dict[str, dict[str, Any]] = {}
     try:
-        observations = await gather_observations(subject, session=session)
+        observations = await gather_observations(
+            subject, session=session, mode=mode, as_of=as_of
+        )
     except Exception:
         logger.exception("Field-provenance gather failed for %s", subject)
         return result

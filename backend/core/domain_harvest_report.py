@@ -1783,6 +1783,13 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
         "summary": {
             **summary_counts,
             "smtp_verification_used": result.smtp_verification_used,
+            # RC7 (Output-Trust): honest SMTP-availability signal — when SMTP was
+            # requested but no probe reached a mail server (port 25 blocked), the
+            # grades are non-SMTP estimates, and the output says so explicitly
+            # rather than implying verification ran.
+            "smtp_unavailable": bool((result.metadata or {}).get("smtp_unavailable", False)),
+            "smtp_probes_used": int((result.metadata or {}).get("smtp_probes_used", 0) or 0),
+            "smtp_status_note": (result.metadata or {}).get("smtp_status_note"),
             "catchall_detected": result.catchall_detected,
             "native_email_validation": (result.metadata or {}).get("native_email_validation", {}),
             "smtp_email_verification": (result.metadata or {}).get("smtp_email_verification", {}),

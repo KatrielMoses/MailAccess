@@ -83,6 +83,21 @@ def _m365_context_infrastructure(context: Any | None) -> dict[str, Any] | None:
         "onedrive": [],
     }
 
+def _smtp_rcpt_used(smtp_validation: dict[str, Any] | None) -> bool:
+    """Was the email verification method an actual SMTP RCPT probe?
+
+    Minor fast-follow (Output-Trust final): ``smtp_verification_used`` must be
+    METHOD-accurate, not enablement-accurate. The verification tail routes M365 /
+    Google / Zoho / Proton / Fastmail domains to provider- or Gravatar-based
+    verifiers (no SMTP RCPT); only the fallback SMTP path runs an
+    :class:`SMTPVerifier` batch and stamps ``probes_attempted`` on its summary. So a
+    run against an M365 tenant must NOT report ``smtp_verification_used: true`` just
+    because SMTP was enabled — it wasn't the method used. Mirrors RC7's
+    ``smtp_probes_used > 0`` gate on the orchestrator path.
+    """
+    return int((smtp_validation or {}).get("probes_attempted", 0) or 0) > 0
+
+
 SUBDOMAIN_INTEL_HARD_CAP_FRACTION = 0.30
 # Default only; each harvest computes and stores its profile-specific value on
 # WorkerContext at the start of run_adaptive_harvest().
@@ -110,6 +125,10 @@ MODULE_GITHUB_ORG_MEMBERS = "github_org_members"
 MODULE_GITHUB_DOMAIN_COMMITS = "github_domain_commits"
 MODULE_EMPLOYEE_NAMES = "employee_name_discovery"
 MODULE_PATTERN_VERIFY = "pattern_and_verify"
+# Upper bound pattern_and_verify will wait for employee_name_discovery's C1→C2
+# handoff before proceeding without it. Generous (names discovery is normally fast)
+# but finite so a stuck employee run can never deadlock pattern.
+_EMPLOYEE_READY_TIMEOUT = 60.0
 MODULE_PERSON_EMAIL_PIVOT = "person_email_pivot"
 MODULE_PERSONA_EMAIL_PIVOT = "persona_email_pivot"
 MODULE_EMAIL_IDENTITY_ENRICHMENT = "email_identity_enrichment"
@@ -244,6 +263,11 @@ class WorkerContext:
     provider_detection: Any | None = None
     provider_mx_records: list[Any] | None = None
     provider_detection_ready: asyncio.Event | None = None
+    # Signalled when employee_name_discovery reaches a terminal state, so
+    # pattern_and_verify waits for the C1→C2 name handoff instead of racing ahead
+    # of it (it only ever waited on provider detection, which the injected-mock and
+    # cache-hit paths pre-set — letting pattern read an empty employee result).
+    employee_names_ready: asyncio.Event | None = None
     subdomain_source_telemetry: dict[str, dict[str, Any]] | None = None
     subdomain_intel_hard_cap: float = SUBDOMAIN_INTEL_HARD_CAP
     m365_context: Any | None = None
@@ -369,7 +393,9 @@ def _termination_snapshot(
         role_account_count=sum(1 for e in unique_emails if e.is_role),
         personal_email_count=sum(1 for e in unique_emails if not e.is_role),
         errors=errors,
-        smtp_verification_used=bool(ctx.enable_smtp and not ctx.module_overrides),
+        # Terminated before the verification tail ran, so no SMTP RCPT probe
+        # happened — reporting SMTP as used here would be a lie (method-accurate).
+        smtp_verification_used=False,
         employee_names_processed=len(
             (
                 module_results.get(MODULE_EMPLOYEE_NAMES).findings
@@ -497,12 +523,21 @@ async def run_adaptive_harvest(
         progress_callback=progress_callback,
         log_callback=log_callback,
         provider_detection_ready=asyncio.Event(),
+        employee_names_ready=asyncio.Event(),
         subdomain_source_telemetry={},
         subdomain_intel_hard_cap=subdomain_intel_hard_cap,
         m365_context=m365_context,
     )
     if ctx.module_overrides:
         ctx.provider_detection_ready.set()
+    # Only wait for the employee handoff when employee_name_discovery will actually
+    # run this configuration; otherwise release the barrier upfront so pattern never
+    # stalls. (Injected-module runs launch only the modules explicitly supplied.)
+    _employee_will_run = MODULE_EMPLOYEE_NAMES not in ctx.skip_modules and (
+        not ctx.module_overrides or MODULE_EMPLOYEE_NAMES in ctx.module_overrides
+    )
+    if not _employee_will_run:
+        ctx.employee_names_ready.set()
 
     # Preserve a truthful per-run module inventory even when the budget is
     # exhausted before a queued item starts. A missing key used to look like
@@ -937,6 +972,7 @@ async def run_adaptive_harvest(
             m365_infra = _m365_context_infrastructure(ctx.m365_context)
             if m365_infra is not None:
                 partial_metadata["m365_tenant"] = m365_infra
+            partial_metadata["signal_pool"] = _signal_pool_stats(signal_pool)
             final_result = DomainHarvestResult(
                 domain=cleaned,
                 started_at=started_iso,
@@ -964,7 +1000,9 @@ async def run_adaptive_harvest(
                 role_account_count=sum(1 for e in unique_emails if e.is_role),
                 personal_email_count=sum(1 for e in unique_emails if not e.is_role),
                 errors=errors,
-                smtp_verification_used=bool(ctx.enable_smtp and not ctx.module_overrides),
+                # Method-accurate: true only if the tail's SMTP path ran an RCPT batch
+                # (M365/Google/etc. provider verification is not SMTP — minor follow-up).
+                smtp_verification_used=_smtp_rcpt_used(smtp_validation),
                 employee_names_processed=len(
                     (
                         module_results.get(MODULE_EMPLOYEE_NAMES).findings
@@ -1110,6 +1148,9 @@ async def run_adaptive_harvest(
         m365_infra = _m365_context_infrastructure(ctx.m365_context)
         if m365_infra is not None:
             metadata["m365_tenant"] = m365_infra
+        # Q5/0.3 — surface signal-pool throughput incl. any dropped signals so losses
+        # are visible in the report rather than only logged.
+        metadata["signal_pool"] = _signal_pool_stats(signal_pool)
         final_result = DomainHarvestResult(
             domain=cleaned,
             started_at=started_iso,
@@ -1125,7 +1166,13 @@ async def run_adaptive_harvest(
             role_account_count=role,
             personal_email_count=len(unique_emails) - role,
             errors=errors,
-            smtp_verification_used=bool(ctx.enable_smtp),
+            # Method-accurate: true only when a real SMTP RCPT batch ran — either in
+            # the verification tail or in pattern-and-verify (RC7 gate). M365/Google
+            # provider verification is not SMTP and must not set this.
+            smtp_verification_used=(
+                _smtp_rcpt_used(smtp_validation)
+                or int((pattern_meta or {}).get("smtp_probes_used", 0) or 0) > 0
+            ),
             catchall_detected=(
                 pattern_meta.get("is_catchall")
                 if pattern_meta.get("is_catchall") is not None
@@ -1473,6 +1520,24 @@ async def _execute_item(item: WorkItem, ctx: WorkerContext) -> WorkResult:
             and not ctx.provider_detection_ready.is_set()
         ):
             await ctx.provider_detection_ready.wait()
+        # C1→C2: pattern_and_verify consumes employee_name_discovery's names, so wait
+        # for that module to finish first. Bounded so a stuck/slow employee run can
+        # never deadlock pattern — after the cap it proceeds with whatever is ready.
+        if (
+            item.module_name == MODULE_PATTERN_VERIFY
+            and ctx.employee_names_ready is not None
+            and not ctx.employee_names_ready.is_set()
+        ):
+            try:
+                await asyncio.wait_for(
+                    ctx.employee_names_ready.wait(), timeout=_EMPLOYEE_READY_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "pattern_and_verify proceeding without employee names "
+                    "(barrier timed out after %.0fs)",
+                    _EMPLOYEE_READY_TIMEOUT,
+                )
         if ctx.subdomain_calibrate and item.module_name != MODULE_SUBDOMAIN_INTEL:
             if item.module_name:
                 skip_result = ModuleResult(
@@ -1729,6 +1794,31 @@ def _ensure_subdomain_partial_result(ctx: WorkerContext) -> ModuleResult:
     return result
 
 
+def _module_partial(module: Any) -> dict[str, Any]:
+    """R8 (S2) — generic partial-result recovery on cancellation.
+
+    A producer opts in by exposing ``partial_findings()`` and/or
+    ``partial_metadata()`` so the findings it streamed before a budget-timeout
+    cancellation are preserved rather than discarded. Modules that don't
+    implement the hook yield an empty partial exactly as before (no regression).
+    """
+    findings: list[Any] = []
+    metadata: dict[str, Any] = {}
+    getter = getattr(module, "partial_findings", None)
+    if callable(getter):
+        try:
+            findings = list(getter() or [])
+        except Exception:
+            findings = []
+    meta_getter = getattr(module, "partial_metadata", None)
+    if callable(meta_getter):
+        try:
+            metadata = dict(meta_getter() or {})
+        except Exception:
+            metadata = {}
+    return {"findings": findings, "metadata": metadata}
+
+
 async def _run_module_core(
     module_name: str,
     ctx: WorkerContext,
@@ -1769,11 +1859,19 @@ async def _run_module_core(
         if module_name == MODULE_SUBDOMAIN_INTEL:
             result = _partial_subdomain_result(module, ctx)
         else:
+            # R8 (S2) — preserve any findings the module streamed before the
+            # cancellation instead of discarding them (no timeout is a silent
+            # data loss). Empty for modules that don't expose the hook.
+            recovered = _module_partial(module)
             result = ModuleResult(
                 status=ModuleStatus.PARTIAL,
-                findings=[],
+                findings=recovered["findings"],
                 errors=["Cancelled by budget timeout"],
-                metadata={"domain": ctx.domain, "duration_seconds": elapsed},
+                metadata={
+                    "domain": ctx.domain,
+                    "duration_seconds": elapsed,
+                    **recovered["metadata"],
+                },
             )
         raise
     finally:
@@ -1970,12 +2068,32 @@ async def _run_module_with_payload(
     return out_findings, new_items
 
 
+def _signal_pool_stats(signal_pool: Any) -> dict[str, int]:
+    """Best-effort snapshot of signal-pool throughput incl. dropped signals (Q5/0.3)."""
+    try:
+        stats = signal_pool.stats()
+        return {
+            "signals": int(getattr(stats, "signals", 0)),
+            "clusters": int(getattr(stats, "clusters", 0)),
+            "exports": int(getattr(stats, "exports", 0)),
+            "dropped": int(getattr(stats, "dropped", 0)),
+        }
+    except Exception:
+        return {"signals": 0, "clusters": 0, "exports": 0, "dropped": 0}
+
+
 def _record_module_result(
     ctx: WorkerContext, module_name: str, result: ModuleResult
 ) -> None:
     """Store results without discarding earlier reactive pivot findings."""
     if ctx.module_results is None:
         return
+    # Release the C1→C2 barrier once employee_name_discovery reaches any terminal
+    # state (it is not an accumulating module, so this path always runs for it), so
+    # pattern_and_verify reads a populated — or definitively empty — employee result
+    # rather than racing it.
+    if module_name == MODULE_EMPLOYEE_NAMES and ctx.employee_names_ready is not None:
+        ctx.employee_names_ready.set()
     if module_name not in _ACCUMULATING_MODULES:
         ctx.module_results[module_name] = result
         return

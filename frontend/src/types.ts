@@ -74,7 +74,17 @@ export interface PaginatedInvestigations {
 // WebSocket event frames from /ws/investigate/:id
 export type WsEvent =
   | { type: 'module_start'; module: string; timestamp: string }
-  | { type: 'module_result'; module: string; findings: Record<string, unknown>[]; status: string }
+  | {
+      type: 'module_result'
+      module: string
+      // R9 — an oversized frame omits `findings` and carries `_truncated` +
+      // `findings_count` instead; consumers must tolerate a missing array.
+      findings?: Record<string, unknown>[]
+      status: string
+      _truncated?: boolean
+      findings_count?: number
+      _suppression_unavailable?: boolean
+    }
   | { type: 'module_error'; module: string; error: string; status: string }
   | {
       type: 'investigation_complete'
@@ -85,4 +95,7 @@ export type WsEvent =
       credential_risk_band: string
       timeline?: Timeline
     }
+  // R9 — the backend emits this terminal frame on a persisted failure; the UI
+  // must leave the "running" state instead of hanging forever.
+  | { type: 'investigation_failed'; error?: string }
   | { type: 'error'; error: string }

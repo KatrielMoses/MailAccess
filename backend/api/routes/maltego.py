@@ -13,6 +13,7 @@ from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.service import InvestigationService, enrich_report
+from ...core.suppression import SuppressionUnavailable
 from ...db.database import get_db
 from ...integrations.maltego_transform import build_error_response, build_response, parse_request
 from .. import queue_registry
@@ -87,7 +88,15 @@ async def email_investigate(
             media_type=_XML,
         )
 
+    # R2 (S1) — fail closed if the suppression store is unreadable.
+    try:
+        enriched = enrich_report(data)
+    except SuppressionUnavailable:
+        return Response(
+            content=build_error_response("Suppression store unavailable"),
+            media_type=_XML,
+        )
     return Response(
-        content=build_response(enrich_report(data), partial=partial),
+        content=build_response(enriched, partial=partial),
         media_type=_XML,
     )

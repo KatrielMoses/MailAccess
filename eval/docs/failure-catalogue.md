@@ -117,7 +117,7 @@ These files did not terminate under a blocked network and were killed. Treated a
 | env-only | `tests/test_common_names.py::test_empty_inputs_return_false[\t\n]` |
 | env-only | `tests/test_common_names.py::test_empty_inputs_return_false[]` |
 | env-only | `tests/test_common_names.py::test_loads_corpus_and_matches_exact_names` |
-| env-only | `tests/test_common_names.py::test_maigret_finding_downgrades_common_username` |
+| env-only | `tests/test_common_names.py::test_username_finding_downgrades_common_username` |
 | env-only | `tests/test_common_names.py::test_malformed_corpus_fails_silently` |
 | env-only | `tests/test_common_names.py::test_missing_corpus_fails_silently` |
 | env-only | `tests/test_config.py::test_cors_origins_parsing[CORS_ORIGINS=["http://localhost:3000","http://localhost:5173"]\n-expected0]` |
@@ -152,8 +152,8 @@ These files did not terminate under a blocked network and were killed. Treated a
 | env-only | `tests/test_disposable_domains.py::test_extract_domain[user@-]` |
 | env-only | `tests/test_disposable_domains.py::test_extract_domain[user@@example.com-]` |
 | env-only | `tests/test_disposable_domains.py::test_extract_domain[user@example.com-example.com]` |
-| env-only | `tests/test_disposable_domains.py::test_maigret_finding_downgrades_disposable_email` |
-| env-only | `tests/test_disposable_domains.py::test_maigret_finding_preserves_both_fp_warnings` |
+| env-only | `tests/test_disposable_domains.py::test_username_finding_downgrades_disposable_email` |
+| env-only | `tests/test_disposable_domains.py::test_username_finding_preserves_both_fp_warnings` |
 | env-only | `tests/test_disposable_domains.py::test_malformed_corpus_fails_open` |
 | env-only | `tests/test_disposable_domains.py::test_missing_corpus_fails_open` |
 | env-only | `tests/test_export_termination.py::test_budget_timeout_export_reflects_partial_state` |
@@ -226,12 +226,6 @@ These files did not terminate under a blocked network and were killed. Treated a
 | pre-existing-known | `tests/test_name_quality_phase4.py::test_name_discovery_module_imports_penalty` |
 | env-only | `tests/test_new_sources.py::test_cidr_file_written_to_results_dir` |
 | env-only | `tests/test_new_sources.py::test_cidrs_txt_written_with_real_prefixes` |
-| env-only | `tests/test_nexfil_loader.py::test_loader_handles_malformed_json` |
-| env-only | `tests/test_nexfil_loader.py::test_loader_handles_missing_file` |
-| env-only | `tests/test_nexfil_loader.py::test_loader_logs_skipped_count` |
-| env-only | `tests/test_nexfil_loader.py::test_loader_skips_missing_error_type` |
-| env-only | `tests/test_nexfil_loader.py::test_loader_skips_missing_url` |
-| env-only | `tests/test_nexfil_loader.py::test_loader_skips_unsupported_error_type` |
 | env-only | `tests/test_platform_audit_cli.py::test_audit_summary_includes_auto_demotion_counts` |
 | env-only | `tests/test_platform_audit_cli.py::test_classify_demote` |
 | env-only | `tests/test_platform_audit_cli.py::test_classify_keep` |

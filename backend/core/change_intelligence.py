@@ -295,6 +295,7 @@ async def domain_change_report(domain: str, *, include_stale: bool = True) -> Ch
     domain is not silently retained.
     """
     from .corpus_store import normalize_domain
+    from .suppression import SuppressionUnavailable
 
     normalized = normalize_domain(domain)
     empty = ChangeReport(domain=normalized, previous_at=None, current_at=None, signals=[])
@@ -329,12 +330,25 @@ async def domain_change_report(domain: str, *, include_stale: bool = True) -> Ch
                          "reason": lead.get("decay", {}).get("reason")},
                     )
                 )
+        # R2 (S1) — read-time suppression over the emitted signals. The email
+        # diff reads raw snapshot ``unique_emails``, so a subject objected-to
+        # after collection is only removed here. ``index.hit(email=...)``
+        # escalates email → its domain, so a domain-scope objection is honoured
+        # too. Fail-closed: SuppressionUnavailable propagates to the boundary.
+        from .suppression import load_index_sync, subject_suppressed
+
+        index = load_index_sync()
+        if subject_suppressed(index, domain=normalized):
+            return empty
+        signals = [s for s in signals if not index.hit(email=s.email)]
         return ChangeReport(
             domain=normalized,
             previous_at=previous_at,
             current_at=current_at,
             signals=signals,
         )
+    except SuppressionUnavailable:
+        raise
     except Exception:
         logger.exception("domain_change_report failed for %s", domain)
         return empty

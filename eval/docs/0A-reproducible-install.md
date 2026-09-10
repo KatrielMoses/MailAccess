@@ -13,7 +13,7 @@ We use [`uv`](https://docs.astral.sh/uv/) as the install/lock mechanism.
 | Option | Verdict |
 |---|---|
 | **`uv`** ✅ | Single universal lockfile (`uv.lock`) resolving the *entire* dependency graph incl. all extras; pins the Python version via `.python-version`; `uv sync --frozen` gives a deterministic, fail-closed install; fast; first-class GitHub Action (`astral-sh/setup-uv`). Directly satisfies both 0A requirements (lock + Python pin) with one tool. |
-| `pip-tools` | Produces `requirements.txt` locks but does **not** pin the interpreter, and multi-extra locking (`ml`/`pdf`/`ghunt`/`dev`) needs several compiled files stitched together. More moving parts for the same result. |
+| `pip-tools` | Produces `requirements.txt` locks but does **not** pin the interpreter, and multi-extra locking (`ml`/`pdf`/`dev`) needs several compiled files stitched together. More moving parts for the same result. |
 | `hatch` | Already our build backend, but its environment/locking story is weaker than uv's and would duplicate what uv does better. We keep `hatchling` as the **build backend** (unchanged) and use uv only for install/lock — they compose cleanly. |
 
 The build backend stays `hatchling` (see `pyproject.toml`); uv reads the same
@@ -39,14 +39,13 @@ install` in CI fetches exactly this interpreter. Baseline captured on CPython
 
 | Extra | Contents | Needed for baselining? |
 |---|---|---|
-| *(core)* | fastapi, sqlalchemy, pydantic(+settings), httpx, dnspython, typer, holehe, user-scanner, rapidfuzz, … | **Yes** — the tool itself. |
+| *(core)* | fastapi, sqlalchemy, pydantic(+settings), httpx, dnspython, typer, rapidfuzz, … | **Yes** — the tool itself. (The third-party account-existence libraries were removed in 0.15.0 — account existence is now a native engine over `data/mailaccess_sites.json`.) |
 | `dev` | pytest, pytest-asyncio, ruff, mypy | **Yes** — the test + lint gate. |
 | `ml` | spaCy (name classifier) | **No.** Only used by `--enable-ml` / `--verify` name classification. Keyless baseline runs without it; tests that import spaCy skip. |
 | `pdf` | weasyprint | **No.** Only for `--output report.pdf`. |
-| `ghunt` | ghunt | **No.** Opt-in, key/creds-gated module (off by default). |
 
 **Baseline env = core + `dev`.** Install with `uv sync --extra dev`.
-`ml`/`pdf`/`ghunt` are locked (so they're reproducible if needed later) but not
+`ml`/`pdf` are locked (so they're reproducible if needed later) but not
 installed for the primary baseline.
 
 Known latent packaging nit (documented, **not changed** to keep v0.14.4 frozen):

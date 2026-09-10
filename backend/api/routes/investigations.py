@@ -9,11 +9,30 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.service import InvestigationService, enrich_report
+from ...core.suppression import SuppressionUnavailable
 from ...db.database import get_db
 from ...exporters import EXPORTERS
 from .. import queue_registry
 
 router = APIRouter()
+
+# R2 (S1) — a suppression-store read failure must fail closed at the boundary.
+_SUPPRESSION_UNAVAILABLE = HTTPException(
+    status_code=503, detail="suppression store unavailable"
+)
+
+
+def _parse_iso(value: object) -> object | None:
+    """Parse an ISO-8601 timestamp string to a datetime (R12 provenance
+    ``as_of`` bound). Returns None for missing/invalid values."""
+    if not isinstance(value, str) or not value:
+        return None
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 async def _cleanup_queue(investigation_id: str, delay: float = 300.0) -> None:
     await asyncio.sleep(delay)
@@ -118,7 +137,12 @@ async def get_report(
     if data is None:
         raise HTTPException(status_code=404, detail="Investigation not found")
 
-    enriched = enrich_report(data)
+    # R2 (S1) — enrich_report runs the suppression redactor; fail closed (503)
+    # if the store is unreadable rather than return an unfiltered report.
+    try:
+        enriched = enrich_report(data)
+    except SuppressionUnavailable as exc:
+        raise _SUPPRESSION_UNAVAILABLE from exc
     # Phase 1E — attach ledger-derived field provenance (conflict resolution).
     # Additive and fully guarded: never alters existing keys or fails the report.
     try:
@@ -126,9 +150,24 @@ async def get_report(
 
         subject = enriched.get("canonical_email") or enriched.get("email")
         if subject:
-            provenance = await resolve_report_fields(str(subject), session=session)
+            # R12 (S1) — scope provenance to THIS run's mode and run time so a
+            # later or different-mode run can't leak a name/title into it.
+            as_of = _parse_iso(enriched.get("completed_at"))
+            provenance = await resolve_report_fields(
+                str(subject),
+                session=session,
+                mode=enriched.get("mode"),
+                as_of=as_of,
+            )
             if provenance:
-                enriched["field_provenance"] = provenance
+                # R2 — provenance is attached AFTER redaction, so redact it too.
+                from ...core.suppression import redact_field_provenance
+
+                provenance = redact_field_provenance(provenance)
+                if provenance:
+                    enriched["field_provenance"] = provenance
+    except SuppressionUnavailable as exc:
+        raise _SUPPRESSION_UNAVAILABLE from exc
     except Exception:
         pass
     return enriched
@@ -147,7 +186,10 @@ async def export_report(
     if data is None:
         raise HTTPException(status_code=404, detail="Investigation not found")
 
-    data = enrich_report(data)
+    try:
+        data = enrich_report(data)
+    except SuppressionUnavailable as exc:
+        raise _SUPPRESSION_UNAVAILABLE from exc
     email = data.get("email", "unknown")
 
     exporter = EXPORTERS[format]()
@@ -192,12 +234,20 @@ async def list_investigations(
     """Paginated list of past investigations, newest first."""
     service = InvestigationService(session)
     result = await service.list_investigations(page=page, page_size=page_size)
-    return PaginatedInvestigations(
-        total=result["total"],
-        page=result["page"],
-        page_size=result["page_size"],
-        pages=result["pages"],
-        items=[
+    # R2 (S1) — a suppressed subject must not appear even in the summary list.
+    # Fail closed if the store is unreadable. Empty index → zero-overhead pass.
+    from ...core.suppression import load_index, subject_suppressed
+
+    try:
+        index = await load_index()
+    except SuppressionUnavailable as exc:
+        raise _SUPPRESSION_UNAVAILABLE from exc
+    items = []
+    for item in result["items"]:
+        subject = item.get("canonical_email") or item.get("email")
+        if isinstance(subject, str) and subject_suppressed(index, email=subject):
+            continue
+        items.append(
             InvestigationSummary(
                 id=item["id"],
                 email=item["email"],
@@ -208,8 +258,13 @@ async def list_investigations(
                 created_at=item["created_at"],
                 completed_at=item.get("completed_at"),
             )
-            for item in result["items"]
-        ],
+        )
+    return PaginatedInvestigations(
+        total=result["total"],
+        page=result["page"],
+        page_size=result["page_size"],
+        pages=result["pages"],
+        items=items,
     )
 
 

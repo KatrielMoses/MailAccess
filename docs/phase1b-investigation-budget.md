@@ -16,7 +16,7 @@ compounding causes:
    still working.
 2. **No server-side budget.** The engine runs `PHASE_DAG` to completion, bounded
    only by per-module timeouts. Heavy username-enumeration modules have timeout
-   *floors* (`whatsmyname` 200 s, `maigret`/`sherlock`/`user_scanner` 180 s) and
+   *floors* (`username_platforms` 200 s, `account_discovery` 180 s) and
    run concurrently in the primary phase, so a footprint-poor corporate target
    drives the primary phase to ~200 s+ — over the 120 s client cap.
 

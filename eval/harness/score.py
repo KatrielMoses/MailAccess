@@ -52,7 +52,7 @@ SENSITIVE_MODULE_HINTS = (
     "smtp",
     "m365",
     "yahoo",
-    "ghunt",
+    "google",
     "deep",
     "credential",
 )

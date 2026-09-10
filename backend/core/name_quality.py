@@ -470,6 +470,54 @@ _NAVIGATION_TOKENS: frozenset[str] = frozenset(
     }
 )
 
+# RC2 (Output-Trust): tokens that are page-chrome / captcha-UI / marketing /
+# certification noise and are NEVER a component of a real person's name. Unlike
+# the graded _NAVIGATION_TOKENS rule (reject only when ALL / >=50% of tokens are
+# stopwords), the presence of EVEN ONE of these hard-chrome tokens rejects the
+# candidate outright — "Security Verification", "Upload Image", "Vivaldi Forum",
+# "Google Cybersecurity Certificate", "Operational Certifications" all die here.
+_HARD_CHROME_TOKENS: frozenset[str] = frozenset(
+    {
+        # captcha / verification / anti-bot UI
+        "verification", "verify", "verified", "captcha", "recaptcha", "challenge",
+        # generic page chrome / actions
+        "upload", "download", "image", "images", "photo", "avatar", "banner",
+        "login", "logout", "signin", "signup", "register", "subscribe",
+        "menu", "navbar", "navigation", "dashboard", "notification", "notifications",
+        "cookie", "cookies", "settings", "submit", "search", "loading", "welcome",
+        "comment", "comments", "share", "follow", "message", "messages", "inbox",
+        # community / forum furniture
+        "forum", "forums", "community", "thread", "threads", "channel",
+        # certification / training marketing
+        "certificate", "certification", "certifications", "certified",
+        "cybersecurity", "training", "course", "courses", "curriculum", "credential",
+        "operational", "join", "chat",
+        # section-heading / FAQ furniture
+        "faq", "frequently", "questions", "asked", "overview", "introduction",
+        # marketing landing-page headings — "Why Atlas", "Why Us", "Pricing", …
+        # ("why" is never a person-name token; a real first name like "Atlas" is
+        # only rejected here when paired with one of these headings).
+        "why", "pricing", "features", "solutions",
+    }
+)
+
+
+def contains_chrome_token(text: str) -> bool:
+    """RC2 (Output-Trust): True if *text* contains a hard page-chrome / captcha /
+    marketing / certification token that is never part of a person's name.
+
+    Targeted for the name-consensus / identity-graph entry points: unlike the full
+    :func:`is_plausible_person_name` gate (which also rejects legitimate short
+    two-token names like "Jane Doe" / "Ed Lee" via its average-token-length
+    heuristic), this only fires on unambiguous chrome tokens, so real names pass.
+    """
+    if not isinstance(text, str):
+        return False
+    return any(
+        token.strip(".,;:'-\"()[]").lower() in _HARD_CHROME_TOKENS
+        for token in text.split()
+    )
+
 # Same idea — when the *entire input string* matches one of these words,
 # it cannot be a person name.
 _NON_NAME_WORDS: frozenset[str] = frozenset(
@@ -827,6 +875,12 @@ def is_plausible_person_name(text: str) -> bool:
             if _contains_product_token(tokens):
                 return False
             if _looks_like_common_noun_phrase(tokens):
+                return False
+            # RC2: any hard page-chrome / captcha / marketing / certification
+            # token in the candidate disqualifies it outright.
+            if any(
+                t.lower().strip(".,;:'-") in _HARD_CHROME_TOKENS for t in tokens
+            ):
                 return False
             if tokens[0].lower().strip(".,;:'-") in _NON_NAME_WORDS:
                 return False

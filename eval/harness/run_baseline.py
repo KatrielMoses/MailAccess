@@ -52,6 +52,12 @@ class RunConfig:
     label: str
     strip_keys: bool  # keyless => strip all key + dotenv-defined names
     use_repo_cwd: bool  # with-keys => cwd=repo so ./.env is read by the tool
+    # security-enabled (Config B): extra env toggles turning the de-vendored
+    # native modules ON, plus a product mode passed via --mode. Left empty for
+    # the parity configs so their CLI invocation stays byte-identical to the
+    # v0.14.4 baseline (the regression proof must not change the command line).
+    extra_env: dict[str, str] = field(default_factory=dict)
+    mode: str | None = None
 
     def build_env(self, home_dir: Path) -> dict[str, str]:
         env = dict(os.environ)
@@ -74,6 +80,10 @@ class RunConfig:
             names_to_strip |= _dotenv_key_names(Path.home() / ".mailaccess" / ".env")
             for name in names_to_strip:
                 env.pop(name, None)
+        # Config B: apply native-module enable toggles AFTER stripping so they
+        # survive the keyless purge (they are behavior flags, not API keys).
+        for name, value in self.extra_env.items():
+            env[name] = value
         return env
 
     def build_cwd(self, isolated_cwd: Path) -> Path:
@@ -85,6 +95,21 @@ class RunConfig:
 CONFIGS: dict[str, RunConfig] = {
     "keyless-default": RunConfig("keyless-default", strip_keys=True, use_repo_cwd=False),
     "with-keys": RunConfig("with-keys", strip_keys=False, use_repo_cwd=True),
+    # Config B — keyless isolation (no API keys) but with the de-vendored native
+    # engines explicitly enabled and the full-capability product mode selected,
+    # so the run exercises account_discovery + username_platforms (+ google
+    # account intel, on by default) that the public/default gate keeps dormant.
+    "security-enabled": RunConfig(
+        "security-enabled",
+        strip_keys=True,
+        use_repo_cwd=False,
+        extra_env={
+            "ENABLE_ACCOUNT_DISCOVERY": "true",
+            "ENABLE_USERNAME_PLATFORMS": "true",
+            "ENABLE_GOOGLE_ACCOUNT_INTEL": "true",
+        },
+        mode="security-investigation",
+    ),
 }
 
 
@@ -200,9 +225,10 @@ def run_investigate(
         }
     raw_path = run_dir / "raw" / f"{target.id}.run{run_idx}.investigate.json"
     log_path = run_dir / "logs" / f"{target.id}.run{run_idx}.investigate.log"
+    mode_args = ["--mode", cfg.mode] if cfg.mode else []
     meta = _run_cli(
         ["investigate", target.value, "--format", "json",
-         "--output", str(raw_path), "--timeout", "30"],
+         "--output", str(raw_path), "--timeout", "30", *mode_args],
         cfg,
         home_dir,
         isolated_cwd,
@@ -232,9 +258,10 @@ def run_harvest(
     isolated_cwd.mkdir(parents=True, exist_ok=True)
     raw_path = run_dir / "raw" / f"{target.id}.run{run_idx}.harvest.json"
     log_path = run_dir / "logs" / f"{target.id}.run{run_idx}.harvest.log"
+    mode_args = ["--mode", cfg.mode] if cfg.mode else []
     meta = _run_cli(
         ["harvest-emails", "-d", target.value, "--export", str(raw_path),
-         "--timeout", str(timeout - 30)],
+         "--timeout", str(timeout - 30), *mode_args],
         cfg,
         home_dir,
         isolated_cwd,
@@ -388,7 +415,14 @@ def main(argv: list[str] | None = None) -> int:
     manifest = build_manifest(
         config_label=cfg.label,
         keys_stripped=cfg.strip_keys,
-        extra={"run_id": run_id, "runs": args.runs},
+        extra={
+            "run_id": run_id,
+            "runs": args.runs,
+            # Config B specifics live in the subprocess env, so record them here
+            # explicitly (the harness-process resolved_config cannot see them).
+            "cli_mode": cfg.mode,
+            "module_enable_env": cfg.extra_env,
+        },
     )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 

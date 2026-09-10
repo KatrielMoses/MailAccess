@@ -59,7 +59,7 @@ untouched; a ledger/resolution failure silently omits the block.
   corroboration merges + counts support. (`tests/test_claim_resolver.py`, 14.)
 - **Real** multi-source conflict on a baseline target (`katriel@rootaccess.tech`,
   389 ledger observations): `name` resolves across 2 competing values and
-  `source_type` across 10 (blackbird beats nexfil/maigret/sherlock by support) —
+  `source_type` across 10 (the native username-platform corpus wins by support) —
   deterministic, with recorded reasoning; losing claims retrievable by
   observation id.
 - No regression vs baseline; `gate check` green.

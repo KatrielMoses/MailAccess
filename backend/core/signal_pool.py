@@ -121,6 +121,11 @@ MEDIUM_TIER_THRESHOLD: float = 1.5
 LOW_TIER_THRESHOLD: float = 0.5
 
 _DEFAULT_QUEUE_MAXSIZE: int = 4096
+# Q5 — how long a producer applies backpressure (waits for the drain task to free
+# space) on a full queue before it finally counts the signal as dropped. Event-driven
+# via ``asyncio.Queue.put``, so a batch larger than the queue is processed fully as
+# long as the consumer keeps up; the bound guarantees a producer can never hang.
+_PUBLISH_BACKPRESSURE_TIMEOUT: float = 2.0
 
 
 def export_tier_for_score(score: float) -> str | None:
@@ -141,7 +146,7 @@ class Signal:
     Fields
     ------
 
-    source:      The module that produced the signal (e.g. ``"maigret"``,
+    source:      The module that produced the signal (e.g. ``"username_platforms"``,
                  ``"username_pivot"``, ``"avatar_hasher"``).
     kind:        The kind of finding (see :data:`VALID_SIGNAL_KINDS`).
                  Unknown kinds log a warning and fall back to ``"other"``.
@@ -298,6 +303,11 @@ class AsyncSignalPool:
         self._display_subscribers: list[Callable[[Signal], Any]] = []
         self._scheduler: WorkScheduler | None = None
         self._dispatch_tasks: set[asyncio.Task[Any]] = set()
+        # R8 (S2) — background publish tasks spawned by the sync emit helpers
+        # (emit_email/emit_name/...). close() awaits these before terminating so
+        # a signal emitted just before close() cannot lose the sync-emit→close
+        # race and be dropped by the post-close publish guard.
+        self._publish_tasks: set[asyncio.Task[Any]] = set()
 
     # Properties --------------------------------------------------------
 
@@ -338,9 +348,13 @@ class AsyncSignalPool:
     async def publish(self, signal: Signal) -> None:
         """Push one signal onto the ingestion queue.
 
-        Never blocks the event loop — on a full queue we increment the
-        dropped counter and return so the caller can keep producing.
-        The lazy drain task is started on first call.
+        Fast path is a non-blocking ``put_nowait``. On a full queue we apply
+        *bounded backpressure* (Q5): await space for up to
+        ``_PUBLISH_BACKPRESSURE_TIMEOUT`` so the drain task can catch up and the
+        signal is not dropped — a large batch is processed fully as long as the
+        consumer keeps up. Only if space never frees within the bound is the signal
+        counted as dropped. The bound guarantees a producer can never hang. The lazy
+        drain task is started on first call.
         """
         if self._closed:
             logger.warning(
@@ -353,10 +367,19 @@ class AsyncSignalPool:
         self._ensure_drain_task()
         try:
             self._queue.put_nowait(signal)
+            return
         except asyncio.QueueFull:
+            pass
+        try:
+            await asyncio.wait_for(
+                self._queue.put(signal), timeout=_PUBLISH_BACKPRESSURE_TIMEOUT
+            )
+        except asyncio.TimeoutError:
             self._dropped += 1
             logger.warning(
-                "AsyncSignalPool queue is full (maxsize=%d); dropped signal from %s",
+                "AsyncSignalPool queue still full after %.1fs backpressure "
+                "(maxsize=%d); dropped signal from %s",
+                _PUBLISH_BACKPRESSURE_TIMEOUT,
                 self._queue.maxsize,
                 signal.source,
             )
@@ -542,7 +565,10 @@ class AsyncSignalPool:
                 signal.kind,
             )
             return
-        loop.create_task(self.publish(signal))
+        # R8 (S2) — track the task so close() can await it (see _publish_tasks).
+        task = loop.create_task(self.publish(signal))
+        self._publish_tasks.add(task)
+        task.add_done_callback(self._publish_tasks.discard)
 
     # Drain -------------------------------------------------------------
 
@@ -683,6 +709,12 @@ class AsyncSignalPool:
         """
         if self._closed:
             return
+        # R8 (S2) — absorb in-flight sync-emitted signals BEFORE flipping the
+        # closed flag: publish() drops once ``_closed`` is set, so these tasks
+        # must be awaited while publishing is still open. Re-check the set in a
+        # loop so a task created during the gather is caught too.
+        while self._publish_tasks:
+            await asyncio.gather(*tuple(self._publish_tasks), return_exceptions=True)
         self._closed = True
         self._ensure_drain_task()
         # Push the sentinel so the drain loop wakes up and runs to

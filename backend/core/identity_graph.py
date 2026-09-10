@@ -8,6 +8,13 @@ from urllib.parse import urlparse
 
 _USERNAME_KEYS = frozenset({"username", "login", "user", "handle", "matched_username"})
 _DISPLAY_KEYS = frozenset({"display_name", "name", "full_name", "real_name"})
+
+
+def _is_chrome_name(text: str) -> bool:
+    """RC2 gate — lazy import to avoid a module-load cycle."""
+    from .name_quality import contains_chrome_token
+
+    return contains_chrome_token(text)
 _PHOTO_KEYS = frozenset({
     "photo_url",
     "thumbnail_url",
@@ -199,6 +206,22 @@ class IdentityGraph:
         for module_name, finding in flat:
             if not isinstance(finding, dict):
                 continue
+            # RC1 (Output-Trust): an UNVERIFIED speculative account hit (a localpart
+            # guess fired at hundreds of sites) must NOT be fused into the subject's
+            # identity graph — that is exactly what merged dozens of unrelated people
+            # into one "identity". Only corroborated/verified accounts contribute
+            # graph nodes; the raw hits still live in the findings list for the
+            # analyst, just not as asserted identity.
+            _meta = finding.get("metadata")
+            if isinstance(_meta, dict) and _meta.get("verification") == "unverified":
+                continue
+            # RC3 (Output-Trust): domain-infrastructure contacts (WHOIS/RDAP
+            # registrar / abuse phone) are NOT the subject's identity — never fuse
+            # them into the person's graph.
+            if isinstance(_meta, dict) and (
+                _meta.get("is_infrastructure") or _meta.get("not_personal_pii")
+            ):
+                continue
             platform = str(finding.get("platform") or module_name or "unknown")
             platform_nid = graph._ensure_node(
                 "platform",
@@ -233,7 +256,13 @@ class IdentityGraph:
                 for key in _DISPLAY_KEYS:
                     val = payload.get(key)
                     if isinstance(val, str) and val.strip():
-                        display_name = val.strip()
+                        candidate_name = val.strip()
+                        # RC2 (Output-Trust): a display name carrying page-chrome /
+                        # marketing tokens ("Security Verification", "Upload Image")
+                        # is never a real identity — don't seed it as a name node.
+                        if _is_chrome_name(candidate_name):
+                            continue
+                        display_name = candidate_name
                 for key in _PHOTO_KEYS:
                     val = payload.get(key)
                     if isinstance(val, str) and val.strip().startswith("http"):

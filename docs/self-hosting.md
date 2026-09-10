@@ -87,7 +87,7 @@ Every setting is optional unless marked required.
 |----------|---------|-------------|
 | `MAX_CONCURRENT_MODULES` | `10` | Maximum number of modules that run in parallel per investigation |
 | `MODULE_TIMEOUT_SECONDS` | `30` | Per-module timeout; modules that exceed this are cancelled and marked `failed` |
-| `MODULE_TIMEOUT_OVERRIDES` | `{}` | Per-module timeout overrides as a JSON object (values in seconds). Example: `{"whatsmyname": 120, "account_discovery": 90}` |
+| `MODULE_TIMEOUT_OVERRIDES` | `{}` | Per-module timeout overrides as a JSON object (values in seconds). Example: `{"username_platforms": 120, "account_discovery": 90}` |
 | `ENABLE_INVESTIGATION_CACHE` | `true` | Cache complete investigation results; repeated queries within the window return instantly |
 | `INVESTIGATION_CACHE_WINDOW_MINUTES` | `30` | How long a cached result is considered fresh (minutes) |
 
@@ -99,10 +99,11 @@ Every setting is optional unless marked required.
 | `BREACH_DEEP_LIMIT` | `100` | Sites to probe; max 750 |
 | `BREACH_DEEP_FULL` | `false` | Probe all 750 HIBP sites |
 | `ENABLE_EMAIL_DISCOVERY` | `true` | Name-to-email dorks |
-| `ENABLE_MAIGRET_PLATFORMS` | `true` | Default true. Set to false to disable 2500+ platform sweep and reduce investigation time by ~35-90s. |
-| `ENABLE_MAIGRET_WAVE2` | `false` | Optional. Enable Wave 2 slow/fragile platform sweep. Requires `ENABLE_MAIGRET_PLATFORMS=true`. Adds ~90-150s. |
+| `ENABLE_USERNAME_PLATFORMS` | `true` | Default true. Set to false to disable the ~700-platform default wave and reduce investigation time by ~35-90s. |
+| `ENABLE_USERNAME_WAVE2` | `false` | Optional. Enable Wave 2 slow/fragile platform sweep. Requires `ENABLE_USERNAME_PLATFORMS=true`. Adds ~90-150s. |
 | `MAILACCESS_DISABLE_HEALTH` | `0` | Set to `1` to bypass platform-health skip decisions without deleting the SQLite probe history. |
-| `MAIGRET_FORCE_{PLATFORM}` | _(unset)_ | Per-platform demotion override. Replace `{PLATFORM}` with the uppercase, non-alphanumeric-stripped name. Example: `MAIGRET_FORCE_GITHUBCOM=true`. Any truthy value (`true`, `1`, `yes`, `on`) wins. |
+| `USERNAME_FORCE_{PLATFORM}` | _(unset)_ | Per-platform demotion override. Replace `{PLATFORM}` with the uppercase, non-alphanumeric-stripped name. Example: `USERNAME_FORCE_GITHUBCOM=true`. Any truthy value (`true`, `1`, `yes`, `on`) wins. |
+
 | `MAILACCESS_SHARE_HEALTH` | `false` | Phase 6D.3 documentation-only flag for `mailaccess platform-health --share`. The CLI requires the explicit `--share` flag — this env var is documentation only and never triggers sharing. |
 | `DOMAIN_CLUSTER_CAP` | `20` | Maximum platform domains checked for infrastructure clustering. |
 | `enable_domain_cluster` | `true` | Enable or disable domain infrastructure clustering. |
@@ -148,11 +149,11 @@ the eight source modules, and confidence-scoring details.
 
 MailAccess fetches the HIBP breach corpus on startup and caches it at `data/cache/breach_corpus.json` for 24h. No API key required for this fetch.
 
-The Maigret platform database (~3 MB JSON) is fetched automatically from GitHub on first use and cached at `~/.mailaccess/cache/maigret-data.json`. It refreshes every 24 hours. No manual setup is needed.
+The username-platform site data ships with MailAccess in the unified `data/mailaccess_sites.json` corpus and is loaded offline. There is no network fetch, no external tool, and no local cache — no legacy per-tool data cache exists. No manual setup is needed.
 
-To add custom platforms, edit `data/mailaccess-extra-sites.json` using the same format as Maigret's `data.json`. These custom additions are merged at runtime and are never overwritten by auto-refresh.
+To add custom platforms, add them to the unified `data/mailaccess_sites.json` corpus (schema in [docs/mailaccess-sites-schema.md](mailaccess-sites-schema.md)). These custom additions are loaded at runtime alongside the shipped sites.
 
-Enabling `ENABLE_MAIGRET_PLATFORMS` adds 35-90 seconds to investigation time for Wave 1. Wave 2 adds a further 90-150 seconds. For automated or batch use, consider whether the extended coverage is worth the runtime cost for your use case.
+Enabling `ENABLE_USERNAME_PLATFORMS` adds 35-90 seconds to investigation time for Wave 1. Wave 2 adds a further 90-150 seconds. For automated or batch use, consider whether the extended coverage is worth the runtime cost for your use case.
 
 The Defender's Brief is generated automatically for every investigation. Suppress it with the CLI `--no-brief` flag or by setting `SHOW_DEFENDERS_BRIEF=false` in `.env`.
 
@@ -160,7 +161,7 @@ The Defender's Brief is generated automatically for every investigation. Suppres
 
 > **Note:** `mailaccess platform-audit` shows platforms that have been probed
 > in your local investigations. This number grows over time. The full platform
-> database (2500+) is checked during every investigation regardless of how many
+> database (4,000+) is checked during every investigation regardless of how many
 > appear in the health DB.
 
 After every investigation, MailAccess automatically adjusts which platforms it
@@ -199,7 +200,7 @@ Every auto-action writes one JSONL line to `~/.mailaccess/platform_demotion.log`
 {"timestamp": "2026-06-24T10:00:00Z", "platform": "NoisySite.com", "action": "skip",
  "reason": "inconclusive_rate=0.82, probes=134",
  "stats": {"inconclusive_rate": 0.82, "hit_rate": 0.08, "total_probes": 134},
- "reversible_via": "MAIGRET_FORCE_NOISYSITECOM"}
+ "reversible_via": "USERNAME_FORCE_NOISYSITECOM"}
 ```
 
 The log is append-only and one JSON object per line. Use
@@ -212,12 +213,12 @@ To force a specific platform to run in its native wave regardless of health
 stats, set its override env var:
 
 ```bash
-MAIGRET_FORCE_NOISYSITECOM=true mailaccess investigate user@example.com
+USERNAME_FORCE_NOISYSITECOM=true mailaccess investigate user@example.com
 ```
 
 Mapping rule: take the platform name, strip non-alphanumeric characters,
-uppercase it, and prefix with `MAIGRET_FORCE_`. So `NoisySite.com` becomes
-`MAIGRET_FORCE_NOISYSITECOM`. Any truthy value (`true`, `1`, `yes`, `on`)
+uppercase it, and prefix with `USERNAME_FORCE_`. So `NoisySite.com` becomes
+`USERNAME_FORCE_NOISYSITECOM`. Any truthy value (`true`, `1`, `yes`, `on`)
 disables the auto-action for that platform.
 
 #### Community health sharing (opt-in)
@@ -299,16 +300,15 @@ All API keys are optional. Modules that require a missing key skip themselves wi
 
 ## Enabling Opt-in Modules
 
-Six opt-in features require explicit enabling per run or via `.env`:
+Five opt-in features require explicit enabling per run or via `.env`:
 
 | Module | Description |
 |--------|-------------|
 | `breach_deep` | Probes 100 breach sites (slow, ~90 s) |
-| `ghunt` | Deep Gmail intel (requires one-time `ghunt login` setup) |
 | `press_intel` | Press release contact extraction for business domains |
 | `email_discovery` | Name → email dorks (requires `SERPAPI_KEY`) |
-| `maigret_platforms` | Native Maigret engine across 2500+ platforms (set `ENABLE_MAIGRET_PLATFORMS=true`) |
-| `maigret_platforms` Wave 2 | Slower and more fragile Maigret sweep (set `ENABLE_MAIGRET_WAVE2=true`) |
+| `username_platforms` | Native username-platform engine over a 5,000+ platform corpus (set `ENABLE_USERNAME_PLATFORMS=true`) |
+| `username_platforms` Wave 2 | Slower and more fragile username-platform sweep (set `ENABLE_USERNAME_WAVE2=true`) |
 
 **Enable for one run** using the `-m` / `--enable` flag:
 
@@ -322,7 +322,7 @@ mailaccess investigate email -m all
 
 ```env
 ENABLE_BREACH_DEEP=true
-ENABLE_MAIGRET_PLATFORMS=true
+ENABLE_USERNAME_PLATFORMS=true
 ```
 
 `-m all` enables all opt-in modules for the current run only.
@@ -331,20 +331,19 @@ ENABLE_MAIGRET_PLATFORMS=true
 
 ## Module Timeout Overrides
 
-`whatsmyname` and `account_discovery` perform hundreds of HTTP requests per investigation and routinely exceed the default 30-second timeout. Set longer values in `MODULE_TIMEOUT_OVERRIDES` to prevent them from being cancelled early:
+`username_platforms` and `account_discovery` perform hundreds of HTTP requests per investigation and routinely exceed the default 30-second timeout. Set longer values in `MODULE_TIMEOUT_OVERRIDES` to prevent them from being cancelled early:
 
 ```
-MODULE_TIMEOUT_OVERRIDES={"whatsmyname": 120, "account_discovery": 90, "username_pivot": 180}
+MODULE_TIMEOUT_OVERRIDES={"username_platforms": 120, "account_discovery": 90, "username_pivot": 180}
 ```
 
 Recommended values by connection quality:
 
 | Module | Fast connection | Slow connection |
 |--------|----------------|-----------------|
-| `whatsmyname` | `120` | `240` |
-| `account_discovery` | `90` | `180` |
+| `username_platforms` | `120` | `240` |
+| `account_discovery` | `180` | `360` |
 | `username_pivot` | `180` | `360` |
-| `user_scanner` | `180` | `300` |
 
 Modules that hit their timeout return `status: partial` with whatever findings were collected up to that point.
 
@@ -494,4 +493,4 @@ cp .env.example .env      # all API keys are optional
 docker compose up         # backend :8000  ·  frontend :3000
 ```
 
-Open **http://localhost:3000** in your browser. Full setup guide: [docs/self-hosting.md](docs/self-hosting.md).
+Open **http://localhost:3000** in your browser. The sections below cover the full `.env` reference, PostgreSQL, proxy/Tor, and Maltego setup.

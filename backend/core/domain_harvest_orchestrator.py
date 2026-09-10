@@ -405,6 +405,41 @@ def _extract_role(finding: dict[str, Any]) -> tuple[bool, str | None]:
     return bool(meta.get("is_role")), meta.get("role_match_type")
 
 
+#: Person-relevant metadata keys used to detect COMPETING person claims (R6).
+_PERSON_CLAIM_FIELDS = (
+    "name",
+    "full_name",
+    "first",
+    "first_name",
+    "last",
+    "last_name",
+    "title",
+    "job_title",
+    "seniority",
+    "department",
+    "linkedin_url",
+    "phone",
+    "location",
+)
+
+
+def _person_claim_signature(meta: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """A hashable signature of the person claim carried by *meta*.
+
+    R6 (S3): two findings from the same module for the same email carry
+    DIFFERENT signatures only when their person fields (name/title/…) differ, so
+    a competing claim is retained as distinct evidence while identical or
+    person-claim-free repeats collapse. Deterministic (sorted, lower-cased).
+    """
+    if not isinstance(meta, dict):
+        return ()
+    return tuple(
+        (field, str(meta[field]).strip().lower())
+        for field in _PERSON_CLAIM_FIELDS
+        if meta.get(field) not in (None, "")
+    )
+
+
 def _extract_source_types(finding: dict[str, Any]) -> list[str]:
     """Pull source_type(s) from a finding's metadata."""
     meta = finding.get("metadata") or {}
@@ -525,17 +560,34 @@ def _infer_confirmed_pattern_from_emails(
 
 
 def _name_matches_email_local(name: str, local_part: str) -> bool:
+    """Whether a full name plausibly generated an email local-part.
+
+    Q7: the initial+token clauses must match the local-part EXACTLY, not by prefix.
+    A prefix match let "Alice Smith" corroborate the unrelated username "alicesanders"
+    (``first + last[:1]`` = ``alices``, and ``alicesanders`` starts with ``alices``),
+    manufacturing false high-confidence identities. Exact patterns (plus the
+    both-tokens-present case) require genuine correspondence.
+    """
     tokens = [t.lower() for t in re.findall(r"[a-zA-Z]+", name)]
     if len(tokens) < 2:
         return False
     local = re.sub(r"[^a-z0-9]", "", local_part.lower())
+    if not local:
+        return False
     first, last = tokens[0], tokens[-1]
-    return (
-        (first in local and last in local)
-        or local.startswith(first[:1] + last)
-        or local.startswith(first + last[:1])
-        or local == f"{first[:1]}{last}"
-    )
+    # Both full name tokens appear in the local part (e.g. "alice.smith" → alicesmith).
+    if first in local and last in local:
+        return True
+    # Otherwise the local-part must EXACTLY equal a supported name pattern.
+    patterns = {
+        f"{first}{last}",       # alicesmith
+        f"{last}{first}",       # smithalice
+        f"{first[:1]}{last}",   # asmith
+        f"{first}{last[:1]}",   # alices
+        f"{last}{first[:1]}",   # smitha
+        f"{last[:1]}{first}",   # salice
+    }
+    return local in patterns
 
 
 def _pattern_metadata(entry: HarvestedEmail) -> dict[str, Any] | None:
@@ -693,7 +745,9 @@ def _apply_signal_pool_correlation(
             name_sources = set(name_signal.get("sources") or [])
             if source_modules and name_sources and source_modules >= name_sources:
                 continue
-            entry.confidence_score = round(entry.confidence_score * 2.5, 4)
+            # Q7: clip the correlation boost to MAX_SCORE like every other boost site
+            # (660/1404). Unclipped, a 1.5 score became 3.75, blowing the documented range.
+            entry.confidence_score = round(min(entry.confidence_score * 2.5, MAX_SCORE), 4)
             entry.confidence_label = label_for_score(entry.confidence_score)
             entry.evidence.append(
                 {
@@ -789,8 +843,15 @@ def _aggregate(
     # subaddress_key(email) → HarvestedEmail — the dedup key.
     # Email variants seen for the same key are recorded in
     # entry.subaddress_variants for analyst visibility.
-    first_meta_seen: dict[tuple[str, str], dict[str, Any]] = {}
+    first_meta_seen: dict[tuple[Any, ...], dict[str, Any]] = {}
     seen_urls: dict[str, set[str]] = {}
+    # Q3 / Part 0.2 — accumulate the source-types (and any confidence breakdowns) of
+    # EVERY finding per email, order-independently. The evidence *dict* is still
+    # deduped to one-per-(module,email) to bound duplicate URLs, but the aggregated
+    # claims that drive the score are collected from all findings — so shuffling the
+    # input can no longer change the retained source-types or the score.
+    source_type_acc: dict[str, set[str]] = {}
+    breakdown_acc: dict[str, list[dict[str, Any]]] = {}
 
     for module_name, result in module_results.items():
         safe_result = _normalize_module_result(module_name, result)
@@ -901,11 +962,33 @@ def _aggregate(
             if meta.get("source_type") in ("ca_attested", "pgp_uid"):
                 entry.is_pgp_or_ca = True
 
-            # MUST-FIX M4: dedupe evidence by (module, email). The
-            # FIRST finding's metadata is the canonical evidence
-            # entry; subsequent findings from the same module do NOT
-            # append another evidence dict.
-            key = (module_name, email)
+            # Q3 / Part 0.2 / R5 (S3): accumulate this finding's source-types and
+            # breakdown order-independently, keyed by the SAME group key
+            # (``key`` == subaddress_key(email) here) used for ``grouped`` — NOT
+            # the raw email. Keying by the raw email scattered a subaddress
+            # variant's source-types under a different key from its group, so the
+            # score depended on which variant happened to become canonical first.
+            st_acc = source_type_acc.setdefault(key, set())
+            st_acc.update(_extract_source_types({"metadata": meta}))
+            _status = meta.get("verification_status")
+            if _status == "verified":
+                st_acc.add("permutation_verified")
+            elif _status == "catchall":
+                st_acc.add("permutation_catchall")
+            _cb = meta.get("confidence_breakdown")
+            if isinstance(_cb, dict):
+                breakdown_acc.setdefault(key, []).append(_cb)
+
+            # M4 / R6 (S3): dedupe evidence by (module, email, person-claim
+            # signature). The first finding for a given claim is the canonical
+            # evidence entry, but a later finding from the SAME module carrying a
+            # DIFFERENT person claim (e.g. a competing title) is RETAINED rather
+            # than dropped by a first-wins rule — so the downstream 1E resolver
+            # sees every competing claim and can resolve/flag the conflict.
+            # Identical or person-claim-free repeats still collapse (their
+            # distinguishing URLs are captured in aggregated_source_urls below),
+            # so display isn't bloated.
+            key = (module_name, email, _person_claim_signature(meta))
             if key not in first_meta_seen:
                 first_meta_seen[key] = meta
                 entry.evidence.append({"module": module_name, "metadata": meta})
@@ -949,40 +1032,42 @@ def _aggregate(
     # already expects.
     # ------------------------------------------------------------------
     final: list[HarvestedEmail] = []
-    for entry in grouped.values():
+    for group_key, entry in grouped.items():
+        # R5 (S3) — choose the canonical representative DETERMINISTICALLY so the
+        # emitted address is invariant to finding arrival order (previously it was
+        # whichever variant arrived first). Prefer the base mailbox form (the
+        # group key, e.g. ``foo@gmail.com`` for a collapsed subaddress group),
+        # else the lexicographically smallest observed variant. For a custom
+        # domain nothing collapses, so ``forms`` is a singleton and this is a
+        # no-op.
+        forms = {entry.email, *entry.subaddress_variants}
+        representative = group_key if group_key in forms else min(forms)
+        entry.email = representative
+        entry.subaddress_variants = sorted(forms - {representative})
+
         # Build the canonical, sorted, deduplicated found_by_modules list.
         unique_modules = sorted(entry.occurrence_count_per_module.keys())
         entry.found_by_modules = unique_modules
 
-        # Collect all source_types across evidence.
-        all_source_types: list[str] = []
-        # MUST-FIX S4: also harvest a per-evidence
-        # ``confidence_breakdown`` so the most useful breakdown (typically
-        # the one with verification status set, or with the strongest
-        # source) can be surfaced to the analyst.
+        # Q3 / Part 0.2 / R5 (S3): source_types come from the order-independent
+        # accumulator (every finding's types unioned), keyed by the SAME group
+        # key used at accumulation time (subaddress_key) — NOT the order-dependent
+        # first-seen variant. Sorted for a deterministic breakdown.
+        all_source_types = sorted(source_type_acc.get(group_key, set()))
+        # Pick the module-provided breakdown deterministically: the one with the
+        # highest base_score (tie-break by sorted source_types), not "first seen".
+        candidate_breakdowns = breakdown_acc.get(group_key, [])
         best_breakdown: dict[str, Any] | None = None
-        for ev in entry.evidence:
-            meta = ev.get("metadata") or {}
-            if not isinstance(meta, dict):
-                continue
-            all_source_types.extend(_extract_source_types({"metadata": meta}))
-            # Also pull permutation_verified variants from pattern_and_verify
-            status = meta.get("verification_status")
-            if status == "verified" and "permutation_verified" not in all_source_types:
-                all_source_types.append("permutation_verified")
-            elif status in ("catchall",) and "permutation_catchall" not in all_source_types:
-                all_source_types.append("permutation_catchall")
-
-            # MUST-FIX S4: pick the FIRST observed confidence_breakdown
-            # the evidence carries. Modules that don't compute breakdowns
-            # contribute nothing; pattern_and_verify is the only one
-            # that does today, and its breakdown encodes both the
-            # source_types AND the multiplier / freshness factors used
-            # to land on the final score — exactly the "why this
-            # confidence label" the analyst needs to see.
-            cb = meta.get("confidence_breakdown")
-            if isinstance(cb, dict) and best_breakdown is None:
-                best_breakdown = cb
+        if candidate_breakdowns:
+            best_breakdown = dict(
+                max(
+                    candidate_breakdowns,
+                    key=lambda cb: (
+                        float(cb.get("base_score") or 0.0),
+                        str(sorted(cb.get("source_types") or [])),
+                    ),
+                )
+            )
 
         score, label = compute_confidence(
             source_count=len(unique_modules),
@@ -1191,12 +1276,16 @@ async def _apply_deliverability_grade(
         from .deliverability_score import compute_deliverability_score, log_score_sample
         from .disposable_domains import is_disposable_domain, is_disposable_email
         from .mail_provider import detect_provider_from_mx
-        from .mx_resolver import resolve_mx
+        from .mx_resolver import resolve_mx_typed
         from .product_mode import get_active_mode
 
         mode = get_active_mode()
-        mx = await resolve_mx(domain)
-        mx_present = bool(mx)
+        # R4 (S4): typed MX outcome so a DNS failure (unknown) is never conflated
+        # with an authoritative "no mail" (which would grade every contact Invalid).
+        mx_resolution = await resolve_mx_typed(domain)
+        mx = mx_resolution.records
+        mx_present = mx_resolution.usable
+        mx_status = mx_resolution.status.value
         provider = detect_provider_from_mx(mx, target_domain=domain).provider
         dns = await resolve_domain_email_dns_signals(domain)
         spf_present = bool(dns.get("spf_present"))
@@ -1244,6 +1333,7 @@ async def _apply_deliverability_grade(
                 score=score,
                 is_disposable=is_disposable,
                 mx_present=mx_present,
+                mx_status=mx_status,
                 is_role=entry.is_role,
                 catchall=catchall_detected,
                 smtp_status=sig["smtp_status"],
@@ -3034,43 +3124,29 @@ async def _safe_phase12_run(
         kwargs["scrape_session"] = scrape_session
         kwargs["source_telemetry"] = source_telemetry
     accepted = _kwargs_accepted(module)
+    filtered = kwargs if accepted is None else {k: v for k, v in kwargs.items() if k in accepted}
+
+    # R15 (S5): validate the BINDING before invocation. A TypeError raised while
+    # *calling* ``run`` is a signature mismatch (e.g. a bare test mock) — the only
+    # case the positional fallback is meant to handle. A TypeError raised while
+    # *executing* the coroutine is the module's own bug: it must be REPORTED, not
+    # silently re-invoked with dropped options (which duplicated work and changed
+    # behaviour). So we bind first, retry positionally only on a binding error,
+    # then await exactly once.
     try:
-        if accepted is None:
-            # Generic callable — pass everything.
-            result = await _run_with_soft_timeout(
-                name,
-                module.run(domain, **kwargs),
-                budget,
-                soft_timeout=soft_timeout,
-            )
-            normalized = _normalize_module_result(name, result)
-            _emit_finding_signals(signal_pool, name, normalized.findings, domain)
-            return name, normalized
-        filtered = {k: v for k, v in kwargs.items() if k in accepted}
-        result = await _run_with_soft_timeout(
-            name,
-            module.run(domain, **filtered),
-            budget,
-            soft_timeout=soft_timeout,
-        )
-        normalized = _normalize_module_result(name, result)
-        _emit_finding_signals(signal_pool, name, normalized.findings, domain)
-        return name, normalized
+        coroutine = module.run(domain, **filtered)
     except TypeError:
-        # Mocks that don't accept our kwargs — fall back to positional.
+        coroutine = module.run(domain)
+
+    try:
         result = await _run_with_soft_timeout(
-            name,
-            module.run(domain),
-            budget,
-            soft_timeout=soft_timeout,
+            name, coroutine, budget, soft_timeout=soft_timeout
         )
         normalized = _normalize_module_result(name, result)
         _emit_finding_signals(signal_pool, name, normalized.findings, domain)
         return name, normalized
-    except Exception as exc:  # noqa: BLE001
-        _LOG.warning(
-            "domain_harvest: %s crashed: %s", name, exc
-        )
+    except Exception as exc:  # noqa: BLE001 - once execution starts, report it
+        _LOG.warning("domain_harvest: %s crashed: %s", name, exc)
         return name, ModuleResult(
             status=ModuleStatus.FAILED,
             errors=[f"{name}: {exc}"],
@@ -3530,6 +3606,57 @@ async def run_domain_harvest(
         if module is not None
     }
 
+    # R17 (S5): ``content_intelligence_callable`` is a legacy hook from the old
+    # ``_orchestrate`` pipeline. The live adaptive path (``run_adaptive_harvest``)
+    # does structured content extraction in ``harvest_runner._fetch_and_extract``
+    # and does NOT consume this callable, so rather than silently accepting and
+    # dropping it we reject it EXPLICITLY with a warning. It is retained in the
+    # signature only for backward compatibility.
+    if content_intelligence_callable is not None:
+        _LOG.warning(
+            "run_domain_harvest: content_intelligence_callable is deprecated and "
+            "IGNORED by the adaptive pipeline; structured content extraction now "
+            "runs in harvest_runner._fetch_and_extract."
+        )
+
+    # Injected modules are the isolated/mock path used by the orchestrator
+    # tests and embedders. Disable network-heavy identity enrichment there by
+    # default; production calls without injected modules keep it enabled.
+    if enable_email_identity_enrichment is None:
+        enable_email_identity_enrichment = not bool(module_overrides)
+
+    # R1 (S1) — resolve the run's scope/policy ONCE, before any cache reuse.
+    # The product mode plus the coverage-affecting flags together define a scope
+    # signature; read-first may only reuse a snapshot collected under the EXACT
+    # same signature (see corpus_store.scope_signature). Resolving the mode here,
+    # rather than after the read, is precisely what makes read-first scope- and
+    # mode-aware: a public-mode request must never reuse security-mode evidence,
+    # and a narrower crawl must never satisfy a broader request.
+    from .product_mode import active_mailbox_probing_allowed, normalize_mode
+
+    resolved_mode = normalize_mode(mode if mode is not None else settings.product_mode)
+    # A mode that forbids active mailbox probing (the FTC line for
+    # public-business-contact) collects a strictly narrower crawl — SMTP
+    # verification is disabled. Apply it here so the signature reflects the
+    # actual collection scope and the two never alias.
+    if not active_mailbox_probing_allowed(resolved_mode):
+        enable_smtp = False
+
+    from .corpus_store import SCOPE_SIGNATURE_KEY, read_fresh_crawl, scope_signature
+
+    request_scope = scope_signature(
+        mode=resolved_mode.value,
+        with_subdomains=with_subdomains,
+        subdomain_deep=subdomain_deep,
+        subdomain_calibrate=subdomain_calibrate,
+        enable_smtp=enable_smtp,
+        enable_m365=enable_m365,
+        enable_yahoo=enable_yahoo,
+        aggressive=aggressive,
+        dork_lite_mode=dork_lite_mode,
+        enable_email_identity_enrichment=enable_email_identity_enrichment,
+    )
+
     # Phase 1D — read-first from the unified corpus DB (replaces the per-domain
     # JSON cache as the source of truth). Explicit module injection is the
     # deterministic test/embedder seam and must not consume or overwrite a real
@@ -3538,17 +3665,9 @@ async def run_domain_harvest(
         module_overrides
     )
     if corpus_enabled and not force:
-        from .corpus_store import read_fresh_crawl
-
-        cached = await read_fresh_crawl(domain)
+        cached = await read_fresh_crawl(domain, request_scope)
         if cached is not None:
             return cached
-
-    # Injected modules are the isolated/mock path used by the orchestrator
-    # tests and embedders. Disable network-heavy identity enrichment there by
-    # default; production calls without injected modules keep it enabled.
-    if enable_email_identity_enrichment is None:
-        enable_email_identity_enrichment = not bool(module_overrides)
 
     # An injected-module run is a deterministic test/embedder seam. Do not
     # launch real network modules that were not explicitly supplied; that
@@ -3592,14 +3711,10 @@ async def run_domain_harvest(
     # mode into skip_modules by unioning in every module the mode disallows. In
     # security-investigation the blocked set is empty (zero regression). Resolved
     # once here and reused for the run-manifest stamp below.
-    from .product_mode import (
-        active_mailbox_probing_allowed,
-        blocked_modules,
-        normalize_mode,
-        set_active_mode,
-    )
+    from .product_mode import blocked_modules, set_active_mode
 
-    resolved_mode = normalize_mode(mode if mode is not None else settings.product_mode)
+    # ``resolved_mode`` was resolved once above (before the read-first) so the
+    # cache reuse could be mode-aware; reuse it here for the lawful gate.
     set_active_mode(resolved_mode)
     effective_skip_modules |= {str(name) for name in blocked_modules(resolved_mode)}
     # Phase 4C — skip sources auto-demoted for no longer earning their runtime.
@@ -3612,11 +3727,9 @@ async def run_domain_harvest(
             effective_skip_modules |= demoted_source_names()
         except Exception:
             _LOG.debug("source demotion consult unavailable", exc_info=True)
-    # Phase 2C — no active mailbox probing for growth in public-business-contact
-    # mode (the FTC line). Candidates may still be generated from evidenced
-    # people/patterns, but active SMTP verification is disabled.
-    if not active_mailbox_probing_allowed(resolved_mode):
-        enable_smtp = False
+    # (Active-mailbox-probing gate — ``enable_smtp`` disable for modes that
+    #  forbid it — was applied above, before the read-first, so the scope
+    #  signature reflects it.)
 
     result = await run_adaptive_harvest(
         domain=domain,
@@ -3648,6 +3761,10 @@ async def run_domain_harvest(
     # the collection mode. ``resolved_mode`` was computed above with the gate.
     if isinstance(getattr(result, "metadata", None), dict):
         result.metadata["mode"] = resolved_mode.value
+        # R1 — persist the full scope signature so a later read-first can require
+        # an exact scope match (mode + coverage envelope) before reusing this
+        # snapshot, rather than serving it to any request for the same domain.
+        result.metadata[SCOPE_SIGNATURE_KEY] = request_scope
     if corpus_enabled:
         from .corpus_store import write_back
 
@@ -3793,6 +3910,31 @@ async def _run_hunter(
             "monthly_cap": HUNTER_MONTHLY_CAP,
         },
     )
+
+
+def _smtp_availability_metadata(
+    pattern_meta: dict[str, Any], budget: Any | None
+) -> dict[str, Any]:
+    """RC7 (Output-Trust): honest SMTP-availability signal on the harvest result.
+
+    Distinguishes "SMTP disabled" from "SMTP enabled but no probe reached a mail
+    server" (e.g. outbound port 25 blocked). In the latter case the grades are
+    non-SMTP estimates, so the output must say so explicitly rather than implying
+    verification happened.
+    """
+    meta: dict[str, Any] = {"budget": budget.stats} if budget is not None else {}
+    smtp_enabled = bool(pattern_meta.get("smtp_verification_enabled", False))
+    smtp_probes = int(pattern_meta.get("smtp_probes_used", 0) or 0)
+    meta["smtp_verification_enabled"] = smtp_enabled
+    meta["smtp_probes_used"] = smtp_probes
+    if smtp_enabled and smtp_probes == 0:
+        meta["smtp_unavailable"] = True
+        meta["smtp_status_note"] = (
+            "SMTP verification unavailable - no probe reached a mail server "
+            "(e.g. outbound port 25 blocked); deliverability grades are non-SMTP "
+            "estimates."
+        )
+    return meta
 
 
 async def _orchestrate(
@@ -4205,14 +4347,20 @@ async def _orchestrate(
             role_account_count=role,
             personal_email_count=personal,
             errors=errors,
+            # RC7 (Output-Trust): report SMTP as USED only when it was actually
+            # ATTEMPTED (>=1 probe) — not merely enabled. With port 25 blocked the
+            # verifier runs zero probes, so claiming "smtp_verification_used: true /
+            # attempted: 0" is a lie. When SMTP was enabled but no probe landed, the
+            # result carries an explicit smtp_unavailable signal (see metadata).
             smtp_verification_used=bool(
                 pattern_meta.get("smtp_verification_enabled", False)
+                and int(pattern_meta.get("smtp_probes_used", 0) or 0) > 0
             ),
             catchall_detected=catchall_detected,
             confirmed_pattern=confirmed_pattern,
             employee_names_processed=len(employee_names),
             fetch_cache_stats=cache_stats or None,
-            metadata={"budget": budget.stats} if budget is not None else {},
+            metadata=_smtp_availability_metadata(pattern_meta, budget),
             shadow_profiles=shadow_profiles,
         )
     finally:

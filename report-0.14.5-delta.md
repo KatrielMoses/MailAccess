@@ -140,7 +140,7 @@ Owned-domain known-good mailbox found with no false positive on the labeled set.
 - **Stability:** CV ≈ 0.007–0.034 for most targets; rootaccess & lavelle harvest CV = 0 (identical yields across 3 runs); stripe CV 0.33 (one failed run). ≥ v0.14.4 stability.
 - **Latency:** comparable to baseline (rootaccess ~893s, stripe ~899s); 5B block-reduction gains are volume-dependent and not expected to show on this small fixed set (documented deferred).
 - **Failure modes:** 1 stripe harvest timeout (identical to v0.14.4); rootaccess reliability improved 2/3 → 3/3.
-- **Policy posture:** sensitive modules (`breach_deep`, `breachdirectory`, `ghunt`) skipped 15× (keyless + mode gate); no sensitive module fired; mode + source-policy stamped on every observation/manifest/audit entry.
+- **Policy posture:** sensitive modules (`breach_deep`, `breachdirectory`) skipped 15× (keyless + mode gate); no sensitive module fired; mode + source-policy stamped on every observation/manifest/audit entry.
 
 **Verdict:** no default-mode yield or quality regression; substantial new deliverability/lead coverage; the one prior hard failure (lavelle investigate) is fixed.
 

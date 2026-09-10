@@ -7,17 +7,12 @@ _BREACH_MODULES = frozenset(
 )
 _USERNAME_ENUM_MODULES = frozenset(
     {
-        "sherlock_platforms",
-        "maigret_platforms",
-        "blackbird_platforms",
-        "nexfil_platforms",
-        "whatsmyname",
+        "username_platforms",
         "github_code_search",
         "pastebin_search",
         "fediverse_discovery",
         "gravatar_lookup",
         "account_discovery",
-        "user_scanner",
         "username_pivot",
     }
 )
@@ -28,7 +23,7 @@ _SOCIAL_MODULES = frozenset(
     {
         "gravatar",
         "social_links",
-        "ghunt",
+        "google_account_intel",
         "social",
         "twitter_profile",
         "linkedin_serp",
@@ -47,6 +42,18 @@ _POST_PRIMARY_ONLY = frozenset(
         "marketplace_profile",
         "domain_cluster",
         "breach_aggregator",
+    }
+)
+
+# T1 (Output-Trust final): SPECULATIVE enumerators — they probe a guess derived
+# from the bare email localpart (not confirmed evidence) across a large corpus.
+# The PrimaryPhase runs these AFTER the real-signal / evidence modules so a heavy
+# localpart sweep can never starve the sources that actually confirm identity
+# (github/PGP/keybase/gravatar/…). Their hits are also gated to unverified (RC1).
+_SPECULATIVE_ENUMERATION = frozenset(
+    {
+        "username_platforms",
+        "account_discovery",
     }
 )
 
@@ -70,13 +77,8 @@ _CONFIDENCE_MULTIPLIER: dict[str, float] = {
     "none": 0.0,
 }
 _MODULE_CAP: dict[str, int] = {
-    "whatsmyname": 20,
-    "maigret_platforms": 25,
-    "sherlock_platforms": 30,
-    "nexfil_platforms": 25,
-    "blackbird_platforms": 30,
+    "username_platforms": 25,
     "account_discovery": 15,
-    "user_scanner": 15,
     "username_pivot": 10,
     "email_discovery": 10,
     "social": 10,
@@ -99,19 +101,15 @@ _MODULE_DEFAULT_TIMEOUTS: dict[str, int] = {
     "github_commits": 90,
 }
 _MODULE_TIMEOUT_FLOORS: dict[str, int] = {
-    "account_discovery": 120,
+    "account_discovery": 180,
     "username_pivot": 120,
-    "user_scanner": 180,
-    "whatsmyname": 200,
-    "maigret_platforms": 180,
-    "sherlock_platforms": 180,
+    "username_platforms": 180,
 }
 _OPT_IN_FLAG_BY_MODULE: dict[str, str] = {
     "breach_deep": "enable_breach_deep",
-    "ghunt": "enable_ghunt",
     "email_discovery": "enable_email_discovery",
     "press_intel": "enable_press_intel",
-    "maigret_platforms": "enable_maigret_platforms",
+    "username_platforms": "enable_username_platforms",
 }
 
 

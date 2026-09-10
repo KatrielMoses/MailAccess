@@ -76,6 +76,7 @@ def grade_email(
     score: DeliverabilityScore | None = None,
     is_disposable: bool = False,
     mx_present: bool = True,
+    mx_status: str | None = None,
     is_role: bool = False,
     catchall: bool | None = None,
     smtp_status: str | None = None,
@@ -109,13 +110,23 @@ def grade_email(
     smtp = str(smtp_status or "").lower()
     prov = str(provider_status or "").lower()
 
+    # R4 (S4): a transient MX-lookup failure is UNKNOWN, never definitive.
+    mx_unknown = (not mx_present) and str(mx_status or "") == "temporary_error"
+
     # 1. Hard invalids — no mailbox can exist.
     if is_disposable:
         reasons.append("disposable/throwaway domain")
         return done(GRADE_INVALID)
     if not mx_present:
-        reasons.append("no MX records — domain accepts no mail")
-        return done(GRADE_INVALID)
+        # Distinguish a DNS failure (UNKNOWN) from an authoritative "no mail"
+        # answer. A transient error must NOT mark the address Invalid — that
+        # would condemn every contact on the domain over a blip. A positive
+        # signal below can still confirm; otherwise it degrades to Unknown.
+        if mx_unknown:
+            reasons.append("MX lookup unavailable (DNS error) — deliverability unknown")
+        else:
+            reasons.append("no MX records — domain accepts no mail")
+            return done(GRADE_INVALID)
 
     # 2. Authoritative negatives — a verifier said the mailbox does not exist.
     if smtp in _SMTP_NEGATIVE or smtp_exists is False:
@@ -165,6 +176,10 @@ def grade_email(
         return done(GRADE_RISKY)
     if p >= _UNKNOWN_FLOOR:
         reasons.append(f"non-SMTP score {p:.2f}: insufficient signal to grade")
+        return done(GRADE_UNKNOWN)
+    if mx_unknown:
+        # R4: a weak score driven by an UNKNOWN MX is not evidence of invalidity.
+        reasons.append("MX lookup unavailable — insufficient signal, not a definitive invalid")
         return done(GRADE_UNKNOWN)
     reasons.append(f"non-SMTP score {p:.2f}: weak infrastructure signal")
     return done(GRADE_INVALID)

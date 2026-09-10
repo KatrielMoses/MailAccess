@@ -77,16 +77,22 @@ def _compute_exposure_score(
         if result.status not in (ModuleStatus.SUCCESS, ModuleStatus.PARTIAL):
             continue
         weight = module_weight(name)
-        module_score = sum(
-            weight
-            * _CONFIDENCE_MULTIPLIER.get(
-                finding.get("confidence", "high")
-                if isinstance(finding, dict)
-                else "high",
-                1.0,
-            )
-            for finding in result.findings
-        )
+        module_score = 0.0
+        for finding in result.findings:
+            confidence = "high"
+            if isinstance(finding, dict):
+                meta = finding.get("metadata") if isinstance(finding.get("metadata"), dict) else {}
+                # RC4 (Output-Trust): the risk score must reflect CORROBORATED
+                # evidence, not finding VOLUME. An uncorroborated speculative hit
+                # (RC1: verification == "unverified") is not evidence — a
+                # localpart guess firing at hundreds of sites must not push an
+                # identity-less address to "critical". Domain-infrastructure
+                # contacts (RC3) are not the subject's exposure either. Neither
+                # contributes to the score.
+                if meta.get("verification") == "unverified" or meta.get("is_infrastructure"):
+                    continue
+                confidence = finding.get("confidence", "high")
+            module_score += weight * _CONFIDENCE_MULTIPLIER.get(confidence, 1.0)
         cap = _MODULE_CAP.get(name)
         total += min(module_score, cap) if cap is not None else module_score
 
@@ -250,8 +256,13 @@ class InvestigationEngine:
                 self.status = InvestigationStatus.RUNNING
                 await self._set_status(investigation_id, InvestigationStatus.RUNNING)
 
-                from ..config import settings as config
-                from ._phase_runner import settings_override
+                from ..config import (
+                    reset_run_opt_in_flags,
+                    set_run_opt_in_flags,
+                )
+                from ..config import (
+                    settings as config,
+                )
                 from .investigation_budget import InvestigationBudget
                 from .phases import PHASE_DAG
                 from .product_mode import normalize_mode
@@ -278,12 +289,64 @@ class InvestigationEngine:
                 if effective_modules is None and config.investigation_fast_modules:
                     effective_modules = list(config.investigation_fast_modules)
 
-                opt_in_overrides = {
-                    _OPT_IN_FLAG_BY_MODULE[name]: True
+                # L1 — publish this run's opt-in flags task-locally instead of
+                # mutating the shared `config` singleton across phase awaits, so
+                # concurrent investigations cannot cross-contaminate each other's
+                # feature flags. Read sites use `config.opt_in_active(...)`.
+                opt_in_flags = {
+                    _OPT_IN_FLAG_BY_MODULE[name]
                     for name in (enable_modules or [])
                     if name in _OPT_IN_FLAG_BY_MODULE
                 }
-                with settings_override(config, **opt_in_overrides):
+                opt_in_token = set_run_opt_in_flags(opt_in_flags)
+
+                # RC5 (Output-Trust): decide the investigate entry gates ONCE.
+                # If the domain does not resolve, the mailbox cannot exist — do NOT
+                # let the localpart enumerator fabricate an identity from soft hits.
+                # A role/system address (noreply@, info@) is not a person.
+                from .investigation_gate import reset_target_gate, set_target_gate
+
+                domain = current_email.split("@", 1)[1] if "@" in current_email else ""
+                try:
+                    from .name_consensus import is_role_or_system_email
+
+                    is_role_system = bool(is_role_or_system_email(current_email))
+                except Exception:
+                    is_role_system = False
+                domain_resolves = True
+                if domain:
+                    try:
+                        from .mx_resolver import MxStatus, resolve_mx_typed
+
+                        _mx = await resolve_mx_typed(domain)
+                        # No MX AND no A/AAAA → the domain does not resolve. A
+                        # transient DNS error stays "resolves" (fail open — we are
+                        # only uncertain, not certain it is absent).
+                        domain_resolves = _mx.status is not MxStatus.NO_RECORDS
+                    except Exception:
+                        domain_resolves = True
+                gate_token = set_target_gate(
+                    domain_resolves=domain_resolves, is_role_system=is_role_system
+                )
+                if not domain_resolves:
+                    collected["domain_resolution"] = ModuleResult(
+                        status=ModuleStatus.SUCCESS,
+                        findings=[{
+                            "platform": "domain_resolution",
+                            "signal_type": "domain_status",
+                            "confidence": "high",
+                            "metadata": {
+                                "domain": domain,
+                                "resolves": False,
+                                "note": (
+                                    "domain does not resolve — mailbox cannot exist; "
+                                    "personal identity enumeration skipped"
+                                ),
+                            },
+                        }],
+                        metadata={"domain": domain, "resolves": False},
+                    )
+                try:
                     for phase in PHASE_DAG:
                         await phase.run(
                             investigation_id=investigation_id,
@@ -355,6 +418,9 @@ class InvestigationEngine:
                     except Exception:
                         logger.exception("run manifest skipped for %s", investigation_id)
                     await self._dispatch_webhooks(investigation_id, email, final)
+                finally:
+                    reset_run_opt_in_flags(opt_in_token)
+                    reset_target_gate(gate_token)
             except Exception:
                 logger.exception("Investigation %s failed", investigation_id)
                 self.status = InvestigationStatus.FAILED

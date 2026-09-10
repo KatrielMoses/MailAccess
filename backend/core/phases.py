@@ -13,6 +13,7 @@ from .policy import (
     _BREACH_MODULES,
     _MODULE_DEFAULT_TIMEOUTS,
     _POST_PRIMARY_ONLY,
+    _SPECULATIVE_ENUMERATION,
 )
 
 logger = logging.getLogger(__name__)
@@ -142,9 +143,23 @@ class PrimaryPhase(InvestigationPhase):
                 ),
             )
 
+        # T1 (Output-Trust final): run the EVIDENCE / real-signal modules first,
+        # then the SPECULATIVE localpart enumerators with whatever budget remains.
+        # Previously all primary modules ran in one concurrent burst, so a heavy
+        # localpart sweep (username_platforms) saturated the shared network/budget
+        # and starved the sources that actually confirm identity (github/PGP/
+        # keybase/gravatar) — they'd time out or be budget-skipped. Reserving the
+        # budget for evidence first is the fix; the speculative wave then runs (and
+        # is budget-skipped by run_one_module if evidence already used the time).
+        evidence_classes = [c for c in classes if c.name not in _SPECULATIVE_ENUMERATION]
+        speculative_classes = [c for c in classes if c.name in _SPECULATIVE_ENUMERATION]
         await asyncio.gather(
-            *(run_class(cls) for cls in classes), return_exceptions=True
+            *(run_class(cls) for cls in evidence_classes), return_exceptions=True
         )
+        if speculative_classes:
+            await asyncio.gather(
+                *(run_class(cls) for cls in speculative_classes), return_exceptions=True
+            )
         return collected
 
 
@@ -207,7 +222,9 @@ class EmailDiscoveryPhase(InvestigationPhase):
     dependencies = ("primary",)
 
     async def run(self, **kwargs: Any) -> dict[str, ModuleResult]:
-        if kwargs["config"].enable_email_discovery:
+        from ..config import opt_in_active
+
+        if opt_in_active("enable_email_discovery", kwargs["config"].enable_email_discovery):
             from ..modules import get_all_modules
             from ..modules.email_discovery import EmailDiscoveryModule
 

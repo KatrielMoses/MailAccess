@@ -12,7 +12,9 @@ from ..core.harvester_collectors import (
     collect_bufferoverun,
     collect_certspotter,
     collect_crtsh,
+    collect_hackertarget,
     collect_rapiddns,
+    collect_subdomaincenter,
     collect_threatminer,
     dns_brute_force,
     resolve_ips,
@@ -28,7 +30,10 @@ _WAVE1_CONCURRENCY = 5
 _WAVE2_CONCURRENCY = 3
 _BRUTE_PREFIX_CAP = 200
 
-_WAVE1_SOURCES = frozenset({"crtsh", "certspotter", "bufferoverun"})
+# Wave 1 = fast, reliable structured APIs; Wave 2 = slower / politeness-throttled sources.
+# ``bufferoverun`` is retired (defunct endpoint, disabled in harvester_sources.json) but its
+# collector is kept for back-compat; it simply never appears in the enabled source set.
+_WAVE1_SOURCES = frozenset({"crtsh", "certspotter", "hackertarget", "subdomaincenter"})
 _WAVE2_SOURCES = frozenset({"rapiddns", "threatminer"})
 
 _COLLECTOR_MAP = {
@@ -37,6 +42,8 @@ _COLLECTOR_MAP = {
     "certspotter": collect_certspotter,
     "bufferoverun": collect_bufferoverun,
     "threatminer": collect_threatminer,
+    "hackertarget": collect_hackertarget,
+    "subdomaincenter": collect_subdomaincenter,
 }
 
 
@@ -78,7 +85,9 @@ async def _resolve_ip_asn_footprint(
                 _LOG.debug("domain_harvester: ASN lookup failed for %s: %s", ip, exc)
                 return ip, None
 
-        prefixes = ((body.get("data") or {}).get("prefixes") or []) if isinstance(body, dict) else []
+        prefixes = (
+            ((body.get("data") or {}).get("prefixes") or []) if isinstance(body, dict) else []
+        )
         asns: dict[int, dict[str, Any]] = {}
         for item in prefixes:
             if not isinstance(item, dict):
@@ -156,7 +165,9 @@ async def _resolve_ip_asn_footprint(
 
 def _enabled_source_names() -> set[str]:
     sources = load_sources()
-    return {s["name"] for s in sources if s.get("name")}
+    # ``disabled`` sources (e.g. a defunct endpoint) are documented in harvester_sources.json but
+    # never probed — same disable-with-reason convention used across the corpus.
+    return {s["name"] for s in sources if s.get("name") and not s.get("disabled")}
 
 
 def _subdomain_finding(
@@ -201,7 +212,7 @@ class DomainHarvesterModule(BaseModule):
     name = "domain_harvester"
     description = (
         "Subdomain enumeration + DNS brute force + hostname resolution for the target "
-        "email's domain. Native port of curated theHarvester collectors."
+        "email's domain via curated native subdomain collectors."
     )
     requires_key = False
     default_enabled = True

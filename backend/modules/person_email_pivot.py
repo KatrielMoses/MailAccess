@@ -29,16 +29,27 @@ _ROLE_LOCALS = frozenset({
 
 
 def derive_name_from_email(email: str) -> str | None:
-    """Derive a cautious name candidate from a name-shaped local part."""
+    """Derive a cautious name candidate from a name-shaped local part.
+
+    T3 (Output-Trust final): the local part is a SPECULATIVE hint, not evidence, so a
+    candidate is only returned for a STRUCTURED, multi-token local part — a genuine
+    "john.smith" -> "John Smith" (or "jane.doe" -> "Jane Doe"). The single-token echo
+    branch is gone: "afaltin" -> "Afaltin", "toasty" -> "Toasty", "user" -> "User" are
+    NOT names and must not become a harvest "person". A final chrome-token check drops
+    page-furniture echoes; is_plausible_person_name is deliberately not used because it
+    over-rejects legitimate short two-token names ("Jane Doe", "Ed Lee") (see RC2).
+    """
+    from ..core.name_quality import contains_chrome_token
+
     local = str(email).split("@", 1)[0].strip().casefold()
     role_key = local.replace("_", "-").replace(".", "-")
     if not local or local in _ROLE_LOCALS or role_key in _ROLE_LOCALS or role_key.startswith("security-") or len(local) < 3:
         return None
     parts = [part for part in local.replace("_", ".").replace("-", ".").split(".") if part]
     if len(parts) >= 2 and parts[0].isalpha() and len(parts[0]) > 1 and parts[1].isalpha():
-        return " ".join(part.capitalize() for part in parts[:3])
-    if local.isalpha():
-        return local.capitalize()
+        candidate = " ".join(part.capitalize() for part in parts[:3])
+        if not contains_chrome_token(candidate):
+            return candidate
     return None
 
 

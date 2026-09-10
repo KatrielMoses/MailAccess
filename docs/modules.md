@@ -36,19 +36,14 @@
 | ransomware_intel | Default-on domain victim correlation against ransomware lists; skips free providers | No | No |
 | social | 13 platforms via YAML | No | No |
 | social_links | Username extraction, feeds pivot | No | No |
-| account_discovery | Holehe 120+ platforms | No | Yes |
-| user_scanner | 205+ platform vectors | No | Yes |
-| whatsmyname | 700+ platforms | No | Yes |
-| maigret_platforms | Native Maigret platform engine, 2500+ platforms | No | No (disable via `ENABLE_MAIGRET_PLATFORMS=false`) |
-| sherlock_platforms | Sherlock native engine, ~300 platforms | No | No |
-| nexfil_platforms | Nexfil native engine, ~300 platforms | No | No |
-| blackbird_platforms | Blackbird native engine, social focus | No | No |
+| account_discovery | Native 250+ platform existence probes | No | Yes |
+| username_platforms | Native username-platform engine over the MailAccess corpus, 5,000+ platform definitions (two-marker detection; no runtime dependency) | No | No (disable via `ENABLE_USERNAME_PLATFORMS=false`) |
 | breachdirectory | 2nd breach source | Yes | No |
-| username_pivot | WMN via recovered usernames | No | Yes |
+| username_pivot | Native username sweep via recovered usernames | No | Yes |
 | permutation_discovery | 60 email variants | No | Yes |
 | phone_intel | Phone validation + WA/TG hints | No | No |
 | messaging_hints | Telegram/WhatsApp username check | No | No |
-| ghunt | Gmail deep intel | No (setup required) | Yes |
+| google_account_intel | Unauthenticated Gmail/Google account existence + public profile intel | No | No (on by default) |
 | identity_graph | Cross-platform cluster analysis | No | No (automatic) |
 | platform_health | Persistent probe health, fragility, and skip decisions | No | No (automatic) |
 | temporal_cluster | Coordinated account-creation windows | No | No (automatic) |
@@ -58,7 +53,7 @@
 | common_names | Common-name and username false-positive controls | No | No (automatic) |
 | disposable_domains | Disposable-email confidence controls | No | No (automatic) |
 
-> 64 modules · 2500+ platforms by default
+> 75 modules · 5,000+ platform corpus (~700 vetted platforms probed in the default wave)
 
 ### Platform Coverage
 
@@ -66,44 +61,40 @@ MailAccess checks usernames derived from the target email across multiple platfo
 
 | Source | Platforms | Default |
 |--------|-----------|---------|
-| WhatsMyName | 700+ | On |
-| Holehe | 120+ | On |
-| user-scanner | 205+ | On |
-| Maigret native engine | 2500+ | On |
-| Sherlock native | ~300 | On |
-| Nexfil native | ~300 | On |
-| Blackbird native | social focus | On |
+| Native two-marker username sweep | 700+ | On |
+| Native account-existence engine | 250+ | On |
+| Username-platform native engine | 5,000+ | On |
 
-Total with Maigret enabled: 2500+ unique platforms after deduplication.
+Total with the username-platform engine enabled: 5,000+ unique platforms after deduplication.
 
-Enable Maigret:
+Enable the username-platform sweep:
 
 ```bash
-ENABLE_MAIGRET_PLATFORMS=true mailaccess investigate email
+ENABLE_USERNAME_PLATFORMS=true mailaccess investigate email
 ```
 
-Enable Maigret + Wave 2, the slower platform sweep:
+Enable username-platform + Wave 2, the slower platform sweep:
 
 ```bash
-ENABLE_MAIGRET_PLATFORMS=true ENABLE_MAIGRET_WAVE2=true mailaccess investigate email
+ENABLE_USERNAME_PLATFORMS=true ENABLE_USERNAME_WAVE2=true mailaccess investigate email
 ```
 
-The platform database is fetched from Maigret's GitHub repository (MIT licensed) and cached locally for 24 hours. Custom platforms can be added to `data/mailaccess-extra-sites.json` in the same format.
+The platform site data ships locally in `data/mailaccess_sites.json` (the unified corpus) and is loaded offline — no network fetch, no external tool, and no cache. Custom platforms can be added to the same unified `data/mailaccess_sites.json` (schema in [docs/mailaccess-sites-schema.md](mailaccess-sites-schema.md)).
 
-Findings from WMN and Maigret are deduplicated by URL domain. When both tools confirm the same platform, the finding is marked dual-confirmed with high confidence.
+Findings from the native two-marker sweep and the full username-platform engine are deduplicated by URL domain. When both confirm the same platform, the finding is marked dual-confirmed with high confidence.
 
 | Variable | Module | Key Required | Default | Description |
 |----------|--------|--------------|---------|-------------|
-| `ENABLE_MAIGRET_PLATFORMS` | `maigret_platforms` | None | `false` | Enable 2500+ platform sweep. Adds ~35-90s. |
-| `ENABLE_MAIGRET_WAVE2` | `maigret_platforms` (Wave 2) | None | `false` | Enable slow/fragile platform sweep. Requires `ENABLE_MAIGRET_PLATFORMS=true`. Adds ~90-150s. |
-| `MAIGRET_FORCE_{PLATFORM}` | `maigret_platforms` | None | _(unset)_ | Override auto-demotion for one platform. |
+| `ENABLE_USERNAME_PLATFORMS` | `username_platforms` | None | `true` | On by default; the ~700-platform default wave adds ~35-90s. Set `false` to disable. |
+| `ENABLE_USERNAME_WAVE2` | `username_platforms` (Wave 2) | None | `false` | Enable slow/fragile platform sweep. Requires `ENABLE_USERNAME_PLATFORMS=true`. Adds ~90-150s. |
+| `USERNAME_FORCE_{PLATFORM}` | `username_platforms` | None | _(unset)_ | Override auto-demotion for one platform. |
 | `MAILACCESS_SHARE_HEALTH` | `platform-health` | None | `false` | Opt in to anonymized health sharing; sharing still requires `--share`. |
 | `DOMAIN_CLUSTER_CAP` | `domain_cluster` | None | `20` | Maximum domains checked per infrastructure cluster pass. |
 
 ---
 
 
-MailAccess ships 64 modules covering 2500+ platforms. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
+MailAccess ships 75 modules over a 5,000+ platform corpus. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
 
 A module marked **key required** skips itself with `status: skipped` when its API key is absent — it does not cause the investigation to fail.
 
@@ -520,7 +511,7 @@ Up to 5 results per dork are returned as findings with platform inferred from th
 
 ## `email_discovery`
 
-Post-primary module that dorks for other email addresses owned by the same person, using real names recovered by GHunt, Gravatar, WHOIS, breach metadata, social findings, or EmailRep.
+Post-primary module that dorks for other email addresses owned by the same person, using real names recovered by the Google account intel module, Gravatar, WHOIS, breach metadata, social findings, or EmailRep.
 
 | | |
 |--|--|
@@ -953,16 +944,16 @@ Runs in the primary phase alongside other modules. Findings are username candida
 
 ## `account_discovery`
 
-Check account existence across 120+ platforms powered by [Holehe](https://github.com/megadose/holehe).
+Check account existence across 250+ platforms via MailAccess's native account-existence probe engine (no third-party dependency — the email-to-account existence probes are a native MailAccess implementation as of 0.15.0).
 
 | | |
 |--|--|
 | **Requires key** | No |
 | **Status** | Implemented |
 
-Platform coverage is dynamic — as Holehe adds new platforms upstream, this module picks them up automatically on the next install. See the [Holehe repository](https://github.com/megadose/holehe) for the current full platform list.
+Platform coverage is data-driven from `data/mailaccess_sites.json` (the unified site corpus — see [the schema](mailaccess-sites-schema.md)). Add or update a site by editing that file; declarative sites need no code. A handful of sites whose upstream flows are broken or bot-protected are present but marked `disabled` with a reason.
 
-Enable via `ENABLE_ACCOUNT_DISCOVERY=true` (opt-in — runs 120+ probes, expect 30–60 s per investigation).
+Enable via `ENABLE_ACCOUNT_DISCOVERY=true` (opt-in — runs 250+ probes, expect 30–90 s per investigation).
 
 **Finding example (account confirmed):**
 ```json
@@ -983,63 +974,32 @@ Findings with `email_recovery` or `phone_hint` in metadata are flagged `high_val
 **Module metadata:**
 ```json
 {
-  "platforms_checked": 124,
+  "platforms_checked": 103,
   "platforms_confirmed": 3,
   "platforms_rate_limited": 2,
-  "platforms_not_found": 119,
-  "holehe_version": "1.61"
+  "platforms_not_found": 98,
+  "platforms_skipped_health": 0,
+  "engine_version": "mailaccess-account-probe/1.0",
+  "site_source": "mailaccess_sites",
+  "site_count": 124
 }
 ```
 
 ---
 
-## `whatsmyname`
+## `username_platforms`
 
-Username enumeration across 700+ platforms via the [WhatsMyName](https://github.com/WebBreacher/WhatsMyName) dataset.
-
-| | |
-|--|--|
-| **Requires key** | No |
-| **Status** | Implemented |
-
-Opt-in (`ENABLE_WHATSMYNAME=true`) because the sweep fires one HTTP request per platform and takes 60–90 seconds. The dataset is fetched from GitHub on first run and cached locally at `data/cache/wmn-data.json` for 24 hours.
-
-**Finding example (account confirmed):**
-```json
-{
-  "platform": "HackerNews",
-  "profile_url": "https://news.ycombinator.com/user?id=janedoe",
-  "metadata": { "category": "tech" },
-  "confidence": "high"
-}
-```
-
-**Module metadata:**
-```json
-{
-  "total_platforms_checked": 800,
-  "platforms_confirmed": 4,
-  "platforms_not_found": 705,
-  "platforms_errored": 3,
-  "wmn_version": "1.4.0"
-}
-```
-
----
-
-## `maigret_platforms`
-
-Native platform checking engine using Maigret's MIT-licensed platform database. It checks 2500+ platforms via MailAccess's own `httpx` engine, with no Maigret runtime dependency.
+MailAccess's native username-platform checking engine. It draws on a 5,000+ platform corpus via MailAccess's own `httpx` engine, and by default probes an evidence-first, precision-ranked wave of ~700 vetted platforms (two-marker detection) rather than the whole corpus. The platform site data is the native MailAccess corpus, and the runtime has no third-party dependency.
 
 | | |
 |--|--|
 | **Requires key** | No |
 | **Default** | On |
-| **Disable** | `ENABLE_MAIGRET_PLATFORMS=false` (only if investigation speed is a priority) |
-| **Wave 2** | `ENABLE_MAIGRET_WAVE2=true` for additional slower and more fragile platforms |
+| **Disable** | `ENABLE_USERNAME_PLATFORMS=false` (only if investigation speed is a priority) |
+| **Wave 2** | `ENABLE_USERNAME_WAVE2=true` for additional slower and more fragile platforms |
 | **Runtime** | ~35-90s for Wave 1, plus ~90-150s for Wave 2 |
-| **Platform database** | Fetched from Maigret GitHub and cached 24h at `~/.mailaccess/cache/maigret-data.json` |
-| **Custom additions** | `data/mailaccess-extra-sites.json` |
+| **Platform database** | Ships locally in `data/mailaccess_sites.json` (the unified corpus), loaded offline — no network fetch, no external tool, no cache |
+| **Custom additions** | `data/mailaccess_sites.json` (schema in [docs/mailaccess-sites-schema.md](mailaccess-sites-schema.md)) |
 | **Status** | Implemented, opt-in |
 
 Wave 1 covers roughly 1500 fast and reliable platforms: `status_code` checks, no bot protection, and higher Alexa rank. Wave 2 adds roughly 1000 slower, protected, regional, or message-based platforms.
@@ -1062,8 +1022,8 @@ stats:
 Every applied action is logged to `~/.mailaccess/platform_demotion.log` and
 surfaced in `mailaccess platform-audit` output as `[AUTO-DEMOTED]`. To force
 a specific platform to run in its native wave regardless of health stats, set
-`MAIGRET_FORCE_<PLATFORM>=true` (mapping rule: strip non-alphanumerics,
-uppercase, prefix with `MAIGRET_FORCE_`).
+`USERNAME_FORCE_<PLATFORM>=true` (mapping rule: strip non-alphanumerics,
+uppercase, prefix with `USERNAME_FORCE_`).
 
 Username variants used by default:
 - raw local-part, such as `katriel.moses`
@@ -1082,14 +1042,14 @@ Username variants used by default:
   "wave": 1,
   "alexa_rank": 12345,
   "dual_confirmed": true,
-  "sources": ["wmn", "maigret"]
+  "sources": ["username_platforms", "pivot"]
 }
 ```
 
 **Module metadata:**
 ```json
 {
-  "sites_loaded": 2500,
+  "sites_loaded": 4000,
   "wave1_probes": 1500,
   "wave2_probes": 0,
   "catchalls_excluded": 12,
@@ -1106,37 +1066,32 @@ Finding fields: `platform`, `profile_url`, `username`, `confidence`, `tags`, `ch
 
 ---
 
-## `sherlock_platforms`
+## Folded username modules (0.15.0)
 
-Native Sherlock platform engine covering approximately 300 platforms. It uses
-a loader-and-detector pattern with no Sherlock runtime dependency, requires no
-API key, runs by default, and has `SOURCE_PRIORITY` 4.
-
-## `nexfil_platforms`
-
-Native Nexfil platform engine covering approximately 300 platforms. It uses a
-loader-and-detector pattern with no Nexfil runtime dependency, requires no API
-key, runs by default, and has `SOURCE_PRIORITY` 4.
-
-## `blackbird_platforms`
-
-Native Blackbird platform engine focused on social platforms. It uses a
-loader-and-detector pattern with no Blackbird runtime dependency, requires no
-API key, runs by default, and has `SOURCE_PRIORITY` 4.
+Several legacy standalone username-enumeration modules were removed in 0.15.0 and folded into
+[`username_platforms`](#username_platforms). Their site definitions were consolidated into the
+single native corpus (`data/mailaccess_sites.json`) as `username-url` rows — reviving popular
+platforms that had gone dead, tightening bare status-code markers, and adding net-new
+**regional/forum** platforms (Alik.cz, Baraza.africa, Pixelfed/Lemmy instances, sr.ht, subdomain
+user-page hosts, …). The **two-marker** detection (a hit requires the existence marker present AND
+the absence marker gone, from one response) is part of the shared `probe_detector`, so every
+`e_code`/`m_code` row benefits at no extra request. The former per-module enable flags are removed;
+the single toggle is `ENABLE_USERNAME_PLATFORMS`, and `username_platforms` is the one enumeration
+source name used in dedup / dual-confirmation. The two legacy probe detectors were collapsed into the
+single `probe_detector`.
 
 ## Platform Deduplication
 
 When multiple modules find the same platform, MailAccess deduplicates by normalized profile URL domain, such as `github.com`, not by display name.
 
 Rules:
-- Same domain from WMN + Maigret becomes one finding with `sources: ["wmn", "maigret"]` and `confidence: "high"`
+- Same domain from the username-platform engine and a derivative source becomes one finding with `sources: ["username_platforms", "pivot"]` and `confidence: "high"`
 - Same domain from any two modules is merged
 - `api.*` subdomains are canonicalized to the root domain, such as `api.github.com` to `github.com`
 
 Metadata reported per investigation:
-- `wmn_hits`: raw WMN platform count
-- `maigret_hits`: raw Maigret platform count
-- `dual_confirmed`: platforms found by both
+- `username_hits`: raw username-platform count
+- `dual_confirmed`: platforms corroborated by an independent derivative source
 - `unique_platforms`: deduplicated count used in the headline
 
 ### Platform Dedup Priority
@@ -1145,62 +1100,28 @@ When engines overlap, the lowest priority number supplies the canonical finding:
 
 | Priority | Source | Reason |
 |----------|--------|--------|
-| 0 | `whatsmyname`, `wmn` | Most strictly vetted |
-| 1 | `holehe` | Registration-probe accuracy |
-| 2 | `user_scanner` | Solid coverage |
-| 3 | `maigret`, `maigret_platforms` | Broad but less vetted |
-| 4 | `sherlock`, `nexfil`, `blackbird` | Newest additions |
+| 3 | `username_platforms` | Primary native enumeration source |
 | 99 | `unknown` | Default fallback |
 
 ---
 
-## `user_scanner`
-
-Email registration probes across 205+ platforms via the [user-scanner](https://pypi.org/project/user-scanner/) package.
-
-| | |
-|--|--|
-| **Requires key** | No |
-| **Status** | Implemented |
-
-Opt-in (`ENABLE_USER_SCANNER=true`) because a full sweep can take several minutes. Set `user_scanner` in `MODULE_TIMEOUT_OVERRIDES` (default 180s in `.env.example`).
-
-**Finding example (account confirmed):**
-```json
-{
-  "platform": "Instagram",
-  "profile_url": "https://instagram.com",
-  "metadata": {
-    "category": "Social",
-    "reason": "",
-    "source": "user_scanner"
-  },
-  "confidence": "high"
-}
-```
-
-**Module metadata:**
-```json
-{
-  "platforms_checked": 205,
-  "platforms_confirmed": 4,
-  "platforms_not_registered": 198,
-  "user_scanner_version": "1.3.6"
-}
-```
+> **Removed in 0.15.0:** the standalone email→account scanning module and its
+> third-party PyPI dependency were de-vendored. Its ~178 email→account vectors were
+> merged (deduped) into `data/mailaccess_sites.json` and are now probed by
+> [`account_discovery`](#account_discovery).
 
 ---
 
 ## `username_pivot`
 
-Post-primary phase: collects up to five unique usernames from primary findings (email local-part, metadata usernames, slugified display names) and re-runs the WhatsMyName dataset for each. Skips platforms already confirmed by the `whatsmyname` module.
+Post-primary phase: collects up to five unique usernames from primary findings (email local-part, metadata usernames, slugified display names) and re-runs the native username sweep for each. Skips platforms already confirmed by the `username_platforms` module.
 
 | | |
 |--|--|
 | **Requires key** | No |
 | **Status** | Implemented |
 
-Opt-in (`ENABLE_USERNAME_PIVOT=true`). Runs after primary modules complete and before `permutation_discovery`. Reuses the cached WMN dataset at `data/cache/wmn-data.json`.
+Opt-in (`ENABLE_USERNAME_PIVOT=true`). Runs after primary modules complete and before `permutation_discovery`. Reads platform definitions from the unified corpus (`data/mailaccess_sites.json`).
 
 **Finding example:**
 ```json
@@ -1222,7 +1143,7 @@ Opt-in (`ENABLE_USERNAME_PIVOT=true`). Runs after primary modules complete and b
   "usernames_pivoted": ["katriel.moses", "katriel_moses"],
   "platforms_checked": 1600,
   "platforms_confirmed": 2,
-  "wmn_version": "1.4.0"
+  "corpus_version": "1.4.0"
 }
 ```
 
@@ -1325,7 +1246,7 @@ Per-domain findings (one per compromised service credential):
 
 ## `permutation_discovery`
 
-Post-primary-phase orchestrator: if any upstream module recovered a real name (from Gravatar, HIBP breach data, GHunt, etc.), generates up to 60 email permutations and probes each with HIBP and Hudson Rock to find related accounts.
+Post-primary-phase orchestrator: if any upstream module recovered a real name (from Gravatar, HIBP breach data, the Google account intel module, etc.), generates up to 60 email permutations and probes each with HIBP and Hudson Rock to find related accounts.
 
 | | |
 |--|--|
@@ -1360,18 +1281,16 @@ Opt-in (`ENABLE_PERMUTATION_DISCOVERY=true`) because it adds 30–60 seconds and
 
 ---
 
-## `ghunt`
+## `google_account_intel`
 
-Extract deep Google account intelligence via [GHunt](https://github.com/mxrch/GHunt): GAIA ID, display name, profile photo, YouTube channel, public Drive files, Maps review history, and active Google services.
+Native, unauthenticated Google account intelligence: Gmail/Google account existence plus public profile data (GAIA ID, display name, profile photo, YouTube channel, public Drive files, Maps review history, and active Google services). No credentials, no login, no setup.
 
 | | |
 |--|--|
-| **Requires key** | Yes — `GHUNT_CREDS_PATH` (session credentials from `ghunt login`) |
+| **Requires key** | No |
 | **Status** | Implemented |
 
-Opt-in (`ENABLE_GHUNT=true`). Runs only against `@gmail.com`, `@googlemail.com`, and domains whose MX records route through Google (Google Workspace). All other domains are skipped immediately.
-
-Requires the `ghunt` extra: `pip install "mailaccess[ghunt]"` and a one-time `ghunt login`. See [docs/ghunt-setup.md](ghunt-setup.md).
+On by default (`ENABLE_GOOGLE_ACCOUNT_INTEL=true`). Runs only against `@gmail.com`, `@googlemail.com`, and domains whose MX records route through Google (Google Workspace). All other domains are skipped immediately.
 
 **Finding example:**
 ```json
@@ -1665,7 +1584,7 @@ The graph is available at:
   "reasoning": "Shared username 'janedoe' across GitHub, HackerNews, and Twitter findings",
   "members": [
     {"module": "social", "platform": "GitHub", "username": "janedoe"},
-    {"module": "whatsmyname", "platform": "HackerNews", "username": "janedoe"}
+    {"module": "username_platforms", "platform": "HackerNews", "username": "janedoe"}
   ]
 }
 ```
@@ -1737,7 +1656,7 @@ The self-healing selectors are `get_skip_set()`, `get_demote_set()`, and
   "auto_demoted_to_wave2": 12,
   "auto_upgraded_to_wave1": 3,
   "auto_demotion_overrides": {
-    "NoisySite.com": "MAIGRET_FORCE_NOISYSITECOM"
+    "NoisySite.com": "USERNAME_FORCE_NOISYSITECOM"
   }
 }
 ```
@@ -1751,7 +1670,7 @@ Every auto-demotion / auto-upgrade event appends one JSONL line to
 {"timestamp": "2026-06-24T10:00:00Z", "platform": "NoisySite.com", "action": "skip",
  "reason": "inconclusive_rate=0.82, probes=134",
  "stats": {"inconclusive_rate": 0.82, "hit_rate": 0.08, "total_probes": 134},
- "reversible_via": "MAIGRET_FORCE_NOISYSITECOM"}
+ "reversible_via": "USERNAME_FORCE_NOISYSITECOM"}
 ```
 
 The log is the user-visible audit trail behind
@@ -2181,21 +2100,21 @@ true
 
 ---
 
-## `maigret_detector` (built-in helper)
+## `probe_detector` (built-in helper)
 
-Applies Maigret `status_code`, message, and response-URL rules with redirect and
+Applies `status_code`, message, and response-URL rules with redirect and
 regex safeguards.
 
 | | |
 |--|--|
 | **Requires key** | No |
-| **Execution** | Called by `maigret_platforms` |
+| **Execution** | Called by `username_platforms` |
 | **Status** | Implemented |
 
-`backend/modules/maigret_platforms.py` also validates the top 50 eligible
+`backend/modules/username_platforms.py` also validates the top 50 eligible
 status-code sites against their known-unclaimed usernames before the main sweep.
 
-**Finding schema (`maigret_platforms`):**
+**Finding schema (`username_platforms`):**
 ```json
 {
   "platform": "GitHub",
@@ -2204,7 +2123,7 @@ status-code sites against their known-unclaimed usernames before the main sweep.
   "confidence": "high",
   "metadata": {
     "check_type": "message",
-    "source": "maigret",
+    "source": "username_platforms",
     "wave": 1,
     "dual_confirmed": false
   }
@@ -2215,7 +2134,7 @@ status-code sites against their known-unclaimed usernames before the main sweep.
 `metadata.check_type`, `metadata.source`, `metadata.wave`,
 `metadata.dual_confirmed`.
 
-**Module metadata (`maigret_platforms`):**
+**Module metadata (`username_platforms`):**
 ```json
 {
   "platforms_confirmed": 14,
@@ -2227,92 +2146,16 @@ status-code sites against their known-unclaimed usernames before the main sweep.
 
 ---
 
-## `sherlock_detector` (built-in helper)
+## `probe_detector` — the single probe engine
 
-Hardens Sherlock hit detection across status-code, message, response-URL, and JSON
-rules with WAF awareness.
-
-| | |
-|--|--|
-| **Requires key** | No |
-| **Execution** | Called by `sherlock_platforms` |
-| **Status** | Implemented |
-
-**Finding schema (`sherlock_platforms`):**
-```json
-{
-  "platform": "sherlock:GitHub",
-  "profile_url": "https://github.com/janedoe",
-  "username": "janedoe",
-  "confidence": "medium",
-  "metadata": {
-    "error_type": "status_code",
-    "source": "sherlock",
-    "wave": 1,
-    "waf_protected": false,
-    "dual_confirmed": false
-  }
-}
-```
-
-**Finding fields:** `platform`, `profile_url`, `username`, `confidence`,
-`metadata.error_type`, `metadata.source`, `metadata.wave`,
-`metadata.waf_protected`, `metadata.dual_confirmed`.
-
-**Module metadata (`sherlock_platforms`):**
-```json
-{
-  "platforms_confirmed": 8,
-  "platforms_inconclusive": 5,
-  "catch_all_skipped": 2,
-  "health_skipped": 4
-}
-```
-
----
-
-## `blackbird_detector` (built-in helper)
-
-Hardens Blackbird-style detection using distinct existing/missing status markers,
-optional response markers, POST bodies, and username cleaning.
-
-| | |
-|--|--|
-| **Requires key** | No |
-| **Execution** | Called by `blackbird_platforms` |
-| **Status** | Implemented |
-
-**Finding schema (`blackbird_platforms`):**
-```json
-{
-  "platform": "blackbird:Example",
-  "profile_url": "https://example.com/janedoe",
-  "username": "janedoe",
-  "confidence": "high",
-  "metadata": {
-    "source": "blackbird",
-    "wave": 1,
-    "method": "GET",
-    "waf_protected": false,
-    "e_code": 200,
-    "m_code": 404
-  }
-}
-```
-
-**Finding fields:** `platform`, `profile_url`, `username`, `confidence`,
-`metadata.source`, `metadata.wave`, `metadata.method`,
-`metadata.waf_protected`, `metadata.e_code`, `metadata.m_code`.
-
-**Module metadata (`blackbird_platforms`):**
-```json
-{
-  "platforms_confirmed": 11,
-  "platforms_inconclusive": 7,
-  "health_skipped": 3,
-  "fragile_demoted": 6
-}
-```
+In 0.15.0 the previously separate probe helpers collapsed into one. Every username-url /
+email-existence probe now runs through `backend/core/probe_detector.py`
+(`probe_platform` / `detect_hit`), which covers status-code, message, response-URL, and two-marker
+(`e_code`/`m_code`) detection with a shared WAF guard (`waf_fingerprints.py`), templated `errorUrl`
+substitution, `strip_bad_char` cleaning, pre-check session bootstrap, and profile extraction. The
+two-marker rule (existence marker present AND absence marker gone, from one response) is applied in
+`detect_hit`'s `e_code`/`m_code` branch, so every two-marker row gets the precision at no extra
+request. All findings surface through `username_platforms` as ordinary `username-url` findings.
 
 ---
 
@@ -2336,7 +2179,7 @@ enumeration sources set `metadata.dual_confirmed: true` and raise confidence to
 {
   "profile_url": "https://github.com/janedoe",
   "confidence": "high",
-  "sources": ["maigret", "sherlock"],
+  "sources": ["username_platforms", "pivot"],
   "metadata": {
     "dual_confirmed": true,
     "alternate_urls": ["https://www.github.com/janedoe"]
@@ -2350,8 +2193,7 @@ enumeration sources set `metadata.dual_confirmed: true` and raise confidence to
 **Module metadata:**
 ```json
 {
-  "wmn_hits": 12,
-  "maigret_hits": 14,
+  "username_hits": 14,
   "dual_confirmed": 5,
   "unique_platforms": 21
 }

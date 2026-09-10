@@ -165,7 +165,7 @@ class Settings(BaseSettings):
     # Worker
     max_concurrent_modules: int = 10
     module_timeout_seconds: int = 30
-    # Per-module timeout overrides: MODULE_TIMEOUT_OVERRIDES={"whatsmyname": 120}
+    # Per-module timeout overrides: MODULE_TIMEOUT_OVERRIDES={"username_platforms": 120}
     module_timeout_overrides: dict[str, int] = {}
 
     # Investigate mode — overall wall-clock completion budget (Phase 1B).
@@ -293,29 +293,35 @@ class Settings(BaseSettings):
     corpus_contribution_max_per_window: int = 5
     corpus_contribution_window_seconds: float = 3600.0
 
-    # Account discovery — probes 120+ platforms via Holehe
+    # Account discovery — probes 250+ platforms for account existence by email
     enable_account_discovery: bool = True
 
-    # WhatsMyName — username enumeration across 700+ platforms (~15s with concurrency)
-    enable_whatsmyname: bool = True
-
-    # Maigret native platform engine — 2500+ platform username sweep
-    enable_maigret_platforms: bool = True
-    enable_maigret_wave2: bool = False
-
-    # Sherlock native platform engine — ~400 curated platforms (independent dataset)
-    enable_sherlock_platforms: bool = True
-    enable_sherlock_wave2: bool = True
-
-    # Phase 3D — Nexfil
-    enable_nexfil_platforms: bool = True
-    enable_nexfil_wave2: bool = True
-
-    # Phase 3C — Blackbird / WhatsMyName native two-marker platform engine
-    enable_blackbird_platforms: bool = True
-    enable_blackbird_wave2: bool = True
-    enable_blackbird_nsfw: bool = False
-    blackbird_concurrency: int = 60
+    # Native username platform engine — sweeps the unified 5,000+ platform corpus
+    # (data/mailaccess_sites.json) for username-url account existence. This single
+    # engine covers the full corpus (including the former standalone username sweep,
+    # now folded in). Wave 2 opts into lower-ranked/long-tail platforms beyond the
+    # default high-signal cut.
+    enable_username_platforms: bool = True
+    enable_username_wave2: bool = False
+    # Per-run cap on the number of platforms probed per wave, selected by popularity
+    # rank (best first, unranked last) after health/skip filtering. It is a *ceiling*:
+    # The username sweep probes a SPECULATIVE guess derived from the email localpart
+    # (not confirmed evidence), so T1 (Output-Trust final) restricts it to the
+    # HIGH-PRECISION tier of Wave 1: platforms that are popularity-ranked OR carry a
+    # discriminating probe contract (two-marker presence+absence / regex / distinct
+    # existence-vs-miss codes). The dropped remainder is the unranked bare-status_code
+    # long tail — the false-positive source (a soft 200 for any string). This tail-drop
+    # is applied by ``_cap_queue_by_rank`` regardless of this value; ``alexaRank`` is
+    # too sparse in the corpus (only ~340/2238 Wave-1 sites ranked, GitHub/YouTube/…
+    # unranked) to shrink by rank without evicting real majors, so precision — not a
+    # magic count — selects the subset. This value is a further RANK CEILING on that
+    # high-precision tier (~600 sites today, so 2500 never trims it) that bounds a
+    # cold-box run's wall-clock if the corpus grows. 0 disables the ceiling (the
+    # precision tail-drop still applies). The evidence-first PrimaryPhase ordering
+    # ensures even a full sweep never starves the real identity sources; confirmed-
+    # handle enumeration is username_pivot's job.
+    username_wave1_cap: int = 2500
+    username_wave2_cap: int = 0
 
     # GitHub Code Search — surfaces email mentions in public code and gists
     enable_github_code_search: bool = True
@@ -331,10 +337,8 @@ class Settings(BaseSettings):
     enable_keybase_lookup: bool = True
     enable_hackernews_lookup: bool = True
 
-    # User-scanner — probes 205+ platforms via user-scanner (no API key required)
-    enable_user_scanner: bool = True
-
-    # Username pivot — re-runs WhatsMyName for recovered usernames after primary modules
+    # Username pivot — re-runs the username platform sweep for recovered
+    # usernames after primary modules
     enable_username_pivot: bool = True
 
     # Permutation discovery — generates email variations from recovered names,
@@ -350,7 +354,7 @@ class Settings(BaseSettings):
     intelx_buckets: list[str] = ["leaks.public", "pastes"]
     intelx_max_results: int = 50
 
-    # Domain harvester — theHarvester-style subdomain enumeration for the target email's domain
+    # Domain harvester — native subdomain enumeration for the target email's domain
     enable_domain_harvester: bool = True
     personal_email_providers: list[str] = [
         "gmail.com",
@@ -376,10 +380,16 @@ class Settings(BaseSettings):
         "tutanota.com",
     ]
 
-    # GHunt (opt-in — requires ghunt>=2.3 installed and a valid creds file from `ghunt login`)
-    # Cookies expire periodically and require manual refresh via `ghunt login`.
-    enable_ghunt: bool = False
-    ghunt_creds_path: str | None = None
+    # Native Google-account intelligence — unauthenticated, stable public signals
+    # (Gmail/Google account existence, public GAIA profile, avatar, review/presence).
+    # Plain HTTP/DNS, no credentials required, so it is on by default and health-registered.
+    enable_google_account_intel: bool = True
+    # Optional: a Google public web API key enables best-effort public-profile
+    # enrichment (display name / avatar / GAIA id) via the public People endpoint.
+    # Left empty by default — the module still returns the stable MX/domain signal
+    # without it, and the enrichment source is health-registered so any endpoint
+    # change degrades gracefully rather than erroring.
+    google_intel_api_key: str = ""
 
     # Phone intel: validates recovered phones and probes WhatsApp/Telegram (post-primary)
     enable_phone_intel: bool = True
@@ -872,3 +882,34 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# ── L1: task-local per-run opt-in overrides ────────────────────────────────────
+# Concurrent investigations share this one ``settings`` singleton. The engine used
+# to enable a run's opt-in modules by *mutating* the singleton for the duration of
+# the run (``settings_override``), holding that mutation open across every phase
+# ``await`` — so an overlapping run on the same event loop could observe another
+# run's flags, or have its own reverted mid-flight. Instead, each run publishes its
+# opt-in flag *names* into this ContextVar, which is task-local (child tasks copy
+# the context at creation, siblings never share it). ``opt_in_active`` ORs that
+# per-run set over the global default at each read site, so no global state is
+# mutated and runs cannot cross-contaminate.
+import contextvars  # noqa: E402
+
+_RUN_OPT_IN_FLAGS: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "mailaccess_run_opt_in_flags", default=frozenset()
+)
+
+
+def set_run_opt_in_flags(flags: set[str] | frozenset[str]) -> contextvars.Token:
+    """Publish this run's opt-in flag names task-locally. Returns a reset token."""
+    return _RUN_OPT_IN_FLAGS.set(frozenset(flags))
+
+
+def reset_run_opt_in_flags(token: contextvars.Token) -> None:
+    _RUN_OPT_IN_FLAGS.reset(token)
+
+
+def opt_in_active(flag_name: str, base: bool) -> bool:
+    """True if ``flag_name`` is globally enabled OR opted-in for the current run."""
+    return bool(base) or flag_name in _RUN_OPT_IN_FLAGS.get()

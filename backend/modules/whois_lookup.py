@@ -262,12 +262,22 @@ class WhoisLookupModule(BaseModule):
                         "domain": domain,
                     }
 
+        # RC3 (Output-Trust): a WHOIS/RDAP phone is a REGISTRAR / abuse / registrant
+        # contact for the DOMAIN — domain infrastructure, not the subject's personal
+        # phone. Tag it as such so phone-intel / messaging checks and the Defender's
+        # Brief never attribute it to the individual or escalate it to a personal
+        # vishing / SIM-swap threat.
         return [
             {
                 "platform": "whois_phone",
                 "signal_type": "phone_number",
-                "confidence": "medium",
-                "metadata": {k: v for k, v in metadata.items() if v},
+                "confidence": "low",
+                "metadata": {
+                    **{k: v for k, v in metadata.items() if v},
+                    "is_infrastructure": True,
+                    "attribution": "domain_infrastructure",
+                    "not_personal_pii": True,
+                },
             }
             for metadata in phones.values()
         ]

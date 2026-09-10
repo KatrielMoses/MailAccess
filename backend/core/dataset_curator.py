@@ -6,8 +6,8 @@ hit rate / consecutive-miss pattern indicates they're dead or FP-heavy. The
 output is a `CuratorReport` with one `PruneRecommendation` per flagged platform.
 
 This module is intentionally **read-only with respect to source data** —
-it never edits `data/sherlock_sites.json`, `data/wmn_sites.json`,
-`data/nexfil_sites.json`, or any per-platform probe log. Curators are
+it never edits the unified `data/mailaccess_sites.json` corpus or any
+per-platform probe log. Curators are
 **advisory**: a `CuratorReport` can be logged, returned from an API, or
 hand-applied by an operator. The actual loader-side auto-skipping is gated
 behind a future `dataset_curator_auto_prune` flag and lives in the loaders,
@@ -19,8 +19,8 @@ Why advisory-only by default?
       dead-looking platform is plausible (e.g. service revival, cache flush).
     - Per-investigation noise: a 0% hit rate over 8 probes might just mean the
       last 8 usernames happened to be uncommon — not that the platform is dead.
-    - Module owners (sherlock vs blackbird vs nexfil) need to interpret the
-      signal differently; one global auto-pruner would over-fit.
+    - Different platform categories need to interpret the signal differently;
+      one global auto-pruner would over-fit.
 
 Public surface:
     Curator                        — orchestrator class

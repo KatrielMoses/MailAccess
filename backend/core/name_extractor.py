@@ -100,10 +100,13 @@ def _iter_module_payloads(collected_findings: Any) -> Iterable[tuple[str, dict[s
 def _candidate_values(module_name: str, payload: dict[str, Any]) -> Iterable[tuple[str, float]]:
     module = module_name.lower()
 
-    if module == "ghunt":
+    if module == "google_account_intel":
+        # A Google display name is user-mutable and self-set — a weak, social-tier
+        # signal, not a near-certain identity. It was overweighted at 0.95, letting a
+        # vanity/handle display name dominate the extracted name.
         value = payload.get("display_name")
         if isinstance(value, str):
-            yield value, 0.95
+            yield value, 0.50
         return
 
     if module == "gravatar":
@@ -127,9 +130,8 @@ def _candidate_values(module_name: str, payload: dict[str, Any]) -> Iterable[tup
     if module in {
         "social",
         "social_links",
-        "whatsmyname",
+        "username_platforms",
         "account_discovery",
-        "user_scanner",
         "username_pivot",
     }:
         for key in ("display_name", "full_name", "real_name", "name"):

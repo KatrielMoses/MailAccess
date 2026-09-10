@@ -122,7 +122,7 @@ def test_clear_all_cache_preserves_non_harvest_cache_files(tmp_path):
 def test_list_domains_ignores_non_harvest_cache_files(tmp_path):
     cache = HarvestCache(tmp_path)
     cache.set("example.com", _result())
-    (tmp_path / "maigret-data.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "unrelated-data.json").write_text("{}", encoding="utf-8")
     assert cache.list_domains() == ["example.com"]
 
 

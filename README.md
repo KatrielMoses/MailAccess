@@ -9,7 +9,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-0D0D0D.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11%2B-0D0D0D.svg" alt="Python 3.11+"></a>
   <a href="docker-compose.yml"><img src="https://img.shields.io/badge/Docker-Compose-0D0D0D.svg" alt="Docker Compose"></a>
-  <a href="https://pypi.org/project/mailaccess/"><img src="https://img.shields.io/static/v1?label=PyPI&message=0.14.4&color=8A1C2B&logo=pypi&logoColor=white" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/mailaccess/"><img src="https://img.shields.io/static/v1?label=PyPI&message=0.15.0&color=8A1C2B&logo=pypi&logoColor=white" alt="PyPI version"></a>
   <a href="https://pepy.tech/projects/mailaccess"><img src="https://img.shields.io/pepy/dt/mailaccess?color=8A1C2B&amp;label=downloads" alt="PyPI downloads"></a>
 </p>
 
@@ -59,7 +59,7 @@ Pipeline, stdin, JSONL, and CI examples -> [docs/integrations.md](docs/integrati
 - **Name Consensus Engine** - synthesizes independent name signals into confirmed, probable, possible, or unknown identity bands.
 - **Defender's Brief** - security-manager-ready risk summary with prioritized findings and a concrete next action.
 - **Domain email harvesting** - `harvest-emails` discovers organization addresses across Common Crawl, GitHub, CT logs, registries, keyservers, dorks, employee pages, and patterns.
-- **2500+ platform coverage** - native Maigret engine plus Sherlock, Nexfil, Blackbird, WhatsMyName, Holehe, and user-scanner coverage.
+- **5,000+ platform corpus** - a native username-platform engine over a MailAccess-verified corpus of 5,000+ platform definitions (`data/mailaccess_sites.json`), with two-marker detection and zero runtime dependencies; each investigation probes a bounded, rank- and health-prioritized subset of the highest-signal platforms. Plus a native account-existence engine covering 250+ email-checkable services, and native Google-account intelligence (unauthenticated, on by default).
 - **Deep breach mode** - probes the highest-severity breach corpus for account-existence risk.
 - **Credential Risk Score** - separate 0-100 credential exposure band with top drivers and recommended next steps.
 - **6 export formats** - JSON, CSV, PDF, Markdown, STIX 2.1, and Maltego XML.
@@ -98,7 +98,7 @@ Suppress it with `--no-brief`; full details live in [docs/modules.md](docs/modul
 
 ## Modules
 
-64 modules, 2500+ platforms by default. Full module reference -> [docs/modules.md](docs/modules.md).
+75 modules over a 5,000+ platform corpus. Investigations probe a bounded, evidence-first wave of the highest-signal platforms (~700 vetted by default) rather than the whole corpus. Full module reference -> [docs/modules.md](docs/modules.md).
 
 ## API Keys
 

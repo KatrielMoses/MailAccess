@@ -35,14 +35,9 @@ _DORK_MODULES = frozenset({
     "press_intel",
 })
 _PLATFORM_MODULES = frozenset({
-    "whatsmyname",
-    "user_scanner",
     "account_discovery",
     "social",
-    "maigret_platforms",
-    "sherlock_platforms",
-    "nexfil_platforms",
-    "blackbird_platforms",
+    "username_platforms",
     "breach_deep",
     "employee_name_discovery",
 })

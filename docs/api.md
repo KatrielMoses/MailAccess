@@ -67,14 +67,14 @@ Start an investigation. Returns immediately with an ID — the investigation run
 {
   "email": "user@example.com",
   "modules": ["hibp", "gravatar"],
-  "enable_modules": ["breach_deep", "ghunt"],
+  "enable_modules": ["breach_deep", "google_account_intel"],
   "force": false
 }
 ```
 
 `modules` is optional. Omit it to run all registered modules. Set `force: true` to bypass the investigation cache and always run a fresh investigation.
 
-`enable_modules` is a list of opt-in module names to enable for this run only. Equivalent to the CLI `-m` flag. Valid values include `breach_deep`, `ghunt`, `email_discovery`, and `press_intel`. Pass `["all"]` to enable all opt-in modules.
+`enable_modules` is a list of opt-in module names to enable for this run only. Equivalent to the CLI `-m` flag. Valid values include `breach_deep`, `email_discovery`, and `press_intel`. Pass `["all"]` to enable all opt-in modules.
 
 New modules available in 0.4.0: `breach_deep`, `email_discovery`, `wayback`, `github_commits`. Pass them in the `modules` array to run selectively:
 
@@ -191,8 +191,8 @@ The response includes `exposure_score` plus the separate credential risk fields:
     "generated_at": "2026-05-19T12:00:15+00:00"
   },
   "platform_stats": {
-    "wmn_hits": 4,
-    "maigret_hits": 6,
+    "username_platform_hits": 4,
+    "username_hits": 6,
     "dual_confirmed": 2,
     "unique_platforms": 8
   },
@@ -225,10 +225,10 @@ The response includes `exposure_score` plus the separate credential risk fields:
     },
     {
       "id": "d4c3b2a1-...",
-      "module_name": "maigret_platforms",
+      "module_name": "username_platforms",
       "status": "success",
       "run_metadata": {
-        "sites_loaded": 2500,
+        "sites_loaded": 4000,
         "wave1_probes": 1500,
         "wave2_probes": 0,
         "catchalls_excluded": 12,
@@ -318,7 +318,7 @@ Returns the identity clusters built from cross-module correlation, with confiden
       "reasoning": "Shared username 'janedoe' across GitHub, HackerNews, and Twitter findings",
       "members": [
         {"module": "social", "platform": "GitHub", "username": "janedoe"},
-        {"module": "whatsmyname", "platform": "HackerNews", "username": "janedoe"}
+        {"module": "username_platforms", "platform": "HackerNews", "username": "janedoe"}
       ]
     }
   ]

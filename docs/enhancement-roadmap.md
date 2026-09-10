@@ -19,11 +19,11 @@
 
 ---
 
-### Phase 1A — Maigret Detection Hardening
-**File:** `backend/core/maigret_detector.py`
+### Phase 1A — Probe Detection Hardening
+**File:** `backend/core/probe_detector.py`
 
 - [ ] **1A.1** — Cross-apply `absenceStrs` to `status_code` checks
-  - In `detect_hit()`, after `status == 200` returns "hit", add a check against `defn.get("absenceStrs")` from Maigret data
+  - In `detect_hit()`, after `status == 200` returns "hit", add a check against `defn.get("absenceStrs")` from the platform corpus
   - If any absence marker found in body → return "miss" instead
   - Test with at least 3 known noisy platforms (e.g. sites that return 200 for any URL)
 
@@ -35,7 +35,7 @@
   - Import `html` from stdlib
   - In `_detect_message()` and `detect_hit()`, decode body with `html.unescape()` before checking patterns
   - Handles `&#39;`, `&amp;`, `&lt;`, `&gt;`, `&quot;` etc.
-  - Test: find a site that returns HTML-encoded failure strings in Maigret data
+  - Test: find a site that returns HTML-encoded failure strings in the platform corpus
 
 - [ ] **1A.4** — Add `expected_content_length_min` check
   - For `check_type: body_contains`, if response body is suspiciously short (e.g. < 200 chars), treat as inconclusive
@@ -44,7 +44,7 @@
 ---
 
 ### Phase 1B — Common-Name FP Filter
-**Files:** New file `backend/core/common_names.py`, `backend/core/maigret_platforms.py`, new data file `data/common_names.json`
+**Files:** New file `backend/core/common_names.py`, `backend/core/username_platforms.py`, new data file `data/common_names.json`
 
 - [ ] **1B.1** — Build common-names corpus
   - Curate `data/common_names.json` with top personal names from:
@@ -60,8 +60,8 @@
   - `is_common_name(username: str) -> bool` — case-insensitive lookup
   - `is_common_username(username: str) -> bool` — checks if username matches a common name pattern (e.g. "johnsmith", "jsmith", "john.smith")
 
-- [ ] **1B.3** — Integrate into maigret_platforms `_finding()`
-  - In `_finding()` in `maigret_platforms.py`, check `is_common_username(variant)`
+- [ ] **1B.3** — Integrate into username_platforms `_finding()`
+  - In `_finding()` in `username_platforms.py`, check `is_common_username(variant)`
   - If common and no corroborating signals (avatar match, bio match, domain match) → downgrade to `low` confidence
   - Add `"fp_warning": "common_username_no_corroboration"` to metadata
   - Add `fp_warning` to the CLI output as a subtle indicator
@@ -75,7 +75,7 @@
   - Structure: `{"<lang_code>": {"success": [...], "failure": [...]}}`
   - Languages to cover: EN, RU, ES, FR, DE, PT, ZH, JA, KO, AR, NL, PL, TR, IT, HI
   - Each with 5–10 success and failure phrases
-  - Sources: manually curated from known reset flows + Maigret data (absenseStrs/presenseStrs)
+  - Sources: manually curated from known reset flows + the platform corpus (absenseStrs/presenseStrs)
   - Document source for each phrase (which platform it was observed on)
 
 - [ ] **1C.2** — Add language detection to `_classify_text()`
@@ -96,7 +96,7 @@
 ---
 
 ### Phase 1D — Username Permutation Expansion
-**Files:** `backend/core/maigret_platforms.py`
+**Files:** `backend/core/username_platforms.py`
 
 - [ ] **1D.1** — Rewrite `_username_variants()` with documented policy
   - Expand from 3 variants to ~25–40
@@ -235,7 +235,7 @@
     - `get_fragility_score(platform) -> float 0.0–1.0` — derived from error rate + latency variance
   - Auto-migrate schema on startup
 
-- [ ] **2D.2** — Wire platform health into maigret_platforms
+- [ ] **2D.2** — Wire platform health into username_platforms
   - Before probing, call `should_probe(platform)` — skip if returns False
   - After each probe, call `record_probe()`
   - Use fragility score in `_wave()` to adjust wave assignment dynamically
@@ -277,50 +277,47 @@
 
 ---
 
-### Phase 3A — Sherlock Integration
-**Files:** New `backend/modules/sherlock.py`, new `tests/test_sherlock.py`
+### Phase 3A — Popular-Platform Coverage Expansion
+**Files:** `backend/modules/username_platforms.py`, `tests/test_username_platforms.py`
 
-- [ ] **3A.1** — Add `sherlock-project` to dependencies
-  - Add to `pyproject.toml`: `sherlock-project>=0.15`
-  - Or wrap via subprocess if library API is unstable
+- [ ] **3A.1** — Expand the native username-platform corpus
+  - Add popular-platform definitions to `data/mailaccess_sites.json`
+  - No third-party runtime dependency
 
-- [ ] **3A.2** — Build `backend/modules/sherlock.py`
-  - Follow pattern of `whatsmyname.py` / `user_scanner.py`
-  - `SherlockModule(BaseModule)` — runs `sherlock` for each username variant
+- [ ] **3A.2** — Serve via `backend/modules/username_platforms.py`
+  - Run the native corpus for each username variant
   - Parse results: `site`, `url_user`, `exists`
   - Normalize findings to match MailAccess schema
   - Add to `MODULE_WEIGHT_MAP` in engine as social weight
 
-- [ ] **3A.3** — Handle Sherlock-specific issues
-  - Rate limiting: Sherlock has its own internal delay; respect it
-  - Timeout: Sherlock can hang on some sites → enforce 5min max
-  - Duplicate with Maigret: use dedup_key() to merge Sherlock hits with existing findings
+- [ ] **3A.3** — Handle probe-reliability issues
+  - Rate limiting: honor per-platform delays
+  - Timeout: enforce a max so a slow site can't hang the sweep
+  - Duplicates: use dedup_key() to merge hits with existing findings
 
 ---
 
-### Phase 3B — Blackbird Integration
-**Files:** New `backend/modules/blackbird.py`
+### Phase 3B — Gaming/Community Platform Coverage
+**Files:** `backend/modules/username_platforms.py`
 
-- [ ] **3B.1** — Add `blackbird` to dependencies
-  - Check if pip package exists; wrap if needed
+- [ ] **3B.1** — Add gaming/community platform definitions
+  - Extend the native corpus; no third-party dependency
 
-- [ ] **3B.2** — Build `backend/modules/blackbird.py`
+- [ ] **3B.2** — Coverage
   - ~500 platforms, mostly Discord-adjacent and gaming sites
-  - Integrate with dedup_key to avoid double-counting with Maigret/WMN
+  - Integrate with dedup_key to avoid double-counting within the native sweep
 
 ---
 
-### Phase 3C — Snoop + Nexfil Integration
-**Files:** New `backend/modules/snoop.py`, new `backend/modules/nexfil.py`
+### Phase 3C — Short-Form/Regional Platform Coverage
+**Files:** `backend/modules/username_platforms.py`
 
-- [ ] **3C.1** — Snoop integration
-  - snoop uses a similar data.json format to Maigret — possible to reuse `maigret_loader`
-  - Clone snoop's data.json, filter, merge into MailAccess platform DB
-  - Or wrap as module if library API available
+- [ ] **3C.1** — Short-form platform coverage
+  - Reuse the shared corpus loader; merge new definitions into the native platform corpus
 
-- [ ] **3C.2** — Nexfil integration
+- [ ] **3C.2** — Regional platform coverage
   - ~350 platforms, focuses on short-form/social platforms
-  - Wrap as module following same pattern
+  - Serve via the same native corpus following the same pattern
 
 ---
 
@@ -373,11 +370,11 @@
 
 ---
 
-### Phase 3H — theHarvester Integration
-**Files:** New `backend/modules/harvester.py`
+### Phase 3H — Native Subdomain/Domain Harvesting
+**Files:** New `backend/modules/domain_harvester.py`
 
-- [ ] **3H.1** — Build `backend/modules/harvester.py`
-  - theHarvester: `mailaccess investigate email@domain.com` style calls
+- [ ] **3H.1** — Build `backend/modules/domain_harvester.py`
+  - Native subdomain/email collectors: `mailaccess investigate email@domain.com` style calls
   - Sources: Google, Bing, Baidu, Yandex, Dogpile, etc.
   - Returns: emails, hosts, virtual hosts, banners, operative systems
   - Run for email domain, extract emails + hosts
@@ -480,8 +477,8 @@
 - [ ] **4C.2** — Normalize source tag independently from module name
   - In `dedup.py`: when reading findings, call `_normalize_source(finding)` helper
   - `_normalize_source()`: look at `finding.get("metadata", {}).get("source")` first, fall back to module name mapping
-  - Add: WMN findings from within `username_pivot` → tag as "wmn", not "username_pivot"
-  - Add test: simulate WMN finding inside username_pivot module → verify merges correctly
+  - Add: native username-sweep findings from within `username_pivot` → tag as "username_platforms", not "username_pivot"
+  - Add test: simulate a native username-sweep finding inside username_pivot module → verify merges correctly
 
 - [ ] **4C.3** — Add debug output for dedup decisions
   - In `dedupe_key()`: if same domain has > 2 sources, log a warning with sources list
@@ -576,7 +573,7 @@
   - Test: `_check_adobe` with empty list response
   - Test: rate-limited slug handling (spotify, linkedin, patreon)
 
-- [ ] **5C.2** — `tests/test_maigret_detector.py`
+- [ ] **5C.2** — `tests/test_probe_detector.py`
   - Test `detect_hit()` matrix: all combinations of status code (200, 404, 403, 429, 503) × check_type (status_code, message, tags, response_url)
   - Test `username_matches_regex()` with various patterns
   - Test `prepare_platform_defn()` for Discourse engine
@@ -584,8 +581,8 @@
 
 - [ ] **5C.3** — `tests/test_platform_dedup.py`
   - Test `dedup_key()` with: `https://example.com`, `https://www.example.com`, `https://m.example.com`, `https://api.example.com`
-  - Test: WMN + Maigret finding for same domain → dual_confirmed
-  - Test: three sources (WMN, Maigret, username_pivot) for same domain
+  - Test: native username-sweep + derivative finding for same domain → dual_confirmed
+  - Test: three sources (username_platforms, pivot, fediverse) for same domain
   - Test: `_finding_sources()` normalization
 
 - [ ] **5C.4** — `tests/test_identity_graph.py`
@@ -717,12 +714,12 @@
 ---
 
 ### Phase 6D — Self-Healing Platform DB
-**Files:** `backend/core/maigret_loader.py`, `backend/core/platform_health.py`
+**Files:** `backend/core/username_sites.py`, `backend/core/platform_health.py`
 
 - [ ] **6D.1** — Auto-demotion based on health data
   - If platform has < 10% hit rate AND > 50 probes AND > 60% inconclusive → auto-skip in future runs
   - Log demotion event with reason
-  - User can override with `MAIGRET_FORCE_<platform>=true`
+  - User can override with `USERNAME_FORCE_<platform>=true`
 
 - [ ] **6D.2** — Auto-upgrade based on health data
   - If platform had 0 inconclusive for 30 days and hit rate > 20% → promote from Wave 2 to Wave 1
@@ -774,7 +771,7 @@ START HERE
 │  PHASE 3 (Free Expansion) — 9 sub-phases, ~600 LOC    │
 │  Independent of Phases 1–2. Can run in parallel.       │
 │  Prioritize: 3F (GitHub Code) > 3G (Pastebin) >       │
-│  3I (Fediverse) > 3A (Sherlock) > 3E (IntelX)        │
+│  3I (Fediverse) > 3A (Popular platforms) > 3E (IntelX) │
 └─────────────────────────────────────────────────────────┘
                         │
                         ▼
@@ -793,7 +790,7 @@ START HERE
 
 If bandwidth is limited, do these in order:
 
-1. **Phase 1A** (maigret absence_strings) — ~30 LOC, biggest FP reduction
+1. **Phase 1A** (probe absence_strings) — ~30 LOC, biggest FP reduction
 2. **Phase 1B** (common-name filter) — ~100 LOC, prevents noisy username hits
 3. **Phase 1C** (multi-language resets) — ~100 LOC, non-English sites currently invisible
 4. **Phase 2D** (platform health) — ~300 LOC, persistent improvement over time

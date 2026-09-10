@@ -43,7 +43,7 @@ interface Store {
   initLive: (id: string, email: string) => void
   loadReport: (report: Record<string, unknown>) => void
   handleWsModuleStart: (module: string) => void
-  handleWsModuleResult: (module: string, findings: Record<string, unknown>[], status: string) => void
+  handleWsModuleResult: (module: string, findings: Record<string, unknown>[] | undefined, status: string) => void
   handleWsModuleError: (module: string, error: string) => void
   handleWsComplete: (
     canonicalEmail: string | null,
@@ -53,6 +53,8 @@ interface Store {
     credentialRiskBand: string,
     timeline?: Timeline
   ) => void
+  handleWsFailed: (error?: string) => void
+  syncFromServer: (id: string) => Promise<void>
   setStatus: (status: InvStatus) => void
   reset: () => void
 }
@@ -157,14 +159,18 @@ export const useInvestigationStore = create<Store>((set) => ({
   },
 
   handleWsModuleResult(module, findings, statusStr) {
+    // R9 — an oversized/_truncated frame carries no `findings` array; tolerate it
+    // rather than throwing on a spread of `undefined`. The persisted report
+    // (fetched on the terminal event) is the source of truth for the full set.
+    const safeFindings = Array.isArray(findings) ? findings : []
     set(s => {
       const prev = s.modules[module] ?? { name: module, findings: [] }
-      const newFindings = [...prev.findings, ...findings]
+      const newFindings = [...prev.findings, ...safeFindings]
       const status: ModuleStatus = statusStr === 'success' ? 'success' : 'failed'
       let canonicalEmail = s.canonicalEmail
       let emailCredibility = s.emailCredibility
-      if (module === 'email_credibility' && findings.length > 0) {
-        const first = findings[0] as Record<string, unknown>
+      if (module === 'email_credibility' && safeFindings.length > 0) {
+        const first = safeFindings[0] as Record<string, unknown>
         const meta = (first.metadata as EmailCredibility | undefined) ?? undefined
         if (meta) {
           canonicalEmail = meta.canonical_email ?? canonicalEmail
@@ -173,10 +179,10 @@ export const useInvestigationStore = create<Store>((set) => ({
       }
       return {
         modules: { ...s.modules, [module]: { ...prev, status, findings: newFindings } },
-        totalFindings: s.totalFindings + findings.length,
+        totalFindings: s.totalFindings + safeFindings.length,
         breachCount:
           module === 'hibp'
-            ? s.breachCount + findings.length
+            ? s.breachCount + safeFindings.length
             : s.breachCount,
         canonicalEmail,
         emailCredibility,
@@ -207,6 +213,32 @@ export const useInvestigationStore = create<Store>((set) => ({
       credentialRiskBand,
       timeline: timeline ?? null,
     })
+  },
+
+  // R9 — a persisted failure must move the view out of "running".
+  handleWsFailed() {
+    set({ status: 'failed' })
+  },
+
+  // R9 — converge the live view to PERSISTED TRUTH. Called on any terminal event
+  // or on reconnect-uncertainty (socket closed before a terminal frame). The
+  // report JSON is authoritative; the live frames may have been partial or
+  // truncated. Guarded — a fetch failure leaves the current view untouched.
+  async syncFromServer(id) {
+    try {
+      const resp = await fetch(`/api/report/${id}`)
+      if (!resp.ok) {
+        // A persisted failure with no report still resolves the "running" spinner.
+        if (resp.status >= 500 || resp.status === 404) {
+          set(s => (s.status === 'running' ? { status: 'failed' as InvStatus } : {}))
+        }
+        return
+      }
+      const report = (await resp.json()) as Record<string, unknown>
+      useInvestigationStore.getState().loadReport(report)
+    } catch {
+      // network hiccup — keep whatever the live stream produced
+    }
   },
 
   setStatus(status) {

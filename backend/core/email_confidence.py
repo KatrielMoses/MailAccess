@@ -418,50 +418,7 @@ def _pgp_or_ca_flag(
     return is_ca_attested or bool(unique_types & {"pgp_uid", "ca_attested"})
 
 
-def compute_confidence(
-    source_count: int,
-    source_types: list[str],
-    is_smtp_verified: bool = False,
-    is_ca_attested: bool = False,
-    is_pgp_or_ca: bool | None = None,
-    oldest_timestamp: str | None = None,
-    last_seen_timestamp: str | None = None,
-) -> tuple[float, str]:
-    """Compute a ``(score, label)`` pair for aggregated email evidence."""
-    del source_count
-
-    unique_types = {st for st in source_types if st}
-    base_score = sum(SOURCE_WEIGHTS.get(t, 0.0) for t in unique_types)
-    pgp_or_ca = _pgp_or_ca_flag(
-        unique_types,
-        is_ca_attested=is_ca_attested,
-        is_pgp_or_ca=is_pgp_or_ca,
-    )
-    multiplier, _ = _select_verification_multiplier(
-        source_types=list(unique_types),
-        is_smtp_verified=is_smtp_verified,
-        is_pgp_or_ca=pgp_or_ca,
-    )
-    # P2 / FIX 4B: pass a representative source so ``freshness_factor``
-    # can apply the no-decay rule.  A PERMANENT source (PGP, commit,
-    # provider-verified) wins; otherwise the first permutation source
-    # (which returns 1.0 on a missing timestamp).
-    perm_source = next(
-        (st for st in unique_types if st in PERMANENT_SOURCES),
-        None,
-    ) or next(
-        (st for st in unique_types if str(st).startswith("permutation_")),
-        None,
-    )
-    freshness = freshness_factor(
-        last_seen_timestamp or oldest_timestamp,
-        source=perm_source,
-    )
-    final = min(max(base_score * multiplier * freshness, 0.0), MAX_SCORE)
-    return final, _label(final)
-
-
-def compute_confidence_breakdown(
+def _assess_email_confidence(
     source_types: list[str],
     is_smtp_verified: bool = False,
     is_ca_attested: bool = False,
@@ -469,7 +426,16 @@ def compute_confidence_breakdown(
     oldest_timestamp: str | None = None,
     last_seen_timestamp: str | None = None,
 ) -> ConfidenceLabel:
-    """Like :func:`compute_confidence` but returns the full breakdown."""
+    """The single canonical email-confidence scorer — (score, label, breakdown).
+
+    Part 0.1 / Q6: both the scalar ``compute_confidence`` and the
+    ``compute_confidence_breakdown`` paths delegate here, so they can NEVER diverge.
+    Previously the breakdown path selected its freshness ``perm_source`` from
+    ``permutation_``-prefixed types only, ignoring ``PERMANENT_SOURCES`` — so a
+    permanent source like ``github_commit_author`` (2010) scored 0.95 through the
+    scalar path but ~0.14 through the breakdown path (age-decayed). Here the
+    PERMANENT-source rule is applied once, and the MAX_SCORE clip is enforced once.
+    """
     unique_types = {st for st in source_types if st}
     base_score = sum(SOURCE_WEIGHTS.get(t, 0.0) for t in unique_types)
     pgp_or_ca = _pgp_or_ca_flag(
@@ -482,9 +448,12 @@ def compute_confidence_breakdown(
         is_smtp_verified=is_smtp_verified,
         is_pgp_or_ca=pgp_or_ca,
     )
-    # P2: same permutation-aware freshness rule as the scalar
-    # :func:`compute_confidence`.  See the comment there.
+    # A PERMANENT source (PGP, commit, provider-verified) wins and disables decay;
+    # otherwise the first permutation source (which returns 1.0 on a missing timestamp).
     perm_source = next(
+        (st for st in unique_types if st in PERMANENT_SOURCES),
+        None,
+    ) or next(
         (st for st in unique_types if str(st).startswith("permutation_")),
         None,
     )
@@ -501,6 +470,51 @@ def compute_confidence_breakdown(
         "source_types": sorted(unique_types),
     }
     return ConfidenceLabel(score=final, label=_label(final), breakdown=breakdown)
+
+
+def compute_confidence(
+    source_count: int,
+    source_types: list[str],
+    is_smtp_verified: bool = False,
+    is_ca_attested: bool = False,
+    is_pgp_or_ca: bool | None = None,
+    oldest_timestamp: str | None = None,
+    last_seen_timestamp: str | None = None,
+) -> tuple[float, str]:
+    """Compute a ``(score, label)`` pair for aggregated email evidence."""
+    del source_count
+    assessment = _assess_email_confidence(
+        source_types,
+        is_smtp_verified=is_smtp_verified,
+        is_ca_attested=is_ca_attested,
+        is_pgp_or_ca=is_pgp_or_ca,
+        oldest_timestamp=oldest_timestamp,
+        last_seen_timestamp=last_seen_timestamp,
+    )
+    return assessment.score, assessment.label
+
+
+def compute_confidence_breakdown(
+    source_types: list[str],
+    is_smtp_verified: bool = False,
+    is_ca_attested: bool = False,
+    is_pgp_or_ca: bool | None = None,
+    oldest_timestamp: str | None = None,
+    last_seen_timestamp: str | None = None,
+) -> ConfidenceLabel:
+    """Like :func:`compute_confidence` but returns the full breakdown.
+
+    Delegates to the single canonical scorer so the score/label are byte-identical
+    to :func:`compute_confidence` for the same inputs.
+    """
+    return _assess_email_confidence(
+        source_types,
+        is_smtp_verified=is_smtp_verified,
+        is_ca_attested=is_ca_attested,
+        is_pgp_or_ca=is_pgp_or_ca,
+        oldest_timestamp=oldest_timestamp,
+        last_seen_timestamp=last_seen_timestamp,
+    )
 
 
 def label_for_score(score: float) -> str:

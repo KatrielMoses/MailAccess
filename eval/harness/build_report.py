@@ -266,7 +266,7 @@ def render_md(rep: dict[str, Any], redact: bool) -> str:
     # --- Caveats ---
     L.append("## Caveats & known limitations of this baseline")
     L.append("")
-    L.append("- **Investigate 120 s cap:** the default module set (incl. `maigret_platforms`) can "
+    L.append("- **Investigate 120 s cap:** the default module set (incl. `username_platforms`) can "
              "exceed the tool's hard 120 s completion cap; `corp_own_2` timed out 3/3 (exit 3). "
              "4/5 emails completed.")
     L.append("- **Harvest ceiling:** rootaccess.tech harvest runs ~892 s, occasionally hitting the "

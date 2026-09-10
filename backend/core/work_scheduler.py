@@ -21,13 +21,18 @@ TRACK_OPPORTUNISTIC = 2
 
 
 def _normalize_url(url: str) -> str:
+    # Scheme and host are case-insensitive (RFC 3986 §6.2.2.1) so we lowercase them.
+    # The PATH is case-SENSITIVE: lowercasing it collapsed genuinely distinct
+    # resources into one fingerprint — e.g. ``github.com/User`` and ``github.com/user``
+    # (potentially different accounts) — and silently dropped one as a duplicate.
+    # Preserve path (and query) case; only strip a trailing slash.
     parts = urlsplit(url)
     path = parts.path.rstrip("/")
     return urlunsplit(
         (
             parts.scheme.lower(),
             parts.netloc.lower(),
-            path.lower(),
+            path,
             parts.query,
             "",
         )

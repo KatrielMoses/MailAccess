@@ -11,13 +11,29 @@ from urllib.parse import urlparse
 
 import yaml
 
-from ..modules.base import ModuleResult
+from ..modules.base import ModuleResult, ModuleStatus
 from .breach_normalizer import collapse_breach_findings, is_breach_finding
 
 _INFOSTEALER_FLOOR = 76
 _CONFIRMED_ACCOUNT_MODULES = frozenset(
-    {"whatsmyname", "user_scanner", "social", "account_discovery"}
+    {"username_platforms", "social", "account_discovery"}
 )
+
+# Modules whose successful run constitutes credential-exposure *coverage*. If not one
+# of these produced a usable (SUCCESS/PARTIAL) result, a zero score means "we could
+# not look" — insufficient evidence — not "the subject is clean". Distinguishing the
+# two prevents an all-failed run from masquerading as a reassuring "0 / LOW".
+_CREDENTIAL_EVIDENCE_MODULES = frozenset(
+    {
+        "hibp",
+        "breachdirectory",
+        "breach_deep",
+        "xposedornot",
+        "intelx_lookup",
+        "breach_aggregator",
+        "hudson_rock",
+    }
+) | _CONFIRMED_ACCOUNT_MODULES
 _HISTORICAL_MODULES = frozenset({"wayback", "github_commits"})
 _ROW_OMIT_KEYS = frozenset({"id", "module_name", "created_at", "data"})
 _SERVICE_CATEGORY_CAP = 5
@@ -57,6 +73,9 @@ class CredentialRiskAssessment:
     band: str
     score_drivers: list[str]
     recommended_actions: list[str]
+    # True when no credential-exposure source returned usable data, so `score`/`band`
+    # reflect missing coverage rather than a genuinely clean subject.
+    insufficient_evidence: bool = False
 
 
 def load_service_categories() -> dict[str, list[str]]:
@@ -88,7 +107,17 @@ def assess_credential_risk_from_results(
         module_name: deepcopy(result.metadata) if result.metadata else {}
         for module_name, result in results.items()
     }
-    return _assess(collapse_breach_findings(rows), metadata_table, as_of=as_of)
+    evidence_available = any(
+        result.status in (ModuleStatus.SUCCESS, ModuleStatus.PARTIAL)
+        for module_name, result in results.items()
+        if str(module_name).strip().lower() in _CREDENTIAL_EVIDENCE_MODULES
+    )
+    return _assess(
+        collapse_breach_findings(rows),
+        metadata_table,
+        as_of=as_of,
+        evidence_available=evidence_available,
+    )
 
 
 def assess_credential_risk_from_report(
@@ -102,7 +131,13 @@ def assess_credential_risk_from_report(
         for run in report.get("module_runs", [])
         if isinstance(run, dict) and run.get("module_name")
     }
-    return _assess(rows, metadata_table, as_of=as_of)
+    evidence_available = any(
+        str(run.get("status") or "").strip().lower() in ("success", "partial")
+        for run in report.get("module_runs", [])
+        if isinstance(run, dict)
+        and str(run.get("module_name") or "").strip().lower() in _CREDENTIAL_EVIDENCE_MODULES
+    )
+    return _assess(rows, metadata_table, as_of=as_of, evidence_available=evidence_available)
 
 
 def credential_risk_band(score: int | None) -> str:
@@ -122,6 +157,7 @@ def _assess(
     metadata_table: dict[str, dict[str, Any]],
     *,
     as_of: datetime | date | None = None,
+    evidence_available: bool = True,
 ) -> CredentialRiskAssessment:
     reference_date = _as_of_date(as_of)
     breach_rows = [row for row in rows if is_breach_finding(row)]
@@ -178,6 +214,25 @@ def _assess(
     score = max(0, min(raw_score, 100))
     if infostealer_present and score < _INFOSTEALER_FLOOR:
         score = _INFOSTEALER_FLOOR
+
+    # Insufficient evidence: no credential-exposure source produced usable data and
+    # nothing scored. Report UNKNOWN rather than a falsely-reassuring 0/LOW — "we
+    # could not look" must never read the same as "we looked and found nothing".
+    if not evidence_available and score == 0:
+        return CredentialRiskAssessment(
+            score=0,
+            band="UNKNOWN",
+            score_drivers=[
+                "Insufficient evidence: no breach, infostealer, or account-enumeration "
+                "source returned usable data (the credential-exposure lookups failed or "
+                "were unavailable). This is not a clean-subject result.",
+            ],
+            recommended_actions=[
+                "Re-run the credential-exposure modules — the current result reflects "
+                "missing coverage, not confirmed safety.",
+            ],
+            insufficient_evidence=True,
+        )
 
     band = credential_risk_band(score)
     score_drivers = _score_drivers(
@@ -387,7 +442,7 @@ def _confirmed_account_payloads(rows: list[dict[str, Any]]) -> list[dict[str, An
         payload = _finding_payload(row)
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         confidence = str(payload.get("confidence") or "").strip().lower()
-        if module_name == "whatsmyname" and _truthy(metadata.get("search_result")):
+        if module_name == "username_platforms" and _truthy(metadata.get("search_result")):
             continue
         if confidence == "low":
             continue

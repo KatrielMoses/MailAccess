@@ -18,15 +18,15 @@
 
 ### Phase 1 — False Positive Killers
 
-**Problem:** Maigret-based enumeration produces false positives on generic "not found" pages.
+**Problem:** Native username-platform enumeration produces false positives on generic "not found" pages.
 Enumerate-them-all leads to noisy, unreliable results.
 
-**1A — Maigret Detection Hardening** (`backend/core/maigret_detector.py`)
+**1A — Probe Detection Hardening** (`backend/core/probe_detector.py`)
 - Cross-applies `absenceStrs` to status-code checks so a 200 without any absence signal
   doesn't flip to "not found"
 - Content-length sanity check (≥500B body) guards against honeypot 200s with 0-length bodies
 - HTML entity decoding runs before regex matching so `&#116;witter.com` resolves correctly
-- `expected_content_length_min` field added to `maigret.yaml` checks
+- `expected_content_length_min` field added to platform-definition checks in `data/mailaccess_sites.json`
 
 **1B — Common-Name FP Filter** (`backend/core/common_names.py` + `data/common_names.json`)
 - 1000-entry curated common name list (English + common international)
@@ -36,7 +36,7 @@ Enumerate-them-all leads to noisy, unreliable results.
 **1C — Multi-Language Reset Signals** (`backend/core/reset_prober.py` + `data/reset_signals.json`)
 - Non-English HTML entity decoding across 4 languages (German, French, Spanish, Portuguese)
 - Signal taxonomy: `success | failure | inconclusive | blocked | rate_limited`
-- Prober runs on any page where maigret returns 200 but the result is unclear
+- Prober runs on any page where a platform probe returns 200 but the result is unclear
 
 **1D — Disposable Domain Detection** (`backend/core/disposable_domains.py` + `data/disposable_domains.json`)
 - Tags findings with `disposable_domain: true` in metadata
@@ -84,11 +84,10 @@ accounts on different platforms belong to the same person.
 
 **Problem:** Enumeration was limited to a handful of platforms.
 
-**3 — Sherlock, Nexfil, Blackbird** (`backend/modules/sherlock_platforms.py`, `backend/modules/nexfil_platforms.py`, `backend/modules/blackbird_platforms.py` + loaders + detectors)
-- Sherlock: ~300 platforms, username-based
-- Nexfil: ~300 platforms, username-based
-- Blackbird: social media focused
-- All three integrated via loader + detector pattern; load on-demand
+**3 — Native Username Platform Corpus** (`backend/modules/username_platforms.py` + loader + detector)
+- Consolidates username-based platform definitions into one native corpus (`data/mailaccess_sites.json`)
+- Broad username-based coverage plus social-media-focused platforms
+- Integrated via loader + detector pattern; load on-demand
 
 ---
 
@@ -100,7 +99,7 @@ accounts on different platforms belong to the same person.
 
 **4C — Platform Dedup** (`backend/core/platform_dedup.py`)
 - 21-prefix subdomain stripping (`www`, `m`, `i`, `api`, `mobile`, `web`, etc.)
-- Source normalization: `wmn / sherlock / maigret / nexfil` enumerate; `username_pivot / fediverse` excluded
+- Source normalization: `username_platforms` enumerates; `username_pivot / fediverse` excluded
 - `dual_confirmed`: ≥2 enumeration sources → same-as-original label
 - WARNING log when ≥3 sources agree (potential coordinated enumeration)
 - Alphabetically-earliest module name wins on tiebreak
@@ -142,7 +141,7 @@ accounts on different platforms belong to the same person.
 - `docs/fp-control.md` — new file documenting all FP killer logic
 - `CONTRIBUTING.md` — appended Phase 1–4 patterns
 - `README.md` — refreshed to reflect current state
-- Audited: `docs/api.md`, `docs/integrations.md`, `docs/exports.md`, `docs/self-hosting.md`, `docs/ghunt-setup.md` — no changes needed
+- Audited: `docs/api.md`, `docs/integrations.md`, `docs/exports.md`, `docs/self-hosting.md` — no changes needed
 - Confirmed: `mailaccess platform-health` CLI command exists; DB lives at `~/.mailaccess/platform_health.db`
 
 ---

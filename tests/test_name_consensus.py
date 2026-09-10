@@ -152,6 +152,30 @@ def test_extract_name_candidates_reads_profile_platform_fields() -> None:
     }
 
 
+def test_extract_name_candidates_reads_google_account_intel() -> None:
+    # google_account_intel must reach the authoritative engine (it previously had no
+    # branch here), routed at a sane social-tier weight (0.45), not the 0.95 it once
+    # carried in name_extractor.
+    from backend.core.name_consensus import SOURCE_WEIGHTS
+
+    collected = {
+        "google_account_intel": SimpleNamespace(findings=[
+            {
+                "platform": "google_account",
+                "metadata": {
+                    "source": "google_account_intel",
+                    "display_name": "Katriel Moses",
+                },
+            },
+        ]),
+    }
+    candidates = extract_name_candidates(collected, "katriel.moses@gmail.com")
+    google = [c for c in candidates if c["source"] == "google_account_intel"]
+    assert google and google[0]["raw_name"] == "Katriel Moses"
+    weight, source_class = SOURCE_WEIGHTS["google_account_intel"]
+    assert weight <= 0.50 and source_class == "social"
+
+
 def test_extract_name_candidates_accepts_flat_finding_list() -> None:
     candidates = extract_name_candidates(
         [
@@ -534,10 +558,10 @@ def test_fuzzy_merge_one_char_typo_shares_token() -> None:
             {"raw_name": "John Smith", "source": "gravatar"},
         ]
     )
-    assert result.confirmed_name == "John Smith"
-    assert "John Smith" in result.all_candidates[0].normalized_name or any(
-        c.normalized_name == "John Smith" for c in result.all_candidates
-    )
+    # The cluster is labelled by its highest-scoring member, not its longest string.
+    # github_profile (0.60) outranks gravatar (0.50), so its spelling heads the cluster.
+    assert result.confirmed_name == "Jon Smith"
+    assert any(c.normalized_name == "John Smith" for c in result.all_candidates)
 
 
 # ---------------------------------------------------------------------------
@@ -556,11 +580,11 @@ def test_token_set_ratio_merges_display_subset() -> None:
         ]
     )
     assert result.confirmed_name is not None
-    # The longer name wins as cluster head. Note: normalize_name
-    # title-cases every token (including the preposition "at" → "At"),
-    # which is pre-existing behavior shared with all other tests.
-    assert result.confirmed_name == "Software Engineer At Acme"
-    # Reasoning should mention the display-name subset match
+    # The highest-scoring member heads the cluster (not the longest string). about_me
+    # (0.45) outranks twitter_profile (0.35), so the shorter "Software Engineer" wins —
+    # the padded "…at Acme" variant no longer overwrites it purely by length.
+    assert result.confirmed_name == "Software Engineer"
+    # Reasoning should still mention the display-name subset match (the merge happened).
     assert "Display name subset match" in result.name_reasoning
 
 

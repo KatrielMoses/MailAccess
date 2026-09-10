@@ -123,10 +123,14 @@ def normalize_url(url: str) -> str:
 
     path = parsed.path or "/"
 
-    # Sort query pairs.  parse_qsl returns lists (multi-value friendly);
-    # sort by (key, value) tuples — deterministic across all runs.
+    # R16 (S5): canonicalize the query deterministically WITHOUT collapsing
+    # repeated-key order. Sorting by the full (key, value) tuple made
+    # ``?id=alice&id=bob`` and ``?id=bob&id=alice`` share a cache key, even though
+    # a repeated key's order can be semantically significant (a distinct request).
+    # A STABLE sort by KEY ONLY normalizes cross-key order (a&b == b&a) while
+    # preserving the relative order of values under the same key.
     query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
-    query_pairs.sort()
+    query_pairs.sort(key=lambda kv: kv[0])
     query = urlencode(query_pairs)
 
     # urlunparse('') drops the fragment; we still pass it explicitly so

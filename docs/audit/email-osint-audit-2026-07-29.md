@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-29
 **Scope:** Email discovery, verification, and quality only. No subdomains, infrastructure, or username-only work.
-**Method:** Direct source read of `C:\MailAccess\backend\` + external research of `megadose/holehe`, `kaifcodec/user-scanner`, `Raikia/UhOh365`, `email2name.py`, `snov.io`.
+**Method:** Direct source read of `C:\MailAccess\backend\` + external research of leading public account-existence and username-scan tools, `Raikia/UhOh365`, `email2name.py`, and `snov.io`.
 
 ---
 
@@ -137,32 +137,32 @@
 
 | Technique | Source | Notes |
 |---|---|---|
-| Gravatar deep + Libravatar fallback | `modules/gravatar.py:32-321` | Holehe (`holehe/cms/gravatar.py:8-32`) only fetches display name; MailAccess extracts bio, urls[], accounts[], phones, emails from bio, aggregator URLs. |
-| PGP keyserver multi-source | `modules/pgp_keyserver.py:1-243` + `modules/pgp_domain_email.py:1-609` | Holehe only uses Proton's `/pks/lookup`; MailAccess uses openpgp.org + Ubuntu + MIT HKP with three parsers (pgpy / gpg / regex). |
-| Holehe wrapped | `modules/account_discovery.py:11-12, 99-170` | MailAccess runs all 120+ Holehe modules. |
-| UserScanner wrapped | `modules/user_scanner.py:1-103` | MailAccess runs another 140+ UserScanner modules. Net coverage 360+ email-integrated sites. |
-| GHunt (Google GAIA) | `modules/ghunt_module.py:1-240` | Far exceeds Holehe's `mails/google.py:18-67` which only hits `webusernameavailability`. |
-| HIBP / Hudson Rock / IntelX / LeakCheck | Multiple modules | Holehe has no breach correlation. |
-| Email credibility / pattern verify / disposable filter | `core/email_credibility.py`, `core/email_validator.py`, `core/disposable_domains.py` | Holehe has none. |
-| SMTP RCPT TO + catch-all + greylist retry | `core/smtp_verifier.py:1-632` | Holehe has zero SMTP. |
+| Gravatar deep + Libravatar fallback | `modules/gravatar.py:32-321` | The reference account-existence tool only fetches display name; MailAccess extracts bio, urls[], accounts[], phones, emails from bio, aggregator URLs. |
+| PGP keyserver multi-source | `modules/pgp_keyserver.py:1-243` + `modules/pgp_domain_email.py:1-609` | The reference account-existence tool only uses Proton's `/pks/lookup`; MailAccess uses openpgp.org + Ubuntu + MIT HKP with three parsers (pgpy / gpg / regex). |
+| Native account-existence probes | `modules/account_discovery.py:11-12, 99-170` | MailAccess runs 120+ native email-existence probes. |
+| Extended account-existence vectors | `modules/account_discovery.py` | MailAccess runs another 140+ native email-existence probes. Net coverage 360+ email-integrated sites. |
+| Google account intel (Google GAIA) | `modules/google_account_intel.py:1-240` | Far exceeds the reference tool's Google check, which only hits `webusernameavailability`. |
+| HIBP / Hudson Rock / IntelX / LeakCheck | Multiple modules | The reference tools have no breach correlation. |
+| Email credibility / pattern verify / disposable filter | `core/email_credibility.py`, `core/email_validator.py`, `core/disposable_domains.py` | The reference tools have none. |
+| SMTP RCPT TO + catch-all + greylist retry | `core/smtp_verifier.py:1-632` | The reference tools have zero SMTP. |
 
-### B.2 — Holehe techniques NOT in MailAccess
+### B.2 — Reference-tool techniques NOT in MailAccess
 
 | Technique | Tool | MailAccess gap | Effort to add | Email-specific value |
 |---|---|---|---|---|
-| **Microsoft Autodiscover (`POST /autodiscover/autodiscover.json/v1.0/{email}?Protocol=Autodiscoverv1`)** | UhOh365 (Holehe doesn't have it either, credits in README) | **Not covered anywhere.** Returns HTTP 200 = mailbox exists, 302 = does not, zero login attempts, unthrottled. Hits all 400M+ M365 / Exchange Online / live.com / hotmail.com / outlook.com mailboxes. | **Low** (one ~80-line module, single endpoint, single status-code check) | **Very high.** Microsoft is the dominant business email provider; this single endpoint would cover the entire Microsoft ecosystem with positive existence signal where today MailAccess returns only `inconclusive`. |
-| **Adobe IMS typeahead avatar** (`GET ims-na1.adobelogin.com/ims/avatar?email=…`) | socialscan family, not in Holehe proper | Not covered. Returns `{userId, displayName, email, emailVerified, lastLoginDaysAgo}` for an existing user, 404 otherwise. Adobe rotates URLs; needs verification. | Low (one module) | High. Adobe = high-value target for creative / design / enterprise personas; gives the *display name* without triggering a password reset. |
-| **Spotify** `GET spclient.wg.spotify.com/signup/public/v1/account?validate=1&email=…` returns `status: 20` (taken) / `1` (available) | Holehe `music/spotify.py:13-29` | Not in MailAccess. Distinct 3-state: taken / available / rate-limited. | Low (YAML platform entry) | Medium. Spotify = consumer; demographic indicator. |
-| **Atlassian** `POST id.atlassian.com/rest/check-username` with CSRF | Holehe `cms/atlassian.py:18-36` | Not in MailAccess. CSRF scrape + POST. | Low | Medium. Atlassian = enterprise developer persona. |
-| **Mozilla** `POST api.accounts.firefox.com/v1/account/status` with `{"email": …}` returns `{"exists": true|false}` | Holehe `software/firefox.py:7-21` | Not in MailAccess. Simple POST. | Low (YAML platform entry) | Medium. Mozilla account = developer / privacy persona. |
-| **Tellonym** `GET api.tellonym.me/accounts/check?email=…` returns `EMAIL_ALREADY_IN_USE` | Holehe `social_media/tellonym.py:14-30` | Not in MailAccess. Substring match. | Low | Low. |
-| **Wattpad** `GET wattpad.com/api/v3/users/validate?email=…` returns French "Cette adresse…" | Holehe `social_media/wattpad.py:18-33` | Not in MailAccess. Substring match. | Low | Low. |
-| **Imgur** `POST imgur.com/signin/ajax_email_available` form body | Holehe `social_media/imgur.py:18-32` | Not in MailAccess. | Low | Low. |
-| **Adobe / Mail.ru / Odnoklassniki / Samsung forgot-password recovery abuse** | Holehe `software/adobe.py:51-56`, `mails/mail_ru.py:16-49`, `social_media/odnoklassniki.py:24-62`, `products/samsung.py:67-110` | Not in MailAccess. **Should not be added** — these abuse forgot-password flows and leak recovery phone/email. MailAccess's policy is privacy-respecting. | — | — |
-| **Surfacing `key_created` date from PGP keyserver as a finding metadata field** | Holehe `mails/protonmail.py:21-38` does this as `others["Date, time of the creation"]` | Already parsed at `pgp_keyserver.py:170-176` but only stored in metadata, not surfaced in the finding's metadata. | **Trivial** (5 lines) | Medium. Key age is a useful identity signal. |
-| **UserScanner `extras` flattening** | `user_scanner/email_scan/shopping/etsy.py:36-65` returns 12+ fields per finding | `modules/user_scanner.py:73-83` flattens findings but **drops the `extras` dict entirely**. | **Trivial** (5 lines) | High. Rich profile data already returned by UserScanner, just discarded. |
-| **3-way disambiguation: exists / not exists / format error** | Holehe Spotify / Google / Tellonym distinguish all three states | MailAccess YAML `TEMPLATE.yaml:33-37` only has `body_contains` / `body_not_contains`; a 422 from format error and a 422 from "exists" are indistinguishable. | Low (YAML schema extension) | Medium. Eliminates a class of false negatives. |
-| **Hudson Rock integration** | UserScanner `--hudson` flag | Already in `modules/hudson_rock.py` (confirmed in file list) | Done | — |
+| **Microsoft Autodiscover (`POST /autodiscover/autodiscover.json/v1.0/{email}?Protocol=Autodiscoverv1`)** | UhOh365 (not in the reference account-existence tool either) | **Not covered anywhere.** Returns HTTP 200 = mailbox exists, 302 = does not, zero login attempts, unthrottled. Hits all 400M+ M365 / Exchange Online / live.com / hotmail.com / outlook.com mailboxes. | **Low** (one ~80-line module, single endpoint, single status-code check) | **Very high.** Microsoft is the dominant business email provider; this single endpoint would cover the entire Microsoft ecosystem with positive existence signal where today MailAccess returns only `inconclusive`. |
+| **Adobe IMS typeahead avatar** (`GET ims-na1.adobelogin.com/ims/avatar?email=…`) | socialscan family, not in the reference account-existence tool | Not covered. Returns `{userId, displayName, email, emailVerified, lastLoginDaysAgo}` for an existing user, 404 otherwise. Adobe rotates URLs; needs verification. | Low (one module) | High. Adobe = high-value target for creative / design / enterprise personas; gives the *display name* without triggering a password reset. |
+| **Spotify** `GET spclient.wg.spotify.com/signup/public/v1/account?validate=1&email=…` returns `status: 20` (taken) / `1` (available) | Reference account-existence tool | Not in MailAccess. Distinct 3-state: taken / available / rate-limited. | Low (YAML platform entry) | Medium. Spotify = consumer; demographic indicator. |
+| **Atlassian** `POST id.atlassian.com/rest/check-username` with CSRF | Reference account-existence tool | Not in MailAccess. CSRF scrape + POST. | Low | Medium. Atlassian = enterprise developer persona. |
+| **Mozilla** `POST api.accounts.firefox.com/v1/account/status` with `{"email": …}` returns `{"exists": true|false}` | Reference account-existence tool | Not in MailAccess. Simple POST. | Low (YAML platform entry) | Medium. Mozilla account = developer / privacy persona. |
+| **Tellonym** `GET api.tellonym.me/accounts/check?email=…` returns `EMAIL_ALREADY_IN_USE` | Reference account-existence tool | Not in MailAccess. Substring match. | Low | Low. |
+| **Wattpad** `GET wattpad.com/api/v3/users/validate?email=…` returns French "Cette adresse…" | Reference account-existence tool | Not in MailAccess. Substring match. | Low | Low. |
+| **Imgur** `POST imgur.com/signin/ajax_email_available` form body | Reference account-existence tool | Not in MailAccess. | Low | Low. |
+| **Adobe / Mail.ru / Odnoklassniki / Samsung forgot-password recovery abuse** | Reference account-existence tool (forgot-password recovery flows) | Not in MailAccess. **Should not be added** — these abuse forgot-password flows and leak recovery phone/email. MailAccess's policy is privacy-respecting. | — | — |
+| **Surfacing `key_created` date from PGP keyserver as a finding metadata field** | The reference tool surfaces this as `others["Date, time of the creation"]` | Already parsed at `pgp_keyserver.py:170-176` but only stored in metadata, not surfaced in the finding's metadata. | **Trivial** (5 lines) | Medium. Key age is a useful identity signal. |
+| **Extended-probe `extras` flattening** | Extended account-existence probes return 12+ fields per finding | `modules/account_discovery.py` flattens findings but **drops the `extras` dict entirely**. | **Trivial** (5 lines) | High. Rich profile data already returned by the native probes, just discarded. |
+| **3-way disambiguation: exists / not exists / format error** | Reference tools' Spotify / Google / Tellonym checks distinguish all three states | MailAccess YAML `TEMPLATE.yaml:33-37` only has `body_contains` / `body_not_contains`; a 422 from format error and a 422 from "exists" are indistinguishable. | Low (YAML schema extension) | Medium. Eliminates a class of false negatives. |
+| **Hudson Rock integration** | Native breach tooling (Hudson Rock) | Already in `modules/hudson_rock.py` (confirmed in file list) | Done | — |
 
 ### B.3 — snov.io / email2name / LinkedIn directory gaps
 
@@ -182,7 +182,7 @@
 | **Microsoft Autodiscover module** (described above) | new `modules/outlook_autodiscover.py` | Low. | Very high. |
 | **Adobe IMS typeahead module** | new `modules/adobe_ims.py` | Low. | High. |
 | **PGP `key_created` surfaced as `metadata.key_age_days`** | `core/pgp_keyserver.py:170-176` → finding builder | Trivial. | Medium. |
-| **UserScanner `extras` flattening** | `modules/user_scanner.py:73-83` | Trivial. | High. |
+| **Extended-probe `extras` flattening** | `modules/account_discovery.py` | Trivial. | High. |
 | **3-way disambiguation in platform YAML schema** | `core/platform_loader.py` / YAML schema | Low. | Medium. |
 
 ---
@@ -201,23 +201,23 @@ Ranked by `impact / effort` (subjective but justified):
 
 ### 2. **Add Microsoft Autodiscover (`POST /autodiscover/autodiscover.json/v1.0/{email}?Protocol=Autodiscoverv1`) as a new module**
 
-**Impact:** Very high. Microsoft 365 + Exchange Online + all consumer Microsoft accounts (`live.com`, `hotmail.com`, `outlook.com`). 400M+ addresses. Zero login attempts, unthrottled, designed to be queried. The single biggest Holehe gap AND the single biggest missing piece in MailAccess's provider coverage.
+**Impact:** Very high. Microsoft 365 + Exchange Online + all consumer Microsoft accounts (`live.com`, `hotmail.com`, `outlook.com`). 400M+ addresses. Zero login attempts, unthrottled, designed to be queried. The single biggest reference-tool gap AND the single biggest missing piece in MailAccess's provider coverage.
 
 **Effort:** ~80 lines. One new file `backend/modules/outlook_autodiscover.py`, wire into the orchestrator's verifier dispatch.
 
 **Risk:** Low. Microsoft's own Autodiscover endpoint, designed to be public. Doesn't log to target tenant's audit log. Already used in production by UhOh365 and similar tools.
 
-### 3. **Flatten UserScanner `extras` into MailAccess finding metadata**
+### 3. **Flatten extended-probe `extras` into MailAccess finding metadata**
 
-**Impact:** High. MailAccess already runs UserScanner (`modules/user_scanner.py:1-103`), which returns 12+ fields per finding (name, username, location, bio, join date, avatar, etc.). The current code at `modules/user_scanner.py:73-83` discards them. A 5-line change turns "site: registered" into a rich profile finding comparable to the Gravatar output.
+**Impact:** High. MailAccess's native account-existence probes (`modules/account_discovery.py`) return 12+ fields per finding (name, username, location, bio, join date, avatar, etc.). The current flattening code discards them. A 5-line change turns "site: registered" into a rich profile finding comparable to the Gravatar output.
 
-**Effort:** Trivial. ~5 lines in `modules/user_scanner.py`.
+**Effort:** Trivial. ~5 lines in `modules/account_discovery.py`.
 
 **Risk:** None. Pure metadata passthrough.
 
 ### 4. **Surface `key_created` from PGP keyserver as a finding metadata field**
 
-**Impact:** Medium-high. PGP key creation date is a strong identity-correlation signal (someone who's been signing email for 8+ years is unlikely to be a fake account). Currently parsed at `pgp_keyserver.py:170-176` but not surfaced in the finding's metadata. The original Holehe `protonmail.py:21-38` surfaces it as `others["Date, time of the creation"]`.
+**Impact:** Medium-high. PGP key creation date is a strong identity-correlation signal (someone who's been signing email for 8+ years is unlikely to be a fake account). Currently parsed at `pgp_keyserver.py:170-176` but not surfaced in the finding's metadata. The reference tool surfaces it as `others["Date, time of the creation"]`.
 
 **Effort:** Trivial. ~5 lines to move `key_created` from the inner dict into the outer finding's metadata.
 

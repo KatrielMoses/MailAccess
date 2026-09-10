@@ -10,8 +10,12 @@ Design constraints (from the phase spec):
 
 * All active engines run **concurrently** with each other.
 * CAPTCHA / block detection aborts that engine immediately.
-* Multi-engine hits fall into the ``multi_source`` multiplier branch
-  via :func:`compute_confidence_breakdown`.
+* Multi-engine hits are recorded (``found_via_*`` / ``dual_engine_confirmed``)
+  for reporting, but per ``email_confidence`` FIX 4C every ``search_snippet_*``
+  engine collapses to ONE corroboration family: the same email surfaced by DDG
+  and Bing may be the same underlying page indexed twice, so it counts as one
+  source (single-source multiplier), not independent corroboration. Only a
+  different source FAMILY (e.g. common-crawl) multiplies confidence.
 """
 
 from __future__ import annotations
@@ -573,9 +577,12 @@ class EmailSearchDorkModule(BaseModule):
         any_blocked = ddg_blocked or bing_blocked or cse_blocked or brave_blocked
         any_failed = ddg_failed or bing_failed or cse_failed or brave_failed
 
-        if (any_failed and not cse_available) or (ddg_failed and bing_failed and cse_failed):
-            status = ModuleStatus.FAILED
-        elif (
+        # R3 (S4): a transport / proxy / block is a provider-AVAILABILITY failure,
+        # not a definitive module failure — the results are UNKNOWN, not proven
+        # absent. So any engine error/block degrades to PARTIAL (errors surfaced,
+        # results incomplete), never FAILED. FAILED is reserved for the earlier
+        # config/precondition guards (bad domain, no queries, unsupported provider).
+        if (
             any_failed
             or any_blocked
             or (ddg_all_empty and ddg_has_error)

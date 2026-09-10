@@ -369,19 +369,48 @@ def _is_placeholder(local: str, domain: str) -> bool:
     return False
 
 
+#: Providers KNOWN to implement ``+`` subaddressing (all ``local+tag@domain``
+#: route to the same mailbox as ``local@domain``). R5 (S3): ``+`` is only a
+#: mailbox alias for these providers. On an arbitrary CUSTOM domain, ``+`` is a
+#: legal local-part character and ``foo+bar@corp.com`` may be a genuinely
+#: DISTINCT mailbox — collapsing it would destroy account evidence — so we do
+#: NOT strip ``+`` unless the domain is on this policy list.
+_SUBADDRESSING_DOMAINS = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "outlook.com",
+        "hotmail.com",
+        "hotmail.co.uk",
+        "live.com",
+        "msn.com",
+        "icloud.com",
+        "me.com",
+        "mac.com",
+        "fastmail.com",
+        "fastmail.fm",
+        "protonmail.com",
+        "proton.me",
+        "pm.me",
+    }
+)
+
+
 def subaddress_key(email: str) -> str:
-    """Return a normalised dedup key for *email* with ``+anything`` stripped.
+    """Return a normalised dedup key for *email*.
 
-    MUST-FIX S2: Gmail-style subaddressing (``foo+filter@bar.com``,
-    ``foo+anything@bar.com``) routes all mail to the same mailbox as
-    ``foo@bar.com``. Real-world OSINT data frequently contains both
-    forms, and treating them as separate entries duplicates evidence
-    without adding signal.
+    Gmail-style subaddressing (``foo+filter@gmail.com``) routes all mail to the
+    same mailbox as ``foo@gmail.com``, so the ``+suffix`` is stripped **only for
+    providers on the policy list** (:data:`_SUBADDRESSING_DOMAINS`).
 
-    This function returns a lowercased ``local@domain`` form with the
-    ``+suffix`` portion of the local-part stripped. Use it as the
-    dedup KEY only — the original ``email`` (with ``+filter``) is
-    preserved as the canonical entry on the ``HarvestedEmail`` record.
+    R5 (S3): ``+`` is a legal local-part character. On a custom domain,
+    ``foo+bar@corp.com`` is not guaranteed to be the same mailbox as
+    ``foo@corp.com`` — treating them as one would silently merge two distinct
+    accounts and destroy evidence — so a non-policy domain keeps its full local
+    part in the key.
+
+    Use this as the dedup KEY only — the original ``email`` (with ``+filter``)
+    is preserved as the canonical entry on the ``HarvestedEmail`` record.
 
     Examples
     --------
@@ -389,20 +418,19 @@ def subaddress_key(email: str) -> str:
     'jane.doe@gmail.com'
     >>> subaddress_key("jane.doe@gmail.com")
     'jane.doe@gmail.com'
-    >>> subaddress_key("admin@x.com")
-    'admin@x.com'
+    >>> subaddress_key("admin+ops@corp.com")   # custom domain — NOT collapsed
+    'admin+ops@corp.com'
     """
     if not isinstance(email, str) or "@" not in email:
         return email.strip().lower() if email else ""
     local, _, domain = email.strip().lower().partition("@")
-    # Strip ``+suffix`` only if the local part is non-empty AND the
-    # ``+`` is not the first character (which would be a malformed
-    # address). The split is at the FIRST ``+`` only — Gmail and
-    # Outlook only treat the substring before the FIRST ``+`` as the
-    # real local part.
-    plus_idx = local.find("+")
-    if plus_idx > 0:
-        local = local[:plus_idx]
+    # Strip ``+suffix`` only for known-subaddressing providers, only when the
+    # local part is non-empty and the ``+`` is not the first character
+    # (a leading ``+`` is malformed). Split at the FIRST ``+`` only.
+    if domain in _SUBADDRESSING_DOMAINS:
+        plus_idx = local.find("+")
+        if plus_idx > 0:
+            local = local[:plus_idx]
     return f"{local}@{domain}"
 
 

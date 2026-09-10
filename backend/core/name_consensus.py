@@ -45,6 +45,7 @@ SOURCE_WEIGHTS: dict[str, tuple[float, str]] = {
     "pypi_discovery": (0.55, "developer"),
     "npm_discovery": (0.55, "developer"),
     "gravatar": (0.50, "social"),
+    "google_account_intel": (0.45, "social"),
     "email_localpart": (0.50, "inferred"),
     "about_me": (0.45, "social"),
     "twitter_profile": (0.35, "social"),
@@ -52,6 +53,7 @@ SOURCE_WEIGHTS: dict[str, tuple[float, str]] = {
     "mastodon": (0.35, "social"),
     "etsy_shop": (0.30, "commerce"),
     "reddit": (0.15, "social"),
+    "username_platforms": (0.15, "social"),
     "ebay_profile": (0.10, "commerce"),
 }
 
@@ -72,7 +74,6 @@ MODULE_ARTIFACT_TOKENS = frozenset(
         "edgar",
         "hibp",
         "xon",
-        "wmn",
         "cc",
         "orcid",
         "pgp",
@@ -336,6 +337,27 @@ def _looks_like_person_localpart(localpart: str) -> bool:
     return bool(PERSON_RE.match(normalized)) and not is_username_class
 
 
+def _localpart_is_person_name(localpart: str) -> bool:
+    """T3 — is a localpart admissible as a SPECULATIVE person-name hint?
+
+    Requires a MULTI-TOKEN, person-shaped, chrome-free normalized form so that a
+    structured "john.smith"/"jane.doe" passes but a single-token handle
+    ("afaltin"/"toasty"/"user"/"info") — the false echo T3 targets — is rejected.
+    Deliberately not ``is_plausible_person_name`` (it over-rejects short two-token
+    names like "Jane Doe"; see RC2).
+    """
+    from backend.core.name_quality import contains_chrome_token
+
+    normalized, _flags, is_username_class = normalize_name(localpart)
+    if is_username_class or not normalized:
+        return False
+    if len(normalized.split()) < 2:
+        return False
+    if not PERSON_RE.match(normalized):
+        return False
+    return not contains_chrome_token(normalized)
+
+
 def is_role_or_system_email(email: str | None) -> bool:
     localpart = _email_localpart(email).lower()
     if not localpart:
@@ -499,6 +521,10 @@ class NameConsensusEngine:
     def _prepare_candidates(
         self, raw_candidates: list[dict[str, Any] | NameCandidate]
     ) -> list[NameCandidate]:
+        # Absolute import: name_consensus.py is also loaded standalone (by its
+        # test), where a relative import has no package context.
+        from backend.core.name_quality import contains_chrome_token
+
         prepared: list[NameCandidate] = []
         for item in raw_candidates:
             if isinstance(item, NameCandidate):
@@ -512,6 +538,13 @@ class NameConsensusEngine:
             if BOT_TERMS.search(raw_name) or ORG_TERMS.search(raw_name):
                 continue
             if _contains_module_artifact_token(raw_name):
+                continue
+            # RC2 (Output-Trust): a candidate carrying page-chrome / captcha /
+            # marketing / certification tokens ("Security Verification", "Join
+            # group chat on Telegram", "Google Cybersecurity Certificate") is never
+            # a name. Uses the targeted chrome-token check so legitimate short
+            # names ("Jane Doe", "Ed Lee") are not collateral.
+            if contains_chrome_token(raw_name):
                 continue
             if self.target_email and raw_name.strip().lower() == self.target_email.strip().lower():
                 continue
@@ -576,6 +609,22 @@ class NameConsensusEngine:
     def _cluster(self, candidates: list[NameCandidate]) -> list[dict[str, Any]]:
         from rapidfuzz import fuzz as _fuzz  # lazy import
 
+        # R13 (S3) — greedy clustering is order-sensitive (a candidate joins the
+        # FIRST matching cluster and the first candidate seeds the cluster name),
+        # so process candidates in a DETERMINISTIC order: strongest first, ties
+        # broken by a stable string key. This makes the whole resolution
+        # independent of collection order (same winner-or-conflict for any
+        # input permutation).
+        candidates = sorted(
+            candidates,
+            key=lambda c: (
+                -c.final_score,
+                -c.base_weight,
+                c.source_class,
+                c.source,
+                c.normalized_name,
+            ),
+        )
         clusters: list[dict[str, Any]] = []
         for candidate in candidates:
             placed = False
@@ -657,8 +706,21 @@ class NameConsensusEngine:
                                 )
                             )
                     cluster["candidates"].append(candidate)
-                    if len(candidate.normalized_name) > len(str(cluster["name"])):
-                        cluster["name"] = candidate.normalized_name
+                    # Label the cluster with its highest-scoring member's normalized name,
+                    # not its longest. Longest-wins let a low-trust artifact (a padded
+                    # title/handle string) overwrite the real, higher-scoring name.
+                    # R13 — deterministic tie-break so equal-score members can't make
+                    # the label depend on insertion order.
+                    best = max(
+                        cluster["candidates"],
+                        key=lambda c: (
+                            c.final_score,
+                            c.base_weight,
+                            c.source_class,
+                            c.normalized_name,
+                        ),
+                    )
+                    cluster["name"] = best.normalized_name
                     placed = True
                     break
             if not placed:
@@ -681,7 +743,9 @@ class NameConsensusEngine:
                 score += sum(weight * 0.3 for weight in additional)
             cluster["score"] = score
 
-        clusters.sort(key=lambda cluster: float(cluster["score"]), reverse=True)
+        # R13 — deterministic ordering: score desc, then a stable name key so two
+        # equal-score clusters always rank identically regardless of input order.
+        clusters.sort(key=lambda cluster: (-float(cluster["score"]), str(cluster["name"])))
         return clusters
 
     def _confidence_for_cluster(self, cluster: dict[str, Any]) -> str:
@@ -784,6 +848,10 @@ def extract_name_candidates(
     collected: dict[str, Any] | list[Any],
     canonical_email: str | None = None,
 ) -> list[dict[str, Any]]:
+    # Absolute import: name_consensus.py is also loaded standalone (by its test),
+    # where a relative import has no package context.
+    from backend.core.probe_detector import is_confirmed_account_hit
+
     candidates: list[dict[str, Any]] = []
 
     def add(raw_name: Any, source: str, seen_at: datetime | None = None) -> None:
@@ -794,8 +862,17 @@ def extract_name_candidates(
                 entry["seen_at"] = seen_at
             candidates.append(entry)
 
+    # T3 (Output-Trust final): the email localpart is a SPECULATIVE name hint, not
+    # evidence — a title-cased echo of the mailbox string. Admit it only when it is a
+    # MULTI-TOKEN, person-shaped, chrome-free string: a structured "john.smith" →
+    # "John Smith" (or "jane.doe" → "Jane Doe") is a reasonable low-weight hint, but a
+    # single-token handle ("user" / "toasty" / "afaltin" / "info") is not a name and
+    # must not seed a cluster. The multi-token requirement — rather than the full
+    # ``is_plausible_person_name`` gate — is deliberate: is_plausible over-rejects
+    # legitimate short two-token names ("Jane Doe", "Ed Lee") via its average-token
+    # length heuristic (see RC2), which we must not drop here.
     localpart = _email_localpart(canonical_email)
-    if localpart:
+    if localpart and _localpart_is_person_name(localpart):
         add(localpart, "email_localpart")
 
     def iter_module_findings() -> list[tuple[str, list[Any]]]:
@@ -837,6 +914,12 @@ def extract_name_candidates(
                 add(metadata.get("full_name") or metadata.get("credit_name"), "orcid_profile", ts)
             elif platform == "hackernews_profile":
                 add(metadata.get("extracted_name"), "hackernews", ts)
+            elif platform == "google_account" or metadata.get("source") == "google_account_intel":
+                # Public Google-profile display name — a mutable, self-set social-tier
+                # signal. Routed into the authoritative engine so it can *inform*
+                # confirmed_name at a sane weight (0.45) and be gated by the shared
+                # person-name quality multiplier, rather than bypassing it.
+                add(metadata.get("display_name"), "google_account_intel", ts)
             elif module_name == "pypi_discovery":
                 add(metadata.get("author"), "pypi_discovery", ts)
             elif module_name == "npm_discovery":
@@ -844,6 +927,19 @@ def extract_name_candidates(
             elif module_name == "github_commits":
                 name = metadata.get("author_name") or metadata.get("real_name_from_git")
                 add(name, "git_commit", ts)
+            elif (
+                module_name == "username_platforms"
+                or metadata.get("source") == "username_platforms"
+            ):
+                # M2 (Output-Trust) — a display_name from a SPECULATIVE localpart-sweep
+                # hit is an unrelated person's name (the "Angie Quinones" FP). Only a
+                # confirmed/corroborated hit contributes a name candidate; a raw
+                # unverified sweep hit contributes none. Same predicate the graph +
+                # brief use, so the FP cannot leak in via the name path.
+                if is_confirmed_account_hit(finding):
+                    # Phase 3: profile display-name extracted from a username-URL hit.
+                    # Low weight — a single hit can never exceed "possible" on its own.
+                    add(metadata.get("display_name"), "username_platforms", ts)
 
     seen: set[tuple[str, str]] = set()
     unique: list[dict[str, Any]] = []

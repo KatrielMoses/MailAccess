@@ -12,9 +12,10 @@ corroborated identity or credential-risk evidence.
 
 ## Contents
 
+- [Output-Trust Gating (unverified ≠ confirmed)](#output-trust-gating-unverified--confirmed)
 - [Common-Name Filter](#common-name-filter)
 - [Disposable Domain Detection](#disposable-domain-detection)
-- [Maigret Catch-All Detection](#maigret-catch-all-detection)
+- [Username-Platform Catch-All Detection](#username-platform-catch-all-detection)
 - [Detector Response Hardening](#detector-response-hardening)
 - [Multi-Language Reset Signals](#multi-language-reset-signals)
 - [Avatar pHash Clustering](#avatar-phash-clustering)
@@ -24,6 +25,40 @@ corroborated identity or credential-risk evidence.
 - [Temporal Clustering and Shadow Profiles](#temporal-clustering-and-shadow-profiles)
 - [Platform Deduplication](#platform-deduplication)
 - [Credential Risk Calibration](#credential-risk-calibration)
+
+## Output-Trust Gating (unverified ≠ confirmed)
+
+The cross-cutting control: a speculative or low-confidence hit must never enter the
+identity graph, the Defender's Brief, name consensus, or the scores as established
+fact. Every surface that treats an account hit as *confirmed* routes through one
+shared predicate, `is_confirmed_account_hit(finding)` in
+`backend/core/probe_detector.py`, so a false positive kept out of one surface cannot
+leak into another.
+
+A hit qualifies as a confirmed account only when:
+
+- it is corroborated (`metadata.verification == "confirmed"`, e.g. promoted by
+  platform deduplication after two independent confirmations), **or**
+- it is not speculative/unverified and not low-confidence, **and** its URL is
+  user-discriminating.
+
+A URL is rejected as non-discriminating (`is_non_discriminating_url`) when it is a
+bare domain (`https://femometer.com` with no profile path) or a search-results page
+(`…/search?q=<handle>`) — both return `200` for *any* input, so they are not an
+existence signal for the probed handle.
+
+Two direct consequences:
+
+- **Evidence-first probing.** The username sweep is no longer seeded from a bare
+  localpart guess. A two-wave, evidence-seeded pass with a precision tail-drop
+  (`backend/modules/username_platforms.py`) probes a bounded high-precision subset
+  first and expands only on corroboration, and the coverage funnel records what was
+  discarded and why instead of reporting an inflated platform count.
+- **Names must be independently corroborated.** The brief's "Real identity confirmed
+  and public" finding requires a name source outside the localpart guess and the
+  username sweep (`backend/core/name_consensus.py`,
+  `backend/core/defenders_brief.py`), so a localpart echo plus its own username-sweep
+  reflection cannot manufacture a confirmed public identity or a false name conflict.
 
 ## Common-Name Filter
 
@@ -64,10 +99,10 @@ The bundled corpus and helpers live in `data/disposable_domains.json` and
 }
 ```
 
-## Maigret Catch-All Detection
+## Username-Platform Catch-All Detection
 
 Prevents false hits from status-code platforms that return a valid profile page
-for arbitrary usernames. `backend/modules/maigret_platforms.py` probes the 50
+for arbitrary usernames. `backend/modules/username_platforms.py` probes the 50
 highest-ranked eligible platforms with each platform's `usernameUnclaimed` value
 before the main sweep; a positive control is skipped and counted in
 `metadata.catch_all_skipped` for that run.
@@ -82,7 +117,7 @@ before the main sweep; a positive control is skipped and counted in
 
 ## Detector Response Hardening
 
-`backend/core/maigret_detector.py` applies `absenceStrs` to `status_code`
+`backend/core/probe_detector.py` applies `absenceStrs` to `status_code`
 checks as well as body-match checks. Before pattern matching, it decodes HTML
 entities so encoded failure text cannot become a false hit. A `200 OK` response
 with less than 500 bytes of content is treated as inconclusive, and platform
@@ -162,7 +197,7 @@ platform definitions. `backend/core/platform_health.py` stores probe history in
 results after 50 probes are skipped; those above 40% after 30 probes are demoted
 to Wave 2. Reliable Wave-2 platforms can be upgraded to Wave 1. Every action is
 logged to `~/.mailaccess/platform_demotion.log`, and
-`MAIGRET_FORCE_<PLATFORM>=true` overrides an automatic action.
+`USERNAME_FORCE_<PLATFORM>=true` overrides an automatic action.
 
 ```json
 {
@@ -195,7 +230,7 @@ multi-token display names on different non-anchor emails; shadow confidence is
 
 Prevents duplicate enumeration hits from inflating platform counts and distinguishes
 independent corroboration from repeated collection. `backend/core/platform_dedup.py`
-normalizes profile domains across WhatsMyName, Maigret, Sherlock, and Nexfil;
+normalizes profile domains across the native username-platform sweep;
 agreement from at least two enumeration sources sets
 `metadata.dual_confirmed: true`, records `sources`, and raises confidence to
 `high`. More than two agreeing sources also emit a warning so data overlap can be
@@ -205,7 +240,7 @@ reviewed.
 {
   "profile_url": "https://github.com/janedoe",
   "confidence": "high",
-  "sources": ["maigret", "sherlock"],
+  "sources": ["username_platforms", "social"],
   "metadata": {
     "dual_confirmed": true
   }

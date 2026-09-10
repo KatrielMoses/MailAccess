@@ -76,6 +76,38 @@ def _cutoff_ts(window_days: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
 
 
+def _parse_ts(value: Any) -> datetime | None:
+    """Parse an ISO-8601 ``probed_at`` string into an aware UTC datetime."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+# ── Availability-based health gating ───────────────────────────────────────────
+# Health measures whether the PLATFORM/detector is working, NOT whether the probed
+# target happens to have an account there. A ``hit`` or a ``miss`` both prove the
+# probe reached the site and the detector produced a verdict, so both count as
+# "available"; only ``inconclusive`` (timeout / WAF / transport / broken detector)
+# counts against availability. This is the root-cause fix for the old
+# consecutive-miss / low-hit-rate gates, which conflated ordinary target negatives
+# (most people have no account on most sites) with platform death and slowly
+# disabled healthy popular platforms.
+_UNAVAILABLE_OUTCOME = "inconclusive"
+_HEALTH_WINDOW_DAYS = 30
+# Need a meaningful sample before we're willing to disable anything.
+_HEALTH_MIN_PROBES = 20
+# Disable only when the platform is almost entirely inconclusive (genuinely broken),
+# not merely low-yield.
+_HEALTH_MAX_UNAVAIL_RATE = 0.90
+# Even when disabled, re-probe after this backoff so a transient outage self-heals
+# (expiring backoff — no permanent death).
+_HEALTH_BACKOFF_MINUTES = 60.0
+
+
 class PlatformHealthDB:
     """SQLite-backed per-platform probe outcome tracker."""
 
@@ -251,27 +283,78 @@ class PlatformHealthDB:
                 break
         return count
 
-    def should_probe(self, platform: str) -> bool:
-        """Return False when health data indicates the platform is consistently dead."""
-        if os.environ.get("MAILACCESS_DISABLE_HEALTH") == "1":
+    def should_probe(self, platform: str, force: bool = False) -> bool:
+        """Return False only when the PLATFORM itself looks unavailable.
+
+        Availability is read from *conclusive* verdicts: a ``hit`` or a ``miss`` both
+        prove the probe reached the site and the detector produced an answer, so
+        neither disables the platform. Many valid targets simply have no account on a
+        given site, and those legitimate negatives must never look like platform
+        death. Only ``inconclusive`` outcomes (timeout / WAF / transport / broken
+        detector) count against availability, and a disabled platform is re-probed
+        after ``_HEALTH_BACKOFF_MINUTES`` so a transient outage self-heals.
+
+        ``force`` (mirroring the ``MAILACCESS_DISABLE_HEALTH`` env override and the
+        per-platform ``USERNAME_FORCE_*`` flags) bypasses the gate entirely, applied
+        consistently across every caller.
+        """
+        if force or os.environ.get("MAILACCESS_DISABLE_HEALTH") == "1":
             return True
-        if self.get_consecutive_misses(platform) >= 10:
-            return False
-        cutoff = _cutoff_ts(30)
         with _LOCK:
-            total = self._conn.execute(
-                "SELECT COUNT(*) FROM probe_log WHERE platform = ? AND probed_at >= ?",
-                (platform, cutoff),
-            ).fetchone()[0]
-        if total >= 30 and self.get_hit_rate(platform, 30) < 0.05:
-            return False
-        return True
+            rows = self._conn.execute(
+                "SELECT outcome, probed_at FROM probe_log"
+                " WHERE platform = ? AND probed_at >= ?"
+                " ORDER BY probed_at DESC, id DESC",
+                (platform, _cutoff_ts(_HEALTH_WINDOW_DAYS)),
+            ).fetchall()
+        if len(rows) < _HEALTH_MIN_PROBES:
+            # Not enough evidence to declare a platform dead — a run of legitimate
+            # target-misses can never trip this.
+            return True
+        unavailable = sum(1 for r in rows if r["outcome"] == _UNAVAILABLE_OUTCOME)
+        if unavailable / len(rows) < _HEALTH_MAX_UNAVAIL_RATE:
+            # The platform is producing conclusive verdicts → it is responsive.
+            return True
+        # Platform looks unavailable. Allow a periodic recovery probe so a transient
+        # outage doesn't disable it forever.
+        last_at = _parse_ts(rows[0]["probed_at"])
+        if last_at is None:
+            return True
+        age_minutes = (datetime.now(timezone.utc) - last_at).total_seconds() / 60.0
+        return age_minutes >= _HEALTH_BACKOFF_MINUTES
 
     # ── async wrappers for use in async contexts ───────────────────────────────
 
-    async def should_probe_async(self, platform: str) -> bool:
+    async def should_probe_async(self, platform: str, force: bool = False) -> bool:
         """Async version of should_probe — runs the blocking sqlite3 call in a thread."""
-        return await asyncio.to_thread(self.should_probe, platform)
+        return await asyncio.to_thread(self.should_probe, platform, force)
+
+    def recovery_due(self, platform: str, backoff_minutes: float | None = None) -> bool:
+        """R10 (S4): whether a platform is due a bounded-time RECOVERY probe.
+
+        A platform demoted/skipped by a *later* health gate (Phase-6D skip set)
+        would otherwise never be probed again until its stats age out of the
+        window — stranding a site that has since recovered for weeks. This lets
+        such a platform through occasionally (last probe older than the health
+        backoff, or never probed) so a recovery self-heals within a bounded time.
+        """
+        backoff = _HEALTH_BACKOFF_MINUTES if backoff_minutes is None else backoff_minutes
+        with _LOCK:
+            row = self._conn.execute(
+                "SELECT MAX(probed_at) AS last FROM probe_log WHERE platform = ?",
+                (platform,),
+            ).fetchone()
+        last = row["last"] if row else None
+        last_at = _parse_ts(last) if last else None
+        if last_at is None:
+            return True
+        age_minutes = (datetime.now(timezone.utc) - last_at).total_seconds() / 60.0
+        return age_minutes >= backoff
+
+    async def recovery_due_async(
+        self, platform: str, backoff_minutes: float | None = None
+    ) -> bool:
+        return await asyncio.to_thread(self.recovery_due, platform, backoff_minutes)
 
     async def record_probe_async(
         self,

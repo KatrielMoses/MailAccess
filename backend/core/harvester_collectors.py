@@ -159,7 +159,10 @@ async def collect_crtsh(
     exponential backoff (2s/4s/8s) before giving up. Non-429 errors
     still surface as empty set (graceful degradation).
     """
-    url = f"https://crt.sh/?q=%25.{domain}&output=json"
+    # Phase 8 refinement: ``exclude=expired`` drops long-dead certs (fewer stale hostnames) and
+    # ``deduplicate=Y`` shrinks the payload — crt.sh explicitly asks callers not to hammer it, so a
+    # smaller, deduplicated response is the polite/robust query against the crt.sh JSON endpoint.
+    url = f"https://crt.sh/?q=%25.{domain}&exclude=expired&deduplicate=Y&output=json"
     resp = await _get_with_429_retry(
         client, url, sem=sem, timeout=timeout, label="crtsh"
     )
@@ -211,8 +214,11 @@ async def collect_rapiddns(
     except Exception:
         return set()
 
+    # Phase 8 refinement: match the hostname between *any* tag boundary (``>host<``) rather than a
+    # literal ``<td>…</td>`` cell, so the parser survives RapidDNS markup drift (e.g. hostnames
+    # wrapped in an ``<a>`` link inside the cell). ``_is_subdomain`` still filters to the domain.
     pattern = re.compile(
-        r"<td>([a-z0-9_*.-]+" + re.escape(domain) + r")</td>",
+        r">\s*([a-z0-9_*.\-]+\." + re.escape(domain) + r")\s*<",
         re.IGNORECASE,
     )
     matches = pattern.findall(html)
@@ -338,6 +344,75 @@ async def collect_threatminer(
         return set()
 
     raw = [str(r) for r in results if r]
+    return _clean_subdomains(raw, domain)
+
+
+async def collect_hackertarget(
+    client: httpx.AsyncClient,
+    domain: str,
+    sem: asyncio.Semaphore,
+    timeout: float = 15.0,
+) -> set[str]:
+    """Fetch subdomains from HackerTarget's keyless ``hostsearch`` API.
+
+    Native keyless HackerTarget hosts source. The endpoint
+    returns plain-text ``hostname,ip`` lines (one per host). No API key: the free tier is used
+    without one, and its rate-limit message (``API count exceeded``) is treated as an empty result.
+    """
+    url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
+    resp = await _get_with_429_retry(
+        client, url, sem=sem, timeout=timeout, label="hackertarget"
+    )
+    if resp is None:
+        return set()
+
+    try:
+        body = resp.text
+    except Exception:
+        return set()
+
+    # Free-tier soft cap / error strings are returned as HTTP 200 plain text — never a host list.
+    lowered = body.lower()
+    if "api count exceeded" in lowered or ("error" in lowered and "," not in body):
+        _LOG.debug("hackertarget: rate-limited / error response for %s", domain)
+        return set()
+
+    raw: list[str] = []
+    for line in body.splitlines():
+        host = line.split(",", 1)[0].strip()
+        if host:
+            raw.append(host)
+    return _clean_subdomains(raw, domain)
+
+
+async def collect_subdomaincenter(
+    client: httpx.AsyncClient,
+    domain: str,
+    sem: asyncio.Semaphore,
+    timeout: float = 15.0,
+) -> set[str]:
+    """Fetch subdomains from the keyless subdomain.center API.
+
+    Native keyless SubdomainCenter source. The endpoint
+    returns a JSON array of hostname strings; no API key required.
+    """
+    url = f"https://api.subdomain.center/?domain={domain}"
+    resp = await _get_with_429_retry(
+        client, url, sem=sem, timeout=timeout, label="subdomaincenter"
+    )
+    if resp is None:
+        return set()
+
+    try:
+        data = resp.json()
+    except Exception:
+        _LOG.debug("subdomaincenter: malformed JSON for %s", domain)
+        return set()
+
+    if not isinstance(data, list):
+        return set()
+
+    raw = [str(name) for name in data if isinstance(name, str) and name.strip()]
     return _clean_subdomains(raw, domain)
 
 

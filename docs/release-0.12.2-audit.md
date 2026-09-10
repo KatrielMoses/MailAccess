@@ -10,8 +10,9 @@
 ## Purpose
 
 Version 0.12.2 is an audit-preparation release. Its purpose is to support a
-controlled comparison of MailAccess against Blackbird, Holehe, Maigret,
-Sherlock, and theHarvester.
+controlled comparison of MailAccess against the established third-party
+account-discovery, username-enumeration, and subdomain-harvesting tools it
+supersedes.
 
 This release is not a claim that MailAccess will produce identical results to
 those tools. Differences should be recorded and explained by source coverage,
@@ -74,7 +75,7 @@ Before an audit run, execute:
 
 ```powershell
 python -m pytest tests/test_pre_check.py tests/test_email_platforms.py tests/test_email_detector.py -q
-ruff check backend/core/pre_check.py backend/core/maigret_detector.py backend/core/blackbird_detector.py backend/modules/maigret_platforms.py
+ruff check backend/core/pre_check.py backend/core/probe_detector.py backend/modules/username_platforms.py
 ```
 
 The 0.12.2 baseline includes regression coverage for pre-check ordering,

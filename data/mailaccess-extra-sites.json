@@ -130,7 +130,7 @@
     "m_code": 401,
     "m_string": "Invalid",
     "disabled": true,
-    "disabled_reason": "Endpoint response no longer matches Blackbird's documented markers.",
+    "disabled_reason": "Endpoint response no longer matches the recorded detection markers.",
     "is_email_only": true,
     "cat": "images"
   },

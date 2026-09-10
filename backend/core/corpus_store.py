@@ -25,6 +25,7 @@ a harvest (the JSON export still lands).
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -93,12 +94,104 @@ def _snapshot_is_fresh(mailaccess_version: str, harvested_at: datetime, ttl: int
     return age < ttl
 
 
-async def read_fresh_crawl(domain: str) -> DomainHarvestResult | None:
-    """Read-first: return the latest *fresh* crawl for ``domain``, else None.
+#: Key under which the run's canonical scope signature is stamped on the harvest
+#: result's ``metadata`` (see :func:`scope_signature`). Persisted inside
+#: ``crawl_snapshots.result_json`` so a later read-first can require an exact
+#: scope match before reusing the snapshot — no migration needed.
+SCOPE_SIGNATURE_KEY = "scope_signature"
+
+
+def scope_signature(
+    *,
+    mode: str,
+    app_version: str = APP_VERSION,
+    with_subdomains: bool = False,
+    subdomain_deep: bool = False,
+    subdomain_calibrate: bool = False,
+    enable_smtp: bool = True,
+    enable_m365: bool = False,
+    enable_yahoo: bool = False,
+    aggressive: bool = False,
+    dork_lite_mode: bool | None = None,
+    enable_email_identity_enrichment: bool | None = None,
+) -> str:
+    """Canonical signature of the coverage-affecting run parameters.
+
+    R1 (S1): read-first reuse requires an EXACT signature match. A snapshot
+    collected under a different product mode (cross-mode evidence leakage) or a
+    narrower coverage envelope (subdomains off, non-aggressive, identity
+    enrichment off, active probing off, …) must NOT satisfy a broader or
+    differently-scoped request — the orchestrator re-collects instead.
+
+    Exact match is intentionally strict: it never leaks security-mode evidence
+    into a public-mode response, and never lets a narrow crawl masquerade as a
+    broad one. The only cost is a re-collect when a request is *strictly*
+    narrower than a cached crawl, which is correct, not wrong. The default
+    security-investigation path uses fixed default flags, so the common case
+    (default request ↔ default snapshot) still matches and still hits the cache.
+    """
+    payload = {
+        "mode": str(mode),
+        "app_version": str(app_version),
+        "with_subdomains": bool(with_subdomains),
+        "subdomain_deep": bool(subdomain_deep),
+        "subdomain_calibrate": bool(subdomain_calibrate),
+        "enable_smtp": bool(enable_smtp),
+        "enable_m365": bool(enable_m365),
+        "enable_yahoo": bool(enable_yahoo),
+        "aggressive": bool(aggressive),
+        "dork_lite_mode": None if dork_lite_mode is None else bool(dork_lite_mode),
+        "identity_enrichment": (
+            None
+            if enable_email_identity_enrichment is None
+            else bool(enable_email_identity_enrichment)
+        ),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _snapshot_scope_compatible(
+    row: Any, result_json: dict, expected_scope: str | None
+) -> bool:
+    """Whether a snapshot may be reused for a request carrying *expected_scope*.
+
+    ``expected_scope is None`` restores the pre-R1 domain+version-only behaviour
+    (used by callers that do not thread a scope, e.g. pure cache-inspection).
+    When a scope is supplied:
+
+    * if the snapshot recorded its own scope signature, reuse requires an EXACT
+      match (mode + full coverage envelope);
+    * legacy snapshots predating R1 carry no signature — fall back to a strict
+      mode-only gate using the persisted ``mode`` column so a public request can
+      never reuse a security-mode snapshot. Such snapshots age out within the
+      (short) TTL, after which every snapshot carries a full signature.
+    """
+    if expected_scope is None:
+        return True
+    stored = (result_json.get("metadata") or {}).get(SCOPE_SIGNATURE_KEY)
+    if isinstance(stored, str) and stored:
+        return stored == expected_scope
+    # Legacy snapshot (no signature): gate on mode alone, fail-closed.
+    try:
+        expected_mode = json.loads(expected_scope).get("mode")
+    except (ValueError, TypeError):
+        return False
+    return str(getattr(row, "mode", None) or "") == str(expected_mode or "")
+
+
+async def read_fresh_crawl(
+    domain: str, expected_scope: str | None = None
+) -> DomainHarvestResult | None:
+    """Read-first: return the latest *fresh, scope-compatible* crawl, else None.
 
     Reconstructs the full result from ``result_json`` and stamps the cache
     fields exactly as the old JSON cache did, so the returned result is
     parity-identical to a JSON-cache hit.
+
+    ``expected_scope`` is the requesting run's :func:`scope_signature`. Reuse is
+    granted only when the snapshot is fresh AND scope-compatible (R1); otherwise
+    ``None`` is returned and the caller re-collects. Passing ``None`` preserves
+    the legacy freshness-only semantics.
     """
     if not _corpus_enabled():
         return None
@@ -127,7 +220,12 @@ async def read_fresh_crawl(domain: str) -> DomainHarvestResult | None:
             harvested_at = harvested_at.replace(tzinfo=timezone.utc)
         if not _snapshot_is_fresh(row.mailaccess_version, harvested_at, ttl):
             return None
-        result = _deserialize_result(dict(row.result_json))
+        result_json = dict(row.result_json)
+        if not _snapshot_scope_compatible(row, result_json, expected_scope):
+            # Scope/mode mismatch: a narrower or different-mode crawl must not be
+            # reused for this request. Re-collect instead of leaking/under-serving.
+            return None
+        result = _deserialize_result(result_json)
         result.from_cache = True
         result.cached_at = harvested_at.isoformat().replace("+00:00", "Z")
         result.cache_age_seconds = max(0.0, (_now() - harvested_at).total_seconds())
@@ -394,8 +492,20 @@ async def read_leads(
 
     Returns ``{domain, total, limit, offset, leads: [...]}``. Fully guarded — a
     corpus failure returns an empty result rather than raising into the API.
-    Suppression is enforced at write time (``_refresh_contacts`` never inserts a
-    suppressed subject), so no read-time filtering is needed for that."""
+
+    R2 (S1): suppression is enforced at BOTH write time (``_refresh_contacts``
+    never inserts a suppressed subject) AND read time here — an objection added
+    *after* collection can only retroactively remove already-persisted contacts
+    at read time. Fail-closed: if the suppression store is unreadable,
+    :class:`SuppressionUnavailable` propagates to the boundary (never a silently
+    unfiltered lead list)."""
+    from .suppression import (
+        SuppressionUnavailable,
+        filter_rows,
+        load_index_sync,
+        subject_suppressed,
+    )
+
     empty = {"domain": normalize_domain(domain), "total": 0, "limit": limit,
              "offset": offset, "leads": []}
     if not _corpus_enabled():
@@ -432,13 +542,23 @@ async def read_leads(
                     .offset(max(0, int(offset)))
                 )
             ).scalars().all()
+        index = load_index_sync()
+        if subject_suppressed(index, domain=normalized):
+            # The whole domain is suppressed → serve nothing, flagged.
+            return {**empty, "suppressed": True}
+        leads = filter_rows([_contact_to_dict(r) for r in rows], index)
         return {
             "domain": normalized,
+            # ``total`` is the DB match count for pagination; the served page is
+            # suppression-filtered so it may contain fewer rows than ``total``.
             "total": int(total or 0),
             "limit": limit,
             "offset": offset,
-            "leads": [_contact_to_dict(r) for r in rows],
+            "leads": leads,
         }
+    except SuppressionUnavailable:
+        # Fail closed: refuse rather than return an unfiltered lead list.
+        raise
     except Exception:
         logger.exception("read_leads failed for %s", domain)
         return empty
@@ -454,6 +574,7 @@ async def read_stale_contacts(
     consumes this as the "likely stale" change signal.
     """
     from .corpus_decay import is_stale
+    from .suppression import SuppressionUnavailable, filter_rows
 
     if not _corpus_enabled():
         return []
@@ -476,7 +597,11 @@ async def read_stale_contacts(
                 )
             ).scalars().all()
         stale = [r for r in rows if is_stale(r.last_verified)]
-        return [_contact_to_dict(r) for r in stale]
+        # R2 (S1) — read-time suppression so a suppressed subject can't resurface
+        # through the stale-contact / change-intelligence path.
+        return filter_rows([_contact_to_dict(r) for r in stale])
+    except SuppressionUnavailable:
+        raise
     except Exception:
         logger.exception("read_stale_contacts failed")
         return []
@@ -489,6 +614,8 @@ async def read_verification_history(
 
     Phase 3C consumes this as a deliverability signal (has this address/domain
     verified before, and how recently). Guarded → [] on failure."""
+    from .suppression import SuppressionUnavailable
+
     if not _corpus_enabled() or (not email and not domain):
         return []
     try:
@@ -512,7 +639,7 @@ async def read_verification_history(
                     .limit(max(1, min(int(limit), 1000)))
                 )
             ).scalars().all()
-        return [
+        history = [
             {
                 "email": r.email,
                 "domain": r.domain,
@@ -525,6 +652,13 @@ async def read_verification_history(
             }
             for r in rows
         ]
+        # R2 (S1) — read-time suppression: a stale verification row for a subject
+        # objected-to after the fact must not survive until the next re-harvest.
+        from .suppression import filter_rows
+
+        return filter_rows(history)
+    except SuppressionUnavailable:
+        raise
     except Exception:
         logger.exception("read_verification_history failed")
         return []

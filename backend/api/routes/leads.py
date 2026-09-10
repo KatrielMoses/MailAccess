@@ -14,12 +14,17 @@ Per-principal quota is applied explicitly, matching the investigate routes.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from ...core import corpus_store
+from ...core.suppression import SuppressionUnavailable
 from ..security import enforce_quota
 
 router = APIRouter()
+
+_SUPPRESSION_UNAVAILABLE = HTTPException(
+    status_code=503, detail="suppression store unavailable"
+)
 
 
 @router.get("/leads/{domain}")
@@ -43,17 +48,21 @@ async def get_leads(
     """Return the servable Leads harvested for ``domain`` (read-only).
 
     Data comes from prior harvest runs' corpus projection; this endpoint never
-    triggers collection. Suppressed subjects are already excluded at write time.
+    triggers collection. Suppressed subjects are excluded at write AND read time
+    (R2); if the suppression store is unavailable the route fails closed (503).
     """
     enforce_quota(request)
-    return await corpus_store.read_leads(
-        domain,
-        seniority=seniority,
-        grade=grade,
-        has_person=has_person,
-        limit=limit,
-        offset=offset,
-    )
+    try:
+        return await corpus_store.read_leads(
+            domain,
+            seniority=seniority,
+            grade=grade,
+            has_person=has_person,
+            limit=limit,
+            offset=offset,
+        )
+    except SuppressionUnavailable as exc:
+        raise _SUPPRESSION_UNAVAILABLE from exc
 
 
 @router.get("/leads/{domain}/changes")
@@ -67,7 +76,10 @@ async def get_change_intelligence(request: Request, domain: str) -> dict:
     enforce_quota(request)
     from ...core.change_intelligence import domain_change_report
 
-    report = await domain_change_report(domain)
+    try:
+        report = await domain_change_report(domain)
+    except SuppressionUnavailable as exc:
+        raise _SUPPRESSION_UNAVAILABLE from exc
     return report.to_dict()
 
 
@@ -80,7 +92,10 @@ async def get_verification_history(
 ) -> dict:
     """Verification-outcome history for a domain (or a single email within it)."""
     enforce_quota(request)
-    history = await corpus_store.read_verification_history(
-        email=email, domain=domain, limit=limit
-    )
+    try:
+        history = await corpus_store.read_verification_history(
+            email=email, domain=domain, limit=limit
+        )
+    except SuppressionUnavailable as exc:
+        raise _SUPPRESSION_UNAVAILABLE from exc
     return {"domain": domain, "email": email, "count": len(history), "history": history}

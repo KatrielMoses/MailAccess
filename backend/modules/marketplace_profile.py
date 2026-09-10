@@ -21,11 +21,11 @@ _SCRAPER_UA = (
 def _find_marketplace_usernames(
     collected: dict[str, Any],
 ) -> tuple[str | None, str | None]:
-    """Return (etsy_username, ebay_username) from whatsmyname/username_pivot findings."""
+    """Return (etsy_username, ebay_username) from username_platforms/username_pivot findings."""
     etsy_user: str | None = None
     ebay_user: str | None = None
 
-    for module_name in ("whatsmyname", "username_pivot"):
+    for module_name in ("username_platforms", "username_pivot"):
         result = collected.get(module_name)
         if not result or not hasattr(result, "findings"):
             continue

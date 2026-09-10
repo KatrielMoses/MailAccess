@@ -98,6 +98,27 @@ _SCRAPINGANT_KEYS: list[tuple[str, str, str]] = [
 _SCRAPINGANT_KEY_NAMES = {key_name for key_name, _, _ in _SCRAPINGANT_KEYS}
 
 _EXPORT_FORMATS = {".json", ".csv", ".md", ".pdf", ".stix", ".mtgx"}
+# RC8 (Output-Trust): map a file extension to the API's export FORMAT name. The
+# naive ``ext.lstrip(".")`` produced "md"/"mtgx", which the export endpoint rejects
+# (its formats are markdown/maltego), so .md and .mtgx exports failed silently.
+_EXT_TO_FORMAT = {
+    ".json": "json",
+    ".csv": "csv",
+    ".md": "markdown",
+    ".pdf": "pdf",
+    ".stix": "stix",
+    ".mtgx": "maltego",
+}
+
+
+def _pdf_available() -> bool:
+    """RC8: whether PDF export can actually produce a file (weasyprint present)."""
+    try:
+        import weasyprint  # type: ignore[import-not-found]  # noqa: F401
+
+        return True
+    except Exception:
+        return False
 _SCRAPINGANT_PROXY_TYPES = {"residential", "datacenter"}
 # Phase 2B — product modes selectable via --mode (see backend/core/product_mode.py).
 _PRODUCT_MODES = (
@@ -208,7 +229,7 @@ _HARDCODED_MODULES = [
     ("dns_lookup", "DNS", "—", "No", "DNS record enumeration for email domain"),
     ("whois_lookup", "WHOIS", "—", "No", "WHOIS registration data for email domain"),
     ("social_links", "Multi", "—", "No", "Check email on social platforms"),
-    ("maigret_platforms", "Maigret", "—", "Yes", "Username sweep across 2500+ Maigret platforms"),
+    ("username_platforms", "Platforms", "—", "No", "Username sweep across the native 5,000+ platform corpus"),
     (
         "domain_intel",
         "Multi",
@@ -221,10 +242,8 @@ _HARDCODED_MODULES = [
 
 OPT_IN_MODULES = {
     "breach_deep": "enable_breach_deep",
-    "ghunt": "enable_ghunt",
     "email_discovery": "enable_email_discovery",
     "press_intel": "enable_press_intel",
-    "maigret_platforms": "enable_maigret_platforms",
 }
 
 
@@ -2357,6 +2376,25 @@ def _format_duration(run: dict[str, Any]) -> str:
 # ── Investigate ───────────────────────────────────────────────────────────────
 
 
+def _server_start_timeout_seconds() -> float:
+    """How long to wait for an auto-spawned backend to answer /health.
+
+    The backend import is heavy (corpus + optional spaCy) and a cold start can
+    take ~15s on its own, so the previous 15s ceiling raced the boot and failed
+    spuriously — both here and in the eval harness's auto-spawn. Default is 30s;
+    override with ``MAILACCESS_SERVER_START_TIMEOUT`` for slower boxes/CI.
+    """
+    raw = os.environ.get("MAILACCESS_SERVER_START_TIMEOUT", "").strip()
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return 30.0
+
+
 async def _ensure_server_running(
     base_url: str,
     email: str,
@@ -2383,7 +2421,8 @@ async def _ensure_server_running(
         return None
 
     try:
-        deadline = time.monotonic() + 15.0
+        start_timeout = _server_start_timeout_seconds()
+        deadline = time.monotonic() + start_timeout
         while time.monotonic() < deadline:
             await asyncio.sleep(0.5)
             try:
@@ -2399,7 +2438,9 @@ async def _ensure_server_running(
                     return None
 
         _stop_managed_server(proc)
-        err_console.print("Error: backend server did not start within 15s.", markup=False)
+        err_console.print(
+            f"Error: backend server did not start within {start_timeout:.0f}s.", markup=False
+        )
         err_console.print("Try running manually: mailaccess serve", markup=False)
         return None
     except BaseException:
@@ -3278,11 +3319,33 @@ async def _investigate_run(
                             continue
                         confidence = str(finding.get("confidence", "")).lower()
                         severity = str(finding.get("severity", "")).lower()
+                        _meta = (
+                            finding.get("metadata")
+                            if isinstance(finding.get("metadata"), dict)
+                            else {}
+                        )
+                        verification = str(
+                            finding.get("verification")
+                            or (_meta or {}).get("verification")
+                            or ""
+                        ).lower()
                         symbol = "✓"
                         style = "green"
-                        if confidence == "low":
+                        # Output-Trust: an unverified/speculative single-signal hit
+                        # (e.g. an email-existence probe or a bare username-sweep match)
+                        # is a lead, not a confirmed account — never give it a
+                        # confirming check. Corroboration (verification == confirmed)
+                        # earns the check back.
+                        if (
+                            confidence == "low"
+                            or verification in ("unverified", "speculative")
+                            or bool((_meta or {}).get("speculative"))
+                        ):
                             symbol = "~"
                             style = "dim"
+                        if verification == "confirmed":
+                            symbol = "✓"
+                            style = "green"
                         if severity == "critical":
                             symbol = "⚠"
                             style = "red"
@@ -3291,11 +3354,13 @@ async def _investigate_run(
                         if "common_variations" in meta:
                             detail = "→ " + ", ".join(meta["common_variations"])
 
-                        if module_name in ("account_discovery", "user_scanner") or str(
+                        if module_name == "account_discovery" or str(
                             finding.get("source", "")
-                        ) in ("account_discovery", "user_scanner"):
+                        ) == "account_discovery":
                             platform = platform.title()
-                            detail_text = "[dim][email registration confirmed][/dim]"
+                            # Parenthesised, not bracketed: Rich would parse a
+                            # ``[...]`` payload as (invalid) markup and drop it.
+                            detail_text = "[dim]email registration signal (unverified lead)[/dim]"
                         elif module_name == "dns_lookup":
                             pt = str(finding.get("platform", ""))
                             if pt == "dns_mx" and meta.get("mx_provider"):
@@ -3360,11 +3425,9 @@ async def _investigate_run(
                     "hunter_io",
                 ],
                 "OPTIONAL MODULES": [
-                    "ghunt",
-                    "user_scanner",
+                    "google_account_intel",
                     "account_discovery",
-                    "whatsmyname",
-                    "maigret_platforms",
+                    "username_platforms",
                     "username_pivot",
                     "permutation_discovery",
                     "phone_intel",
@@ -3382,8 +3445,6 @@ async def _investigate_run(
                 "domain_intel": "set SHODAN_API_KEY",
                 "hunter_io": "set HUNTER_IO_API_KEY",
                 "emailrep": "set EMAILREP_API_KEY",
-                "ghunt": "run mailaccess keys set GHUNT_CREDS_PATH /path/to/creds",
-                "maigret_platforms": "set ENABLE_MAIGRET_PLATFORMS=true or use --modules maigret_platforms",
             }
 
             for group_name, mods in groups.items():
@@ -3429,7 +3490,12 @@ async def _investigate_run(
                 out.print()
 
             out.print("[dim]Legend: ✓ confirmed  ~ low confidence  — skipped[/dim]")
-            out.print(f"[dim]💾 Save report: mailaccess investigate {email} -o report.pdf[/dim]")
+            # RC8 (Output-Trust): advertise PDF only when weasyprint is actually
+            # available; otherwise point at a format that will really produce a file.
+            _save_fmt = "report.pdf" if _pdf_available() else "report.md"
+            out.print(
+                f"[dim]💾 Save report: mailaccess investigate {email} -o {_save_fmt}[/dim]"
+            )
 
         if cached:
             try:
@@ -3469,10 +3535,15 @@ async def _investigate_run(
                                 )
                                 break
                             try:
-                                raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 150))
+                                # RC8/UX: the per-receive timeout must exceed the
+                                # investigation budget so live progress survives a
+                                # long run (the old 150 s cap dropped the stream
+                                # mid-run and fell back to polling on every real run).
+                                _ws_recv_timeout = max(remaining, 60.0) + 30.0
+                                raw = await asyncio.wait_for(ws.recv(), timeout=_ws_recv_timeout)
                             except asyncio.TimeoutError:
                                 err_console.print(
-                                    "[yellow]WS receive timed out (150 s), falling back to polling[/yellow]"
+                                    "[yellow]WS receive timed out, falling back to polling[/yellow]"
                                 )
                                 break
                             event = json.loads(raw)
@@ -3596,7 +3667,7 @@ async def _investigate_run(
                     f"[red]Unsupported extension:[/] {ext}. Supported: {', '.join(sorted(_EXPORT_FORMATS))}"
                 )
             else:
-                fmt = ext.lstrip(".")
+                fmt = _EXT_TO_FORMAT.get(ext, ext.lstrip("."))
                 await _save_investigate_export(client, inv_id, fmt, output_file, out)
 
         # Determine exit code
@@ -3776,14 +3847,29 @@ async def _investigate_run(
                     platform, detail = _extract_finding_line(item, mod_name)
 
                     detail_text = detail
-                    if mod_name in ("account_discovery", "user_scanner") or str(
+                    sym = "[green]✓[/green]"
+                    if mod_name == "account_discovery" or str(
                         item.get("source", "")
-                    ) in ("account_discovery", "user_scanner"):
+                    ) == "account_discovery":
                         platform = platform.title()
-                        detail_text = "[email registration confirmed]"
+                        _m = (
+                            item.get("metadata")
+                            if isinstance(item.get("metadata"), dict)
+                            else {}
+                        )
+                        _ver = str(
+                            item.get("verification") or (_m or {}).get("verification") or ""
+                        ).lower()
+                        # An email-existence hit is a single, uncorroborated signal —
+                        # never a confirmed account unless platform_dedup promoted it.
+                        if _ver == "confirmed":
+                            detail_text = "email registration confirmed"
+                        else:
+                            detail_text = "email registration signal (unverified)"
+                            sym = "[dim]~[/dim]"
 
                     p_label = f"{platform[:16]:<16}"
-                    out.print(f"    [green]✓[/green] {p_label} [dim]{detail_text}[/dim]")
+                    out.print(f"    {sym} {p_label} [dim]{detail_text}[/dim]")
                     shown += 1
                     if not is_col and shown >= 5 and len(findings) > 5:
                         out.print(f"    [dim]+ {len(findings) - 5} more accounts[/dim]")
@@ -4273,7 +4359,7 @@ def investigate(
         None,
         "-m",
         "--enable",
-        help="Enable opt-in modules for this run. Comma-separated or 'all'. Example: -m breach_deep,whatsmyname",
+        help="Enable opt-in modules for this run. Comma-separated or 'all'. Example: -m breach_deep,press_intel",
     ),
     no_brief: bool = typer.Option(
         False, "--no-brief", help="Suppress the Defender's Brief section."

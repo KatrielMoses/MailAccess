@@ -1,27 +1,21 @@
 {
   "_meta": {
-    "license": "MIT (data only; collectors are native ports)",
-    "sources_total": 5,
-    "key_required_sources_excluded": ["hunter", "intelx", "shodan", "tomba", "leakix", "urlscan", "otx"]
+    "description": "Native MailAccess subdomain-collector source registry (keyless public endpoints).",
+    "sources_total": 6,
+    "sources_active": 6,
+    "sources_disabled": 1,
+    "key_required_sources_excluded": ["hunter", "intelx", "shodan", "tomba", "leakix", "urlscan", "otx"],
+    "policy": "keyless sources only — never add a source that requires an API key"
   },
   "sources": [
     {
       "name": "crtsh",
       "display_name": "crt.sh",
-      "url_template": "https://crt.sh/?q=%25.{domain}&output=json",
+      "url_template": "https://crt.sh/?q=%25.{domain}&exclude=expired&deduplicate=Y&output=json",
       "type": "json",
       "auth_required": false,
-      "rate_limit_hint": "5 req/min — be polite",
+      "rate_limit_hint": "5 req/min — be polite; exclude=expired&deduplicate=Y keeps the query light",
       "parser": "crtsh"
-    },
-    {
-      "name": "rapiddns",
-      "display_name": "RapidDNS",
-      "url_template": "https://rapiddns.io/subdomain/{domain}?full=1",
-      "type": "html",
-      "auth_required": false,
-      "rate_limit_hint": "no key, no documented limit — be polite",
-      "parser": "rapiddns"
     },
     {
       "name": "certspotter",
@@ -33,13 +27,33 @@
       "parser": "certspotter"
     },
     {
-      "name": "bufferoverun",
-      "display_name": "BufferOverRun",
-      "url_template": "https://tls.bufferover.run/dns?q={domain}",
+      "name": "hackertarget",
+      "display_name": "HackerTarget",
+      "url_template": "https://api.hackertarget.com/hostsearch/?q={domain}",
+      "type": "csv",
+      "auth_required": false,
+      "rate_limit_hint": "free tier ~limited queries/day, no key — be polite ('API count exceeded' => empty)",
+      "parser": "hackertarget",
+      "added_in": "0.15.0 Phase 8"
+    },
+    {
+      "name": "subdomaincenter",
+      "display_name": "subdomain.center",
+      "url_template": "https://api.subdomain.center/?domain={domain}",
       "type": "json",
       "auth_required": false,
-      "rate_limit_hint": "100 queries/month free, no key",
-      "parser": "bufferoverun"
+      "rate_limit_hint": "no key, modest rate — be polite",
+      "parser": "subdomaincenter",
+      "added_in": "0.15.0 Phase 8"
+    },
+    {
+      "name": "rapiddns",
+      "display_name": "RapidDNS",
+      "url_template": "https://rapiddns.io/subdomain/{domain}?full=1",
+      "type": "html",
+      "auth_required": false,
+      "rate_limit_hint": "no key, no documented limit — be polite",
+      "parser": "rapiddns"
     },
     {
       "name": "threatminer",
@@ -49,6 +63,17 @@
       "auth_required": false,
       "rate_limit_hint": "no key, modest rate",
       "parser": "threatminer"
+    },
+    {
+      "name": "bufferoverun",
+      "display_name": "BufferOverRun",
+      "url_template": "https://tls.bufferover.run/dns?q={domain}",
+      "type": "json",
+      "auth_required": false,
+      "rate_limit_hint": "n/a",
+      "parser": "bufferoverun",
+      "disabled": true,
+      "disabled_reason": "endpoint defunct — tls.bufferover.run returns HTTP 403 (service went commercial); confirmed dead 2026-09-08"
     }
   ]
 }
