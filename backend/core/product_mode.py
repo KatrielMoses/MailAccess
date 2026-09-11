@@ -254,6 +254,23 @@ _ALL_KNOWN_MODULES: frozenset[str] = frozenset(
         # ``_PERSONAL_PIVOT_BLOCKED`` → security-investigation only.
         "apollo",
         "pdl",
+        # --- 0.16.0 Phase 3: corpus company-pattern email inference ---
+        # Not a pipeline module — a top-of-funnel capability (name + domain →
+        # ONE unverified, corpus-learned email), classified here so the lawful
+        # gate governs it. It is *evidenced candidate generation* from an
+        # independently-observed person plus an offline corpus pattern — the
+        # lawful side of the FTC candidate-vs-dictionary line (Doc-1 #6), like
+        # ``pattern_and_verify`` — with NO active probing. So it sits in no
+        # blocked bucket and is ALLOWED in every mode:
+        #   - public-business-contact: the core lead-gen use case (ALLOWED);
+        #   - org-authorized-verification: ALLOWED;
+        #   - security-investigation: ALLOWED (D3 — guessing a subject's likely
+        #     email is public inference with no probing; explicitly in scope).
+        # It never emits a *ready-to-send* lead on its own: the result is always
+        # unverified, grades ≤ Risky, and is verdicted review/research-only by
+        # the eligibility gate — the mode allowlist governs the capability, the
+        # governance layer (deliverability + eligibility) governs the output.
+        "company_pattern_index",
     }
 )
 

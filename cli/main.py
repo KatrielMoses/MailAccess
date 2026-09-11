@@ -4516,5 +4516,86 @@ async def _history(page: int, page_size: int, timeout: int) -> None:
     console.print(table)
 
 
+@app.command(name="find-email")
+def find_email_command(
+    name: str = typer.Option(..., "--name", "-n", help="Full name, e.g. \"Jane Doe\"."),
+    domain: str = typer.Option(..., "--domain", "-d", help="Employer domain, e.g. company.com."),
+    title: str | None = typer.Option(
+        None, "--title", help="Job title (optional) — enables per-role pattern overrides."
+    ),
+    seniority: str | None = typer.Option(
+        None, "--seniority", help="Seniority (optional) — fallback for the role override."
+    ),
+) -> None:
+    """Apply the offline company email-pattern index: name + domain -> ONE email.
+
+    Returns a single *unverified*, fully-governed candidate when the domain is
+    indexed, or a clean 'no pattern' fallback otherwise.
+
+    Root D — this serving boundary is governed, not a raw ``apply`` probe: it
+    respects ``enable_company_pattern_index``, routes the pattern email through the
+    same :func:`pattern_email_to_candidate` governance the harvest uses (so the
+    printed confidence is honesty-capped and an eligibility verdict is shown), and
+    enforces suppression *before* printing — a suppressed subject is never
+    displayed.
+    """
+    from backend.config import settings
+    from backend.core.company_pattern_index import apply, get_index
+    from backend.core.pattern_candidate import pattern_email_to_candidate
+    from backend.core.product_mode import get_active_mode
+
+    if not getattr(settings, "enable_company_pattern_index", True):
+        err_console.print(
+            "[yellow]company-pattern index disabled[/] "
+            "(ENABLE_COMPANY_PATTERN_INDEX=false); no pattern applied."
+        )
+        raise typer.Exit(0)
+
+    if not get_index().available:
+        err_console.print(
+            "[yellow]company-pattern index not available[/] "
+            "(data/company_patterns.json.gz not shipped); no pattern to apply."
+        )
+        raise typer.Exit(0)
+
+    result = apply(name, domain, title=title, seniority=seniority)
+    if result is None:
+        console.print(
+            f"[dim]No indexed pattern for[/] [cyan]{domain}[/] "
+            "— fall back to live inference."
+        )
+        raise typer.Exit(0)
+
+    candidate = pattern_email_to_candidate(result, mode=get_active_mode())
+    # Suppression wins outright — never print a suppressed subject's address.
+    if candidate.suppressed:
+        err_console.print(
+            f"[yellow]Suppressed[/] — the pattern address for [cyan]{name}[/] @ "
+            f"[cyan]{domain}[/] matches a suppression entry and is not shown."
+        )
+        raise typer.Exit(0)
+
+    table = Table(title=f"Company email pattern — {domain}")
+    table.add_column("Field", style="cyan", no_wrap=True)
+    table.add_column("Value")
+    table.add_row("email", f"[bold]{candidate.email}[/]")
+    table.add_row("verification", f"[yellow]{candidate.verification}[/]")
+    table.add_row(
+        "confidence", f"{candidate.confidence_label} ({candidate.confidence_score:.2f})"
+    )
+    table.add_row("eligibility", f"{candidate.eligibility} — {candidate.eligibility_reason}")
+    table.add_row("deliverability", candidate.deliverability_grade)
+    table.add_row(
+        "pattern",
+        candidate.pattern_id
+        + (f" (role: {candidate.role_used})" if candidate.role_used else ""),
+    )
+    table.add_row("applied_confidence", f"{candidate.applied_confidence:.4f}")
+    table.add_row("support", f"{candidate.support_n} verified samples")
+    table.add_row("mx", candidate.mx)
+    table.add_row("provenance", candidate.provenance)
+    console.print(table)
+
+
 if __name__ == "__main__":
     app()

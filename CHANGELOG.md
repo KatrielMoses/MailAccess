@@ -1,5 +1,73 @@
 # Changelog
 
+### 0.16.0 (2026-09-11)
+
+**Company email patterns — a name plus a domain becomes one honestly-graded likely email,
+entirely offline.** MailAccess now ships a bundled index of corpus-learned email-address
+patterns for ~384,000 domains. Give it a person's name and their employer domain and it
+returns a *single* most-likely address for that organization — `jane.doe@acme.com` — with a
+calibrated confidence label, not a spray of a dozen guesses. The index is derived from real
+verified addresses, carries the sample count behind each domain's pattern, and loads from the
+package with no network access.
+
+The guiding rule from 0.15.0 carries straight through: **a guess is never dressed up as a
+fact.**
+
+- **Every pattern email is labelled `unverified` and can never auto-qualify as an
+  eligible/deliverable contact on its own.** Its confidence flows through the one canonical
+  scorer and is capped below the confirmed band, so however well-supported the pattern, an
+  unverified inference is presented as *likely*, never *confirmed*. It carries a plain
+  provenance line — "company email pattern (N verified samples)" — everywhere it surfaces.
+- **One email per person, not a permutation spray.** On an indexed domain each discovered
+  employee yields exactly one governed candidate. A person the harvest already resolved to a
+  real on-domain address gets no guess at all — an observed address always beats an inferred
+  one.
+- **Microsoft 365 mailboxes are verified against the existence oracle.** Where the domain's
+  mail is hosted on M365, each candidate is checked for real mailbox existence: a confirmed one
+  is upgraded to `provider_verified` (and can then clear the eligibility/deliverability gates);
+  a candidate the oracle proves does **not** exist is dropped and never surfaced. Google and
+  other providers stay `unverified` by design.
+- **New `find-email` command.** `mailaccess find-email --name "Jane Doe" --domain acme.com`
+  returns the one likely address with its confidence, verification state, pattern, supporting
+  sample count, and provenance — or a clean "no indexed pattern" fallback when the domain
+  isn't covered. An optional `--title` applies per-role pattern overrides.
+- Pattern emails are harvest/lead artifacts: they surface in the harvest exports (JSON, CSV,
+  NDJSON), the harvest report, and `/api/leads`, always carrying their verification state and
+  provenance so an unverified candidate reads as *review*, never *confirmed*. They never enter
+  the investigation exporters (STIX 2.1, Maltego XML, PDF), which are a separate pipeline.
+
+Database: adds an additive `Contact.verification` column (Alembic migration `0010`) to record
+whether a contact is an unverified inference or provider-verified. The migration is
+backward-compatible — existing rows default cleanly and no data is rewritten.
+
+#### Correctness — the contract holds at every boundary, not just in the helpers
+
+The pattern honesty rules (unverified ≠ confirmed, never auto-eligible, one email per person,
+honest confidence, suppression wins) were enforced in the building blocks but could break where
+the live path, aggregation, export, and serving APIs meet. This pass fixes them **at the
+boundary, structurally** — there is now one governed name→email path and one canonical
+finalization, and every serving boundary preserves the same contract.
+
+- **One governed generator on the live path.** The reactive per-name worker and the batch
+  module now run the *same* governed generator over one shared run-state. A generated address is
+  never mistaken for an observed one; a mailbox the existence oracle proves absent (or that is
+  suppressed, or superseded by a real observed address) is tombstoned and never regenerated; and
+  a person is reconciled to a single address — a late observed `j.smith@` retires an earlier
+  inferred `jane.smith@`.
+- **The honesty cap lives in the one scorer.** An unverified inference can never present as
+  *confirmed* anywhere the label is computed — including after aggregation and after a
+  write/read/export round-trip, not only in the applier.
+- **Observed vs. inferred is decided by evidence kind, not a source-name list.** A permutation
+  guess (like a pattern guess) can no longer clear the verification gate and mark a mailbox
+  ready-to-send with no confirmation.
+- **Serving boundaries are governed.** `find-email` enforces suppression before printing and
+  respects the feature flag; every export (JSON, CSV, NDJSON) and the served-lead API carry the
+  verification state and the real eligibility verdict, so readiness is never inferred from a
+  label or a deliverability grade; and the harvest cache invalidates when the feature flag, the
+  oracle setting, or the shipped index version changes.
+- **Existence-oracle batches are grouped per tenant.** A mixed-domain verification batch can no
+  longer let one tenant's catch-all falsely confirm another tenant's addresses.
+
 ### 0.15.0 (2026-09-10)
 
 Two thrusts in one release: (1) a **de-vendor + de-brand** program that reimplements every

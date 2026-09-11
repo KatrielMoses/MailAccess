@@ -128,11 +128,128 @@ async def confirm_mailbox(
         )
 
 
+async def confirm_mailboxes(
+    emails: list[str],
+    provider: MailProvider | str | None,
+    *,
+    mode: str | ProductMode,
+    verifier: Any | None = None,
+) -> list[ExistenceSignal]:
+    """Batched :func:`confirm_mailbox` — one policy gate, one oracle round-trip.
+
+    Confirms many mailboxes on the SAME provider in a single ``verify_batch``
+    call (the M365 oracle is batched), so a per-run pattern pass amortises latency
+    and rate-limit pressure instead of paying one HTTP request per candidate. The
+    policy gate and guards are identical to :func:`confirm_mailbox` — this stays
+    inside the governance seam, it does not bypass it. Returns one
+    :class:`ExistenceSignal` per (de-duplicated, ``@``-bearing) input email; a
+    result missing from the oracle response degrades to ``inconclusive``.
+    """
+    m = normalize_mode(mode)
+    prov = provider if isinstance(provider, MailProvider) else _coerce_provider(provider)
+    cleaned = list(
+        dict.fromkeys(
+            e.strip().lower() for e in (emails or []) if isinstance(e, str) and "@" in e
+        )
+    )
+    if not is_bust_allowed(m):
+        return [
+            ExistenceSignal(
+                e, None, prov.value if prov else None, "blocked_by_mode",
+                "active existence probing is not permitted in public-business-contact",
+            )
+            for e in cleaned
+        ]
+    if not oracle_available(prov):
+        return [
+            ExistenceSignal(
+                e, None, prov.value if prov else None, "no_oracle",
+                "no non-SMTP existence oracle for this provider",
+            )
+            for e in cleaned
+        ]
+    if not cleaned:
+        return []
+
+    try:
+        by_email = await _run_oracle_batch(cleaned, prov, verifier)
+    except Exception:
+        logger.debug("catch-all oracle batch failed", exc_info=True)
+        by_email = {}
+
+    signals: list[ExistenceSignal] = []
+    for e in cleaned:
+        raw = by_email.get(e)
+        if raw is None:
+            signals.append(ExistenceSignal(e, None, prov.value, "inconclusive", "oracle error"))
+            continue
+        status = str(raw.get("status") or "inconclusive").lower()
+        exists = raw.get("exists")
+        if exists is True or status == "verified":
+            signals.append(
+                ExistenceSignal(e, True, prov.value, "confirmed", "oracle confirmed mailbox")
+            )
+        elif exists is False or status == "not_found":
+            signals.append(
+                ExistenceSignal(e, False, prov.value, "not_found", "oracle: mailbox not found")
+            )
+        else:
+            # throttled / inconclusive / unmanaged / not_attempted → inconclusive.
+            signals.append(
+                ExistenceSignal(e, None, prov.value, "inconclusive", f"oracle status={status}")
+            )
+    return signals
+
+
 def _coerce_provider(provider: str | None) -> MailProvider | None:
     try:
         return MailProvider(str(provider)) if provider else None
     except ValueError:
         return None
+
+
+async def _run_oracle_batch(
+    emails: list[str], provider: MailProvider, verifier: Any | None
+) -> dict[str, dict[str, Any]]:
+    """Invoke the provider verifier once for the whole batch; index by email.
+
+    ``verify_batch`` lower-cases and de-duplicates its inputs, so the returned
+    map is keyed by the same normalized email the caller passes in.
+    """
+    results: list[Any]
+    if provider is MailProvider.M365:
+        if verifier is None:
+            from .m365_verifier import M365Verifier
+
+            verifier = M365Verifier()
+        results = await verifier.verify_batch(emails)
+    elif provider is MailProvider.GOOGLE:
+        # No working Google oracle (Phase 1) — this branch exists only for
+        # symmetry; the pattern pass never routes google here. verify_batch is
+        # per-domain, so group by domain first.
+        if verifier is None:
+            from .google_workspace_verifier import GoogleWorkspaceVerifier
+
+            verifier = GoogleWorkspaceVerifier()
+        results = []
+        by_domain: dict[str, list[str]] = {}
+        for e in emails:
+            by_domain.setdefault(e.rsplit("@", 1)[-1], []).append(e)
+        for domain, group in by_domain.items():
+            results.extend(await verifier.verify_batch(group, domain))
+    else:  # pragma: no cover - guarded by oracle_available
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for first in results or []:
+        email = str(getattr(first, "email", "") or "").strip().lower()
+        if not email:
+            continue
+        out[email] = {
+            "status": getattr(first, "status", "inconclusive"),
+            "exists": getattr(first, "exists", None),
+        }
+    return out
 
 
 async def _run_oracle(

@@ -414,6 +414,8 @@ class AsyncSignalPool:
         existing["sources"].add(source)
         existing["confidence"] = max(float(existing["confidence"]), float(confidence))
         existing["metadata"].update(metadata)
+        evidence = existing.setdefault("email_evidence", [])
+        evidence.append({"source_type": source, **metadata})
         signal = Signal(
             source=source,
             kind="email",
@@ -537,12 +539,28 @@ class AsyncSignalPool:
         out: list[dict[str, Any]] = []
         for domain_key in domains:
             for payload in self._emails_by_domain.get(domain_key, {}).values():
+                from .pattern_resolver import EVIDENCE_OBSERVED, classify_evidence_kind
+
+                resolver = getattr(self, "pattern_resolver", None)
+                evidence = payload.get("email_evidence") or [payload["metadata"]]
+                observed = [m for m in evidence if classify_evidence_kind(m) == EVIDENCE_OBSERVED]
+                metadata = dict(payload["metadata"])
+                if observed:
+                    metadata.update(sorted(observed, key=lambda m: repr(sorted(m.items())))[0])
+                    metadata["is_inference"] = False
+                    metadata["evidence_kind"] = "observed"
+                if resolver is not None:
+                    if not resolver.is_visible(payload["email"], inferred=not observed):
+                        continue
+                    verification = resolver.mailbox_verification(payload["email"])
+                    if verification is not None:
+                        metadata["verification"] = verification
                 out.append(
                     {
                         "email": payload["email"],
                         "sources": sorted(payload["sources"]),
                         "confidence": payload["confidence"],
-                        "metadata": dict(payload["metadata"]),
+                        "metadata": metadata,
                     }
                 )
         return out

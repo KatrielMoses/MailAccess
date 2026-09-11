@@ -89,6 +89,14 @@ from .m365_tenant import get_user_realm
 from .m365_verifier import M365Verifier
 from .mail_provider import MailProvider, detect_provider_from_mx
 from .mx_resolver import MXRecord, resolve_mx
+from .pattern_resolver import (
+    DROP,
+    EVIDENCE_INFERRED,
+    EVIDENCE_OBSERVED,
+    VERIFICATION_PROVIDER_VERIFIED,
+    CanonicalResolver,
+    classify_evidence_kind,
+)
 from .role_classifier import classify_email
 from .signal_pool import AsyncSignalPool
 from .smtp_verifier import (
@@ -210,6 +218,12 @@ class HarvestedEmail:
     deliverability_score: float | None = None
     deliverability_grade: str | None = None
     deliverability: dict[str, Any] | None = None
+    # 0.16.0 Phase 3 — verification status of THIS address. ``None`` means "no
+    # claim asserted" (an observed address whose eligibility is decided by its
+    # confidence + grade, as before — zero regression). A corpus company-pattern
+    # inference sets ``"unverified"`` so the eligibility gate caps it at REVIEW:
+    # a learned-pattern guess is never a ready-to-send lead on its own.
+    verification: str | None = None
 
 
 # MUST-FIX M4: cap on aggregated_source_urls to keep JSON export
@@ -607,6 +621,74 @@ def _pattern_source_types(entry: HarvestedEmail) -> set[str]:
     return source_types
 
 
+def _entry_person_names(entry: HarvestedEmail) -> list[str]:
+    """Every person name asserted for an entry across its evidence."""
+    names: list[str] = []
+    for ev in entry.evidence or []:
+        meta = ev.get("metadata") if isinstance(ev, dict) else None
+        if not isinstance(meta, dict):
+            continue
+        for k in ("name", "source_name", "person_name", "display_name"):
+            v = meta.get(k)
+            if isinstance(v, str) and v.strip():
+                names.append(v)
+    return names
+
+
+def _entry_is_observed(entry: HarvestedEmail) -> bool:
+    """Whether an aggregated entry carries at least one GENUINE observation.
+
+    Applies the shared :func:`pattern_resolver.classify_evidence_kind` contract to
+    each of the entry's evidence dicts — an entry is observed if any of its findings
+    is an observation (a real sighting or an affirmative confirmation, including an
+    oracle-confirmed pattern). A pure inference (only ``inferred`` / ``unknown``
+    findings) is not observed, whatever its ``verification`` field happens to be.
+    """
+    for ev in entry.evidence or []:
+        meta = ev.get("metadata") if isinstance(ev, dict) else None
+        if classify_evidence_kind(meta) == EVIDENCE_OBSERVED:
+            return True
+    return False
+
+
+def _apply_resolver_person_selection(
+    emails: list[HarvestedEmail], resolver: CanonicalResolver | None
+) -> list[HarvestedEmail]:
+    """Derive person selection from all retained mailbox evidence, in either order."""
+    from .pattern_resolver import person_key
+
+    resolver = resolver if resolver is not None else CanonicalResolver()
+    observed_emails = set()
+    for entry in emails:
+        kinds = []
+        for evidence in entry.evidence or []:
+            meta = dict(evidence.get("metadata") or {})
+            # Confirmation proves a generated mailbox; it does not turn its
+            # person/address attribution into an independent observed sighting.
+            for status_field in ("verification", "verification_status", "smtp_verification_status",
+                          "provider_verification_status"):
+                meta.pop(status_field, None)
+            kinds.append(classify_evidence_kind(meta))
+        kind = "observed" if EVIDENCE_OBSERVED in kinds else (
+            "confirmed" if entry.verification == VERIFICATION_PROVIDER_VERIFIED else "inferred"
+        )
+        if kind == "observed":
+            observed_emails.add(entry.email)
+        for name in _entry_person_names(entry):
+            resolver.register_person_mailbox(
+                entry.email, person_key=person_key(name), kind=kind,
+                corpus="company_pattern_index" in _pattern_source_types(entry),
+            )
+    return [entry for entry in emails if resolver.is_visible(
+        entry.email, inferred=entry.email not in observed_emails,
+    )]
+
+
+def _reconcile_pattern_inferences_by_person(emails: list[HarvestedEmail]) -> list[HarvestedEmail]:
+    """Compatibility entry point; person resolution has one implementation."""
+    return _apply_resolver_person_selection(emails, None)
+
+
 def _pattern_shape_for_email(email: str, name: str | None = None) -> str | None:
     """Infer a supported email template, using the source name when known."""
     local = email.rsplit("@", 1)[0].lower()
@@ -681,6 +763,19 @@ def _apply_passive_pattern_signals(
         metadata = _pattern_metadata(entry)
         if metadata is None or not entry.on_domain:
             continue
+        # Root B / Brief A — skip ONLY the corpus company-pattern inference, whose
+        # score is a calibrated ``applied_confidence``: recomputing it here goes
+        # through ``compute_confidence`` WITHOUT the ``source_confidence`` override
+        # (falling back to the fixed weight), silently overwriting the calibrated
+        # value (e.g. .9879 → .425). The predicate is the inference SOURCE, not the
+        # ``unverified`` verification, because a permutation-spray guess is now also
+        # derived-unverified (Brief A item 4) yet legitimately relies on this
+        # additive name/format pass for its corroboration boost — exactly as it did
+        # before pure inferences carried a derived verification. (Corpus entries also
+        # lack ``pattern_template`` and are already excluded above; this is the
+        # intent-revealing guard.)
+        if "company_pattern_index" in _pattern_source_types(entry):
+            continue
 
         name = str(metadata.get("source_name") or "")
         name_tokens = [token.lower() for token in re.findall(r"[a-zA-Z]+", name)]
@@ -710,7 +805,9 @@ def _apply_passive_pattern_signals(
             last_seen_timestamp=entry.last_seen_timestamp,
         )
         entry.confidence_score = round(min(base_score + boost, MAX_SCORE), 4)
-        entry.confidence_label = label_for_score(entry.confidence_score)
+        entry.confidence_label = label_for_score(
+            entry.confidence_score, cap_unverified_inference=entry.verification == "unverified"
+        )
         if entry.confidence_breakdown is not None:
             entry.confidence_breakdown["passive_signal_boost"] = round(boost, 4)
             entry.confidence_breakdown["passive_signal_kind"] = (
@@ -729,6 +826,14 @@ def _apply_signal_pool_correlation(
         # Pattern candidates use the Phase A additive path; applying the old
         # multiplicative identity boost here would double count the name.
         if _pattern_metadata(entry) is not None:
+            continue
+        # 0.16.0 Phase 4 — a corpus company-pattern inference (verification
+        # ``"unverified"``, no observed corroboration) is BUILT from the very
+        # name this loop would match, so boosting it by that name double-counts
+        # the same signal. Its score is already the calibrated applied
+        # confidence. An observed collision clears verification to None and
+        # passes through normally.
+        if entry.verification == "unverified":
             continue
         if "@" not in entry.email:
             continue
@@ -804,12 +909,25 @@ def _record_shadow_profile(
         )
 
 
+# 0.16.0 Phase 6 — confirmed verification claims a pattern candidate may carry
+# (only ``provider_verified`` today, from the M365 existence oracle). When a pure
+# inference group carries one, it propagates onto the entry so the eligibility
+# gate can clear it and corpus_store/exports surface the confirmed status.
+_CONFIRMED_PATTERN_VERIFICATIONS: frozenset[str] = frozenset({"provider_verified"})
+
+# Root B / Brief A — a finding is classified observed-vs-inferred through the ONE
+# shared evidence-kind contract (:func:`pattern_resolver.classify_evidence_kind`),
+# which mirrors ``eligibility._CONFIRMED_VERIFICATIONS`` for the "confirmed finding
+# is an observation" rule. The per-finding confirmation set no longer lives here.
+
+
 def _aggregate(
     harvest_domain: str,
     module_results: dict[str, ModuleResult],
     signal_pool: Any | None = None,
     identity_clusters: list[Any] | None = None,
     shadow_profiles_out: list[dict[str, Any]] | None = None,
+    resolver: CanonicalResolver | None = None,
 ) -> list[HarvestedEmail]:
     """Group findings across modules, dedup by email, aggregate confidence.
 
@@ -852,6 +970,28 @@ def _aggregate(
     # input can no longer change the retained source-types or the score.
     source_type_acc: dict[str, set[str]] = {}
     breakdown_acc: dict[str, list[dict[str, Any]]] = {}
+    # 0.16.0 Phase 4 — per-group corpus company-pattern signals, accumulated
+    # order-independently alongside the source-types:
+    #  * verification_acc: the verification claims asserted for this mailbox
+    #    (canonically ``"unverified"`` from the pattern index);
+    #  * observed_keys: groups that carry at least one OBSERVED (non-inference)
+    #    finding, so an observed address always beats a pattern guess;
+    #  * pattern_applied_conf: the per-candidate Wilson-lower-bound
+    #    ``applied_confidence`` that overrides the fixed source weight so the
+    #    score tracks the domain's real support (max across findings).
+    if resolver is not None:
+        module_results = resolver.retained_results(module_results)
+    verification_acc: dict[str, set[str]] = {}
+    observed_keys: set[str] = set()
+    # Brief A item 4 — groups carrying at least one INFERENCE finding, classified by
+    # the shared evidence-kind contract. Derived verification for a pure-inference
+    # group (inferred and not observed) is ``unverified`` even when no producer
+    # supplied that literal field — a missing verification field is never proof of
+    # observation, so a legacy fallback finding (``verification_status`` only) can no
+    # longer masquerade as an observation that anchors a person and deletes the
+    # corpus candidate.
+    inferred_keys: set[str] = set()
+    pattern_applied_conf: dict[str, float] = {}
 
     for module_name, result in module_results.items():
         safe_result = _normalize_module_result(module_name, result)
@@ -979,6 +1119,40 @@ def _aggregate(
             if isinstance(_cb, dict):
                 breakdown_acc.setdefault(key, []).append(_cb)
 
+            # 0.16.0 Phase 4 — corpus company-pattern signals (order-independent,
+            # keyed by the same group key as the source-types). A finding that
+            # asserts a verification status contributes it; the pattern index is
+            # the one inference source, so anything else is an observation that
+            # wins the mailbox. The Wilson ``applied_confidence`` overrides the
+            # fixed source weight for the score.
+            _src_type = meta.get("source_type")
+            _ver = meta.get("verification")
+            if isinstance(_ver, str) and _ver.strip():
+                verification_acc.setdefault(key, set()).add(_ver.strip().lower())
+            if _src_type == "company_pattern_index":
+                _applied = meta.get("applied_confidence")
+                if isinstance(_applied, int | float) and not isinstance(_applied, bool):
+                    pattern_applied_conf[key] = max(
+                        pattern_applied_conf.get(key, 0.0), float(_applied)
+                    )
+            # Root B / Brief A — classify observed vs inferred by the SHARED
+            # evidence-kind contract, NOT a source-name allowlist: an SMTP/provider
+            # -verified permutation IS a confirmation (observed), a permutation or
+            # corpus guess is inferred, and a plain sighting is observed. So a
+            # permutation guess can no longer clear the verification gate and
+            # auto-eligible a mailbox with no oracle.
+            # Brief A item 1 — one ingestion-time evidence-kind normalization
+            # (``observed`` / ``inferred`` / ``unknown``) over EVERY marker: the
+            # scalar/collection source-types, the ``is_inference`` flag, the legacy
+            # ``verification_status`` and SMTP/provider status, and the new
+            # ``verification`` field. Missing verification is not observation; an
+            # inferred source is not lifted to observed by an absent field.
+            _kind = classify_evidence_kind(meta)
+            if _kind == EVIDENCE_INFERRED:
+                inferred_keys.add(key)
+            elif _kind == EVIDENCE_OBSERVED:
+                observed_keys.add(key)
+
             # M4 / R6 (S3): dedupe evidence by (module, email, person-claim
             # signature). The first finding for a given claim is the canonical
             # evidence entry, but a later finding from the SAME module carrying a
@@ -1069,6 +1243,60 @@ def _aggregate(
                 )
             )
 
+        # 0.16.0 Phase 4 — a corpus company-pattern email carries a calibrated
+        # per-candidate ``applied_confidence`` (Wilson lower bound of the
+        # domain's dominant-follow rate). Feed it through the ONE canonical
+        # scorer as a source-weight override so the score tracks real support
+        # instead of the fixed fallback weight. ``None`` for every other email →
+        # the exact legacy score.
+        source_confidence = (
+            {"company_pattern_index": pattern_applied_conf[group_key]}
+            if group_key in pattern_applied_conf
+            else None
+        )
+        # 0.16.0 Phase 4/6 — verification precedence for a pure-inference group
+        # (no observed finding shares the mailbox; an observation always wins and
+        # leaves ``verification=None`` so a guess never downgrades a real hit):
+        #   * a Phase-6 M365-oracle *confirmed* claim (``provider_verified``)
+        #     propagates so the eligibility gate can clear it and the confirmed
+        #     status reaches corpus_store / exports;
+        #   * otherwise an ``"unverified"`` claim caps the lead at REVIEW.
+        # Root B — computed BEFORE the label so the honesty cap can be applied in
+        # the ONE canonical scorer for this group. A Phase-6 *confirmed* claim
+        # always propagates (an oracle confirmation is an observation, so its group
+        # is now in ``observed_keys``); the ``unverified`` cap is applied only to a
+        # pure inference group (no observed finding shares the mailbox), so a real
+        # observation still leaves ``verification=None`` and a guess never downgrades
+        # a real hit.
+        _claims = verification_acc.get(group_key, set())
+        _confirmed = _claims & _CONFIRMED_PATTERN_VERIFICATIONS
+        if _confirmed:
+            entry.verification = sorted(_confirmed)[0]
+        elif group_key not in observed_keys and group_key in inferred_keys:
+            # Brief A item 4 — a pure-inference group (inferred, no observed/confirmed
+            # finding sharing the mailbox) is ``unverified`` — DERIVED from the
+            # evidence kind, not from a literal ``verification`` field a producer may
+            # never have supplied. A legacy fallback finding (``verification_status``
+            # only) is therefore correctly capped and cannot masquerade as observed.
+            entry.verification = "unverified"
+        # Brief A item 3/5 — the run-scoped resolver's retained oracle decision is
+        # the authority and projects consistently at THIS boundary: a terminal
+        # negative drops the mailbox (unless a real observation shares it), a
+        # confirmation lifts it to ``provider_verified`` (an unverified duplicate can
+        # never overwrite it), and an unresolved positive/negative conflict is held
+        # ``unverified`` (never automatically eligible).
+        if resolver is not None:
+            _mv = resolver.mailbox_verification(entry.email)
+            if _mv == DROP:
+                continue  # retracted — excluded from every current projection
+            if _mv == VERIFICATION_PROVIDER_VERIFIED:
+                entry.verification = VERIFICATION_PROVIDER_VERIFIED
+            elif _mv == "unverified":
+                entry.verification = "unverified"
+        # Root B — the honesty cap, in the canonical finalization: an unverified
+        # inference (this group asserts ``unverified`` and has no observed/confirmed
+        # finding) can never present as CONFIRMED, wherever the label is computed.
+        cap_unverified = entry.verification == "unverified"
         score, label = compute_confidence(
             source_count=len(unique_modules),
             source_types=all_source_types,
@@ -1076,6 +1304,8 @@ def _aggregate(
             is_ca_attested=entry.is_ca_attested,
             is_pgp_or_ca=entry.is_pgp_or_ca,
             last_seen_timestamp=entry.last_seen_timestamp,
+            source_confidence=source_confidence,
+            cap_unverified_inference=cap_unverified,
         )
 
         entry.confidence_score = round(score, 4)
@@ -1093,6 +1323,8 @@ def _aggregate(
             is_ca_attested=entry.is_ca_attested,
             is_pgp_or_ca=entry.is_pgp_or_ca,
             last_seen_timestamp=entry.last_seen_timestamp,
+            source_confidence=source_confidence,
+            cap_unverified_inference=cap_unverified,
         ).breakdown
         if best_breakdown is not None:
             best_breakdown.update(current_breakdown)
@@ -1102,6 +1334,12 @@ def _aggregate(
             entry.confidence_breakdown = current_breakdown
         final.append(entry)
 
+    # Root A — retire company-pattern inferences superseded by a real observed
+    # address for the same person (person-level dedup), before the additive signal
+    # passes run over the surviving set.
+    # Brief A item 2 — retire competing inferences for the same person via the run's
+    # canonical resolver, so two producers converge on one deterministic selection.
+    final = _apply_resolver_person_selection(final, resolver)
     _apply_passive_pattern_signals(final, module_results)
     _apply_signal_pool_correlation(final, signal_pool)
     _apply_identity_cluster_snapshot(final, identity_clusters)
@@ -1456,6 +1694,8 @@ def apply_domain_email_dns_signals(
     if dns_boost <= 0:
         return
     for entry in emails:
+        if "company_pattern_index" in _pattern_source_types(entry):
+            continue  # Domain DNS cannot replace a calibrated mailbox inference score.
         metadata = _pattern_metadata(entry)
         if metadata is None or not entry.on_domain:
             continue
@@ -1475,7 +1715,9 @@ def apply_domain_email_dns_signals(
             entry.confidence_breakdown["spf_present"] = bool(signals.get("spf_present"))
             entry.confidence_breakdown["dmarc_strict"] = bool(signals.get("dmarc_strict"))
         entry.confidence_score = round(min(base_score + passive_boost + dns_boost, MAX_SCORE), 4)
-        entry.confidence_label = label_for_score(entry.confidence_score)
+        entry.confidence_label = label_for_score(
+            entry.confidence_score, cap_unverified_inference=entry.verification == "unverified"
+        )
 
 
 def _select_low_email_validation_candidates(
@@ -3191,6 +3433,7 @@ async def _run_pattern(
     budget: TimeBudget | None = None,
     provider_detection: Any | None = None,
     mx_records: list[MXRecord] | None = None,
+    pattern_run_state: Any | None = None,
 ) -> ModuleResult:
     """Run pattern_and_verify with explicit kwargs.
 
@@ -3198,6 +3441,10 @@ async def _run_pattern(
     mock ``pattern_module`` whose ``run()`` accepts only ``(domain,
     employee_names)`` still work because we fall back gracefully when
     the signature doesn't include ``enable_smtp``.
+
+    Root A — ``pattern_run_state`` (when the module accepts it) is the shared
+    governed-pattern run-state, so the batch module and the reactive worker draw
+    from one tombstone set and one oracle budget.
     """
     pattern_accepted = _kwargs_accepted(pattern)
     pattern_kwargs: dict[str, Any] = {}
@@ -3224,6 +3471,10 @@ async def _run_pattern(
         pattern_accepted is None or "mx_records" in pattern_accepted
     ):
         pattern_kwargs["mx_records"] = mx_records
+    if pattern_run_state is not None and (
+        pattern_accepted is None or "pattern_run_state" in pattern_accepted
+    ):
+        pattern_kwargs["pattern_run_state"] = pattern_run_state
     result = await _run_with_soft_timeout(
         pattern.name,
         pattern.run(domain, **pattern_kwargs),
@@ -3644,6 +3895,16 @@ async def run_domain_harvest(
 
     from .corpus_store import SCOPE_SIGNATURE_KEY, read_fresh_crawl, scope_signature
 
+    # Root D — the company-pattern index (and its oracle) are coverage-affecting, so
+    # the cache signature includes their flags, the oracle cap, and — when the
+    # feature is on — the shipped index version, so flag-off and an index refresh
+    # both invalidate a cached crawl.
+    _cpi_enabled = bool(getattr(settings, "enable_company_pattern_index", True))
+    _cpi_version = None
+    if _cpi_enabled:
+        from .company_pattern_index import index_version as _cpi_index_version
+
+        _cpi_version = _cpi_index_version()
     request_scope = scope_signature(
         mode=resolved_mode.value,
         with_subdomains=with_subdomains,
@@ -3655,6 +3916,14 @@ async def run_domain_harvest(
         aggressive=aggressive,
         dork_lite_mode=dork_lite_mode,
         enable_email_identity_enrichment=enable_email_identity_enrichment,
+        enable_company_pattern_index=_cpi_enabled,
+        enable_pattern_oracle_verify=bool(
+            getattr(settings, "enable_pattern_oracle_verify", True)
+        ),
+        pattern_oracle_max_verifications=int(
+            getattr(settings, "pattern_oracle_max_verifications_per_run", 50)
+        ),
+        company_pattern_index_version=_cpi_version,
     )
 
     # Phase 1D — read-first from the unified corpus DB (replaces the per-domain

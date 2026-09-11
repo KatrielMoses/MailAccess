@@ -16,7 +16,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from ...config import settings
 from ...core import corpus_store
+from ...core.product_mode import MODE_VALUES, normalize_mode
 from ...core.suppression import SuppressionUnavailable
 from ..security import enforce_quota
 
@@ -42,6 +44,13 @@ async def get_leads(
     has_person: bool | None = Query(
         default=None, description="Only leads with (true) / without (false) a resolved name."
     ),
+    mode: str | None = Query(
+        default=None,
+        description=(
+            "Serving governance mode for eligibility "
+            f"({'/'.join(MODE_VALUES)}). Defaults to the configured product mode."
+        ),
+    ),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
@@ -50,8 +59,25 @@ async def get_leads(
     Data comes from prior harvest runs' corpus projection; this endpoint never
     triggers collection. Suppressed subjects are excluded at write AND read time
     (R2); if the suppression store is unavailable the route fails closed (503).
+
+    Brief B — the serving governance mode that decides eligibility is resolved
+    HERE, per request: the ``mode`` query param when supplied, else the configured
+    ``settings.product_mode``. It is validated up front (an invalid mode fails
+    closed with 400) and threaded through ``read_leads`` to the eligibility
+    verdict, so the served eligibility never depends on a harvest ContextVar
+    leaking in from an unrelated run. The stored per-lead ``policy_status`` remains
+    the provenance of the collection lawful basis, so choosing a permissive serving
+    mode can never manufacture one.
     """
     enforce_quota(request)
+    serving_mode = mode if mode is not None else settings.product_mode
+    try:
+        normalize_mode(serving_mode)  # fail closed on an invalid mode
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid mode {serving_mode!r}; expected one of {list(MODE_VALUES)}",
+        ) from exc
     try:
         return await corpus_store.read_leads(
             domain,
@@ -60,6 +86,7 @@ async def get_leads(
             has_person=has_person,
             limit=limit,
             offset=offset,
+            mode=serving_mode,
         )
     except SuppressionUnavailable as exc:
         raise _SUPPRESSION_UNAVAILABLE from exc

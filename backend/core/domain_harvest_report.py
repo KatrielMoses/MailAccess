@@ -371,8 +371,16 @@ def _row_eligibility(
         # Phase 3D — the deliverability grade gates eligibility (Invalid/Catch-all
         # can never be eligible for outreach).
         deliverability_grade=getattr(entry, "deliverability_grade", None),
+        # 0.16.0 Phase 3 — an asserted-but-unverified entry (e.g. a corpus
+        # company-pattern inference) caps at REVIEW even at high confidence. None
+        # for observed addresses → no change to their verdict.
+        verification=getattr(entry, "verification", None),
     )
     return {
+        # Root D — the verification status travels as a TOP-LEVEL field on every
+        # row (not only nested in evidence), so no consumer can read "ready to send"
+        # off a label or a Valid grade while missing that the address is unverified.
+        "verification": getattr(entry, "verification", None),
         "eligibility": verdict.verdict.value,
         "eligibility_reason": verdict.reason,
     }
@@ -559,6 +567,10 @@ def _rationale_chip(entry: HarvestedEmail) -> str:
         "permutation_unverified_{last}": "perm:last",
         "permutation_unverified_{last}_{first}": "perm:last.first",
         "permutation_unverified_other": "perm:other",
+        # 0.16.0 — corpus company email-pattern inference (one governed,
+        # unverified guess per person). Kept visually distinct from the
+        # permutation spray so the analyst reads it as an inference.
+        "company_pattern_index": "pattern",
         "github_commit_author": "gh",
         "github_code_match": "gh-code",
         "github_profile_email": "gh-profile",
@@ -1911,6 +1923,12 @@ _CSV_COLUMNS = [
     "person_location",
     "deliverability_score",
     "deliverability_grade",
+    # Root D — verification + eligibility columns, appended so a spreadsheet
+    # consumer can filter on outreach-readiness without inferring it from the
+    # label or the deliverability grade.
+    "verification",
+    "eligibility",
+    "eligibility_reason",
 ]
 
 
@@ -1921,6 +1939,14 @@ def format_harvest_csv_export(result: DomainHarvestResult) -> str:
     and ``subaddress_variants`` are comma-joined for direct paste into
     GSheets / Excel. ``None`` becomes empty string.
     """
+    from .eligibility import evaluate as _eligibility_evaluate
+    from .product_mode import policy_status_for_mode
+
+    _mode = str(
+        (getattr(result, "metadata", None) or {}).get("mode") or "security-investigation"
+    )
+    _policy_status = policy_status_for_mode(_mode)
+
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=_CSV_COLUMNS, lineterminator="\n")
     writer.writeheader()
@@ -1953,7 +1979,9 @@ def format_harvest_csv_export(result: DomainHarvestResult) -> str:
             if getattr(entry, "deliverability_score", None) is not None
             else "",
             "deliverability_grade": getattr(entry, "deliverability_grade", None) or "",
+            **_row_eligibility(entry, _mode, _policy_status, _eligibility_evaluate),
         }
+        row["verification"] = row.get("verification") or ""
         writer.writerow(row)
     return buf.getvalue()
 

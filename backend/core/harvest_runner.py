@@ -8,7 +8,7 @@ import inspect
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -42,6 +42,8 @@ from .mail_provider import detect_provider_from_mx
 from .mx_resolver import resolve_mx
 from .name_quality import _NAVIGATION_TOKENS, COMMON_ENGLISH_NOUNS, _clean_token
 from .pagination_handler import PaginationHandler
+from .pattern_candidate import PatternRunState
+from .product_mode import get_active_mode
 from .signal_pool import AsyncSignalPool
 from .stealth_client import StealthSession, resolve_timing_profile
 from .structured_data_extractor import extract_people
@@ -206,6 +208,15 @@ _ACCUMULATING_MODULES = frozenset(
         MODULE_PERSONA_EMAIL_PIVOT,
         MODULE_EMAIL_IDENTITY_ENRICHMENT,
         "name_to_github_profile",
+        # Brief A (R2) — the batch pattern module and the reactive per-name workers
+        # BOTH write ``pattern_and_verify`` results: the reactive path appends via
+        # ``_accumulate_pattern_findings`` and the batch module is recorded here.
+        # Without accumulation the batch result REPLACED every reactive finding (or
+        # vice-versa by arrival order), so a confirmation emitted by one producer
+        # could be lost by the other. Merging keeps every producer's findings; the
+        # canonical resolver reconciles their verification so arrival order and the
+        # merge seam no longer decide the outcome.
+        MODULE_PATTERN_VERIFY,
     }
 )
 _YIELD_PREDICTION_CANDIDATES = frozenset(
@@ -271,6 +282,15 @@ class WorkerContext:
     subdomain_source_telemetry: dict[str, dict[str, Any]] | None = None
     subdomain_intel_hard_cap: float = SUBDOMAIN_INTEL_HARD_CAP
     m365_context: Any | None = None
+    # 0.16.0 fix-pass Root A — the ONE shared governed-pattern run-state, common to
+    # the reactive worker and the batch module: tombstones (a dropped mailbox is
+    # never regenerated), per-person emission (finalize reconciliation), and the
+    # shared M365 oracle verification budget. ``default_factory`` gives each harvest
+    # its own instance even though the context is frozen.
+    pattern_run_state: PatternRunState = field(default_factory=PatternRunState)
+
+    def __post_init__(self) -> None:
+        self.signal_pool.pattern_resolver = self.pattern_run_state.resolver
 
 
 def _is_obvious_non_person_name(name: str) -> bool:
@@ -347,6 +367,7 @@ def _termination_snapshot(
             signal_pool=None,
             identity_clusters=[],
             shadow_profiles_out=[],
+            resolver=ctx.pattern_run_state.resolver,
         )
         unique_emails.sort(key=_sort_key)
     except Exception as exc:  # noqa: BLE001
@@ -364,6 +385,7 @@ def _termination_snapshot(
         "terminated_early": True,
         "timed_out": timed_out,
         "timeout_at_seconds": timeout_seconds,
+        "mode": get_active_mode().value,
         "budget": ctx.budget.stats,
     }
     return DomainHarvestResult(
@@ -753,6 +775,7 @@ async def run_adaptive_harvest(
                     signal_pool=signal_pool,
                     identity_clusters=identity_clusters,
                     shadow_profiles_out=[],
+                    resolver=ctx.pattern_run_state.resolver,
                 )
                 if not settings.enable_low_email_validation:
                     tail["low_email_validation"] = {"checked": 0, "status": "disabled"}
@@ -936,6 +959,7 @@ async def run_adaptive_harvest(
                 signal_pool=signal_pool,
                 identity_clusters=identity_clusters,
                 shadow_profiles_out=shadow_profiles,
+                resolver=ctx.pattern_run_state.resolver,
             )
             unique_emails.sort(key=_sort_key)
             timeout_enrichment: dict[str, Any] | None = None
@@ -948,6 +972,10 @@ async def run_adaptive_harvest(
                 # too, so a timed-out bulk domain still contributes calibration
                 # volume and carries deliverability grades (parity with normal).
                 await _grade_leads_and_capture(cleaned, unique_emails, module_results)
+            # Capstone finding — final observed-beats-inferred pass over the complete
+            # set (late soft-timeout completions / enrichment can add observed
+            # addresses after the aggregate).
+            unique_emails = _finalize_person_selection(ctx, unique_emails)
             technographics = await _compute_technographics(ctx, cache)
             completed = datetime.now(timezone.utc)
             errors = [
@@ -959,6 +987,7 @@ async def run_adaptive_harvest(
             partial_metadata = {
                 "harvest_status": _derive_harvest_status(ctx, timed_out=True),
                 "timed_out": True,
+                "mode": get_active_mode().value,
                 "timeout_at_seconds": timeout_seconds,
                 "budget": budget.stats,
                 "technographics": technographics,
@@ -1049,6 +1078,7 @@ async def run_adaptive_harvest(
             signal_pool=signal_pool,
             identity_clusters=identity_clusters,
             shadow_profiles_out=shadow_profiles,
+            resolver=ctx.pattern_run_state.resolver,
         )
         dns_signals = {"spf_present": False, "dmarc_strict": False}
         has_pattern_candidates = any(
@@ -1081,6 +1111,9 @@ async def run_adaptive_harvest(
             # fields see any enrichment-filled person/company data.
             enrichment_summary = await _enrich_leads_waterfall(cleaned, unique_emails)
             await _grade_leads_and_capture(cleaned, unique_emails, module_results)
+        # Capstone finding — final observed-beats-inferred pass over the COMPLETE set,
+        # after enrichment/grade (which can add a late observed address for a person).
+        unique_emails = _finalize_person_selection(ctx, unique_emails)
         # Phase 5D — technographic tags from already-fetched bytes (no new I/O).
         technographics = await _compute_technographics(ctx, cache)
         low_email_validation = tail.get("low_email_validation", {})
@@ -1124,6 +1157,11 @@ async def run_adaptive_harvest(
         metadata = {
             "harvest_status": "completed",
             "timed_out": False,
+            # Provenance accuracy — record the ACTUAL run/serving mode (set by
+            # run_domain_harvest via set_active_mode) so the export watermark and the
+            # export-time eligibility reflect the mode the run executed under, not the
+            # security-investigation default.
+            "mode": get_active_mode().value,
             "budget": budget.stats,
             "technographics": technographics,
             "enrichment": enrichment_summary,
@@ -2088,6 +2126,9 @@ def _record_module_result(
     """Store results without discarding earlier reactive pivot findings."""
     if ctx.module_results is None:
         return
+    state = getattr(ctx, "pattern_run_state", None)
+    if state is not None:
+        state.resolver.retain_result(module_name, result)
     # Release the C1→C2 barrier once employee_name_discovery reaches any terminal
     # state (it is not an accumulating module, so this path always runs for it), so
     # pattern_and_verify reads a populated — or definitively empty — employee result
@@ -2107,7 +2148,12 @@ def _record_module_result(
     current_findings = [item for item in (result.findings or []) if isinstance(item, dict)]
     metadata = dict(previous.metadata or {})
     for key, value in (result.metadata or {}).items():
-        if key in {"per_person", "sources"} and isinstance(value, list):
+        if key == "generation_decisions" and isinstance(value, dict):
+            counts = dict(metadata.get(key) or {})
+            for decision, count in value.items():
+                counts[decision] = counts.get(decision, 0) + count
+            metadata[key] = counts
+        elif key in {"per_person", "sources"} and isinstance(value, list):
             existing = metadata.get(key)
             metadata[key] = [*(existing if isinstance(existing, list) else []), *value]
         elif (
@@ -2149,21 +2195,230 @@ def _record_module_result(
         metadata=metadata,
     )
 
+def _accumulate_pattern_findings(
+    ctx: WorkerContext, findings: list[dict], *, extra_meta: dict[str, Any] | None = None
+) -> None:
+    """Merge reactive pattern findings into the accumulating module result."""
+    if ctx.module_results is None:
+        return
+    existing = ctx.module_results.get(MODULE_PATTERN_VERIFY)
+    existing_findings: list[dict] = []
+    existing_metadata: dict[str, Any] = {}
+    if existing is not None:
+        existing_findings = list(existing.findings or [])
+        existing_metadata = dict(existing.metadata or {})
+    existing_metadata.update(
+        {
+            "generated_count": existing_metadata.get("generated_count", 0) + len(findings),
+            "smtp_verification_enabled": ctx.enable_smtp,
+        }
+    )
+    if extra_meta:
+        for k, v in extra_meta.items():
+            existing_metadata[k] = existing_metadata.get(k, 0) + v if isinstance(v, int) else v
+    ctx.module_results[MODULE_PATTERN_VERIFY] = ModuleResult(
+        status=ModuleStatus.SUCCESS,
+        findings=[*existing_findings, *findings],
+        metadata=existing_metadata,
+    )
+    ctx.pattern_run_state.resolver.retain_result(
+        MODULE_PATTERN_VERIFY, ctx.module_results[MODULE_PATTERN_VERIFY]
+    )
+
+
+def _finalize_person_selection(ctx: WorkerContext, unique_emails: list[Any]) -> list[Any]:
+    """Capstone finding — the TRUE-FINAL observed-beats-inferred pass at the export seam.
+
+    Person selection runs inside ``_aggregate`` mid-run, but email-set-mutating steps
+    (the enrichment waterfall, breach enrichment) and slow discovery modules that
+    complete late under a soft-timeout can introduce an OBSERVED address for a person
+    *after* that aggregate. So re-run :func:`_apply_resolver_person_selection` here,
+    over the fully-collected email set at the finalization/export boundary, so a
+    late-arriving observed address retires an already-emitted inference for the same
+    person. Idempotent — a second pass is a no-op if the aggregate already reconciled
+    everything. Guarded: a failure never loses the email set.
+    """
+    try:
+        from .domain_harvest_orchestrator import _apply_resolver_person_selection, _sort_key
+
+        selected = _apply_resolver_person_selection(
+            unique_emails, ctx.pattern_run_state.resolver
+        )
+        selected.sort(key=_sort_key)
+        return selected
+    except Exception:  # never drop the email set over a finalization pass
+        logger.exception("final person-selection pass failed; keeping unreconciled set")
+        return unique_emails
+
+
+def _record_pattern_decision(ctx: WorkerContext, decision: str) -> None:
+    """Brief B — account ONE reactive generation decision into module metadata.
+
+    Every input name receives an explicit, accounted decision (emitted, low name
+    evidence, observed coverage, suppressed, oracle-rejected, unindexed, apply /
+    governance error, …). The histogram rides on the ``pattern_and_verify`` module
+    result's ``generation_decisions`` metadata so it survives into final reporting —
+    an error can never masquerade as an ordinary miss or a generation success.
+    Synchronous read-modify-write (no ``await``), so it is race-free across
+    concurrent reactive workers under asyncio.
+    """
+    if ctx.module_results is None:
+        return
+    existing = ctx.module_results.get(MODULE_PATTERN_VERIFY)
+    findings = list(existing.findings or []) if existing is not None else []
+    metadata = dict(existing.metadata or {}) if existing is not None else {}
+    errors = list(existing.errors or []) if existing is not None else []
+    status = existing.status if existing is not None else ModuleStatus.SUCCESS
+    decisions = dict(metadata.get("generation_decisions") or {})
+    decisions[decision] = int(decisions.get(decision, 0)) + 1
+    metadata["generation_decisions"] = decisions
+    ctx.module_results[MODULE_PATTERN_VERIFY] = ModuleResult(
+        status=status, findings=findings, errors=errors, metadata=metadata
+    )
+
+
 async def _run_pattern_for_name(
     payload: dict,
-    ctx: WorkerContext
+    ctx: WorkerContext,
 ) -> tuple[list[dict], list[WorkItem]]:
+    """Reactive per-name pattern generation.
+
+    0.16.0 fix-pass Root A / Brief B — this worker goes through the SAME governed
+    name→email generator as the batch module (:func:`govern_name_to_candidate`),
+    sharing one run-state (:attr:`WorkerContext.pattern_run_state`), the same
+    name-evidence gate, and the same accounted :class:`GovernOutcome`. On an indexed
+    domain a placeable, sufficiently-evidenced, unresolved name yields ONE governed,
+    honesty-capped unverified candidate (oracle-upgraded/dropped with the shared
+    budget). A plain corpus miss / unavailable index falls through to the untouched
+    spray; a low-name-evidence name, an observed/suppressed/oracle-rejected name, or
+    an apply/governance error emits NOTHING and never sprays. Every outcome is
+    recorded in the pattern module metadata so no input name is unaccounted for.
+    """
     name = payload["name"]
     domain = ctx.domain
 
     if _is_obvious_non_person_name(name):
+        _record_pattern_decision(ctx, "not_person")
         return [], []
 
     from backend.core.name_classifier import classify_name
+
     if not classify_name(name).is_person:
+        _record_pattern_decision(ctx, "not_person")
         return [], []
 
+    from backend.core.pattern_candidate import (
+        DECISION_OBSERVED_COVERAGE,
+        DECISION_ORACLE_REJECTED,
+        DECISION_SUPPRESSED,
+        NameEvidence,
+        govern_name_to_candidate,
+        verify_pattern_candidate,
+    )
+    from backend.core.product_mode import get_active_mode
+    from backend.modules.pattern_and_verify import (
+        EmployeeNameResult,
+        _observed_person_index,
+        _pattern_candidate_finding,
+    )
+
+    run_state = ctx.pattern_run_state
+    run_state.seed_oracle_budget(
+        int(getattr(ctx.settings, "pattern_oracle_max_verifications_per_run", 50))
+    )
+    title = str(payload.get("title") or "").strip() or None
+    # Brief B — pass the discovering source's name confidence (and provenance) as
+    # structured name evidence so the governed generator applies the authoritative
+    # gate. The subscriber's pre-schedule filter is only an optimization; a payload
+    # that omits confidence gets the explicit missing-confidence policy (fail).
+    _conf = payload.get("confidence")
+    name_evidence = NameEvidence(
+        name=name,
+        confidence=(float(_conf) if isinstance(_conf, int | float) else None),
+        title=title,
+        provenance=str(payload.get("source") or "") or None,
+    )
+    observed_locals, observed_names = _observed_person_index(ctx.signal_pool, domain)
+
+    outcome = govern_name_to_candidate(
+        name_evidence,
+        domain,
+        mode=get_active_mode(),
+        run_state=run_state,
+        observed_localparts=observed_locals,
+        observed_name_keys=observed_names,
+    )
+    # A plain corpus miss / unavailable index — keep the exact legacy spray. The
+    # spray path owns this name's accounting (it is not a corpus generation).
+    if outcome.fallback_allowed:
+        _record_pattern_decision(ctx, outcome.decision)
+        return await _run_pattern_spray_for_name(payload, ctx)
+
+    # A weak name (low evidence) or an apply/governance error generates nothing and
+    # never sprays — an error must not masquerade as an ordinary three-address spray.
+    # Account the govern decision as the name's ONE final decision.
+    if not outcome.emitted:
+        _record_pattern_decision(ctx, outcome.decision)
+        # Record the name only for the index-handled no-emit outcomes (a confirmed
+        # person for downstream pivots), matching the legacy worker's name emission.
+        if outcome.decision in (
+            DECISION_OBSERVED_COVERAGE,
+            DECISION_SUPPRESSED,
+            DECISION_ORACLE_REJECTED,
+        ):
+            ctx.signal_pool.emit_name(
+                name, source="pattern_confirmed", confidence=0.55, domain=domain
+            )
+        return [], []
+
+    # The name is recorded (a confirmed person for downstream pivots).
+    ctx.signal_pool.emit_name(
+        name, source="pattern_confirmed", confidence=0.55, domain=domain
+    )
+
+    # One governed unverified candidate. Oracle-upgrade/drop it with the shared
+    # budget before it becomes a finding (m365 only; a no-op otherwise). The name's
+    # ONE final decision is recorded AFTER the oracle step so a govern-emitted
+    # candidate the oracle then rejects is accounted as ``oracle_rejected`` — not
+    # double-counted as both emitted and rejected.
+    candidate = await verify_pattern_candidate(
+        outcome.candidate, mode=get_active_mode(), run_state=run_state
+    )
+    if candidate is None:
+        # not_found — the mailbox does not exist (already tombstoned). Emit nothing.
+        _record_pattern_decision(ctx, DECISION_ORACLE_REJECTED)
+        return [], []
+    _record_pattern_decision(ctx, outcome.decision)  # emitted (survived the oracle)
+
+    # Tag the emitted address as a GENERATED inference so a later observed-coverage
+    # read (this run's ``_observed_person_index``) never mistakes it for an
+    # observation (the reverse-timing false-coverage guard).
+    ctx.signal_pool.emit_email(
+        candidate.email,
+        source="company_pattern_index",
+        confidence=float(candidate.confidence_score),
+        domain=domain,
+        is_inference=True,
+        verification=candidate.verification,
+    )
+    emp = EmployeeNameResult(name=name, title_or_role=title)
+    findings = [_pattern_candidate_finding(candidate, emp)]
+    _accumulate_pattern_findings(
+        ctx, findings, extra_meta={"company_pattern_emails": 1}
+    )
+    return findings, []
+
+
+async def _run_pattern_spray_for_name(
+    payload: dict,
+    ctx: WorkerContext,
+) -> tuple[list[dict], list[WorkItem]]:
+    """Legacy reactive permutation spray — the untouched non-indexed fallback."""
+    name = payload["name"]
+    domain = ctx.domain
+
     from backend.core.email_pattern_generator import _PATTERN_TEMPLATES, generate_patterns
+
     if "templates" in payload:
         templates = payload["templates"]
     elif payload.get("has_title"):
@@ -2180,11 +2435,15 @@ async def _run_pattern_for_name(
     )
     findings = []
     for c in candidates:
+        if ctx.pattern_run_state.is_tombstoned(c.email):
+            _record_pattern_decision(ctx, "oracle_rejected")
+            continue
         ctx.signal_pool.emit_email(
             c.email,
             source="pattern_generated",
             confidence=0.05,
             domain=domain,
+            is_inference=True,
         )
         findings.append({
             "platform": "pattern_and_verify",
@@ -2196,27 +2455,12 @@ async def _run_pattern_for_name(
                 "pattern_template": c.pattern_template,
                 "verification_status": "unverified",
                 "confidence_score": 0.05,
+                # Root B — an explicit inference flag so aggregation classifies this
+                # guess as inferred (never observed), regardless of source-type.
+                "is_inference": True,
             },
         })
-    if ctx.module_results is not None:
-        existing = ctx.module_results.get(MODULE_PATTERN_VERIFY)
-        existing_findings = []
-        existing_metadata = {}
-        if existing is not None:
-            existing_findings = list(existing.findings or [])
-            existing_metadata = dict(existing.metadata or {})
-        existing_metadata.update(
-            {
-                "generated_count": existing_metadata.get("generated_count", 0)
-                + len(findings),
-                "smtp_verification_enabled": ctx.enable_smtp,
-            }
-        )
-        ctx.module_results[MODULE_PATTERN_VERIFY] = ModuleResult(
-            status=ModuleStatus.SUCCESS,
-            findings=[*existing_findings, *findings],
-            metadata=existing_metadata,
-        )
+    _accumulate_pattern_findings(ctx, findings)
     return findings, []
 
 
@@ -2364,6 +2608,7 @@ async def _run_module_instance(
             budget=ctx.budget,
             provider_detection=ctx.provider_detection,
             mx_records=ctx.provider_mx_records,
+            pattern_run_state=ctx.pattern_run_state,
             progress_callback=(
                 (lambda action: ctx.progress_callback(module_name, action))
                 if ctx.progress_callback is not None else None

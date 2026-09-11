@@ -13,6 +13,7 @@ corroborated identity or credential-risk evidence.
 ## Contents
 
 - [Output-Trust Gating (unverified ≠ confirmed)](#output-trust-gating-unverified--confirmed)
+  - [Pattern-Inference Honesty (Company Email Patterns)](#pattern-inference-honesty-company-email-patterns)
 - [Common-Name Filter](#common-name-filter)
 - [Disposable Domain Detection](#disposable-domain-detection)
 - [Username-Platform Catch-All Detection](#username-platform-catch-all-detection)
@@ -59,6 +60,44 @@ Two direct consequences:
   username sweep (`backend/core/name_consensus.py`,
   `backend/core/defenders_brief.py`), so a localpart echo plus its own username-sweep
   reflection cannot manufacture a confirmed public identity or a false name conflict.
+
+### Pattern-Inference Honesty (Company Email Patterns)
+
+The company email-pattern index (`backend/core/company_pattern_index.py`) infers a likely
+address from a name and a domain. An inference is weaker evidence than an observation, so the
+same output-trust discipline governs every pattern email:
+
+- **Unverified ≠ confirmed.** Every pattern-derived email is stamped
+  `verification: "unverified"`, and its confidence is routed through the one canonical scorer
+  (`backend/core/email_confidence.py`) and **capped below the confirmed band** — however large
+  the supporting sample, an inferred address is graded *likely* and can never present as
+  confirmed. The eligibility gate (`backend/core/eligibility.py`) holds an unverified inference
+  at `review`, so it can never auto-qualify as an eligible/deliverable contact on its own.
+- **One email per person, observed beats inferred.** On an indexed domain each discovered
+  employee yields exactly one governed candidate rather than a permutation spray
+  (`backend/modules/pattern_and_verify.py`), and a person the harvest already resolved to a
+  real on-domain address gets no guess at all — a pattern inference never overrides or
+  duplicates an observed hit.
+- **The oracle drops non-existent addresses.** Where the domain runs on Microsoft 365, each
+  candidate is checked against the mailbox-existence oracle
+  (`backend/core/pattern_candidate.py`): a confirmed mailbox is upgraded to `provider_verified`
+  (Valid, and only then eligible); a candidate proven **not** to exist is dropped and never
+  surfaces in any export, the harvest report, or `/api/leads`. Google and other providers stay
+  `unverified` by design.
+
+Every surface that emits a pattern email carries its `verification` state and a plain
+`company email pattern (N verified samples)` provenance line, so a downstream reader always
+sees an unverified inference as *review*, never as an established address.
+
+```json
+{
+  "email": "jane.doe@company.com",
+  "verification": "unverified",
+  "confidence_label": "likely",
+  "eligibility": "review",
+  "provenance": "company email pattern (P04, 142 verified samples, conf 0.91)"
+}
+```
 
 ## Common-Name Filter
 

@@ -1281,6 +1281,64 @@ Opt-in (`ENABLE_PERMUTATION_DISCOVERY=true`) because it adds 30–60 seconds and
 
 ---
 
+## `find-email` (company email-pattern index)
+
+Turns a person's name plus their employer domain into **one** honestly-graded likely email
+address, offline. Backed by a bundled index (`data/company_patterns.json.gz`) of
+corpus-learned address patterns for ~384,000 domains, derived from real verified addresses.
+The index loads from the package on first use — no network access — and each domain's entry
+records the dominant pattern (`P01`–`P15`, e.g. `{first}.{last}`), the confidence, the number
+of verified samples behind it, the mail provider (`m365` / `google` / `other`), and any
+per-role overrides.
+
+**Command:**
+```bash
+mailaccess find-email --name "Jane Doe" --domain company.com
+mailaccess find-email --name "Jane Doe" --domain company.com --title "VP Sales"
+```
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Status** | Implemented |
+| **Offline** | Yes (bundled index, no network) |
+
+`--title` (or `--seniority`) selects a per-role pattern override when the domain has one (e.g.
+an org whose engineers use `{first}.{last}` but whose executives use `{f}.{last}`). Domains the
+index doesn't cover return a clean "no indexed pattern" fallback so the caller drops to live
+inference.
+
+**Honest by construction.** Every result is `verification: "unverified"` — a *likely*
+candidate, never confirmed. Its confidence flows through the one canonical scorer and is capped
+below the confirmed band, so a pattern guess can never present as an established address on its
+own. Where the domain runs on Microsoft 365, the harvest/leads path additionally checks the
+candidate against the mailbox-existence oracle: a confirmed mailbox is upgraded to
+`provider_verified` (and may then clear the eligibility/deliverability gates); a candidate the
+oracle proves does **not** exist is dropped. Google and other providers stay `unverified`.
+
+Inside a domain harvest the index replaces the multi-guess permutation spray on indexed
+domains — each discovered employee yields exactly one governed candidate, and a person the
+harvest already resolved to a real on-domain address gets no guess at all (observed beats
+inferred). See [False-Positive and False-Negative Control](fp-control.md#pattern-inference-honesty-company-email-patterns).
+
+**Result example:**
+```json
+{
+  "email": "jane.doe@company.com",
+  "verification": "unverified",
+  "confidence": "likely",
+  "pattern_id": "P04",
+  "support_n": 142,
+  "mx": "m365",
+  "provenance": "company email pattern (P04, 142 verified samples, conf 0.91)"
+}
+```
+
+Maintainers refresh the index from the master pipeline — see
+[docs/company-pattern-index-refresh.md](company-pattern-index-refresh.md).
+
+---
+
 ## `google_account_intel`
 
 Native, unauthenticated Google account intelligence: Gmail/Google account existence plus public profile data (GAIA ID, display name, profile photo, YouTube channel, public Drive files, Maps review history, and active Google services). No credentials, no login, no setup.

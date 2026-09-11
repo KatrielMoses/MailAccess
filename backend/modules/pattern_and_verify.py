@@ -20,6 +20,9 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ..config import settings
+from ..core.company_pattern_index import (
+    get_index as _get_company_pattern_index,
+)
 from ..core.email_confidence import (
     compute_confidence_breakdown,
     label_for_score,
@@ -33,13 +36,28 @@ from ..core.email_pattern_generator import (
 from ..core.email_validator import validate_email_batch
 from ..core.mail_provider import MailProvider, detect_provider_from_mx
 from ..core.mx_resolver import MXRecord, resolve_mx
+from ..core.pattern_candidate import (
+    DECISION_APPLY_ERROR,
+    DECISION_GOVERNANCE_ERROR,
+    DECISION_OBSERVED_COVERAGE,
+    DECISION_ORACLE_REJECTED,
+    DECISION_SUPPRESSED,
+    VERIFICATION_PROVIDER_VERIFIED,
+    NameEvidence,
+    PatternCandidate,
+    PatternRunState,
+    govern_name_to_candidate,
+    verify_pattern_candidates,
+)
+from ..core.pattern_resolver import person_key as _index_first_last
+from ..core.product_mode import get_active_mode
 from ..core.role_classifier import classify_email
 from ..core.smtp_verifier import (
     DEFAULT_PROBE_DELAY,
-    DEFAULT_SENDER,
     MAX_PROBES_HARD_CAP,
     SMTPVerifier,
 )
+from ..core.suppression import SuppressionIndex, load_index_sync
 from .base import BaseModule, ModuleResult, ModuleStatus
 
 _LOG = logging.getLogger(__name__)
@@ -121,6 +139,331 @@ class GeneratedPatternResult:
     source_type: str = _SOURCE_TYPE_UNVERIFIED
 
 
+# --------------------------------------------------------------------------- #
+# 0.16.0 Phase 4 — corpus company email-pattern index wiring.
+#
+# On an *indexed* domain, each discovered-but-unresolved employee name yields
+# ONE governed, unverified corpus-pattern email (Phase 2 ``apply`` -> Phase 3
+# ``pattern_email_to_candidate``) instead of the multi-guess permutation spray.
+# A name the harvest already observed a real on-domain address for gets NO
+# pattern guess (observed beats inferred). A non-indexed domain — or a name the
+# index cannot place — falls through to the untouched spray path.
+# --------------------------------------------------------------------------- #
+
+
+# 0.16.0 fix-pass Root A — signal-pool email sources that are GENERATED
+# inferences, not observations. An email the pattern pass itself emitted (reactive
+# ``pattern_generated`` or governed ``company_pattern_index``) must NEVER be read
+# back as "observed coverage" for a person — that reverse-timing bug let a prior
+# guess suppress the very inference it should have produced.
+_INFERENCE_EMAIL_SOURCES = frozenset(
+    {"pattern_generated", "company_pattern_index", "pattern_inference"}
+)
+
+
+def _row_is_inference(row: dict[str, Any]) -> bool:
+    """Whether a signal-pool email row is a generated inference (not an observation)."""
+    meta = row.get("metadata") if isinstance(row, dict) else None
+    if isinstance(meta, dict) and meta.get("evidence_kind") == "observed":
+        return False  # Pool projection derived this from retained observations.
+    srcs = set(row.get("sources") or [])
+    if srcs & _INFERENCE_EMAIL_SOURCES:
+        return True
+    meta = row.get("metadata") if isinstance(row, dict) else None
+    if isinstance(meta, dict) and (
+        meta.get("is_inference") is True or meta.get("generated") is True
+    ):
+        return True
+    return False
+
+
+def _observed_person_index(
+    signal_pool: Any | None, domain: str
+) -> tuple[set[str], set[tuple[str, str]]]:
+    """Observed on-domain email localparts + normalized name-keys from the pool.
+
+    Enforces the Phase-4 dedup precedence: a pattern inference is never emitted
+    for a person the harvest already resolved to a real on-domain address. Both
+    signals come from the shared signal pool the pre-pattern modules populate.
+    Name-keys reuse the index's own tokenizer so they line up with how
+    :func:`company_pattern_index.apply` parses the same name. Returns empty sets
+    when no pool is available (the aggregator still collapses any residual
+    same-string collision).
+
+    Root A — a row that is itself a GENERATED inference (``pattern_generated`` /
+    ``company_pattern_index``) is skipped: only genuinely OBSERVED addresses count
+    as coverage, so a prior guess can never be mistaken for an observed hit and
+    suppress the inference it should have produced (the reverse-timing false
+    coverage bug).
+    """
+    localparts: set[str] = set()
+    name_keys: set[tuple[str, str]] = set()
+    if signal_pool is None or not hasattr(signal_pool, "get_emails"):
+        return localparts, name_keys
+    try:
+        observed = signal_pool.get_emails(domain)
+    except Exception:  # a pool read must never break the pattern pass
+        _LOG.debug("company_pattern_index: pool email read failed", exc_info=True)
+        return localparts, name_keys
+    for row in observed or []:
+        if _row_is_inference(row):
+            continue  # a generated guess is not observed coverage
+        email = str(row.get("email") or "").strip().lower()
+        local, sep, dom = email.partition("@")
+        if not sep or dom != domain or not local:
+            continue
+        localparts.add(local)
+        meta = row.get("metadata") if isinstance(row, dict) else None
+        name = None
+        if isinstance(meta, dict):
+            name = meta.get("name") or meta.get("person_name")
+        if isinstance(name, str) and name.strip():
+            key = _index_first_last(name)
+            if key:
+                name_keys.add(key)
+    return localparts, name_keys
+
+
+def _pattern_candidate_finding(
+    candidate: PatternCandidate, emp: EmployeeNameResult
+) -> dict[str, Any]:
+    """Project a governed :class:`PatternCandidate` into a harvest finding dict.
+
+    Carries ``source_type="company_pattern_index"`` and the candidate's
+    ``verification`` so the aggregator scores it through the one canonical scorer
+    (with the per-candidate ``applied_confidence`` override). Full pattern
+    provenance rides in the metadata so it survives into the ledger / export.
+
+    For an *unverified* candidate the eligibility gate caps it at REVIEW. For a
+    Phase-6 M365-oracle-confirmed candidate (``verification="provider_verified"``)
+    the finding additionally stamps the provider-verification signals
+    (``provider_verification_status="verified"`` / ``provider="m365"``) so the
+    harvest aggregator and the post-aggregation deliverability re-grade
+    (``_apply_deliverability_grade``) naturally derive Valid + provider-verified,
+    and the eligibility gate can clear it — the upgrade flows to /api/leads and
+    exports through the existing verification machinery.
+    """
+    metadata: dict[str, Any] = {
+        "email": candidate.email,
+        "name": emp.name,
+        "source_name": emp.name,
+        "on_domain": True,
+        "is_role": False,
+        "source_type": candidate.source_type,
+        "verification": candidate.verification,
+        "is_inference": True,
+        "confidence_score": candidate.confidence_score,
+        "confidence_label": candidate.confidence_label,
+        "confidence_breakdown": candidate.confidence_breakdown,
+        "applied_confidence": candidate.applied_confidence,
+        "pattern_id": candidate.pattern_id,
+        "support_n": candidate.support_n,
+        # Brief C R9 — the denominator + basis ride into the harvested evidence so
+        # export provenance reproduces the applied calculation.
+        "considered_n": candidate.considered_n,
+        "confidence_basis": candidate.confidence_basis,
+        "pattern_confidence": candidate.confidence,
+        "mx": candidate.mx,
+        "role_used": candidate.role_used,
+        "provenance": candidate.provenance,
+        "deliverability_grade": candidate.deliverability_grade,
+        "deliverability": candidate.deliverability,
+        "eligibility": candidate.eligibility,
+        "eligibility_reason": candidate.eligibility_reason,
+        "suppressed": candidate.suppressed,
+        "observation": candidate.observation,
+    }
+    if candidate.verification == VERIFICATION_PROVIDER_VERIFIED:
+        # Phase 6 — surface the per-mailbox oracle confirmation through the same
+        # provider-verification fields the harvest already understands.
+        metadata["provider_verification_status"] = "verified"
+        metadata["provider_verification_provider"] = candidate.mx or "m365"
+    return {
+        "platform": "pattern_and_verify",
+        "profile_url": candidate.email,
+        "confidence": candidate.confidence_label,
+        "metadata": metadata,
+    }
+
+
+def _company_pattern_pass(
+    employee_names: list[EmployeeNameResult],
+    domain: str,
+    *,
+    signal_pool: Any | None,
+    run_state: PatternRunState | None = None,
+) -> tuple[
+    list[tuple[PatternCandidate, EmployeeNameResult]],
+    list[EmployeeNameResult],
+    dict[str, Any],
+]:
+    """Index-driven single-email pass (0.16.0 Phase 4).
+
+    Returns ``(pattern_pairs, spray_names, meta)``. ``spray_names`` are the names
+    that must still run the legacy permutation spray (non-indexed domain,
+    unplaceable name, or a per-name governance error); ``pattern_pairs`` is one
+    ``(governed unverified candidate, employee)`` pair per placed-and-unresolved
+    name — kept as candidate objects (not yet projected to findings) so the
+    Phase-6 oracle pass can upgrade/drop them before emission. When the feature
+    flag is off or the index is not shipped this is a no-op: every name falls
+    through to the spray, byte-for-byte as before.
+
+    Root A / Brief B — every per-name decision goes through the ONE shared governed
+    generator (:func:`pattern_candidate.govern_name_to_candidate`), the same
+    function the reactive worker calls, threading the shared ``run_state`` and the
+    same name-evidence gate. Each name yields exactly one accounted
+    :class:`GovernOutcome`: an ``emitted`` candidate becomes a pattern pair, a
+    fallback-permitted MISS (unindexed / unplaceable / index-unavailable) is routed
+    to the spray, and every other outcome (low name evidence, observed coverage,
+    suppression, oracle rejection, apply / governance error) emits NOTHING and is
+    counted in ``meta["generation_decisions"]``. A governance/apply error is never
+    silently switched to the ungoverned spray path.
+    """
+    meta: dict[str, Any] = {
+        "enabled": False,
+        "domain_indexed": False,
+        "emails": 0,
+        "skipped_observed": 0,
+        "fallback_errors": 0,
+        "apply_errors": 0,
+        # Brief B item 4 — the full per-name decision histogram, carried through the
+        # module metadata so every input name is explicitly accounted for.
+        "generation_decisions": {},
+    }
+    enabled = bool(getattr(settings, "enable_company_pattern_index", True))
+    index = _get_company_pattern_index()
+    available = enabled and index.available
+    meta["enabled"] = available
+    # Domain membership is independent of whether any individual name places
+    # (a name that abstains, or an apply error, is not "domain not indexed").
+    meta["domain_indexed"] = index.is_indexed(domain) if available else False
+
+    mode = get_active_mode()
+    try:
+        suppression_index = load_index_sync()
+    except Exception:
+        # The export boundary remains the authoritative suppression gate; an
+        # empty index here just means this belt-and-braces check is inert.
+        _LOG.debug(
+            "company_pattern_index: suppression index unavailable; "
+            "export boundary remains authoritative",
+            exc_info=True,
+        )
+        suppression_index = SuppressionIndex(
+            frozenset(), frozenset(), frozenset(), {}
+        )
+
+    observed_locals, observed_names = _observed_person_index(signal_pool, domain)
+
+    pattern_pairs: list[tuple[PatternCandidate, EmployeeNameResult]] = []
+    spray_names: list[EmployeeNameResult] = []
+    decisions: dict[str, int] = meta["generation_decisions"]
+    for emp in employee_names:
+        outcome = govern_name_to_candidate(
+            NameEvidence(
+                name=emp.name,
+                confidence=emp.confidence,
+                title=emp.title_or_role,
+                provenance=",".join(emp.sources or []) or None,
+            ),
+            domain,
+            mode=mode,
+            suppression_index=suppression_index,
+            run_state=run_state,
+            observed_localparts=observed_locals,
+            observed_name_keys=observed_names,
+            index=index,
+        )
+        decisions[outcome.decision] = decisions.get(outcome.decision, 0) + 1
+        if outcome.emitted and outcome.candidate is not None:
+            pattern_pairs.append((outcome.candidate, emp))
+            meta["emails"] += 1
+        elif outcome.fallback_allowed:
+            # A plain corpus miss / unavailable index — the untouched permutation
+            # spray runs for this name.
+            spray_names.append(emp)
+        elif outcome.decision in (
+            DECISION_OBSERVED_COVERAGE,
+            DECISION_SUPPRESSED,
+            DECISION_ORACLE_REJECTED,
+        ):
+            # The index handled this name but intentionally emits nothing.
+            meta["skipped_observed"] += 1
+        elif outcome.decision == DECISION_APPLY_ERROR:
+            meta["apply_errors"] += 1
+        elif outcome.decision == DECISION_GOVERNANCE_ERROR:
+            meta["fallback_errors"] += 1
+        # DECISION_LOW_NAME_EVIDENCE: accounted in generation_decisions only — no
+        # emission and no spray (a weak name generates nothing anywhere).
+
+    return pattern_pairs, spray_names, meta
+
+
+async def _verify_company_pattern_pairs(
+    pattern_pairs: list[tuple[PatternCandidate, EmployeeNameResult]],
+    *,
+    meta: dict[str, Any],
+    run_state: PatternRunState | None = None,
+) -> list[dict[str, Any]]:
+    """0.16.0 Phase 6 — oracle-verify the pattern candidates, then project findings.
+
+    Runs the M365 existence oracle over the m365 candidates (batched, budgeted,
+    mode-gated — see :func:`pattern_candidate.verify_pattern_candidates`):
+
+    * confirmed → the candidate is upgraded to provider_verified / Valid /
+      eligible before it becomes a finding;
+    * not_found → the candidate is dropped (a known-nonexistent address is never
+      surfaced);
+    * everything else (inconclusive / throttled / blocked / non-m365 / over
+      budget) → unchanged (still unverified / Risky).
+
+    Records Phase-6 telemetry on ``meta["oracle"]`` and returns the finding dicts
+    for the surviving candidates.
+    """
+    oracle_meta: dict[str, Any] = {
+        "enabled": bool(getattr(settings, "enable_pattern_oracle_verify", True)),
+        "m365_candidates": sum(
+            1 for c, _ in pattern_pairs if (c.mx or "").strip().lower() == "m365"
+        ),
+        "confirmed": 0,
+        "dropped": 0,
+    }
+    meta["oracle"] = oracle_meta
+    if not pattern_pairs:
+        return []
+
+    mode = get_active_mode()
+    try:
+        verified = await verify_pattern_candidates(
+            [c for c, _ in pattern_pairs], mode=mode, run_state=run_state
+        )
+    except Exception:
+        # The oracle is a best-effort upgrade — a failure must never lose the
+        # unverified leads. Fall back to the un-upgraded candidates.
+        _LOG.warning(
+            "pattern oracle verification failed; emitting unverified candidates",
+            exc_info=True,
+        )
+        oracle_meta["errors"] = 1
+        verified = [c for c, _ in pattern_pairs]
+
+    findings: list[dict[str, Any]] = []
+    for (cand, emp), upgraded in zip(pattern_pairs, verified):
+        if upgraded is None:
+            # not_found — the generated address does not exist; drop it.
+            oracle_meta["dropped"] += 1
+            decisions = meta.setdefault("generation_decisions", {})
+            if decisions.get("emitted", 0) > 0:
+                decisions["emitted"] -= 1
+            decisions[DECISION_ORACLE_REJECTED] = decisions.get(DECISION_ORACLE_REJECTED, 0) + 1
+            continue
+        if upgraded.verification == VERIFICATION_PROVIDER_VERIFIED:
+            oracle_meta["confirmed"] += 1
+        findings.append(_pattern_candidate_finding(upgraded, emp))
+    meta["emails"] = len(findings)
+    return findings
+
+
 class PatternAndVerifyModule(BaseModule):
     name = "pattern_and_verify"
     description = (
@@ -141,6 +484,7 @@ class PatternAndVerifyModule(BaseModule):
         progress_callback: Any | None = None,
         provider_detection: Any | None = None,
         mx_records: list[MXRecord] | None = None,
+        pattern_run_state: PatternRunState | None = None,
     ) -> ModuleResult:  # type: ignore[override]
         """Generate email patterns and optionally verify via SMTP.
 
@@ -187,6 +531,32 @@ class PatternAndVerifyModule(BaseModule):
                     "domain": cleaned_domain,
                 },
             )
+
+        # 0.16.0 Phase 4 — index-driven single email. On an indexed domain each
+        # placed, unresolved name becomes ONE governed unverified corpus-pattern
+        # email; those names are dropped from the spray. Non-indexed domains (and
+        # names the index can't place) keep the exact pre-Phase-4 spray path —
+        # ``spray_names`` is then ``employee_names`` unchanged.
+        total_employee_names = len(employee_names)
+        input_employee_names = list(employee_names)
+        company_pattern_pairs, employee_names, company_pattern_meta = (
+            _company_pattern_pass(
+                employee_names,
+                cleaned_domain,
+                signal_pool=signal_pool,
+                run_state=pattern_run_state,
+            )
+        )
+        # 0.16.0 Phase 6 — upgrade/drop the m365 candidates through the existence
+        # oracle before they become findings (unverified guess → verified lead;
+        # nonexistent pattern deviant → dropped). Mode-gated and budgeted (the
+        # budget is shared across the whole run via ``pattern_run_state``), so it
+        # is a no-op in public mode and when the flag is off.
+        company_pattern_findings = await _verify_company_pattern_pairs(
+            company_pattern_pairs,
+            meta=company_pattern_meta,
+            run_state=pattern_run_state,
+        )
 
         candidates: list[GeneratedPatternResult] = []
         confirmed_pattern: str | None = None
@@ -290,6 +660,11 @@ class PatternAndVerifyModule(BaseModule):
                     "skip_reason": reason,
                 }
             )
+
+        # Names rejected by the shared gate still belong in the legacy funnel.
+        for rejected in input_employee_names:
+            if float(rejected.confidence) < medium_threshold:
+                _record_skip(rejected, tier="low", reason="low_name_evidence")
 
         def _append_generated(
             emp: EmployeeNameResult,
@@ -687,6 +1062,7 @@ class PatternAndVerifyModule(BaseModule):
             breakdown = compute_confidence_breakdown(
                 source_types=[cand.source_type],
                 is_smtp_verified=(cand.source_type == _SOURCE_TYPE_VERIFIED),
+                cap_unverified_inference=cand.verification_status != "verified",
                 is_ca_attested=False,
                 oldest_timestamp=None,
             )
@@ -703,7 +1079,9 @@ class PatternAndVerifyModule(BaseModule):
                     corpus_prior_adjustment = adj
                     final_score = min(1.0, max(0.0, final_score + adj))
                     corpus_prior_applied += 1
-            label = label_for_score(final_score)
+            label = label_for_score(
+                final_score, cap_unverified_inference=cand.verification_status != "verified"
+            )
             # P1: compute the hunter adjustment at emission time so
             # the breakdown carries the exact delta.  We recompute
             # here (not from ``cand.confidence_score``) so the
@@ -747,6 +1125,12 @@ class PatternAndVerifyModule(BaseModule):
             if cand.source_type == _SOURCE_TYPE_VERIFIED:
                 verified_count += 1
 
+        # 0.16.0 Phase 4 — append the governed corpus-pattern findings. They are
+        # already graded, verdicted and provenance-tagged (is_role=False by
+        # construction), so they bypass the spray-only role/not-found filtering
+        # above and flow straight into aggregation as unverified candidates.
+        findings.extend(company_pattern_findings)
+
         # ------------------------------------------------------------------
         # 5. Module status — should almost always be SUCCESS; pure-logic
         #    generation cannot fail, and SMTP verification is optional.
@@ -758,8 +1142,10 @@ class PatternAndVerifyModule(BaseModule):
             findings=findings,
             metadata={
                 "domain": cleaned_domain,
-                "employee_names_processed": len(employee_names),
+                "employee_names_processed": total_employee_names,
                 "total_patterns_generated": len(candidates),
+                # 0.16.0 Phase 4 — corpus company-pattern index pass telemetry.
+                "company_pattern_index": company_pattern_meta,
                 "smtp_verification_enabled": smtp_enabled,
                 "native_validation_enabled": bool(enable_native_validation),
                 "native_validation": native_validation_meta,

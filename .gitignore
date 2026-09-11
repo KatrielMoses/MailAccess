@@ -44,24 +44,33 @@ Thumbs.db
 *.log
 logs/
 
-# Runtime data
+# Runtime data.
+# data/ is ignore-by-default; ONLY the shipped runtime files below are tracked
+# (each is also wheel/sdist-bundled in pyproject.toml). Everything else in data/
+# — local *.db scratch, caches, and the corpus/pattern-index BUILD INPUTS (which
+# live in the maintainer's private email-pattern-index/ folder, out of the repo:
+# pattern_pipeline.sql, the reference impl, validation_sample.csv, *.mx.json.gz,
+# assemble.py) — stays ignored. If you add a runtime data file, allowlist it here
+# AND add it to the wheel + sdist force-include lists.
 *.db
 data/
 !data/
 data/*
-!data/mailaccess-extra-sites.json
-!data/mailaccess_sites.json
-!data/breach_aliases.json
-!data/common_names.json
-!data/disposable_domains.json
-!data/fediverse_instances.json
-!data/harvester_sources.json
-!data/reset_signals.json
-!data/role_prefixes.json
-!data/service_categories.yaml
-!data/subdomain_wordlist.txt
-!data/harvest_benchmark_domains.json
-!data/industry_vocabulary.json
+# --- shipped runtime data (tracked + packaged) ---
+!data/mailaccess-extra-sites.json    # supplemental platform site definitions
+!data/mailaccess_sites.json          # native username-platform corpus (~5,365 sites)
+!data/breach_aliases.json            # breach-source alias map
+!data/common_names.json              # common-name false-positive corpus
+!data/disposable_domains.json        # disposable-email domain corpus
+!data/fediverse_instances.json       # known fediverse instances
+!data/harvester_sources.json         # domain-harvest source registry
+!data/reset_signals.json             # multi-language password-reset phrases
+!data/role_prefixes.json             # role-account localpart prefixes
+!data/service_categories.yaml        # credential-risk service categories
+!data/subdomain_wordlist.txt         # subdomain brute wordlist (text)
+!data/subdomain_wordlist.json        # subdomain brute wordlist (structured)
+!data/industry_vocabulary.json       # industry-vocabulary technographic corpus
+!data/company_patterns.json.gz       # 0.16.0 offline company email-pattern index (377K domains)
 maltego/*.mtz
 
 # IDE
@@ -116,6 +125,11 @@ test_*.py
 !tests/test_low_email_validator.py
 !tests/test_aggregator.py
 !tests/test_no_live_network.py
+!tests/test_company_pattern_index.py
+!tests/test_company_pattern_wiring.py
+!tests/test_pattern_candidate.py
+!tests/test_pattern_oracle_verify.py
+!tests/test_fixpass_boundaries.py
 verify_*.py
 .pytest_cache/
 .pytest-tmp/
@@ -171,3 +185,6 @@ docs/audit/
 
 # Brand identity kit source bundle (design file, not a shipped asset)
 /assets/mailaccess Identity Kit.html
+
+!tests/test_pattern_remediation_boundaries.py
+!tests/test_pattern_normalization_differential.py

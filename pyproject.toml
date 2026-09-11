@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mailaccess"
-version = "0.15.0"
+version = "0.16.0"
 description = "Open-source OSINT email intelligence tool"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -63,6 +63,14 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
 ]
+# Company-pattern index build/regeneration + the executable SQL↔Python
+# normalization differential (tests/test_pattern_normalization_differential.py).
+# DuckDB runs the SAME normalization UDFs the generator builds with, so the
+# differential exercises the real build transform, not a constant table. Not a
+# runtime dependency: the shipped index is a prebuilt data file.
+build = [
+    "duckdb==1.5.5",
+]
 
 [project.scripts]
 mailaccess = "cli.main:app"
@@ -74,6 +82,7 @@ packages = ["backend", "cli"]
 [tool.hatch.build.targets.wheel.force-include]
 "data/breach_aliases.json" = "data/breach_aliases.json"
 "data/common_names.json" = "data/common_names.json"
+"data/company_patterns.json.gz" = "data/company_patterns.json.gz"
 "data/disposable_domains.json" = "data/disposable_domains.json"
 "data/fediverse_instances.json" = "data/fediverse_instances.json"
 "data/harvester_sources.json" = "data/harvester_sources.json"
@@ -89,6 +98,7 @@ packages = ["backend", "cli"]
 [tool.hatch.build.targets.sdist.force-include]
 "data/breach_aliases.json" = "data/breach_aliases.json"
 "data/common_names.json" = "data/common_names.json"
+"data/company_patterns.json.gz" = "data/company_patterns.json.gz"
 "data/disposable_domains.json" = "data/disposable_domains.json"
 "data/fediverse_instances.json" = "data/fediverse_instances.json"
 "data/harvester_sources.json" = "data/harvester_sources.json"

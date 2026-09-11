@@ -51,6 +51,16 @@ SOURCE_WEIGHTS: dict[str, float] = {
     "permutation_unverified_{last}": 0.07,
     "permutation_unverified_{last}_{first}": 0.05,
     "permutation_unverified_other": 0.03,
+    # 0.16.0 Phase 2 — company email-pattern index. A learned, per-domain
+    # pattern from the corpus (name+domain -> one graded email). This is the
+    # high-confidence sibling of the corpus-prior "matches the known pattern"
+    # nudge, so it sits at the top of the unverified band (level with
+    # ``permutation_mx_valid``). The value here is only a *fallback* — callers
+    # pass the per-candidate ``applied_confidence`` (Wilson lower bound) through
+    # the scorer's ``source_confidence`` override, so the score tracks the
+    # domain's real support. The signal is always unverified: it can never on
+    # its own reach the CONFIRMED band (see ``company_pattern_index`` caller).
+    "company_pattern_index": 0.30,
     # FIX 4D: removed dead SOURCE_WEIGHTS keys — no module ever emitted
     # these source types (verified by repo-wide grep), so they only
     # added confusion and could silently inflate a pure-guess candidate
@@ -164,6 +174,11 @@ SOURCE_CLASS: dict[str, str] = {
     "permutation_unverified_{last}": "verification",
     "permutation_unverified_{last}_{first}": "verification",
     "permutation_unverified_other": "verification",
+    # 0.16.0 Phase 2 — the learned company-pattern index gets its OWN
+    # corroboration family so it can never collude with real verification
+    # signals to inflate the multi-source multiplier: an unverified inference
+    # is one source, not a corroborator of a live probe.
+    "company_pattern_index": "pattern_index",
     # FIX 4D: dead keys removed (permutation_format_match,
     # permutation_name_match, permutation_unverified_{first}_tier1).
     "autodiscover_m365": "verification",  # FIX 2
@@ -281,6 +296,37 @@ class ConfidenceLabel:
     breakdown: dict[str, float | str | list[str]]
 
 
+#: 0.16.0 Phase 2 — non-permutation source types that are, like permutations, a
+#: *present-tense inference* with no observation age. They opt in to the same
+#: "no freshness penalty on a missing timestamp" rule (a learned pattern is not
+#: a stale data point). Kept as a literal here to avoid importing the applier
+#: module (which imports this one).
+_INFERENCE_SOURCE_TYPES: frozenset[str] = frozenset(
+    {"company_pattern_index", "pattern_generated", "pattern_inference"}
+)
+
+
+def _is_inference_source(source: str | None) -> bool:
+    """True for permutation / learned-pattern sources — present-tense, no age."""
+    if not source:
+        return False
+    s = str(source).strip().lower()
+    return s.startswith("permutation_") or s in _INFERENCE_SOURCE_TYPES
+
+
+def is_inference_source(source: str | None) -> bool:
+    """Public alias of :func:`_is_inference_source` — the shared evidence-kind
+    contract for "this source is a generated/learned inference, not an observation".
+
+    0.16.0 fix-pass Root B: aggregation and the serving boundaries classify a
+    finding as observed-vs-inferred through this one predicate (plus an explicit
+    ``is_inference`` metadata flag), never a bespoke per-call source-name allowlist,
+    so a permutation guess can never be mistaken for an observation that clears the
+    verification gate.
+    """
+    return _is_inference_source(source)
+
+
 def unverified_source_type_for_template(template: str | None) -> str:
     """Map a generated template to its passive confidence source key."""
     known = {
@@ -307,7 +353,9 @@ def freshness_factor(timestamp: str | None, source: str | None = None) -> float:
 
     The ``source`` check is opt-in: callers that pass ``source=None``
     get the legacy behaviour.  Pattern candidates and any source
-    starting with ``"permutation_"`` opt in to the relaxed rule.
+    starting with ``"permutation_"`` — plus the learned company-pattern
+    index (0.16.0 Phase 2) — opt in to the relaxed rule via
+    :func:`_is_inference_source`.
 
     FIX 4B: sources in :data:`PERMANENT_SOURCES` never decay — they
     return ``1.0`` regardless of the timestamp.
@@ -315,13 +363,13 @@ def freshness_factor(timestamp: str | None, source: str | None = None) -> float:
     if source and str(source) in PERMANENT_SOURCES:
         return 1.0
     if not timestamp:
-        if source and str(source).startswith("permutation_"):
+        if _is_inference_source(source):
             return 1.0
         return 0.50
 
     cleaned = str(timestamp).strip()
     if not cleaned:
-        if source and str(source).startswith("permutation_"):
+        if _is_inference_source(source):
             return 1.0
         return 0.50
 
@@ -425,6 +473,8 @@ def _assess_email_confidence(
     is_pgp_or_ca: bool | None = None,
     oldest_timestamp: str | None = None,
     last_seen_timestamp: str | None = None,
+    source_confidence: dict[str, float] | None = None,
+    cap_unverified_inference: bool = False,
 ) -> ConfidenceLabel:
     """The single canonical email-confidence scorer — (score, label, breakdown).
 
@@ -435,9 +485,32 @@ def _assess_email_confidence(
     permanent source like ``github_commit_author`` (2010) scored 0.95 through the
     scalar path but ~0.14 through the breakdown path (age-decayed). Here the
     PERMANENT-source rule is applied once, and the MAX_SCORE clip is enforced once.
+
+    0.16.0 Phase 2: ``source_confidence`` is an optional per-source-type weight
+    OVERRIDE, e.g. ``{"company_pattern_index": 0.82}``. It lets a source carry a
+    *calibrated per-candidate* base contribution instead of the fixed
+    :data:`SOURCE_WEIGHTS` value, while still flowing through the one canonical
+    multiplier / freshness / label pipeline — no parallel scorer. Unlisted source
+    types fall back to :data:`SOURCE_WEIGHTS` as before, so this is backward
+    compatible (default ``None`` reproduces the legacy score exactly).
+
+    0.16.0 fix-pass Root B: ``cap_unverified_inference`` is the ONE canonical home
+    of the honesty cap. When set, a score that reaches the CONFIRMED band is
+    downgraded to LIKELY (the numeric score is unchanged) and the breakdown is
+    stamped ``capped_from_confirmed``. An *unverified* inference — a corpus-pattern
+    guess or a permutation with no per-mailbox proof — can therefore never present
+    as CONFIRMED **anywhere the label is computed** (the applier, aggregation,
+    export, ``read_leads``), not just in one adapter. ``False`` (the default)
+    reproduces the legacy label exactly.
     """
     unique_types = {st for st in source_types if st}
-    base_score = sum(SOURCE_WEIGHTS.get(t, 0.0) for t in unique_types)
+
+    def _weight(t: str) -> float:
+        if source_confidence is not None and t in source_confidence:
+            return float(source_confidence[t])
+        return SOURCE_WEIGHTS.get(t, 0.0)
+
+    base_score = sum(_weight(t) for t in unique_types)
     pgp_or_ca = _pgp_or_ca_flag(
         unique_types,
         is_ca_attested=is_ca_attested,
@@ -454,7 +527,7 @@ def _assess_email_confidence(
         (st for st in unique_types if st in PERMANENT_SOURCES),
         None,
     ) or next(
-        (st for st in unique_types if str(st).startswith("permutation_")),
+        (st for st in unique_types if _is_inference_source(st)),
         None,
     )
     freshness = freshness_factor(
@@ -462,14 +535,20 @@ def _assess_email_confidence(
         source=perm_source,
     )
     final = min(max(base_score * multiplier * freshness, 0.0), MAX_SCORE)
-    breakdown = {
+    breakdown: dict[str, float | str | list[str]] = {
         "base_score": round(base_score, 4),
         "multiplier": multiplier,
         "multiplier_label": multiplier_label,
         "freshness": freshness,
         "source_types": sorted(unique_types),
     }
-    return ConfidenceLabel(score=final, label=_label(final), breakdown=breakdown)
+    label = _label(final)
+    # Root B — the honesty cap, applied in the ONE canonical scorer. An unverified
+    # inference can never present as CONFIRMED, wherever the label is computed.
+    if cap_unverified_inference and label == CONFIRMED_LABEL:
+        label = LIKELY_LABEL
+        breakdown["capped_from_confirmed"] = True
+    return ConfidenceLabel(score=final, label=label, breakdown=breakdown)
 
 
 def compute_confidence(
@@ -480,6 +559,8 @@ def compute_confidence(
     is_pgp_or_ca: bool | None = None,
     oldest_timestamp: str | None = None,
     last_seen_timestamp: str | None = None,
+    source_confidence: dict[str, float] | None = None,
+    cap_unverified_inference: bool = False,
 ) -> tuple[float, str]:
     """Compute a ``(score, label)`` pair for aggregated email evidence."""
     del source_count
@@ -490,6 +571,8 @@ def compute_confidence(
         is_pgp_or_ca=is_pgp_or_ca,
         oldest_timestamp=oldest_timestamp,
         last_seen_timestamp=last_seen_timestamp,
+        source_confidence=source_confidence,
+        cap_unverified_inference=cap_unverified_inference,
     )
     return assessment.score, assessment.label
 
@@ -501,6 +584,8 @@ def compute_confidence_breakdown(
     is_pgp_or_ca: bool | None = None,
     oldest_timestamp: str | None = None,
     last_seen_timestamp: str | None = None,
+    source_confidence: dict[str, float] | None = None,
+    cap_unverified_inference: bool = False,
 ) -> ConfidenceLabel:
     """Like :func:`compute_confidence` but returns the full breakdown.
 
@@ -514,9 +599,12 @@ def compute_confidence_breakdown(
         is_pgp_or_ca=is_pgp_or_ca,
         oldest_timestamp=oldest_timestamp,
         last_seen_timestamp=last_seen_timestamp,
+        source_confidence=source_confidence,
+        cap_unverified_inference=cap_unverified_inference,
     )
 
 
-def label_for_score(score: float) -> str:
+def label_for_score(score: float, *, cap_unverified_inference: bool = False) -> str:
     """Public threshold helper, exposed for downstream consumers/tests."""
-    return _label(score)
+    label = _label(score)
+    return LIKELY_LABEL if cap_unverified_inference and label == CONFIRMED_LABEL else label

@@ -38,7 +38,7 @@ async def _run(domains: list[str], timeout_per_domain: float) -> dict[str, objec
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, default=Path(__file__).parents[1] / "data" / "harvest_benchmark_domains.json")
+    parser.add_argument("--manifest", type=Path, default=Path(__file__).parents[1] / "eval" / "harvest_benchmark_domains.json")
     parser.add_argument("--output", type=Path, default=Path("results/harvest_p0_p1_baseline.json"))
     parser.add_argument("--timeout-per-domain", type=float, default=30.0)
     args = parser.parse_args()

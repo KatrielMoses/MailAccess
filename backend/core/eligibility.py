@@ -83,6 +83,35 @@ def _review_floor() -> float:
 _NON_SENDABLE_GRADES = frozenset({"Invalid", "Catch-all"})
 
 
+# 0.16.0 Phase 3 — verification statuses that establish a per-mailbox / identity
+# confirmation strong enough to be *auto*-eligible for outreach. A record that
+# carries any OTHER (non-None) verification status — canonically ``"unverified"``
+# — has no such confirmation, so however high its research confidence, it can
+# never auto-clear to ELIGIBLE: it caps at REVIEW (a human decides). This is the
+# "eligibility gates on verification, not on the raw confidence score" rule: a
+# well-supported but unverified inference (e.g. a corpus company-pattern email at
+# score ~0.9) is deliberately *not* a ready-to-send lead on its own.
+#
+# ``verification=None`` (the default) means "not asserted" — the caller isn't
+# making a verification claim, so the gate is inert and every pre-Phase-3 caller
+# keeps its exact prior verdict.
+_CONFIRMED_VERIFICATIONS = frozenset(
+    {"verified", "confirmed", "smtp_verified", "provider_verified", "valid"}
+)
+
+
+def _is_confirmed(verification: str | None) -> bool:
+    """Whether a verification status is a per-mailbox/identity confirmation.
+
+    ``None`` → no claim made → treated as confirmed for gating purposes (the
+    gate is inert; the caller's other signals decide). A non-None status is
+    confirmed only if it names an affirmative verification.
+    """
+    if verification is None:
+        return True
+    return str(verification).strip().lower() in _CONFIRMED_VERIFICATIONS
+
+
 def evaluate(
     *,
     mode: str | ProductMode,
@@ -92,6 +121,8 @@ def evaluate(
     threshold: float | None = None,
     review_floor: float | None = None,
     deliverability_grade: str | None = None,
+    verification: str | None = None,
+    needs_reverification: bool = False,
 ) -> EligibilityVerdict:
     """Compute the outreach eligibility verdict for one record.
 
@@ -99,6 +130,19 @@ def evaluate(
     surfacing, never altered. When a Phase-3D ``deliverability_grade`` is
     supplied, an Invalid/Catch-all grade forces ``research-only`` — it can never
     be eligible for outreach, whatever the confidence.
+
+    ``verification`` (0.16.0 Phase 3) gates the top band: a record whose
+    verification is asserted-but-unconfirmed (e.g. ``"unverified"``) can never
+    *auto*-clear to ELIGIBLE — it caps at REVIEW. ``None`` (the default) makes no
+    verification claim and leaves the verdict exactly as it was pre-Phase-3.
+
+    ``needs_reverification`` (Brief B item 2) makes a *stale positive verification*
+    explicit: a confirmed record whose confirmation has aged past the corpus
+    staleness threshold can no longer *auto*-clear to ELIGIBLE — it caps at REVIEW
+    until refreshed, exactly as an unverified record does. The caller supplies this
+    from the served row's freshness flag; it is orthogonal to the (already decayed)
+    served confidence, so a still-high served score cannot keep a stale record
+    eligible. ``False`` (the default) leaves the verdict unchanged.
     """
     m = normalize_mode(mode)
     score = score_of(confidence)
@@ -139,6 +183,26 @@ def evaluate(
             Eligibility.REVIEW, "no confidence score — needs review", None
         )
     if score >= thr:
+        # Brief B — a stale positive verification is not a current confirmation: a
+        # confirmed record whose confirmation has aged past the staleness threshold
+        # caps at REVIEW until re-verified, even at a high (already decayed) score.
+        if needs_reverification:
+            return EligibilityVerdict(
+                Eligibility.REVIEW,
+                f"confidence {score:.2f} >= threshold {thr:.2f} but verification is "
+                "stale (needs_reverification) — refresh before outreach",
+                score,
+            )
+        # Phase 3 — the verification gate. A high research confidence is not, on
+        # its own, a per-mailbox confirmation: an asserted-but-unverified record
+        # caps at REVIEW rather than auto-clearing to ELIGIBLE.
+        if not _is_confirmed(verification):
+            return EligibilityVerdict(
+                Eligibility.REVIEW,
+                f"confidence {score:.2f} >= threshold {thr:.2f} but unverified "
+                f"(verification={verification!r}) — needs review before outreach",
+                score,
+            )
         return EligibilityVerdict(
             Eligibility.ELIGIBLE, f"confidence {score:.2f} >= threshold {thr:.2f}", score
         )

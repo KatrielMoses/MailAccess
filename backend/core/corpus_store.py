@@ -28,11 +28,14 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..config import APP_VERSION, settings
 from .domain_harvest_orchestrator import DomainHarvestResult
 from .harvest_cache import _deserialize_result, _parse_timestamp, _serialize_result
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .product_mode import ProductMode
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +117,10 @@ def scope_signature(
     aggressive: bool = False,
     dork_lite_mode: bool | None = None,
     enable_email_identity_enrichment: bool | None = None,
+    enable_company_pattern_index: bool = True,
+    enable_pattern_oracle_verify: bool = True,
+    pattern_oracle_max_verifications: int | None = None,
+    company_pattern_index_version: str | None = None,
 ) -> str:
     """Canonical signature of the coverage-affecting run parameters.
 
@@ -146,6 +153,23 @@ def scope_signature(
             if enable_email_identity_enrichment is None
             else bool(enable_email_identity_enrichment)
         ),
+        # Root D — the company-pattern index is coverage-affecting: turning it (or
+        # its oracle) on/off, changing the oracle cap, or shipping a rebuilt index
+        # all change what a crawl produces, so a snapshot collected under different
+        # settings must NOT satisfy the request. ``index_version`` is threaded in as
+        # ``None`` when the feature is off (the flag already differentiates).
+        "company_pattern_index": bool(enable_company_pattern_index),
+        "pattern_oracle_verify": bool(enable_pattern_oracle_verify),
+        "pattern_oracle_max_verifications": (
+            None
+            if pattern_oracle_max_verifications is None
+            else int(pattern_oracle_max_verifications)
+        ),
+        "company_pattern_index_version": (
+            str(company_pattern_index_version)
+            if company_pattern_index_version is not None
+            else None
+        ),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -161,22 +185,17 @@ def _snapshot_scope_compatible(
 
     * if the snapshot recorded its own scope signature, reuse requires an EXACT
       match (mode + full coverage envelope);
-    * legacy snapshots predating R1 carry no signature — fall back to a strict
-      mode-only gate using the persisted ``mode`` column so a public request can
-      never reuse a security-mode snapshot. Such snapshots age out within the
-      (short) TTL, after which every snapshot carries a full signature.
+    * legacy snapshots without a signature cannot establish the requested flags
+      or artifact identity and must be recollected.
     """
     if expected_scope is None:
         return True
     stored = (result_json.get("metadata") or {}).get(SCOPE_SIGNATURE_KEY)
     if isinstance(stored, str) and stored:
         return stored == expected_scope
-    # Legacy snapshot (no signature): gate on mode alone, fail-closed.
-    try:
-        expected_mode = json.loads(expected_scope).get("mode")
-    except (ValueError, TypeError):
-        return False
-    return str(getattr(row, "mode", None) or "") == str(expected_mode or "")
+    # A mode alone cannot prove flags, oracle budget or artifact identity.
+    # Recollect legacy snapshots whenever the caller requests a governed scope.
+    return False
 
 
 async def read_fresh_crawl(
@@ -352,6 +371,18 @@ async def _refresh_contacts(
 
     suppression = load_index_sync()
 
+    # Root D — persist the run's lawful-basis policy_status (from its mode) rather
+    # than leaving the model default "unreviewed", so the served-lead eligibility
+    # verdict reflects the basis the data was actually collected under (e.g. an
+    # org-authorized run) instead of being pinned to research-only forever.
+    from .product_mode import policy_status_for_mode
+
+    _run_mode = str(
+        (getattr(result, "metadata", None) or {}).get("mode")
+        or "security-investigation"
+    )
+    _run_policy_status = policy_status_for_mode(_run_mode)
+
     now = _now()
     for email in getattr(result, "unique_emails", None) or []:
         address = getattr(email, "email", None)
@@ -387,6 +418,11 @@ async def _refresh_contacts(
             # Phase 3C/3D deliverability (populated once those passes run).
             deliverability_score=getattr(email, "deliverability_score", None),
             deliverability_grade=getattr(email, "deliverability_grade", None),
+            # 0.16.0 Phase 4 — carry the verification claim so the served lead
+            # keeps the eligibility cap (unverified pattern inference → REVIEW).
+            verification=getattr(email, "verification", None),
+            # Root D — the collection basis, for the served-lead eligibility verdict.
+            policy_status=_run_policy_status,
             created_at=now,
             updated_at=now,
         )
@@ -455,7 +491,9 @@ def _contact_to_dict(row: Any) -> dict[str, Any]:
             "annual_rot": decay["annual_rot"],
             "reason": decay["reason"],
         },
-        "needs_reverification": decay["needs_reverification"],
+        "needs_reverification": decay["needs_reverification"] or (
+            bool(getattr(settings, "enable_corpus_decay", True)) and row.last_verified is None
+        ),
         "source_count": row.source_count,
         "found_by_modules": list(row.found_by_modules or []),
         "first_seen": _iso(row.first_seen),
@@ -475,8 +513,71 @@ def _contact_to_dict(row: Any) -> dict[str, Any]:
         },
         "deliverability_score": row.deliverability_score,
         "deliverability_grade": row.deliverability_grade,
+        # 0.16.0 Phase 4 — the verification claim rides on the served lead so a
+        # corpus company-pattern inference is visibly ``"unverified"`` (never a
+        # ready-to-send lead on its own); ``None`` for observed addresses. The
+        # mode-aware eligibility verdict is computed at the export boundary
+        # (domain_harvest_report._row_eligibility), which reads this field.
+        "verification": getattr(row, "verification", None),
         "policy_status": row.policy_status,
     }
+
+
+def _attach_lead_eligibility(
+    leads: list[dict[str, Any]], *, mode: str | ProductMode
+) -> None:
+    """Root D / Brief B — stamp the real, mode-aware eligibility verdict on each lead.
+
+    Uses the same governance as the export boundary (:mod:`eligibility`): the
+    explicitly-resolved serving ``mode`` + the lead's stored ``policy_status``
+    (lawful basis) + confidence + deliverability grade + verification. So a corpus
+    company-pattern inference is served ``review`` (never ``eligible`` on its own),
+    and an org-authorized-collected lead can clear when the serving mode allows —
+    not pinned to a static ``"unreviewed"``/``research-only``.
+
+    Brief B fixes two boundary defects:
+
+    * **Serving mode is threaded explicitly** by the caller and passed in here,
+      rather than read from a harvest ``ContextVar`` that a lead request never
+      establishes (which pinned every served verdict to the default security mode).
+      The stored ``policy_status`` remains the provenance of the *collection*
+      lawful basis, so changing the serving mode can never manufacture one.
+    * **Current served confidence and freshness drive the verdict**, not the raw
+      stored score: the decayed ``served_confidence_score`` is used, and a stale
+      positive verification (``needs_reverification``) prevents automatic
+      eligibility until refreshed. Missing decay data falls back to the raw score
+      as the documented conservative legacy treatment (decay disabled ⇒ served ==
+      raw), never a silent restore that ignores staleness.
+
+    Guarded: an evaluation error leaves the lead's eligibility unset rather than
+    breaking the read.
+    """
+    from .eligibility import evaluate
+    from .product_mode import normalize_mode
+
+    m = normalize_mode(mode)
+    for lead in leads:
+        try:
+            # Current served score: the decayed value when present, else the raw
+            # stored score (decay disabled / legacy row) — an explicit fallback,
+            # not a silent one. Both `score >= thr` and `< review_floor` therefore
+            # reflect the score a consumer is actually served.
+            served = lead.get("served_confidence_score")
+            if served is None:
+                served = lead.get("confidence_score")
+            verdict = evaluate(
+                mode=m,
+                policy_status=lead.get("policy_status"),
+                suppressed=False,  # suppressed subjects are already filtered out
+                confidence=served,
+                deliverability_grade=lead.get("deliverability_grade"),
+                verification=lead.get("verification"),
+                needs_reverification=bool(lead.get("needs_reverification")),
+            )
+            lead["eligibility"] = verdict.verdict.value
+            lead["eligibility_reason"] = verdict.reason
+        except Exception:  # never break a read over a verdict
+            logger.debug("lead eligibility evaluation failed", exc_info=True)
 
 
 async def read_leads(
@@ -487,6 +588,7 @@ async def read_leads(
     has_person: bool | None = None,
     limit: int = 100,
     offset: int = 0,
+    mode: str | ProductMode | None = None,
 ) -> dict[str, Any]:
     """Read-only servable Lead projection for a domain, with lead-gen filters.
 
@@ -547,6 +649,18 @@ async def read_leads(
             # The whole domain is suppressed → serve nothing, flagged.
             return {**empty, "suppressed": True}
         leads = filter_rows([_contact_to_dict(r) for r in rows], index)
+        # Root D — attach the REAL mode-aware eligibility verdict to every served
+        # lead (never let a consumer infer ready-to-send from the label or a Valid
+        # grade). Computed with the same inputs as the export boundary
+        # (mode + policy_status + confidence + deliverability grade + verification);
+        # an unverified inference caps at REVIEW here too.
+        # Brief B — the serving mode is resolved once per request (route-supplied
+        # `mode`, else the configured `settings.product_mode`) and threaded here
+        # explicitly, so eligibility no longer depends on a harvest ContextVar that
+        # a lead request never establishes.
+        _attach_lead_eligibility(
+            leads, mode=mode if mode is not None else settings.product_mode
+        )
         return {
             "domain": normalized,
             # ``total`` is the DB match count for pagination; the served page is

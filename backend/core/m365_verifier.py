@@ -50,15 +50,29 @@ class M365Verifier:
                 e.strip().lower() for e in emails if isinstance(e, str) and "@" in e
             )
         )
-        results: list[M365VerificationResult] = []
+        # FIX (Root E cross-tenant): GetCredentialType's catch-all control probe is
+        # a PER-TENANT signal, but a pattern batch can span many domains/tenants. A
+        # single control taken from the first email only covers the first tenant, so
+        # a catch-all SECOND-domain tenant would falsely report "verified" for its
+        # addresses. Group by domain and run one control probe per domain/tenant,
+        # while sharing ONE max_checks budget across the whole batch so the per-run
+        # cap is honoured regardless of how many tenants are present.
+        by_domain: dict[str, list[str]] = {}
+        for e in cleaned:
+            by_domain.setdefault(e.rsplit("@", 1)[-1], []).append(e)
+
+        results_by_email: dict[str, M365VerificationResult] = {}
+        checks_used = 0
         async with build_client(timeout=self.timeout_seconds, follow_redirects=True) as client:
-            # FIX 3D: control probe. Before verifying anything, probe one
-            # guaranteed-nonexistent address. If the tenant reports it as
-            # existing (IfExistsResult == 0 → status "verified"), it returns
-            # "exists" for everything — every result would be a false
-            # positive — so mark the whole batch inconclusive and stop.
-            if cleaned:
-                control_domain = cleaned[0].rsplit("@", 1)[-1]
+            first_probe = True
+            for control_domain, group in by_domain.items():
+                # Per-tenant control probe: a guaranteed-nonexistent address on THIS
+                # domain. If the tenant reports it existing (IfExistsResult == 0 →
+                # "verified"), it returns "exists" for everything on this tenant —
+                # mark only this domain's addresses inconclusive and skip probing them.
+                if not first_probe and self.delay_seconds:
+                    await asyncio.sleep(self.delay_seconds)
+                first_probe = False
                 control_email = f"probe-{uuid.uuid4().hex[:12]}@{control_domain}"
                 control = await self._verify_one(client, control_email)
                 if control.if_exists_result == 0 or control.status == "verified":
@@ -66,24 +80,25 @@ class M365Verifier:
                         "M365 tenant appears to return exists for all (%s)",
                         control_domain,
                     )
-                    return [
-                        M365VerificationResult(
+                    for email in group:
+                        results_by_email[email] = M365VerificationResult(
                             email=email,
                             status="inconclusive",
                             error="catchall_tenant",
                         )
-                        for email in cleaned
-                    ]
-                if self.delay_seconds:
-                    await asyncio.sleep(self.delay_seconds)
-            for index, email in enumerate(cleaned):
-                if index >= self.max_checks:
-                    results.append(M365VerificationResult(email=email, status="not_attempted"))
                     continue
-                if index and self.delay_seconds:
-                    await asyncio.sleep(self.delay_seconds)
-                results.append(await self._verify_one(client, email))
-        return results
+                for email in group:
+                    if checks_used >= self.max_checks:
+                        results_by_email[email] = M365VerificationResult(
+                            email=email, status="not_attempted"
+                        )
+                        continue
+                    if self.delay_seconds:
+                        await asyncio.sleep(self.delay_seconds)
+                    results_by_email[email] = await self._verify_one(client, email)
+                    checks_used += 1
+        # Preserve the caller's input order.
+        return [results_by_email[e] for e in cleaned]
 
     async def _verify_one(self, client: Any, email: str) -> M365VerificationResult:
         try:

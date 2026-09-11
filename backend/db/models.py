@@ -332,6 +332,12 @@ class Contact(Base):
     # --- Phase 3C/3D deliverability ---
     deliverability_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     deliverability_grade: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # 0.16.0 Phase 4 — verification status of THIS address. ``None`` = no claim
+    # (observed addresses; eligibility decided by confidence + grade, as before).
+    # ``"unverified"`` = a corpus company-pattern inference, so the eligibility
+    # gate caps the served lead at REVIEW — a learned-pattern guess is never a
+    # ready-to-send lead on its own.
+    verification: Mapped[str | None] = mapped_column(String, nullable=True)
     # Decay readiness (Doc-2 A4) — when we last confirmed/observed this contact.
     # Phase 6 layers a decay curve on this with no schema change.
     last_verified: Mapped[datetime | None] = mapped_column(

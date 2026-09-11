@@ -539,6 +539,37 @@ class Settings(BaseSettings):
     pattern_high_confidence_threshold: float = 0.75
     pattern_medium_confidence_threshold: float = 0.50
 
+    # 0.16.0 Phase 4 — corpus company email-pattern index wiring. When on (the
+    # default) and a harvested domain is present in the offline index
+    # (``data/company_patterns.json.gz``), each discovered-but-unresolved
+    # employee name yields ONE governed, *unverified* corpus-pattern email
+    # instead of the multi-guess permutation spray. Flip to False for a
+    # code-free rollback to the pre-Phase-4 spray-only behaviour; the lazy
+    # singleton means the index is never loaded when this is off or no name
+    # hits an indexed domain.
+    enable_company_pattern_index: bool = True
+
+    # 0.16.0 Phase 6 — M365 oracle verification of corpus-pattern candidates.
+    # When on (the default), each *unverified* corpus-pattern email whose domain
+    # is Microsoft 365 (``mx == "m365"``) is checked against the existing,
+    # governance-gated ``GetCredentialType`` existence oracle right after the
+    # pattern pass builds it: a confirmed mailbox is upgraded to
+    # ``provider_verified`` / Valid / eligible; a ``not_found`` (the ~15% who
+    # deviate from the domain pattern) is dropped so a known-nonexistent address
+    # is never surfaced; an inconclusive/throttled/blocked result leaves the
+    # candidate unchanged (still ``unverified`` / Risky). It is *effectively*
+    # gated by mode — the oracle is active mailbox probing, so it only fires in
+    # security-investigation / org-authorized-verification (the seam returns
+    # ``blocked_by_mode`` in public-business-contact), making it self-limiting.
+    # Google / other providers have no working oracle (Phase 1 research) and are
+    # never probed. Flip to False for a code-free rollback to unverified-only.
+    enable_pattern_oracle_verify: bool = True
+    # Per-harvest-run ceiling on how many m365 pattern candidates are sent to the
+    # oracle (latency + provider rate-limit guard). Candidates beyond the cap stay
+    # ``unverified`` (never dropped). The batch is amortized through a single
+    # ``verify_batch`` call.
+    pattern_oracle_max_verifications_per_run: int = 50
+
     # W5: Phase 0.10.0 final additions — three new structured-source
     # modules that slot into Phase 1 of the harvest orchestrator
     # (the parallel fast/cheap-sources phase). All three default on,
