@@ -81,7 +81,7 @@ _API_KEYS: list[tuple[str, str, str]] = [
     ("GOOGLE_CSE_API_KEY", "email_search_dork", "Google CSE (programableseach.google.com)"),
     ("GOOGLE_CSE_CX", "email_search_dork", "Google CSE Engine ID"),
     ("COMPANIES_HOUSE_API_KEY", "companies_house", "developer.company-information.service.gov.uk"),
-    ("MAILACCESS_PRO_KEY", "mailaccess_pro", "api.mailaccess.pro — paid lead-enrichment tier"),
+    ("MAILACCESS_PRO_KEY", "mailaccess_pro", "mailaccess.pro — paid lead-enrichment tier"),
     ("SLACK_WEBHOOK_URL", "notifications", "Slack app webhooks"),
     ("DISCORD_WEBHOOK_URL", "notifications", "Discord server webhooks"),
 ]

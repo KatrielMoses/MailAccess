@@ -758,9 +758,10 @@ class Settings(BaseSettings):
     mailaccess_pro_base_url: str = "http://192.168.0.106:3001"
     # The hosted /v1 base the LOCAL connector calls (Phase 2). Distinct from
     # ``mailaccess_pro_base_url`` (the engine location, used only by the hosted
-    # backend): the user's pipeline talks to api.mailaccess.pro and must never see
-    # the engine (invariants 3 & 5).
-    mailaccess_pro_api_url: str = "https://api.mailaccess.pro"
+    # backend): the user's pipeline reaches the website's narrowly scoped /v1
+    # reverse proxy and must never see the engine or the private API host
+    # (invariants 3 & 5).
+    mailaccess_pro_api_url: str = "https://mailaccess.pro"
     # Shared secret mirrored onto the engine (the X-MailAccess-Engine-Secret gate).
     # Defense-in-depth before the Tailscale mesh exists; the engine rejects any
     # /api/internal/search call without it. Never logged.

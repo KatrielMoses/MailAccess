@@ -2,8 +2,8 @@
 
 Distinct from :mod:`mailaccess_pro_client` (Phase 1), which runs on the hosted
 backend and queries the corpus engine directly. THIS connector runs in the
-user's local harvest pipeline and calls ``/v1/enrich`` on the hosted API
-(``api.mailaccess.pro``). It must never see or address the engine — the moat data
+user's local harvest pipeline and calls ``/v1/enrich`` through the public website
+(``mailaccess.pro``). It must never see or address the engine — the moat data
 only ever transits as per-query projected results (invariants 3 & 5).
 
 It is a DISCOVERY source, not an enrichment field-filler: the orchestrator injects

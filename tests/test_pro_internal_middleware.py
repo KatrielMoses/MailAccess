@@ -4,6 +4,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.api.middleware.auth import APIKeyMiddleware
+from backend.config import Settings
+
+
+def test_pro_client_default_uses_public_website_proxy():
+    assert Settings().mailaccess_pro_api_url == "https://mailaccess.pro"
 
 
 def test_internal_provisioning_route_reaches_its_own_auth(monkeypatch):

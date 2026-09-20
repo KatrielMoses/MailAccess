@@ -1,5 +1,10 @@
 # Changelog
 
+### 0.17.2 (2026-09-21)
+
+- Route the hosted Pro client through the public website's restricted `/v1`
+  proxy, keeping the API host private on the mesh.
+
 ### 0.17.1 (2026-09-21)
 
 - Fix the private Pro entitlement bridge so its dedicated shared-secret
