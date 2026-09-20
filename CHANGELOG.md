@@ -1,5 +1,10 @@
 # Changelog
 
+### 0.17.1 (2026-09-21)
+
+- Fix the private Pro entitlement bridge so its dedicated shared-secret
+  authorization is reached when the hosted API has no self-host API key.
+
 ### 0.17.0 (2026-09-18)
 
 **Hosted MailAccess Pro lead enrichment — managed enrichment offered as an optional paid tier

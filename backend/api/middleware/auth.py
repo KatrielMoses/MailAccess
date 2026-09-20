@@ -47,11 +47,11 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         if path.startswith("/health"):
             return await call_next(request)
 
-        # 0.17.0 — the paid lead tier (/v1/*) authenticates with its own Pro key
-        # (Authorization: Bearer), not the self-host MAILACCESS_API_KEY. It is a
-        # public paid surface, so the "no key ⇒ local-only" bypass must not gate
-        # it; the route enforces Pro-key auth itself.
-        if path.startswith("/v1/"):
+        # The paid lead tier (/v1/*) and the mesh-only entitlement bridge
+        # (/internal/*) authenticate with their own credentials.  They must pass
+        # through this self-host API-key middleware so each route can enforce its
+        # dedicated, fail-closed authorization scheme.
+        if path.startswith(("/v1/", "/internal/")):
             return await call_next(request)
 
         if not settings.mailaccess_api_key:
