@@ -554,3 +554,38 @@ class ScoreOutcomeLabel(Base):
     )
 
     snapshot: Mapped[ScoreFeatureSnapshot] = relationship(back_populates="outcomes")
+
+
+# ---------------------------------------------------------------------------
+# 0.17.0 — hosted paid lead-enrichment tier: entitlement store.
+# ---------------------------------------------------------------------------
+
+
+class ProKey(Base):
+    """A MailAccess Pro entitlement (the paid lead-tier key).
+
+    Only the SHA-256 ``key_hash`` is stored — never the raw key — so a database
+    dump can never leak a live credential. ``validate_pro_key`` (Phase 1) checks
+    for an ``active`` row whose hash matches; Phase 5 (Stripe webhooks) replaces
+    the manual population path behind the same interface. ``notes`` is an operator
+    memo (which customer / how issued), not part of validation.
+    """
+
+    __tablename__ = "pro_keys"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    key_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # 0.17.0 admin console — lifecycle status (active|suspended|revoked) and an
+    # optional hard expiry (admin-issued test keys are capped at 30 days). Both are
+    # authoritative in ``validate_pro_key``: only an ``active`` and not-yet-expired
+    # row grants access. ``active`` is kept mirrored to ``status == "active"`` for
+    # backward-compatible operator tooling.
+    status: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    notes: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )

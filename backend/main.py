@@ -14,8 +14,10 @@ from rich.console import Console
 
 from .api.middleware.auth import APIKeyMiddleware, RequestIDMiddleware, request_id_contextvar
 from .api.router import api_router, ws_router
+from .api.routes.enrich import router as enrich_router
 from .api.routes.health import router as health_router
 from .api.routes.maltego import router as maltego_router
+from .api.routes.pro_internal import router as pro_internal_router
 from .config import APP_VERSION, settings
 from .db.database import init_db
 from .integrations.maltego_transform import generate_mtz_bundle
@@ -117,3 +119,10 @@ app.include_router(health_router)
 app.include_router(api_router, prefix="/api")
 app.include_router(ws_router)
 app.include_router(maltego_router, prefix="/maltego", tags=["maltego"])
+# 0.17.0 — hosted paid lead-enrichment tier. Self-authenticating via the Pro key
+# (Authorization: Bearer), so it is exempt from the self-host API-key middleware.
+app.include_router(enrich_router, prefix="/v1", tags=["pro"])
+# 0.17.0 — internal provisioning bridge (website BFF → this entitlement store).
+# Self-authenticating via X-Internal-Secret (fail-closed when unset); not under the
+# self-host API-key middleware. Must never be exposed publicly at the edge.
+app.include_router(pro_internal_router, prefix="/internal", tags=["pro-internal"])

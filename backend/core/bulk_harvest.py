@@ -306,6 +306,11 @@ async def _harvest_one_domain(
     box: dict[str, Any] = {}
 
     def _on_harvest_end(snapshot: Any) -> None:
+        # TERMINATION-PARTIAL fallback: fires from the runner's finally on EVERY
+        # termination path (incl. cancel / stage exception where run_domain_harvest
+        # never returns), guaranteeing a partial export for a dying run. On NORMAL
+        # completion the finalized canonical export below OVERWRITES this (same path)
+        # with mode + the Pro channel. A terminated partial has no corpus leads.
         box["result"] = snapshot
         if no_export:
             return
@@ -333,6 +338,14 @@ async def _harvest_one_domain(
 
     from_cache = bool(getattr(result, "from_cache", False))
 
+    # Canonical per-domain export — written ONCE from the FULLY-FINALIZED result (mode
+    # stamped + Pro corpus channel), never from the mid-pipeline snapshot (which lacks
+    # both). On a cancel/failure ``result`` fell back to the snapshot above.
+    if not no_export and bool(getattr(settings, "harvest_auto_export", True)):
+        with contextlib.suppress(Exception):
+            files = write_harvest_export(result, timestamp=timestamp)
+            box["export_path"] = str(files.main_json)
+
     # --- post-processing (guarded; mirrors the single-domain CLI) ---------
     if not from_cache:
         # Phase 1C — dual-write the evidence ledger.
@@ -348,6 +361,8 @@ async def _harvest_one_domain(
 
     payload = None
     with contextlib.suppress(Exception):
+        # History is a persistence sink, not a user-facing export: retain only
+        # Stream 1's native channel. Pro leads are serving-only per query.
         payload = format_harvest_json_export(result)
         # history baseline (diff support), guarded
         with contextlib.suppress(Exception):

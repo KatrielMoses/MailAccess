@@ -188,3 +188,26 @@ docs/audit/
 
 !tests/test_pattern_remediation_boundaries.py
 !tests/test_pattern_normalization_differential.py
+.gstack/
+
+# 0.17.0 Pro regression contract.
+!tests/test_pro_adversarial_audit.py
+!tests/test_pro_brief_a.py
+!tests/test_pro_brief_b.py
+!tests/test_pro_brief_c.py
+!tests/test_pro_brief_d.py
+!tests/test_pro_cli.py
+!tests/test_pro_enrich_route.py
+!tests/test_pro_injection.py
+!tests/test_pro_internal.py
+
+# Local 0.17.0 release workspace and operator-only material.
+/.venv-017/
+/dist_017/
+/tmp/
+/PRO-0.17.0-DEPLOYMENT.md
+/SOLUTIONS-ARCHITECT-HANDOFF.md
+/docs/0.17.0-pro-adversarial-audit.md
+/docs/0.17.0-pro-deletion-and-provenance-limits.md
+/docs/0.17.0-pro-delta-reaudit.md
+/docs/pro-failed and cancel dev brief.txt

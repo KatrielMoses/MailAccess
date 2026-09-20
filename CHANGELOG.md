@@ -1,5 +1,36 @@
 # Changelog
 
+### 0.17.0 (2026-09-18)
+
+**Hosted MailAccess Pro lead enrichment — managed enrichment offered as an optional paid tier
+without ever changing the open result.** 0.16.0 turned a name plus a domain into one honestly
+graded likely address, entirely offline. 0.17.0 adds an *opt-in* hosted enrichment tier: with a
+`MAILACCESS_PRO_KEY` and a lead-gen `--mode`, a domain (or `--company` name) harvest can display
+business-contact leads aggregated from publicly-available and third-party commercial sources,
+served per-query over an authenticated API. Without a key the output is byte-for-byte what it was
+before — the open stream is never degraded.
+
+The honesty rule from 0.15.0/0.16.0 holds without exception, and the tier is built so the moat
+data can never leak into local state:
+
+- **Corpus leads are a serving-only channel.** They are displayed live in their own Pro surface
+  but are *never* merged into the native email set, regular exports, or local history; they are
+  never persisted to the read-first snapshot, contacts projection, observation ledger, or
+  single-domain history baseline. Delete the key and nothing corpus-derived survives.
+- **Every corpus lead is `unverified` and caps at REVIEW.** It carries an explicit
+  `[MailAccess Pro · corpus · unverified]` provenance chip and its own panel; `corpus_verified`
+  is provenance only and is never treated as a confirmed verification.
+- **Ships dark by default.** The tier is gated behind a server-authoritative
+  `lawful_basis_established` flag and stays unavailable until compliance/legal sign-off; the
+  engine is never user-reachable (only the hosted backend queries it, over a private network),
+  and each returned lead is projected to name/title/email/linkedin only — no other PII crosses
+  the boundary.
+- **`--company` name resolution.** `mailaccess harvest-emails --company "Stripe"` resolves the
+  name to a domain via ranked organization records (a single exact match resolves; close matches
+  disambiguate; no confident match guides you to `--domain`), then harvests that domain.
+- **Fail-open, always.** No key, a closed gate, or an unreachable/slow engine all degrade
+  silently to the full open result with a one-line "corpus enrichment unavailable" note.
+
 ### 0.16.0 (2026-09-11)
 
 **Company email patterns — a name plus a domain becomes one honestly-graded likely email,

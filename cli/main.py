@@ -60,10 +60,7 @@ BANNER = f"""\
 ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚══════╝╚══════╝╚══════╝
 [/#820747]
 [dim]Open-source OSINT email intelligence tool[/dim]
-[dim]v{_VERSION} · pypi.org/project/mailaccess[/dim]
-[dim cyan]━━━ Partnered with ScrapingAnt ━━━[/dim cyan]
-[bright_cyan]Web Scraping with Rotating Proxies[/bright_cyan]
-[link=https://scrapingant.com/?ref=mzliyzh][dim italic]↗ scrapingant.com[/dim italic][/link]"""
+[dim]v{_VERSION} · pypi.org/project/mailaccess[/dim]"""
 
 _RICH_LINK_RE = re.compile(r"\[/?link(?:=[^\]]*)?\]")
 
@@ -84,6 +81,7 @@ _API_KEYS: list[tuple[str, str, str]] = [
     ("GOOGLE_CSE_API_KEY", "email_search_dork", "Google CSE (programableseach.google.com)"),
     ("GOOGLE_CSE_CX", "email_search_dork", "Google CSE Engine ID"),
     ("COMPANIES_HOUSE_API_KEY", "companies_house", "developer.company-information.service.gov.uk"),
+    ("MAILACCESS_PRO_KEY", "mailaccess_pro", "api.mailaccess.pro — paid lead-enrichment tier"),
     ("SLACK_WEBHOOK_URL", "notifications", "Slack app webhooks"),
     ("DISCORD_WEBHOOK_URL", "notifications", "Discord server webhooks"),
 ]
@@ -983,6 +981,85 @@ def retention_verify_audit() -> None:
 from cli.harvest_emails import run_harvest_emails  # noqa: E402
 from cli.platform_audit import run_platform_audit  # noqa: E402
 
+_PRO_COMPANY_UNAVAILABLE = (
+    "[yellow]--company resolution needs a MailAccess Pro key; "
+    "use --domain for the open engine.[/yellow]"
+)
+_PRO_COMPANY_SECURITY_MODE = (
+    "[yellow]--company resolution is part of the lead-gen product; a Pro key "
+    "enables it automatically — drop --mode security-investigation, or use "
+    "--domain for the open engine.[/yellow]"
+)
+
+
+def _pro_effective_mode(mode: str | None, *, has_pro_key: bool) -> str | None:
+    """0.17.0 — a paid MailAccess Pro key implies the lead-gen product.
+
+    With a key set and no explicit ``--mode``, default the run to
+    ``public-business-contact`` so a plain ``harvest --domain X`` returns full
+    corpus enrichment with no mode flag to remember. An explicit ``--mode`` always
+    wins. This is a client-side default only; the hosted ``/v1/enrich``
+    lawful-basis gate stays server-authoritative, so it changes nothing until that
+    gate is opened.
+    """
+    if mode is not None:
+        return mode
+    if has_pro_key:
+        return "public-business-contact"
+    return None
+
+
+def _resolve_company_domain_cli(company: str, mode: str | None, console) -> str:
+    """Resolve a company name → domain via MailAccess Pro, or exit with guidance.
+
+    Returns the resolved domain on ``status: ok``. On disambiguation / empty /
+    unavailable it prints the honest guidance and raises ``typer.Exit(0)`` (no
+    harvest runs). Company→domain resolution is inherently a Pro-tier feature
+    (the corpus supplies it), so no key / a non-lead-gen mode is ``unavailable``.
+    """
+    import asyncio
+
+    from backend.config import settings
+    from backend.core import mailaccess_pro_connector
+    from backend.core.product_mode import ProductMode, normalize_mode
+
+    key = getattr(settings, "mailaccess_pro_key", None)
+    resolved_mode = normalize_mode(mode or getattr(settings, "product_mode", None))
+    if not key:
+        console.print(_PRO_COMPANY_UNAVAILABLE)
+        raise typer.Exit(0)
+    if resolved_mode is ProductMode.SECURITY_INVESTIGATION:
+        console.print(_PRO_COMPANY_SECURITY_MODE)
+        raise typer.Exit(0)
+
+    env = asyncio.run(mailaccess_pro_connector.resolve_company(company))
+    status = env.get("status")
+    if status == "ok":
+        domain = str((env.get("company") or {}).get("domain") or "").strip()
+        if not domain:
+            console.print(_PRO_COMPANY_UNAVAILABLE)
+            raise typer.Exit(0)
+        console.print(f"[green]Resolved '{company}' → {domain}[/green]")
+        return domain
+    if status == "disambiguation":
+        console.print(
+            f"[yellow]Multiple companies match '{company}'. "
+            "Re-run with the chosen --domain:[/yellow]"
+        )
+        for cand in env.get("candidates") or []:
+            emp = cand.get("employees")
+            emp_txt = f" ({emp} employees)" if emp else ""
+            console.print(f"  · {cand.get('name')}  —  {cand.get('domain')}{emp_txt}")
+        raise typer.Exit(0)
+    if status == "empty":
+        console.print(
+            f"[yellow]No company match for '{company}' — use --domain <domain> "
+            "instead.[/yellow]"
+        )
+        raise typer.Exit(0)
+    console.print(_PRO_COMPANY_UNAVAILABLE)
+    raise typer.Exit(0)
+
 
 @app.command(name="harvest-emails")
 def harvest_emails_command(
@@ -991,6 +1068,15 @@ def harvest_emails_command(
         "--domain",
         "-d",
         help="Target domain (required unless using --clear-all-cache).",
+    ),
+    company: str | None = typer.Option(
+        None,
+        "--company",
+        help=(
+            "Company NAME to resolve → domain via MailAccess Pro (paid lead-gen "
+            "tier), then harvest that domain. Mutually exclusive with --domain; "
+            "requires a Pro key (which enables the lead-gen product automatically)."
+        ),
     ),
     no_verify: bool = typer.Option(
         False,
@@ -1303,6 +1389,22 @@ def harvest_emails_command(
     """
     if mode is not None and mode not in _PRODUCT_MODES:
         raise typer.BadParameter(f"--mode must be one of: {', '.join(_PRODUCT_MODES)}")
+    # 0.17.0 — a paid MailAccess Pro key implies the lead-gen product (see
+    # _pro_effective_mode): with a key and no explicit --mode, this run defaults to
+    # public-business-contact so a plain `harvest --domain X` (or `--company X`)
+    # returns full corpus enrichment. An explicit --mode always wins.
+    from backend.config import settings as _pro_settings
+
+    mode = _pro_effective_mode(
+        mode, has_pro_key=bool(getattr(_pro_settings, "mailaccess_pro_key", None))
+    )
+    # 0.17.0 Phase 3 — company-name entry (MailAccess Pro tier). Resolve to a
+    # domain first (never auto-pick on ambiguity), then harvest that domain so the
+    # P2 corpus injection fires inside the orchestrator exactly as for --domain.
+    if company and domain:
+        raise typer.BadParameter("--company and --domain are mutually exclusive")
+    if company:
+        domain = _resolve_company_domain_cli(company, mode, console)
     # 0.11.1 Phase 1: resolve the stealth timing profile.
     # Explicit --timing wins.  Then --stealth / --fast.  Otherwise
     # the existing setting (default T2 Balanced) applies.

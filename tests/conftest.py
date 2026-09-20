@@ -17,11 +17,30 @@ Why a conftest at all:
 """
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Hermetic test database (release-gate reproducibility).
+#
+# Point every test process at its OWN fresh temp SQLite DB — migrated to head by the
+# session fixture below — BEFORE any ``backend`` import, so ``Settings`` and the
+# import-time engine in ``backend.db.database`` bind to it. This stops the suite from
+# reading/writing the developer's real ``~/.mailaccess/mailaccess.db``, whose Alembic
+# revision is exactly what made the gate env-dependent: a box at a different revision
+# saw failures that per-file isolation on another box did not (the "40 NEW" mirage).
+# ``setdefault`` lets an explicit ``DATABASE_URL`` (e.g. CI) still win.
+# ---------------------------------------------------------------------------
+_HERMETIC_DB_DIR = tempfile.mkdtemp(prefix="mailaccess-test-db-")
+os.environ.setdefault(
+    "DATABASE_URL",
+    f"sqlite+aiosqlite:///{Path(_HERMETIC_DB_DIR, 'test.db').as_posix()}",
+)
 
 # Make the tests directory importable so we can pull in the shared
 # ``_fetch_fixtures`` module regardless of where pytest was invoked from.
@@ -46,6 +65,19 @@ from backend.core.concurrent_fetch_cache import (  # noqa: E402
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+@pytest.fixture(scope="session", autouse=True)
+def _hermetic_migrated_db() -> Any:
+    """Migrate the per-process hermetic temp DB (set at import above) to head once,
+    so DB-backed tests run against the current schema on ANY host rather than the
+    developer's real ~/.mailaccess DB. DB-less files pay only the one-time cost."""
+    import asyncio
+
+    from backend.db.database import init_db
+
+    asyncio.run(init_db())
+    yield
+
+
 @pytest.fixture
 def fake_session() -> FakeSession:
     """Bare :class:`FakeSession` with no canned responses.

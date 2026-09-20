@@ -117,6 +117,34 @@ Company email pattern - company.com
 
 The pattern comes from a bundled index of ~384,000 domains learned from real verified addresses — it loads offline, no network access. The result is **honest by construction**: an inferred address is always labelled `unverified` and graded *likely*, never presented as confirmed. Where the domain runs on Microsoft 365, the candidate is checked against the mailbox-existence oracle — a confirmed one is upgraded to `provider_verified`, and one proven not to exist is dropped. Add `--title` to apply per-role pattern overrides. Domains the index doesn't cover fall back cleanly to live inference. Full details -> [docs/modules.md](docs/modules.md#find-email-company-email-pattern-index).
 
+## MailAccess Pro — corpus lead enrichment
+
+> **Availability is controlled by the hosted service.** The tier is served only when its
+> server-side compliance gate is enabled; this section documents the client surface.
+
+MailAccess Pro is an optional **paid** managed-enrichment add-on that enriches a lead-gen-mode
+harvest with business-contact leads (name, title, email, LinkedIn) aggregated from
+publicly-available and third-party commercial sources. It is strictly additive: without a key the
+open engine behaves exactly as it always has.
+
+```bash
+mailaccess keys set MAILACCESS_PRO_KEY <your-key>
+# harvest a domain, with corpus leads appended (lead-gen mode required):
+mailaccess harvest-emails --domain company.com --mode public-business-contact
+# or resolve a company name to its domain first (a Pro-tier feature):
+mailaccess harvest-emails --company "Stripe" --mode public-business-contact
+```
+
+Honest by construction:
+
+- Corpus leads are always labelled **`unverified`** with explicit `[MailAccess Pro · corpus · unverified]` provenance — never dressed as a verified/native hit — and the eligibility gate caps them at **REVIEW** (research / outreach-review, not ready-to-send).
+- **The key never forces a mode.** Corpus leads are only injected in a lead-gen mode (`public-business-contact` / `org-authorized-verification`); a key in the default `security-investigation` mode prints a hint and injects nothing.
+- **Fail-open.** If the service is unreachable, the harvest shows the full open result with a one-line "corpus enrichment unavailable" note.
+- Honest framing: the fee recovers paid infrastructure and processing cost; queries are unlimited but serialized per key (one at a time) to protect result quality.
+
+Corpus leads are live-only: they remain in their own unverified Pro surface and never enter the
+open-result exports, local database, or history. See [docs/modules.md](docs/modules.md#mailaccess-pro-corpus-lead-enrichment).
+
 ## Modules
 
 75 modules over a 5,000+ platform corpus. Investigations probe a bounded, evidence-first wave of the highest-signal platforms (~700 vetted by default) rather than the whole corpus. Full module reference -> [docs/modules.md](docs/modules.md).

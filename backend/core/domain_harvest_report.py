@@ -31,6 +31,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .domain_harvest_orchestrator import (
+    MODULE_MAILACCESS_PRO,
     DomainHarvestResult,
     HarvestedEmail,
     _name_matches_email_local,
@@ -1127,6 +1128,83 @@ def _format_emails_block(
     return text
 
 
+# Item B — render up to the 500-cap depth (was 200).
+_CORPUS_RENDER_CAP = 500
+
+
+def _format_corpus_leads_block(leads: list[HarvestedEmail], mode: str) -> Text:
+    """Render corpus (MailAccess Pro) leads distinctly from native finds.
+
+    Each row carries an explicit ``[MailAccess Pro · corpus · unverified]``
+    provenance chip and the eligibility verdict (REVIEW), and shows the resolved
+    person fields (name / title / email / LinkedIn). These deliberately do NOT get
+    the verified/confident affordance a native SMTP/provider hit gets.
+    """
+    from .eligibility import evaluate as _eligibility_evaluate
+    from .product_mode import policy_status_for_mode
+
+    text = Text()
+    if not leads:
+        text.append("  (none)", style="dim")
+        return text
+    policy = policy_status_for_mode(mode)
+    for entry in leads[:_CORPUS_RENDER_CAP]:
+        text.append("  * ", style="dim")
+        text.append(entry.email, style="cyan")
+        text.append("  [MailAccess Pro · corpus · unverified]", style="magenta")
+        verdict = _row_eligibility(entry, mode, policy, _eligibility_evaluate)["eligibility"]
+        text.append(f"  [{str(verdict).upper()}]", style="yellow")
+        if entry.full_name:
+            text.append(f"  {entry.full_name}", style="white")
+        if entry.job_title:
+            text.append(f" · {entry.job_title}", style="dim")
+        if entry.linkedin_url:
+            text.append(f" · {entry.linkedin_url}", style="blue")
+        text.append("\n")
+    return text
+
+
+def _render_corpus_section(
+    console: Console,
+    result: DomainHarvestResult,
+    corpus_leads: list[HarvestedEmail],
+) -> None:
+    """Render the corpus-lead panel or the fail-open note.
+
+    Honest by construction: corpus leads are provenance-chipped and REVIEW-verdicted
+    in their own section (never mixed into the native tiers); and if enrichment was
+    requested (keyed lead-gen run) but the API was unavailable, a subtle one-line
+    note is shown while the full native result stands (invariant 4).
+    """
+    meta = (getattr(result, "metadata", None) or {}).get("mailaccess_pro") or {}
+    requested = bool(meta.get("requested"))
+    status = str(meta.get("status") or "")
+    mode = str((getattr(result, "metadata", None) or {}).get("mode") or "security-investigation")
+    if corpus_leads:
+        console.print(
+            f"\n[bold magenta]+{len(corpus_leads)} corpus leads "
+            "(MailAccess Pro, unverified)[/bold magenta]"
+        )
+        console.print(
+            Panel(
+                _format_corpus_leads_block(corpus_leads, mode),
+                title=(
+                    "[bold magenta]MailAccess Pro — corpus leads "
+                    "(unverified · REVIEW)[/bold magenta]"
+                ),
+                border_style="magenta",
+                subtitle=(
+                    "Corpus provenance — unverified; eligibility caps at REVIEW "
+                    "(research / outreach-review, not ready-to-send)."
+                ),
+            )
+        )
+    if not corpus_leads and requested and status == "unavailable":
+        console.print(
+            "[dim]Corpus enrichment unavailable — showing the full open result.[/dim]"
+        )
+
+
 def _is_proxy_fail(status: str, errors: list[str]) -> bool:
     """Return True if status is PARTIAL and any error mentions proxy failure."""
     return status == "partial" and any(
@@ -1351,6 +1429,21 @@ def format_harvest_cli_output(
     # with arbitrary count fields and the display stays correct.
     # ------------------------------------------------------------------
     export_emails = _sanitised_export_emails(result.unique_emails)
+    # A1: native and serving-only corpus channels are structurally separate.
+    corpus_channel = _sanitised_export_emails(getattr(result, "corpus_leads", []) or [])
+    # Read-only compatibility for historical cached/test fixtures. New harvests
+    # never populate this legacy branch because aggregation keeps corpus rows out
+    # of ``unique_emails``.
+    if not corpus_channel:
+        legacy_corpus = [
+            entry
+            for entry in export_emails
+            if MODULE_MAILACCESS_PRO in (entry.found_by_modules or [])
+        ]
+        if legacy_corpus:
+            corpus_channel = legacy_corpus
+            export_emails = [entry for entry in export_emails if entry not in legacy_corpus]
+    corpus_leads = corpus_channel
     persona_candidates = [
         entry
         for entry in export_emails
@@ -1379,10 +1472,6 @@ def format_harvest_cli_output(
     likely = [e for e in non_perm_personal if e.confidence_label == "LIKELY"]
     medium = [e for e in non_perm_personal if e.confidence_label == "MEDIUM"]
     low = [e for e in non_perm_personal if e.confidence_label == "LOW"]
-    # Backward-compat alias for the rest of the function —
-    # ``high`` was the 3-tier HIGH bucket, now it means
-    # "anything in the actionable tiers (CONFIRMED + LIKELY)".
-    high = confirmed + likely
     # ------------------------------------------------------------------
     # Phase 1: new summary bar.  Replaces the legacy "Total: N candidates"
     # with an "Actionable: ..." line that names each visible bucket and
@@ -1457,6 +1546,10 @@ def format_harvest_cli_output(
             border_style="yellow",
         )
     )
+
+    # 0.17.0 Phase 3 — corpus (MailAccess Pro) leads in their own honest section, or
+    # the fail-open note when enrichment was requested but unavailable.
+    _render_corpus_section(console, result, corpus_leads)
 
     # LOW content is opt-in. Counts and review commands are always shown
     # above, even when the analyst keeps the content hidden.
@@ -1628,6 +1721,30 @@ def format_harvest_cli_output(
     return header + console.export_text()
 
 
+def _export_has_corpus_leads(entries: list[HarvestedEmail]) -> bool:
+    """Whether the export set contains any hosted "MailAccess Pro" corpus lead.
+
+    A1/A3 — the corpus-provenance export column (``corpus`` in CSV) is emitted ONLY
+    when at least one corpus lead is present. For a keyless / security-investigation
+    run there are none, so the serialised output is byte-identical to v0.16.0 (no
+    new columns/keys).
+    """
+    return any(
+        MODULE_MAILACCESS_PRO in (getattr(e, "found_by_modules", None) or [])
+        for e in entries
+    )
+
+
+def _export_entries(result: DomainHarvestResult) -> list[HarvestedEmail]:
+    """Return the native-only export view.
+
+    Corpus leads are a live display channel, never an export channel. Keeping this
+    boundary parameter-free prevents a future caller from accidentally serialising
+    managed-enrichment data into a file or retained report.
+    """
+    return _sanitised_export_emails(result.unique_emails)
+
+
 def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
     """Build the full machine-readable JSON export.
 
@@ -1641,7 +1758,7 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
     without bloating the ``evidence`` list.
     """
     emails_out: list[dict[str, Any]] = []
-    export_emails = _sanitised_export_emails(result.unique_emails)
+    export_emails = _export_entries(result)
     # Phase 2D — the run's mode fixes the policy basis; each row carries an
     # eligibility verdict (orthogonal to, and surfaced alongside, its confidence).
     from .eligibility import evaluate as _eligibility_evaluate
@@ -1929,7 +2046,16 @@ _CSV_COLUMNS = [
     "verification",
     "eligibility",
     "eligibility_reason",
+    # 0.17.0 Phase 3 — explicit corpus-provenance flag (True for a net-new
+    # MailAccess Pro corpus lead) so a spreadsheet filter can isolate corpus vs
+    # native without parsing found_by_modules.
+    "corpus",
 ]
+
+# A3 — the corpus-provenance column is appended ONLY when the export carries at
+# least one corpus lead; a keyless / security-investigation CSV omits it and is
+# byte-identical to v0.16.0.
+_CSV_CORPUS_COLUMNS = ("corpus",)
 
 
 def format_harvest_csv_export(result: DomainHarvestResult) -> str:
@@ -1947,10 +2073,20 @@ def format_harvest_csv_export(result: DomainHarvestResult) -> str:
     )
     _policy_status = policy_status_for_mode(_mode)
 
+    entries = _export_entries(result)
+    # A3 — drop the corpus-provenance columns entirely when no corpus lead is
+    # present, so a keyless / security CSV matches v0.16.0 byte-for-byte.
+    _has_corpus = _export_has_corpus_leads(entries)
+    columns = (
+        list(_CSV_COLUMNS)
+        if _has_corpus
+        else [c for c in _CSV_COLUMNS if c not in _CSV_CORPUS_COLUMNS]
+    )
+
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=_CSV_COLUMNS, lineterminator="\n")
+    writer = csv.DictWriter(buf, fieldnames=columns, lineterminator="\n")
     writer.writeheader()
-    for entry in _sanitised_export_emails(result.unique_emails):
+    for entry in entries:
         validation = _email_validation_summary(entry)
         row: dict[str, Any] = {
             "email": entry.email,
@@ -1981,6 +2117,8 @@ def format_harvest_csv_export(result: DomainHarvestResult) -> str:
             "deliverability_grade": getattr(entry, "deliverability_grade", None) or "",
             **_row_eligibility(entry, _mode, _policy_status, _eligibility_evaluate),
         }
+        if _has_corpus:
+            row["corpus"] = MODULE_MAILACCESS_PRO in (entry.found_by_modules or [])
         row["verification"] = row.get("verification") or ""
         writer.writerow(row)
     return buf.getvalue()
@@ -1996,7 +2134,8 @@ def format_harvest_ndjson_export(result: DomainHarvestResult) -> str:
     through ``jq -c`` line by line.
     """
     out_lines: list[str] = []
-    for entry in _sanitised_export_emails(result.unique_emails):
+    ndjson_entries = _export_entries(result)
+    for entry in ndjson_entries:
         validation = _email_validation_summary(entry)
         # MUST-FIX S4: ensure breakdown is non-null for the stream.
         if entry.confidence_breakdown is None:

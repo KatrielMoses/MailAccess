@@ -244,7 +244,10 @@ async def read_fresh_crawl(
             # Scope/mode mismatch: a narrower or different-mode crawl must not be
             # reused for this request. Re-collect instead of leaking/under-serving.
             return None
-        result = _deserialize_result(result_json)
+        # Sanitize on READ too (defense-in-depth): a snapshot written by a prior
+        # implementation may carry corpus rows in ``unique_emails`` / the Pro note;
+        # strip them so a keyless cache hit can never re-serve paid PII before any gate.
+        result = sanitize_for_persistence(_deserialize_result(result_json))
         result.from_cache = True
         result.cached_at = harvested_at.isoformat().replace("+00:00", "Z")
         result.cache_age_seconds = max(0.0, (_now() - harvested_at).total_seconds())
@@ -254,14 +257,131 @@ async def read_fresh_crawl(
         return None
 
 
+def sanitize_for_persistence(result: DomainHarvestResult) -> DomainHarvestResult:
+    """Return a NATIVE-ONLY copy of *result* that is safe to persist/reuse (A1).
+
+    Hosted "MailAccess Pro" corpus (and personal) leads are per-query, live-only
+    evidence: they must never enter the corpus store, the generic contacts/leads
+    projection, or any reusable crawl snapshot. Persisting them would let paid PII
+    survive key removal and both default-off gates, and be re-served through
+    :func:`read_fresh_crawl` / :func:`read_leads` before any gate runs. This helper
+    produces a view with:
+
+    * every NET-NEW corpus row (``is_corpus_lead`` — business or personal) removed;
+    * every ``mailaccess_pro`` evidence entry stripped from any RETAINED native
+      row, and ``mailaccess_pro`` removed from its ``found_by_modules``
+      (defense-in-depth: after A2 a native row never carries corpus evidence, but a
+      previously-persisted or externally-constructed result might).
+
+    Tier counts and ``total_unique_emails`` are recomputed from the surviving
+    native rows so the snapshot stays self-consistent. The input result and its
+    live rows are never mutated (exports still see the corpus leads); a copy is
+    returned. For a keyless / security-investigation run (no corpus leads) this is a
+    no-op that returns the input unchanged, so persisted output matches v0.16.0.
+    """
+    import copy as _copy
+    from dataclasses import replace as _replace
+
+    from .domain_harvest_orchestrator import MODULE_MAILACCESS_PRO, is_corpus_lead
+
+    # ``corpus_leads`` is a serving-only field. Even if a caller constructs a
+    # result manually, no persistence view may retain it.
+    corpus_channel = list(getattr(result, "corpus_leads", None) or [])
+
+    try:
+        original = list(getattr(result, "unique_emails", None) or [])
+    except Exception:
+        return result
+
+    sanitized_rows: list[Any] = []
+    changed = False
+    for row in original:
+        try:
+            if is_corpus_lead(row):
+                changed = True
+                continue  # net-new corpus/personal lead — never persisted
+            mods = list(getattr(row, "found_by_modules", None) or [])
+            evidence = list(getattr(row, "evidence", None) or [])
+            has_pro = MODULE_MAILACCESS_PRO in mods or any(
+                isinstance(ev, dict) and ev.get("module") == MODULE_MAILACCESS_PRO
+                for ev in evidence
+            )
+            if not has_pro:
+                sanitized_rows.append(row)
+                continue
+            clean = _copy.deepcopy(row)
+            clean.evidence = [
+                ev
+                for ev in evidence
+                if not (isinstance(ev, dict) and ev.get("module") == MODULE_MAILACCESS_PRO)
+            ]
+            clean.found_by_modules = [m for m in mods if m != MODULE_MAILACCESS_PRO]
+            clean.source_count = len(clean.found_by_modules)
+            sanitized_rows.append(clean)
+            changed = True
+        except Exception:
+            # Never let sanitisation drop a native row on an unexpected shape.
+            sanitized_rows.append(row)
+
+    md = getattr(result, "metadata", None)
+    clean_md = md
+    if isinstance(md, dict) and "mailaccess_pro" in md:
+        # A legacy / externally-built snapshot may carry the Pro serving-note; it must
+        # never survive into a reusable native view (read-first would re-serve it).
+        clean_md = {k: v for k, v in md.items() if k != "mailaccess_pro"}
+        changed = True
+    if corpus_channel:
+        changed = True
+    if not changed:
+        return result  # nothing to strip (keyless / security-investigation)
+
+    def _non_role(label: str) -> int:
+        return sum(
+            1
+            for e in sanitized_rows
+            if getattr(e, "confidence_label", None) == label
+            and not getattr(e, "is_role", False)
+        )
+
+    return _replace(
+        result,
+        unique_emails=sanitized_rows,
+        total_unique_emails=len(sanitized_rows),
+        high_confidence_count=_non_role("CONFIRMED"),
+        likely_confidence_count=_non_role("LIKELY"),
+        medium_confidence_count=sum(
+            1
+            for e in sanitized_rows
+            if getattr(e, "confidence_label", None) in {"LIKELY", "MEDIUM"}
+            and not getattr(e, "is_role", False)
+        ),
+        low_confidence_count=_non_role("LOW"),
+        role_account_count=sum(
+            1 for e in sanitized_rows if getattr(e, "is_role", False)
+        ),
+        personal_email_count=sum(
+            1 for e in sanitized_rows if not getattr(e, "is_role", False)
+        ),
+        metadata=clean_md,
+        corpus_leads=[],
+    )
+
+
 async def write_back(domain: str, result: DomainHarvestResult) -> None:
     """Persist a fresh crawl: a new snapshot + refreshed projections.
 
     Never called for a read-first hit (nothing new collected), so it does not
     duplicate snapshots. Fully guarded.
+
+    A1 — the result is sanitised to a native-only view here, at the persistence
+    seam itself, so every downstream writer (snapshot ``result_json``, the
+    ``domains`` aggregate, and the ``contacts``/``verification_outcomes``
+    projection) receives data with no corpus/personal rows. This is idempotent: a
+    caller that already sanitised (the orchestrator does) passes through unchanged.
     """
     if not _corpus_enabled() or getattr(result, "from_cache", False):
         return
+    result = sanitize_for_persistence(result)
     try:
         from ..db.database import AsyncSessionLocal, init_db
 

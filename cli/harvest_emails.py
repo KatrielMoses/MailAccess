@@ -98,6 +98,24 @@ async def _record_harvest_ledger(domain: str, result: Any) -> None:
     await record_observations(records)
 
 
+def _pro_wrong_mode_hint(mode: str | None, key: str | None) -> str | None:
+    """0.17.0 Phase 3 — the "key never forces mode" surface.
+
+    Returns the one-line hint to print when a Pro key is present but the run mode
+    is security-investigation (so no corpus leads are injected), else ``None``. The
+    hint never switches the mode or silently suppresses — it states the rule.
+    """
+    if not key:
+        return None
+    effective = (mode or "security-investigation").strip() or "security-investigation"
+    if effective != "security-investigation":
+        return None
+    return (
+        "MailAccess Pro key detected — corpus enrichment runs in a lead-gen mode. "
+        "Re-run with --mode public-business-contact to include corpus leads."
+    )
+
+
 def _resolve_export_path(export: str) -> Path:
     p = Path(export)
     if p.is_absolute():
@@ -688,6 +706,16 @@ def run_harvest_emails(
             "extraction enabled. Expect more LOW-quality findings.[/yellow]"
         )
 
+    # 0.17.0 — a Pro key auto-selects the lead-gen product (see cli.main), so this
+    # hint only fires when a Pro user EXPLICITLY ran --mode security-investigation
+    # (a deliberate opt-out): remind them how to include corpus leads.
+    _pro_hint = _pro_wrong_mode_hint(
+        mode or getattr(settings, "product_mode", None),
+        getattr(settings, "mailaccess_pro_key", None),
+    )
+    if _pro_hint:
+        console.print(f"[cyan]{_pro_hint}[/cyan]")
+
     # ------------------------------------------------------------------
     # 4. Run the orchestrator with a live progress display.
     # MUST-FIX S5: states are mutated INCREMENTALLY — each module's
@@ -760,6 +788,14 @@ def run_harvest_emails(
         extra_export_path = _resolve_export_path(export)
 
     def _on_harvest_end(snapshot: Any) -> None:
+        # TERMINATION-PARTIAL fallback. The runner fires this from its finally block on
+        # EVERY termination path (incl. soft-kill / stage exception where
+        # run_domain_harvest never returns), so it guarantees an export exists even for
+        # a dying run. It is a mid-pipeline snapshot (no mode / no Pro channel yet), so
+        # on NORMAL completion the CANONICAL export written below — from the fully
+        # finalized result — OVERWRITES this (same path) with correct mode + Pro. A
+        # terminated partial carries no corpus leads (Pro is attached post-run), so
+        # there is nothing to mislabel here.
         termination_snapshot["result"] = snapshot
         if no_export:
             return
@@ -768,8 +804,6 @@ def run_harvest_emails(
             and extra_export_path is None
         ):
             return
-        # Sole production call site for the canonical export. The runner
-        # invokes this handler from its termination finally block.
         termination_snapshot["written"] = write_harvest_export(
             snapshot,
             timestamp=timestamp,
@@ -842,6 +876,21 @@ def run_harvest_emails(
             return 130
         console.print(f"[red]Error:[/] harvest failed: {drive_error}")
         return 3
+
+    # Canonical export — written ONCE, here, from the FULLY-FINALIZED result (mode
+    # stamped + Pro corpus channel attached), never from the mid-pipeline
+    # on_harvest_end snapshot (which lacks both). On a cancel/soft-kill, ``result``
+    # fell back to the termination snapshot above — a degraded native-only partial,
+    # same resilience as before.
+    if not no_export and (
+        bool(getattr(settings, "harvest_auto_export", True))
+        or extra_export_path is not None
+    ):
+        termination_snapshot["written"] = write_harvest_export(
+            result,
+            timestamp=timestamp,
+            extra_export_path=extra_export_path,
+        )
 
     # Phase 1C — dual-write the canonical evidence ledger alongside the export.
     # Skip read-first (corpus) hits: nothing new was collected, and the ledger is
@@ -1151,7 +1200,11 @@ def run_harvest_emails(
 
     if getattr(settings, "enable_harvest_history_cache", True):
         try:
-            latest = json.loads(serialise_harvest_for_export(result, "history.json")[0])
+            # Invariant #5 — the persisted history baseline is NATIVE-ONLY. Serving-
+            # only Pro corpus leads are per-query, live-only and must never be written
+            # to ~/.mailaccess/cache/harvest_history (mirrors the bulk path, which
+            # always receives a native-only payload; corpus leads are live-display-only.
+            latest = format_harvest_json_export(result)
             if save_latest(cleaned_domain, latest):
                 console.print("[dim]Saved latest harvest baseline.[/dim]")
         except Exception as exc:

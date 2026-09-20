@@ -748,6 +748,40 @@ class Settings(BaseSettings):
     enable_pdl: bool = False
     pdl_monthly_limit: int = 1000
 
+    # 0.17.0 — hosted paid lead-enrichment tier (Stream 2). The MailAccess Pro
+    # corpus lead engine is queried ONLY by this backend, over a private mesh; the
+    # engine origin is CONFIGURATION, not a hardcoded URL (the Pi5 today, a Hetzner
+    # box later — the move is a config change, never a code change). See
+    # backend/core/mailaccess_pro_client.py and backend/api/routes/enrich.py.
+    #
+    # Default the Pi5 homelab origin for dev; override in prod via env.
+    mailaccess_pro_base_url: str = "http://192.168.0.106:3001"
+    # The hosted /v1 base the LOCAL connector calls (Phase 2). Distinct from
+    # ``mailaccess_pro_base_url`` (the engine location, used only by the hosted
+    # backend): the user's pipeline talks to api.mailaccess.pro and must never see
+    # the engine (invariants 3 & 5).
+    mailaccess_pro_api_url: str = "https://api.mailaccess.pro"
+    # Shared secret mirrored onto the engine (the X-MailAccess-Engine-Secret gate).
+    # Defense-in-depth before the Tailscale mesh exists; the engine rejects any
+    # /api/internal/search call without it. Never logged.
+    mailaccess_pro_engine_secret: str = ""
+    # The Phase-6 public-launch gate (server-authoritative). While False the paid
+    # lead tier is unavailable regardless of key validity — /v1/enrich returns
+    # status=unavailable, reason=lead_tier_not_yet_available. Flipping this True is
+    # a legal/owner decision (the lawful basis for the corpus), NOT an engineering
+    # one; it must never be implied by a key or a mode.
+    mailaccess_pro_lawful_basis_established: bool = False
+    # A caller's Pro key. Registered here (and in the CLI key registry) now; the
+    # CLI sets it in Phase 3. Distinct from ``mailaccess_api_key`` (the self-host
+    # API gate): this is the paid-tier entitlement presented to /v1/enrich.
+    mailaccess_pro_key: str | None = None
+    # Shared secret for the internal provisioning bridge (POST /internal/pro/keys),
+    # which the website BFF calls to keep its Pro-key store in sync with THIS
+    # entitlement store (what /v1/enrich validates against). Fail-closed: while this
+    # is empty the endpoint rejects every request, so the route is inert until it is
+    # deliberately configured. Never logged.
+    mailaccess_pro_internal_secret: str = ""
+
     # Proxy (single static endpoint — legacy; superseded by the Phase 5B egress
     # pool below, which treats a single configured proxy as a pool of one).
     proxy_url: str | None = None

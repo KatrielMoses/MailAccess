@@ -4,9 +4,9 @@
 so every module in the new architecture requests bytes through one
 shared, in-memory, LRU-bounded cache instead of building (and tearing
 down) its own transport. The cache is per-``--domain`` run: instantiated
-at the top of :func:`backend.core.domain_harvest_orchestrator._orchestrate`
-and cleared via :meth:`ConcurrentFetchCache.aclose` in a ``finally``
-block so no state leaks across runs.
+inside the adaptive harvest pipeline (``backend.core.harvest_runner``) and
+cleared via :meth:`ConcurrentFetchCache.aclose` in a ``finally`` block so
+no state leaks across runs.
 
 Key contract (per the design brief)
 -----------------------------------

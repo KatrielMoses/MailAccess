@@ -1100,8 +1100,8 @@ async def run_adaptive_harvest(
         unique_emails.sort(key=_sort_key)
         # Phase 3C/3D + 4A — grade every lead from non-SMTP signals and snapshot
         # its feature vector for calibration. This is invoked on the LIVE adaptive
-        # path (the legacy ``_orchestrate`` also does it, but the CLI/API run
-        # through here), so single-domain AND Phase-5A bulk harvests populate
+        # path (the only path the CLI/API run through), so single-domain AND
+        # Phase-5A bulk harvests populate
         # deliverability grades and accrue the 4A capture volume the promotion
         # gate needs — identically, preserving per-domain parity. Additive,
         # guarded; skipped for injected-module test/embedder paths.
@@ -2879,8 +2879,8 @@ async def _grade_leads_and_capture(
     Thin adapter over the orchestrator's ``_apply_deliverability_grade`` so the
     live adaptive harvest path populates the deliverability grade/score fields and
     writes the Phase-4A feature snapshots. Extracts the domain catch-all verdict
-    from ``pattern_and_verify`` metadata (as the legacy ``_orchestrate`` path
-    does). Fully guarded — a grading failure leaves leads ungraded, never breaks
+    from ``pattern_and_verify`` metadata. Fully guarded — a grading failure leaves
+    leads ungraded, never breaks
     the harvest, and never changes yield (additive fields only).
     """
     try:

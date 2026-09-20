@@ -52,12 +52,11 @@ truth for this decision.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import inspect
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from ..config import settings
@@ -67,7 +66,7 @@ from ..modules.pattern_and_verify import (
     EmployeeNameResult,
     employee_name_result_from_dict,
 )
-from .concurrent_fetch_cache import CachedFetch, ConcurrentFetchCache
+from .concurrent_fetch_cache import CachedFetch
 from .context_router import IndustryVocabularyResult, IndustryVocabularyRouter
 from .email_confidence import (
     MAX_SCORE,
@@ -98,13 +97,11 @@ from .pattern_resolver import (
     classify_evidence_kind,
 )
 from .role_classifier import classify_email
-from .signal_pool import AsyncSignalPool
 from .smtp_verifier import (
     DEFAULT_PROBE_DELAY,
     MAX_PROBES_HARD_CAP,
     SMTPVerifier,
 )
-from .stealth_client import StealthSession, resolve_timing_profile
 from .time_budget import TimeBudget, budget_for_profile
 from .yahoo_verifier import YahooVerifier
 
@@ -252,6 +249,10 @@ class DomainHarvestResult:
     low_confidence_count: int
     role_account_count: int
     personal_email_count: int
+    # Hosted Pro leads are a serving-only channel. They are deliberately kept
+    # outside ``unique_emails`` so native collection, persistence, telemetry, and
+    # read-first paths cannot retain or re-serve corpus PII by accident.
+    corpus_leads: list[HarvestedEmail] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     smtp_verification_used: bool = False
     catchall_detected: bool | None = None
@@ -921,6 +922,328 @@ _CONFIRMED_PATTERN_VERIFICATIONS: frozenset[str] = frozenset({"provider_verified
 # is an observation" rule. The per-finding confirmation set no longer lives here.
 
 
+# 0.17.0 Phase 2 — the module label carried on injected corpus leads (found_by /
+# evidence source), and the fixed corpus prior. The confidence is COSMETIC: every
+# corpus lead is ``verification="unverified"`` so the eligibility gate caps it at
+# REVIEW regardless of the number. The prior sits below the native confirmed band
+# (LOW, < MEDIUM) so a corpus guess never inflates the CONFIRMED/LIKELY counts and
+# is never eligible for the live provider/SMTP-verification candidate set (which
+# requires MEDIUM+); it stays at/above the eligibility review floor so a lawful-
+# mode lead lands at REVIEW rather than research-only.
+MODULE_MAILACCESS_PRO = "mailaccess_pro"
+_PRO_CORPUS_CONFIDENCE = 0.45
+_PRO_CORPUS_LABEL = "LOW"
+
+
+def _pro_injection_active(mode: Any, key: str | None) -> bool:
+    """Whether corpus-lead injection may run for this (mode, key).
+
+    The "key never forces a mode" rule: injection requires BOTH a Pro key AND a
+    lead-gen mode. security-investigation is excluded even with a key (no
+    injection); the module classification (allowed in every mode, like apollo) is
+    the capability layer, this is the run gate. Defense-in-depth over the
+    authoritative server-side lawful-basis gate (Phase 1).
+    """
+    from .product_mode import ProductMode, is_module_allowed, normalize_mode
+
+    if not key:
+        return False
+    m = normalize_mode(mode)
+    if m is ProductMode.SECURITY_INVESTIGATION:
+        return False
+    return is_module_allowed(MODULE_MAILACCESS_PRO, m)
+
+
+def _scalar_or_none(value: Any) -> str | None:
+    """Brief C (C1) — only a plain string survives into evidence metadata; a
+    dict/list (e.g. smuggled PII under ``source``) is dropped to None so it can
+    never cross into a persisted/exported evidence entry as a nested value."""
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _pro_evidence_entry(lead: dict[str, Any]) -> dict[str, Any]:
+    """Build the evidence entry for one corpus lead, in the native
+    ``{"module", "metadata"}`` shape so ``resolve_person_fields`` attributes
+    name/title/linkedin from it exactly like a native finding. The corpus fields
+    (``corpus_verified`` provenance + ``corpus_source``) ride in the metadata; the
+    resolver reads ``full_name``/``job_title``/``linkedin_url`` for person fields.
+
+    C1 — every value carried here is coerced to a validated scalar: the connector
+    already sanitized the projected lead, but this is a further belt so no nested
+    object ever lands in evidence metadata (and thus a snapshot / export).
+    """
+    return {
+        "module": MODULE_MAILACCESS_PRO,
+        "metadata": {
+            "source_type": MODULE_MAILACCESS_PRO,
+            "full_name": _scalar_or_none(lead.get("name")),
+            "job_title": _scalar_or_none(lead.get("title")),
+            "linkedin_url": _scalar_or_none(lead.get("linkedin_url")),
+            # Provenance only — NEVER promoted to a confirmed verification.
+            "corpus_verified": lead.get("corpus_verified") is True,
+            "corpus_source": _scalar_or_none(lead.get("source")),
+        },
+    }
+
+
+def _email_host(email: str) -> str | None:
+    """Lowercased domain part of an email, or None when it has no ``@``."""
+    if "@" not in email:
+        return None
+    return email.rsplit("@", 1)[1].strip().lower().rstrip(".") or None
+
+
+def _inject_one_pro_lead(
+    lead: dict[str, Any],
+    by_email: dict[str, HarvestedEmail],
+    corpus_leads: list[HarvestedEmail],
+    *,
+    target_domain: str | None,
+) -> None:
+    """Inject one corpus lead as a net-new governed row.
+
+    Brief A (A2) — a native row is NEVER influenced by corpus evidence, full stop.
+    When the address already exists as a native row we do nothing: we do not append
+    the corpus person-field evidence to it, and we do not stamp
+    ``mailaccess_pro`` onto its ``found_by_modules``. Corpus person attributes live
+    ONLY on net-new corpus rows (which get the corpus-only panel treatment). This
+    closes the audit finding where a corpus name could replace a native confirmed
+    person claim through the shared 1E resolver: the resolver can never pick a
+    corpus name over a native one because corpus evidence never enters a native
+    row's resolution.
+
+    Brief B (B2) — ``on_domain`` is decided by POSITIVE validation here, never
+    trusted from upstream: a corpus lead is on-domain only if its email host equals
+    the harvested domain. When no target domain is threaded (direct-construction
+    test seam) the default stays on-domain.
+    """
+    email = str(lead.get("email") or "").strip()
+    if not email or "@" not in email:
+        return
+    if by_email.get(email.lower()) is not None:
+        # Address already covered by a native row — leave it entirely untouched.
+        return
+    if target_domain:
+        on_domain = _email_host(email) == target_domain
+        if not on_domain:
+            # B2 (re-audit) — a corpus lead MUST be on the requested domain. An
+            # off-domain address (e.g. a forged/off-contract hosted response) is not
+            # a valid business lead; DROP it rather than retain an off-domain row
+            # that render/export would treat as business.
+            return
+    else:
+        on_domain = True
+    ev = _pro_evidence_entry(lead)
+    row = HarvestedEmail(
+        email=email,
+        on_domain=on_domain,
+        is_role=False,
+        role_match_type=None,
+        confidence_score=_PRO_CORPUS_CONFIDENCE,
+        confidence_label=_PRO_CORPUS_LABEL,
+        found_by_modules=[MODULE_MAILACCESS_PRO],
+        source_count=1,
+        evidence=[ev],
+        verification="unverified",
+    )
+    corpus_leads.append(row)
+    by_email[email.lower()] = row
+
+
+def _inject_pro_leads(
+    final: list[HarvestedEmail],
+    pro_leads: list[dict[str, Any]] | None,
+    *,
+    mode: Any,
+    key: str | None,
+    domain: str | None = None,
+    corpus_leads_out: list[HarvestedEmail] | None = None,
+) -> None:
+    """Merge corpus leads into a serving-only channel as governed, net-new evidence.
+
+    Runs only when the (mode, key) gate is open. ``final`` (the native aggregate) is
+    consulted ONLY for collision detection — a corpus row is never appended to it.
+    ``domain`` (the harvested domain) drives B2 on-domain validation. The net-new
+    rows land in ``corpus_leads_out`` (required in production; a throwaway list when
+    a caller omits it — NEVER ``final``, so corpus PII can't leak into the native set).
+    """
+    if not _pro_injection_active(mode, key):
+        return
+    # P2(e) — the corpus channel is a dedicated list. A caller that omits it gets a
+    # throwaway (the rows are discarded), never ``final`` — corpus data must never
+    # land in the native aggregate.
+    corpus_leads_out = corpus_leads_out if corpus_leads_out is not None else []
+    # D1 — run EVERY corpus candidate through the LOCAL suppression index before it
+    # is injected, so a locally-objecting subject is never materialised into the
+    # channel (and thus never rendered, exported, or persisted). Defense-in-depth
+    # over the hosted route's server-side suppression. Fail CLOSED: if the store
+    # can't be read, inject NO corpus data (Stream 1 only) rather than unfiltered PII.
+    from .suppression import SuppressionUnavailable, filter_rows, load_index_sync
+
+    try:
+        _supp = load_index_sync()
+        pro_leads = filter_rows(list(pro_leads or []), _supp)
+    except SuppressionUnavailable:
+        _LOG.warning(
+            "suppression store unavailable; skipping corpus injection (Stream 1 only)"
+        )
+        return
+    target_domain = (
+        str(domain).strip().lower().rstrip(".") if isinstance(domain, str) and domain.strip()
+        else None
+    )
+    by_email: dict[str, HarvestedEmail] = {
+        e.email.strip().lower(): e
+        for e in final
+        if isinstance(getattr(e, "email", None), str) and e.email.strip()
+    }
+    for lead in pro_leads or []:
+        if isinstance(lead, dict):
+            _inject_one_pro_lead(
+                lead, by_email, corpus_leads_out, target_domain=target_domain
+            )
+
+
+def is_corpus_lead(entry: HarvestedEmail) -> bool:
+    """Whether ``entry`` is a NET-NEW corpus lead (``mailaccess_pro`` its sole
+    source) — covers both the business and personal sub-groups. A native lead that
+    merely gained a corpus person-field candidate has other modules in
+    ``found_by_modules`` and is NOT a corpus-only lead — it stays in its native tier."""
+    mods = set(getattr(entry, "found_by_modules", None) or [])
+    return mods == {MODULE_MAILACCESS_PRO}
+
+
+async def _fetch_pro_leads(domain: str, mode: Any) -> dict[str, Any]:
+    """Fetch corpus leads for ``domain`` when the (mode, key) gate is open.
+
+    Returns ``{"requested": bool, "status": str, "leads": list}``. Fail-open: a
+    closed gate → ``requested=False`` (Stream 1, no enrichment attempted); a dead
+    API / error → ``requested=True, status="unavailable", leads=[]`` so the CLI can
+    render the honest "corpus enrichment unavailable" note (invariant 4). The gate
+    is checked HERE so the network call is never made in security mode / keyless.
+    """
+    from ..config import settings
+
+    key = getattr(settings, "mailaccess_pro_key", None)
+    if not _pro_injection_active(mode, key):
+        return {"requested": False, "status": "not_requested", "leads": []}
+    try:
+        from . import mailaccess_pro_connector
+
+        # Item B — 500-cap depth: request the full servable set in one call.
+        env = await mailaccess_pro_connector.fetch_leads(domain, type="domain", limit=500)
+    except Exception:  # pragma: no cover - connector is already fail-open
+        _LOG.debug("mailaccess_pro fetch failed; Stream 1 only", exc_info=True)
+        return {"requested": True, "status": "unavailable", "leads": []}
+    leads = env.get("leads") if isinstance(env, dict) else None
+    status = env.get("status") if isinstance(env, dict) else "unavailable"
+    return {
+        "requested": True,
+        "status": str(status or "unavailable"),
+        "leads": leads if isinstance(leads, list) else [],
+    }
+
+
+async def _attach_pro_enrichment(
+    result: DomainHarvestResult, domain: str, mode: Any
+) -> DomainHarvestResult:
+    """0.17.0 — the SINGLE Pro-enrichment seam on the live ``run_domain_harvest``
+    path (both the fresh return and the cache-hit early return).
+
+    Fetch governed corpus leads for ``domain`` (gated on ``mode`` + key, fail-open)
+    and attach them as a serving-only ``corpus_leads`` channel plus the
+    ``mailaccess_pro`` metadata note. The channel is built from
+    ``result.unique_emails`` ONLY for collision detection (a native address is never
+    shadowed by a corpus row) and is NEVER merged back into ``unique_emails`` —
+    native collection, persistence, telemetry, scoring, deliverability, and
+    read-first never see corpus PII (invariants 3 & 5).
+
+    ``mode`` is the run's resolved product mode, threaded explicitly so the gate is
+    correct on the cache-hit path too (it returns before the lawful-gate's own
+    ``set_active_mode``). Fail-open, hard: no key / not a lead-gen mode / any error →
+    ``result`` returned unchanged (Stream 1 only), byte-identical to a keyless run
+    (no ``corpus_leads``, no note).
+    """
+    try:
+        pro_fetch = await _fetch_pro_leads(domain, mode)
+    except Exception:  # pragma: no cover - _fetch_pro_leads is already fail-open
+        _LOG.debug("mailaccess_pro enrichment failed; Stream 1 only", exc_info=True)
+        return result
+    return _inject_pro_sync(result, pro_fetch, domain, mode)
+
+
+def _inject_pro_sync(
+    result: DomainHarvestResult, pro_fetch: dict[str, Any] | None, domain: str, mode: Any
+) -> DomainHarvestResult:
+    """SYNCHRONOUS injection of ALREADY-FETCHED corpus leads as the serving-only
+    ``corpus_leads`` channel + ``mailaccess_pro`` note.
+
+    Split out of :func:`_attach_pro_enrichment` so it can also run inside the
+    SYNCHRONOUS ``on_harvest_end`` export callback (which must not await): the async
+    fetch is done up-front, this does only sync work. Idempotent — a no-op when the
+    note is already attached to ``result`` (so the callback-side inject and the
+    post-run inject converge on the same object) — and fail-open to Stream 1.
+    """
+    if result is None:
+        return result
+    md0 = getattr(result, "metadata", None)
+    if isinstance(md0, dict) and "mailaccess_pro" in md0:
+        return result  # already attached on this object
+    if not isinstance(pro_fetch, dict) or not pro_fetch.get("requested"):
+        # Closed gate (keyless / security) — Stream 1, no note; byte-identical to HEAD.
+        return result
+
+    channel: list[HarvestedEmail] = []
+    try:
+        _inject_pro_leads(
+            result.unique_emails,
+            pro_fetch.get("leads") or [],
+            mode=mode,
+            key=getattr(settings, "mailaccess_pro_key", None),
+            domain=domain,
+            corpus_leads_out=channel,
+        )
+        # The channel receives person projection only — it bypasses native signal
+        # correlation, pattern inference, deliverability, scoring, and persistence.
+        _apply_person_attribution(channel)
+        # D1 (defense-in-depth) — re-filter the resolved channel through the local
+        # suppression index; fail CLOSED to Stream 1 if the store is unreadable.
+        from .suppression import SuppressionUnavailable, load_index_sync
+
+        try:
+            _supp = load_index_sync()
+        except SuppressionUnavailable:
+            _LOG.warning(
+                "suppression store unavailable; dropping corpus channel (Stream 1 only)"
+            )
+            return result
+        channel = [
+            row
+            for row in channel
+            if isinstance(getattr(row, "email", None), str)
+            and not _supp.hit(email=row.email)
+        ]
+    except Exception:  # pragma: no cover - defensive: enrichment must never break S1
+        _LOG.debug("mailaccess_pro injection failed; Stream 1 only", exc_info=True)
+        return result
+    channel.sort(key=_sort_key)
+
+    note = {
+        "requested": True,
+        "status": pro_fetch.get("status") or "unavailable",
+        "injected": len(channel),
+    }
+    # ``DomainHarvestResult`` is a mutable dataclass; attach directly. Persistence
+    # (write_back) uses a sanitized native-only copy, so this only adds the
+    # serving-only channel + note to the returned live display object.
+    result.corpus_leads = channel
+    if isinstance(getattr(result, "metadata", None), dict):
+        result.metadata["mailaccess_pro"] = note
+    else:
+        result.metadata = {"mailaccess_pro": note}
+    return result
+
+
 def _aggregate(
     harvest_domain: str,
     module_results: dict[str, ModuleResult],
@@ -1340,6 +1663,10 @@ def _aggregate(
     # Brief A item 2 — retire competing inferences for the same person via the run's
     # canonical resolver, so two producers converge on one deterministic selection.
     final = _apply_resolver_person_selection(final, resolver)
+    # 0.17.0 — corpus (Pro) leads are NOT injected here. They are a serving-only
+    # channel attached AFTER the native run by ``_attach_pro_enrichment`` on the live
+    # ``run_domain_harvest`` path, so native aggregation, persistence, scoring, and
+    # read-first never see corpus PII.
     _apply_passive_pattern_signals(final, module_results)
     _apply_signal_pool_correlation(final, signal_pool)
     _apply_identity_cluster_snapshot(final, identity_clusters)
@@ -3886,6 +4213,12 @@ async def run_domain_harvest(
     from .product_mode import active_mailbox_probing_allowed, normalize_mode
 
     resolved_mode = normalize_mode(mode if mode is not None else settings.product_mode)
+    # Set the run's active mode BEFORE the read-first so BOTH the cache-hit early
+    # return and the fresh path attach Pro under the correct mode (the cache-hit
+    # return happens before the lawful-gate's own set_active_mode below).
+    from .product_mode import set_active_mode as _set_active_mode
+
+    _set_active_mode(resolved_mode)
     # A mode that forbids active mailbox probing (the FTC line for
     # public-business-contact) collects a strictly narrower crawl — SMTP
     # verification is disabled. Apply it here so the signature reflects the
@@ -3936,7 +4269,9 @@ async def run_domain_harvest(
     if corpus_enabled and not force:
         cached = await read_fresh_crawl(domain, request_scope)
         if cached is not None:
-            return cached
+            # Pro enrichment is live per-query, so it must apply on cache hits too —
+            # the cached snapshot is native-only (corpus PII is never persisted).
+            return await _attach_pro_enrichment(cached, domain, resolved_mode)
 
     # An injected-module run is a deterministic test/embedder seam. Do not
     # launch real network modules that were not explicitly supplied; that
@@ -4035,10 +4370,20 @@ async def run_domain_harvest(
         # snapshot, rather than serving it to any request for the same domain.
         result.metadata[SCOPE_SIGNATURE_KEY] = request_scope
     if corpus_enabled:
-        from .corpus_store import write_back
+        from .corpus_store import sanitize_for_persistence, write_back
 
-        await write_back(domain, result)
-    return result
+        # A1 — persist a NATIVE-ONLY view: strip net-new corpus rows and any
+        # ``mailaccess_pro`` evidence before write-back, so paid/personal corpus
+        # data never enters a reusable snapshot or the generic projection (it is
+        # per-query, live-only). ``result`` itself remains available to the live
+        # renderer; export helpers use the native-only channel. write_back
+        # re-sanitises defensively.
+        await write_back(domain, sanitize_for_persistence(result))
+    # Attach the serving-only Pro corpus channel AFTER mode-stamping + native-only
+    # persistence, so the RETURNED result is fully finalized (mode + corpus_leads) for
+    # the live renderer. Canonical exports remain native-only. ``on_harvest_end``
+    # remains only the cancellation/partial fallback.
+    return await _attach_pro_enrichment(result, domain, resolved_mode)
 
 
 async def _run_hunter(
@@ -4204,441 +4549,3 @@ def _smtp_availability_metadata(
             "estimates."
         )
     return meta
-
-
-async def _orchestrate(
-    domain: str,
-    cc: Any,
-    wayback: Any,
-    cc_cert: Any,
-    dork: Any,
-    emp: Any,
-    npm: Any,
-    pypi: Any,
-    pgp: Any,
-    syndication: Any,
-    github_org: Any,
-    pattern: Any,
-    content_intelligence: Any,
-    content_fetch_enabled: bool,
-    *,
-    enable_smtp: bool = False,
-    dork_lite_mode: bool | None = None,
-    cc_max_records: int | None = None,
-    cc_max_collections: int | None = None,
-    aggressive: bool = False,
-    use_proxies: bool = False,
-    proxy_fallback_ok: bool = False,
-    on_module_complete: Any | None = None,
-    budget: TimeBudget | None = None,
-) -> DomainHarvestResult:
-    """Inner orchestration — runs the 9 modules in sequence.
-
-    Sequence:
-        Phase 1+2 — the domain data modules run concurrently
-                    (``asyncio.as_completed`` so each callback fires
-                    as soon as its module finishes).  W5 adds three
-                    modules to this phase (npm_email, pypi_email,
-                    pgp_domain_email); 0.11.1 Phase 3 adds
-                    wayback_domain_harvest alongside Common Crawl.
-        Phase 3  — pattern_and_verify runs AFTER employee_name_discovery
-                   completes, since it consumes that module's findings.
-
-    MUST-FIX M3: all per-run options (``enable_smtp``, ``dork_lite_mode``,
-    ``cc_max_records``) are threaded down to each module's ``run()`` as
-    keyword arguments. The orchestrator does NOT mutate the global
-    settings object at any point.
-
-    MUST-FIX S5: ``on_module_complete`` is an optional callable that
-    receives ``(module_name: str, status: str)`` each time a module's
-    :class:`ModuleResult` is finalized. The CLI uses this to update
-    its ``Rich Live`` progress table in real time — without it the
-    table would only refresh once at the very end. Callable signature
-    is permissive (``*args, **kwargs``) so a plain function or a
-    bound method both work.
-
-    0.11.1 Phase 3: ``cc_max_collections`` and ``aggressive`` are
-    threaded down to ``commoncrawl_email`` and ``wayback_domain_harvest``;
-    Wayback runs concurrently with Common Crawl in Phase 1 because
-    they hit different upstreams and have no shared rate-limited
-    budget.
-    """
-
-    def _emit(name: str, mr: ModuleResult) -> None:
-        if on_module_complete is None:
-            return
-        status_value = (
-            mr.status.value if hasattr(mr.status, "value") else str(mr.status)
-        )
-        errors = list(mr.errors or [])
-        try:
-            on_module_complete(name, status_value, errors)
-        except TypeError:
-            # Backwards compatibility: old callbacks only accept (name, status).
-            try:
-                on_module_complete(name, status_value)
-            except Exception:  # noqa: BLE001
-                pass
-        except Exception:  # noqa: BLE001
-            # Callback must never break the harvest.
-            _LOG.debug(
-                "domain_harvest: on_module_complete(%s, %s) raised — ignored",
-                name,
-                status_value,
-            )
-
-    started = datetime.now(timezone.utc)
-    started_iso = started.isoformat().replace("+00:00", "Z")
-    signal_pool = AsyncSignalPool(export_threshold=0.0)
-
-    # ------------------------------------------------------------------
-    # 0.11.1 Phase 3: build the per-run HTTP cache.
-    #
-    # Every module in the new architecture fetches bytes through this
-    # cache rather than invoking StealthSession directly, so duplicate
-    # URLs across modules collapse to a single underlying request.
-    # The cache owns one StealthSession for the run; it is created
-    # here, passed to the modules via ``fetch=`` below, and torn down
-    # in the ``finally`` block so no state leaks across runs.
-    #
-    # If StealthSession cannot be constructed (curl-cffi missing in
-    # some test environment), we still wire the orchestrator together
-    # and let modules fall back to their own transports — the cache
-    # is best-effort, not load-bearing for tests.
-    # ------------------------------------------------------------------
-    cache: ConcurrentFetchCache | None = None
-    fetch: CachedFetch | None = None
-    cache_session: StealthSession | None = None
-    cache_stats: dict[str, int] = {}
-    try:
-        try:
-            cache_profile = resolve_timing_profile(
-                getattr(settings, "harvest_timing_profile", None)
-            )
-            cache_session: StealthSession | None = StealthSession(
-                timing_profile=cache_profile,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _LOG.debug(
-                "domain_harvest: StealthSession unavailable, modules will "
-                "fall back to their own transports: %s",
-                exc,
-            )
-            cache_session = None
-
-        if cache_session is not None:
-            cache = ConcurrentFetchCache(cache_session)
-            fetch = CachedFetch(cache)
-    except Exception as exc:  # noqa: BLE001 — never let cache wiring kill the run
-        _LOG.debug("domain_harvest: cache init failed, continuing without: %s", exc)
-        cache = None
-        fetch = None
-
-    try:
-        phase_fetch = fetch if content_fetch_enabled else None
-        phase_session = phase_fetch if phase_fetch is not None else cache_session
-        industry_result = await _route_industry_candidates(domain, phase_fetch)
-        candidate_paths = tuple(industry_result.target_paths)
-        # ------------------------------------------------------------------
-        # Phase 1+2 — concurrent run of all data modules
-        # MUST-FIX S5: ``asyncio.as_completed`` so we can fire the
-        # ``on_module_complete`` callback as each module finishes, instead
-        # of waiting for ``gather`` to return all at once.
-        # W5: the three new structured-source modules (npm, pypi, pgp)
-        # slot in here and run alongside commoncrawl_email and
-        # code_and_cert_email — same parallel budget, no sequencing.
-        # 0.11.1 Phase 3: wayback_domain_harvest joins Phase 1 alongside
-        # Common Crawl — different upstream, no shared rate budget.
-        # 0.11.1 Phase 3: syndication_feed_sweeper also runs here â€” it
-        # discovers feed links from the homepage and extracts authors.
-        # 0.11.1 Phase 4: github_org_members and Hunter.io join Phase 1.
-        # Hunter.io is not a BaseModule — it is a direct function call
-        # wrapped in _run_hunter below.
-        # 0.11.1 Phase 3 cache: every module that touches HTTP gets the
-        # shared ``fetch`` facade; the rest ignore it via signature-aware
-        # kwarg filtering.
-        # ------------------------------------------------------------------
-        phase12_coroutines = [
-            _safe_phase12_run(
-                MODULE_COMMONCRAWL,
-                cc,
-                domain,
-                cc_max_records=cc_max_records,
-                cc_max_collections=cc_max_collections,
-                aggressive=aggressive,
-                fetch=fetch,
-                signal_pool=signal_pool,
-                budget=budget,
-            ),
-            _safe_phase12_run(
-                MODULE_WAYBACK_DOMAIN,
-                wayback,
-                domain,
-                aggressive=aggressive,
-                fetch=fetch,
-                signal_pool=signal_pool,
-                budget=budget,
-            ),
-            _safe_phase12_run(
-                MODULE_CODE_CERT,
-                cc_cert,
-                domain,
-                fetch=fetch,
-                signal_pool=signal_pool,
-                budget=budget,
-            ),
-            _safe_phase12_run(
-                MODULE_EMAIL_DORK,
-                dork,
-                domain,
-                dork_lite_mode=dork_lite_mode,
-                aggressive=aggressive,
-                use_proxies=use_proxies,
-                proxy_fallback_ok=proxy_fallback_ok,
-                fetch=fetch,
-                signal_pool=signal_pool,
-                budget=budget,
-            ),
-            _safe_phase12_run(
-                MODULE_EMPLOYEE_NAMES,
-                emp,
-                domain,
-                use_proxies=use_proxies,
-                proxy_fallback_ok=proxy_fallback_ok,
-                fetch=fetch,
-                candidate_paths=candidate_paths,
-                signal_pool=signal_pool,
-                budget=budget,
-            ),
-            _safe_phase12_run(
-                MODULE_NPM_EMAIL,
-                npm,
-                domain,
-                fetch=fetch,
-                signal_pool=signal_pool,
-                budget=budget,
-            ),
-            _safe_phase12_run(
-                MODULE_PYPI_EMAIL,
-                pypi,
-                domain,
-                fetch=fetch,
-                signal_pool=signal_pool,
-                budget=budget,
-            ),
-            _safe_phase12_run(
-                MODULE_PGP_DOMAIN_EMAIL,
-                pgp,
-                domain,
-                fetch=fetch,
-                signal_pool=signal_pool,
-                budget=budget,
-            ),
-            _safe_phase12_run(
-                MODULE_SYNDICATION_FEED_SWEEPER,
-                syndication,
-                domain,
-                fetch=fetch,
-                signal_pool=signal_pool,
-                budget=budget,
-            ),
-            _safe_phase12_run(
-                MODULE_GITHUB_ORG_MEMBERS,
-                github_org,
-                domain,
-                fetch=fetch,
-                signal_pool=signal_pool,
-                budget=budget,
-            ),
-            _run_content_intelligence(
-                domain,
-                phase_session,
-                phase_fetch,
-                aggressive=aggressive,
-                candidate_paths=candidate_paths,
-                discover_callable=content_intelligence,
-            ),
-            _run_hunter(domain, settings.hunter_io_api_key, signal_pool=signal_pool),
-        ]
-        phase12_results: dict[str, ModuleResult] = {}
-        for fut in asyncio.as_completed(phase12_coroutines):
-            try:
-                outcome = await fut
-            except BaseException as exc:  # noqa: BLE001
-                _LOG.warning("domain_harvest: phase12 task raised: %s", exc)
-                continue
-            if isinstance(outcome, BaseException):
-                _LOG.warning(
-                    "domain_harvest: phase12 task raised: %s", outcome
-                )
-                continue
-            name, result = outcome  # type: ignore[misc]
-            phase12_results[name] = _normalize_module_result(name, result)
-            # MUST-FIX S5: fire callback as soon as this module is final.
-            _emit(name, phase12_results[name])
-
-        # ------------------------------------------------------------------
-        # Phase 3 — pattern_and_verify (depends on employee_name_discovery)
-        # MUST-FIX M3: enable_smtp is threaded via the explicit kwarg.
-        # MUST-FIX S5: emit callback when pattern_and_verify completes too.
-        # ------------------------------------------------------------------
-        employee_result = _normalize_module_result(
-            MODULE_EMPLOYEE_NAMES,
-            phase12_results.get(
-                MODULE_EMPLOYEE_NAMES, ModuleResult(status=ModuleStatus.SKIPPED)
-            ),
-        )
-        employee_findings = employee_result.findings or []
-        employee_names = _employee_names_from_findings(employee_findings)
-
-        try:
-            pattern_result = await _run_pattern(
-                pattern,
-                domain,
-                employee_names=employee_names,
-                enable_smtp=enable_smtp,
-                signal_pool=signal_pool,
-                budget=budget,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _LOG.warning("domain_harvest: pattern_and_verify crashed: %s", exc)
-            pattern_result = ModuleResult(
-                status=ModuleStatus.FAILED,
-                errors=[f"{MODULE_PATTERN_VERIFY}: {exc}"],
-            )
-        pattern_result = _normalize_module_result(MODULE_PATTERN_VERIFY, pattern_result)
-        _emit(MODULE_PATTERN_VERIFY, pattern_result)
-
-        # ------------------------------------------------------------------
-        # Combine all results
-        # ------------------------------------------------------------------
-        module_results: dict[str, ModuleResult] = {
-            **phase12_results,
-            MODULE_PATTERN_VERIFY: pattern_result,
-        }
-
-        shadow_profiles: list[dict[str, Any]] = []
-        unique_emails = _aggregate(
-            domain,
-            module_results,
-            signal_pool=signal_pool,
-            shadow_profiles_out=shadow_profiles,
-        )
-        unique_emails.sort(key=_sort_key)
-
-        completed = datetime.now(timezone.utc)
-        completed_iso = completed.isoformat().replace("+00:00", "Z")
-        duration = (completed - started).total_seconds()
-
-        # P7: 4-tier counts in the summary are PERSONAL-only
-        # (``is_role=False``).  Role accounts are tracked separately
-        # via ``role_account_count`` and rendered in their own
-        # section.  The previous 3-tier semantics inflated the
-        # analyst's HIGH/MEDIUM counts with weak passive
-        # inferences; the new CONFIRMED / LIKELY / MEDIUM split
-        # keeps the "above the noise floor" hits grouped under
-        # LIKELY, the truly-verified hits in CONFIRMED, and the
-        # weak-corroboration hits in MEDIUM.
-        high = sum(
-            1
-            for e in unique_emails
-            if e.confidence_label == "CONFIRMED" and not e.is_role
-        )
-        likely = sum(
-            1
-            for e in unique_emails
-            if e.confidence_label == "LIKELY" and not e.is_role
-        )
-        # ``medium`` is the historical "anything above LOW" band —
-        # LIKELY + MEDIUM.  Field name kept for backward
-        # compatibility with downstream tooling.
-        medium = sum(
-            1
-            for e in unique_emails
-            if e.confidence_label in {"LIKELY", "MEDIUM"} and not e.is_role
-        )
-        low = sum(
-            1
-            for e in unique_emails
-            if e.confidence_label == "LOW" and not e.is_role
-        )
-        role = sum(1 for e in unique_emails if e.is_role)
-        personal = sum(1 for e in unique_emails if not e.is_role)
-
-        errors: list[str] = []
-        for mod_name, res in module_results.items():
-            for err in res.errors or []:
-                errors.append(f"[{mod_name}] {err}")
-
-        # Catch-all signal: surface from pattern_and_verify metadata.
-        catchall_detected: bool | None = None
-        confirmed_pattern: str | None = None
-        pattern_meta = pattern_result.metadata or {}
-        if isinstance(pattern_meta, dict):
-            if "is_catchall" in pattern_meta:
-                catchall_detected = pattern_meta.get("is_catchall")
-            confirmed_pattern = pattern_meta.get("confirmed_pattern")
-        if confirmed_pattern is None:
-            pool_patterns = signal_pool.get_confirmed_patterns()
-            confirmed_pattern = pool_patterns[0] if pool_patterns else None
-
-        # Phase 3C/3D — score + grade every lead from non-SMTP signals (uses the
-        # domain catch-all verdict just resolved). Guarded; additive only.
-        await _apply_deliverability_grade(
-            unique_emails, domain, catchall_detected=catchall_detected
-        )
-
-        # Phase 4C — per-source accounting: what each module actually earned this
-        # run (marginal-unique / incremental-confirmed contribution, latency,
-        # failure/FP rate). Append-only; guarded; drives reversible auto-demotion.
-        _record_source_accounting(domain, unique_emails, module_results)
-
-        # 0.11.1 Phase 3 cache: snapshot stats before teardown so the
-        # CLI can print hits / misses / evictions at the end of the run.
-        if cache is not None:
-            try:
-                cache_stats = cache.stats()
-            except Exception:  # noqa: BLE001
-                cache_stats = {}
-
-        return DomainHarvestResult(
-            domain=domain,
-            started_at=started_iso,
-            completed_at=completed_iso,
-            duration_seconds=round(duration, 3),
-            module_results=module_results,
-            unique_emails=unique_emails,
-            total_unique_emails=len(unique_emails),
-            high_confidence_count=high,
-            likely_confidence_count=likely,
-            medium_confidence_count=medium,
-            low_confidence_count=low,
-            role_account_count=role,
-            personal_email_count=personal,
-            errors=errors,
-            # RC7 (Output-Trust): report SMTP as USED only when it was actually
-            # ATTEMPTED (>=1 probe) — not merely enabled. With port 25 blocked the
-            # verifier runs zero probes, so claiming "smtp_verification_used: true /
-            # attempted: 0" is a lie. When SMTP was enabled but no probe landed, the
-            # result carries an explicit smtp_unavailable signal (see metadata).
-            smtp_verification_used=bool(
-                pattern_meta.get("smtp_verification_enabled", False)
-                and int(pattern_meta.get("smtp_probes_used", 0) or 0) > 0
-            ),
-            catchall_detected=catchall_detected,
-            confirmed_pattern=confirmed_pattern,
-            employee_names_processed=len(employee_names),
-            fetch_cache_stats=cache_stats or None,
-            metadata=_smtp_availability_metadata(pattern_meta, budget),
-            shadow_profiles=shadow_profiles,
-        )
-    finally:
-        # 0.11.1 Phase 3 cache: per-run teardown.  ``aclose`` clears every
-        # map, cancels in-flight futures, and closes the wrapped
-        # StealthSession.  Best-effort — never let teardown noise mask the
-        # real return value above.
-        if cache is not None:
-            with contextlib.suppress(Exception):
-                await cache.aclose()
-        with contextlib.suppress(Exception):
-            await signal_pool.close()

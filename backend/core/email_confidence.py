@@ -61,6 +61,15 @@ SOURCE_WEIGHTS: dict[str, float] = {
     # domain's real support. The signal is always unverified: it can never on
     # its own reach the CONFIRMED band (see ``company_pattern_index`` caller).
     "company_pattern_index": 0.30,
+    # 0.17.0 Brief A (A2) — hosted "MailAccess Pro" corpus evidence. A deliberate
+    # FLOOR weight, below the neutral default (0.30) and below every native
+    # person-field source, so that even if a corpus observation ever reached the
+    # person-field resolver on a row that also carries a native claim, the native
+    # claim always outranks it (belt-and-suspenders over the primary fix, which is
+    # that corpus evidence never enters a native row's resolution at all). Corpus
+    # leads themselves are net-new rows scored at a fixed prior, so this weight
+    # never inflates or deflates their own confidence.
+    "mailaccess_pro": 0.05,
     # FIX 4D: removed dead SOURCE_WEIGHTS keys — no module ever emitted
     # these source types (verified by repo-wide grep), so they only
     # added confusion and could silently inflate a pure-guess candidate
@@ -179,6 +188,10 @@ SOURCE_CLASS: dict[str, str] = {
     # signals to inflate the multi-source multiplier: an unverified inference
     # is one source, not a corroborator of a live probe.
     "company_pattern_index": "pattern_index",
+    # 0.17.0 Brief A (A2) — hosted "MailAccess Pro" corpus evidence gets its OWN
+    # corroboration family so it can never collude with real verification signals to
+    # inflate the multi-source multiplier (invariant: SOURCE_WEIGHTS ⊆ SOURCE_CLASS).
+    "mailaccess_pro": "corpus",
     # FIX 4D: dead keys removed (permutation_format_match,
     # permutation_name_match, permutation_unverified_{first}_tier1).
     "autodiscover_m365": "verification",  # FIX 2

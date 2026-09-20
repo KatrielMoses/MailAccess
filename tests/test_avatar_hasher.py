@@ -74,7 +74,7 @@ def test_cache_hit_skips_network(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.setattr(client, "get", _fake_get)
             return await mod.fetch_and_phash(url, client)
 
-    result = asyncio.get_event_loop().run_until_complete(_run())
+    result = asyncio.run(_run())
 
     assert result == "deadbeef12345678"
     assert not fetch_called

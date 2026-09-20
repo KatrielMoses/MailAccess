@@ -39,7 +39,7 @@ def _serialize_result(result: DomainHarvestResult) -> dict[str, Any]:
     payload = {
         field.name: getattr(result, field.name)
         for field in fields(DomainHarvestResult)
-        if field.name not in {"from_cache", "cache_age_seconds", "cached_at"}
+        if field.name not in {"from_cache", "cache_age_seconds", "cached_at", "corpus_leads"}
     }
     payload["unique_emails"] = [
         {field.name: getattr(email, field.name) for field in fields(HarvestedEmail)}

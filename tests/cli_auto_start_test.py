@@ -130,6 +130,7 @@ async def test_server_start_timeout_terminates_process(monkeypatch: pytest.Monke
     proc = Mock()
     proc.poll.return_value = None
     monkeypatch.setattr(cli_main.subprocess, "Popen", Mock(return_value=proc))
+    monkeypatch.setenv("MAILACCESS_SERVER_START_TIMEOUT", "15")
     monkeypatch.setattr(
         cli_main,
         "time",

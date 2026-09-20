@@ -271,6 +271,21 @@ _ALL_KNOWN_MODULES: frozenset[str] = frozenset(
         # the eligibility gate — the mode allowlist governs the capability, the
         # governance layer (deliverability + eligibility) governs the output.
         "company_pattern_index",
+        # --- 0.17.0 Phase 2: hosted paid corpus lead enrichment (Stream 2) ---
+        # ``mailaccess_pro`` injects published-business-contact leads (name/title/
+        # email/linkedin) from the paid corpus, mirroring the ``apollo`` precedent:
+        # lawful-public business-contact fields → in NO blocked bucket → allowed in
+        # every mode at the CAPABILITY level. Two independent gates keep it honest:
+        #   1. server-side ``mailaccess_pro_lawful_basis_established`` (Phase 1) is
+        #      the authoritative launch gate;
+        #   2. the local injection guard (domain_harvest_orchestrator) only runs it
+        #      in the lead-gen modes (public-business-contact / org-authorized-
+        #      verification) AND with a Pro key — never in security-investigation,
+        #      and a key never forces a mode.
+        # Every injected lead is ``verification="unverified"`` so the eligibility
+        # gate caps it at REVIEW: a corpus lead is never a ready-to-send lead on its
+        # own (the honesty invariant).
+        "mailaccess_pro",
     }
 )
 

@@ -1339,6 +1339,75 @@ Maintainers refresh the index from the master pipeline — see
 
 ---
 
+## MailAccess Pro (corpus lead enrichment)
+
+> **Status: server-gated.** The tier is available only when the hosted service's
+> `MAILACCESS_PRO_LAWFUL_BASIS_ESTABLISHED` gate is enabled. This documents the client
+> surface; the gate is enforced server-side.
+
+MailAccess Pro is an optional **paid** managed-enrichment tier. In a lead-gen-mode harvest,
+business-contact leads (name, title, email, LinkedIn) aggregated from publicly-available and
+third-party commercial sources are displayed as net-new, governed leads. It is a second,
+additive *live-only stream*: the open engine's output is unchanged, and without a key nothing
+about a harvest differs from today.
+
+| | |
+|--|--|
+| **Requires key** | Yes — `MAILACCESS_PRO_KEY` (paid) |
+| **Status** | Built; gated off until the compliance gate is flipped |
+| **Modes** | Injected only in `public-business-contact` / `org-authorized-verification` |
+
+**Setup & usage:**
+```bash
+mailaccess keys set MAILACCESS_PRO_KEY <your-key>
+mailaccess harvest-emails --domain company.com --mode public-business-contact
+mailaccess harvest-emails --company "Stripe" --mode public-business-contact
+```
+
+`--company` resolves a company *name* to its domain via the corpus first (a Pro-tier
+feature) and then harvests that domain. On an ambiguous name it lists the candidate
+`{name, domain, employees}` and exits asking you to re-run with the chosen `--domain`
+— it never auto-picks. With no key or in a non-lead-gen mode it prints a clear message
+and `--domain` continues to work natively.
+
+**Honest by construction:**
+
+- Every corpus lead is `verification: "unverified"` with explicit
+  `[MailAccess Pro · corpus · unverified]` provenance, rendered in its own section — it
+  never wears a native/verified affordance. The eligibility gate caps it at **REVIEW**
+  (research / outreach-review, not ready-to-send) regardless of its confidence;
+  `corpus_verified` is provenance metadata only and is *never* treated as a confirmed
+  verification.
+- **The key never forces a mode.** A key present in the default `security-investigation`
+  mode injects nothing and prints a one-line hint to re-run in a lead-gen mode. The mode
+  is never switched silently.
+- **Fail-open.** If the service is unreachable the harvest returns the full open result
+  with a subtle "corpus enrichment unavailable" note (the open stream is never degraded).
+- Corpus leads stay in a separate live-only Pro surface: they never enter the native email set,
+  open-result exports, local database, or history. An *observed* native address always beats an
+  inferred corpus lead.
+
+Depth policy: a domain returns all its people when the corpus holds ≤ 500; above that it
+returns the top 500 (verified first). Company-name entry resolves to a domain by trying
+the token as a domain first, then ranking organizations (exact > prefix > substring,
+employees as tie-break) — it never surfaces a wall of unrelated substring matches.
+
+A separately-gated **potential-personal-email** sub-group can be enabled independently
+(`mailaccess_pro_personal_emails_enabled`, default off). Personal-provider addresses
+(gmail/outlook/…) live only in the corpus's company-mode results, so the group is sourced
+from a company-mode search on the resolved company name and kept only for people whose name
+also appears in the on-domain roster — tying each personal email to someone independently
+seen at the company by their work address (a defensible association, not an unconfirmed
+match). It is compliance-sensitive, so it ships dark, is rendered/exported as its own group
+(`[potential personal · unverified]`, `is_personal` flag), and is never mixed into the
+business leads or native tiers. The enable decision is owner + legal (Phase 6).
+
+Honest framing: the fee recovers the paid infrastructure and processing cost of the
+corpus; queries are unlimited but serialized per key (one at a time) so concurrent load
+never degrades result quality.
+
+---
+
 ## `google_account_intel`
 
 Native, unauthenticated Google account intelligence: Gmail/Google account existence plus public profile data (GAIA ID, display name, profile photo, YouTube channel, public Drive files, Maps review history, and active Google services). No credentials, no login, no setup.
