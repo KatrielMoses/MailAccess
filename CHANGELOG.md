@@ -1,5 +1,10 @@
 # Changelog
 
+### 0.17.3 (2026-09-21)
+
+- Add a clickable Pro pricing prompt to the interactive CLI banner.
+- Show the final email-address count in a distinct harvest summary box.
+
 ### 0.17.2 (2026-09-21)
 
 - Route the hosted Pro client through the public website's restricted `/v1`
