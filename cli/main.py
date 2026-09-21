@@ -59,6 +59,8 @@ BANNER = f"""\
 ██║ ╚═╝ ██║██║  ██║██║███████╗██║  ██║╚██████╗╚██████╗███████╗███████║███████║
 ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚══════╝╚══════╝╚══════╝
 [/#820747]
+[link=https://mailaccess.pro/pricing][bold cyan]mailaccess.pro/pricing[/bold cyan][/link]
+[dim]Explore the live application and MailAccess Pro.[/dim]
 [dim]Open-source OSINT email intelligence tool[/dim]
 [dim]v{_VERSION} · pypi.org/project/mailaccess[/dim]"""
 

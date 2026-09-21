@@ -1217,6 +1217,14 @@ def run_harvest_emails(
         console.print(f"[red]Error:[/] harvest failed: {drive_error}")
         return 3
 
+    console.print(
+        Panel(
+            f"[bold]Total email addresses found:[/] [bold cyan]{n_emails:,}[/]",
+            border_style="cyan",
+            padding=(0, 1),
+            expand=False,
+        )
+    )
     return 0
 
 
