@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mailaccess"
-version = "0.17.3"
+version = "0.17.4"
 description = "Open-source OSINT email intelligence tool"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,6 +41,7 @@ dependencies = [
     "rapidfuzz>=3.0",
     "unidecode>=1.3",
     "alembic>=1.13",
+    "packaging>=23",
 ]
 
 [project.urls]
@@ -80,6 +81,7 @@ core-metadata-version = "2.4"
 packages = ["backend", "cli"]
 
 [tool.hatch.build.targets.wheel.force-include]
+"cli/assets/banner.ans" = "cli/assets/banner.ans"
 "data/breach_aliases.json" = "data/breach_aliases.json"
 "data/common_names.json" = "data/common_names.json"
 "data/company_patterns.json.gz" = "data/company_patterns.json.gz"
@@ -96,6 +98,7 @@ packages = ["backend", "cli"]
 "data/subdomain_wordlist.json" = "data/subdomain_wordlist.json"
 
 [tool.hatch.build.targets.sdist.force-include]
+"cli/assets/banner.ans" = "cli/assets/banner.ans"
 "data/breach_aliases.json" = "data/breach_aliases.json"
 "data/common_names.json" = "data/common_names.json"
 "data/company_patterns.json.gz" = "data/company_patterns.json.gz"

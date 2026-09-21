@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import getpass
+import importlib.resources
 import importlib.util
 import json
 import os
@@ -48,9 +50,10 @@ if _ENV_FILE.exists():
 
 from backend.config import APP_VERSION
 
-_VERSION = APP_VERSION
-
-BANNER = f"""\
+# Fallback glyph art used only when the packaged ANS asset cannot be loaded.
+# This is Rich markup (NOT raw ANSI), so it is printed with the normal Rich
+# markup path — never through ``Text.from_ansi``.
+_BANNER_ART_FALLBACK = """\
 [#820747]
 ███╗   ███╗ █████╗ ██╗██╗      █████╗  ██████╗ ██████╗███████╗███████╗███████╗
 ████╗ ████║██╔══██╗██║██║     ██╔══██╗██╔════╝██╔════╝██╔════╝██╔════╝██╔════╝
@@ -58,11 +61,52 @@ BANNER = f"""\
 ██║╚██╔╝██║██╔══██║██║██║     ██╔══██║██║     ██║     ██╔══╝  ╚════██║╚════██║
 ██║ ╚═╝ ██║██║  ██║██║███████╗██║  ██║╚██████╗╚██████╗███████╗███████║███████║
 ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚══════╝╚══════╝╚══════╝
-[/#820747]
-[link=https://mailaccess.pro/pricing][bold cyan]mailaccess.pro/pricing[/bold cyan][/link]
-[dim]Explore the live application and MailAccess Pro.[/dim]
-[dim]Open-source OSINT email intelligence tool[/dim]
-[dim]v{_VERSION} · pypi.org/project/mailaccess[/dim]"""
+[/#820747]"""
+
+
+@functools.lru_cache(maxsize=1)
+def _load_banner_art() -> str | None:
+    """Return the raw ANS banner art, or ``None`` if it cannot be loaded.
+
+    Resolves the packaged ``cli/assets/banner.ans`` asset first (installed
+    wheels), then falls back to the repo path for editable installs. Any
+    failure — missing file, decode error — returns ``None`` so the banner can
+    degrade to the hardcoded glyph fallback and never raises or aborts a
+    command.
+    """
+    try:
+        resource = importlib.resources.files("cli").joinpath("assets/banner.ans")
+        return resource.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    with contextlib.suppress(Exception):
+        fs_path = Path(__file__).resolve().parent / "assets" / "banner.ans"
+        return fs_path.read_text(encoding="utf-8")
+    return None
+
+
+def _render_banner() -> None:
+    """Print the banner to stderr: full-color ANS art then the dynamic footer.
+
+    The art is emitted via :func:`Text.from_ansi` (SGR-aware, markup-immune)
+    when the ANS asset loads, else the hardcoded Rich-markup glyph fallback.
+    The footer is always Rich markup and stays dynamic (pricing link, tagline,
+    live ``APP_VERSION``).
+    """
+    art = _load_banner_art()
+    if art is not None:
+        # End the art with an SGR reset so later output isn't tinted, then
+        # parse SGR codes directly (immune to Rich markup injection).
+        err_console.print(Text.from_ansi(art.rstrip("\n") + "\x1b[0m"))
+    else:
+        err_console.print(_BANNER_ART_FALLBACK)
+    err_console.print(
+        "[link=https://mailaccess.pro/pricing][bold cyan]mailaccess.pro/pricing[/bold cyan][/link]\n"
+        "[dim]Explore the live application and MailAccess Pro.[/dim]\n"
+        "[dim]Open-source OSINT email intelligence tool[/dim]\n"
+        f"[dim]v{APP_VERSION} · pypi.org/project/mailaccess[/dim]"
+    )
+
 
 _RICH_LINK_RE = re.compile(r"\[/?link(?:=[^\]]*)?\]")
 
@@ -262,6 +306,11 @@ def main_callback(
         help="Show MailAccess version and exit.",
         is_eager=True,
     ),
+    allow_outdated: bool = typer.Option(
+        False,
+        "--allow-outdated",
+        help="Bypass the soft-enforcement block for badly-outdated clients.",
+    ),
 ) -> None:
     import sys
 
@@ -271,7 +320,16 @@ def main_callback(
         console.print(f"mailaccess {APP_VERSION}")
         raise typer.Exit()
     if sys.stderr.isatty() and not no_banner:
-        err_console.print(BANNER)
+        _render_banner()
+
+    # Update notifier: record the bypass flag, kick off a background cache
+    # refresh (never blocks this run), and register the end-of-command notice.
+    from cli import update_check
+
+    update_check.set_allow_outdated(allow_outdated)
+    update_check.start_background_refresh()
+    update_check.register_exit_notice(err_console, ctx.invoked_subcommand, no_banner)
+
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
         raise typer.Exit()
@@ -1389,6 +1447,9 @@ def harvest_emails_command(
 
     SMTP RCPT TO verification runs by default. Use --no-verify to skip.
     """
+    from cli import update_check
+
+    update_check.enforce_or_exit("harvest-emails", err_console)
     if mode is not None and mode not in _PRODUCT_MODES:
         raise typer.BadParameter(f"--mode must be one of: {', '.join(_PRODUCT_MODES)}")
     # 0.17.0 — a paid MailAccess Pro key implies the lead-gen product (see
@@ -1617,6 +1678,9 @@ def discover_command(
     domain carrying its own DISCOVERY confidence (distinct from contact/email
     confidence). The output feeds the bulk harvester directly.
     """
+    from cli import update_check
+
+    update_check.enforce_or_exit("discover", err_console)
     if mode is not None and mode not in _PRODUCT_MODES:
         raise typer.BadParameter(f"--mode must be one of: {', '.join(_PRODUCT_MODES)}")
     from cli.discover import run_discover
@@ -1635,6 +1699,24 @@ def version() -> None:
     from backend.config import APP_VERSION
 
     console.print(f"mailaccess {APP_VERSION}")
+
+
+@app.command(name="upgrade")
+def upgrade_command(
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation prompt and upgrade immediately."
+    ),
+) -> None:
+    """Upgrade MailAccess to the latest release from PyPI.
+
+    Detects pip vs pipx best-effort and runs the matching upgrade command
+    (never sudo). On failure it prints the exact command to run manually.
+    """
+    from cli import update_check
+
+    exit_code = update_check.run_upgrade(yes, console, err_console)
+    if exit_code != 0:
+        raise typer.Exit(exit_code)
 
 
 @dataclass(frozen=True)
@@ -2285,6 +2367,9 @@ def serve_command(
     reload: bool = typer.Option(False, "--reload", help="Enable auto-reload (dev mode)"),
 ) -> None:
     """Start the MailAccess backend server."""
+    from cli import update_check
+
+    update_check.enforce_or_exit("serve", err_console)
     import asyncio
 
     import uvicorn
@@ -4503,6 +4588,9 @@ def investigate(
 ) -> None:
     """Run a full OSINT investigation against an email address.
     Exit codes: 0=completed 1=failed 2=invalid input 3=server unavailable"""
+    from cli import update_check
+
+    update_check.enforce_or_exit("investigate", err_console)
     if mode is not None and mode not in _PRODUCT_MODES:
         raise typer.BadParameter(f"--mode must be one of: {', '.join(_PRODUCT_MODES)}")
     if use_scraping_api and use_proxies:
@@ -4643,6 +4731,9 @@ def find_email_command(
     enforces suppression *before* printing — a suppressed subject is never
     displayed.
     """
+    from cli import update_check
+
+    update_check.enforce_or_exit("find-email", err_console)
     from backend.config import settings
     from backend.core.company_pattern_index import apply, get_index
     from backend.core.pattern_candidate import pattern_email_to_candidate

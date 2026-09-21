@@ -1,5 +1,16 @@
 # Changelog
 
+### 0.17.4 (2026-09-21)
+
+- Refresh the interactive CLI banner, rendered from a packaged art asset with a
+  built-in fallback.
+- Add a PyPI update notifier: the CLI checks for a newer release (cached,
+  best-effort, never blocking) and prints an upgrade hint at the end of a command.
+  Disable it with `MAILACCESS_NO_UPDATE_CHECK=1`.
+- Add a `mailaccess upgrade` command that updates the tool in place (pip/pipx aware).
+- Warn and stop network commands when the installed release is a full minor version
+  behind the latest; bypass with `--allow-outdated` or `MAILACCESS_ALLOW_OUTDATED=1`.
+
 ### 0.17.3 (2026-09-21)
 
 - Add a clickable Pro pricing prompt to the interactive CLI banner.

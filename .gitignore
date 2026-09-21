@@ -139,10 +139,17 @@ coverage/
 # Agents
 .agents/
 .codex/
+.claude/
 
 # Local verification / scratch artifacts
 .tmp/
 live-verification-*/
+fresh-verification-*/
+buildtmp/
+# Generated per-run test env files (e.g. buildtmp/mailaccess_test_*.env) may hold
+# config/secrets — never commit. .env.example is re-included below.
+*.env
+!.env.example
 inspect_structure.py
 
 # Investigation outputs (never commit personal investigation data)
