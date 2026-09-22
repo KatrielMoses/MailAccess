@@ -32,6 +32,7 @@ import asyncio
 import logging
 import math
 import re
+import time
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -647,3 +648,86 @@ async def _serve_domain(
     if not leads:
         return _envelope(status="empty", company=company)
     return _envelope(status="ok", leads=leads, company=company)
+
+
+# ── Coverage count (free-tier upsell teaser) ──────────────────────────────────
+# A keyless, count-only view of the corpus: "how many business contacts would Pro
+# add for this domain". It returns ONLY an integer — never rows, never PII — so it
+# is safe to expose without a Pro key. It honors the SAME gates as /v1/enrich
+# (lawful-basis, consumer-domain rejection, suppression fail-closed) so the teaser
+# can never advertise a subject who has objected, and the number equals what a Pro
+# harvest would actually serve (on-domain, deduped, suppressed, capped) — never the
+# engine's raw match total, which would over-promise.
+_COVERAGE_TTL_SECONDS = 24 * 3600
+# Per-domain in-process cache (a count is stable day-to-day). Bounds engine load
+# from a keyless endpoint; the lock serializes cache-miss engine hits so a burst of
+# distinct domains cannot fan out concurrently. Put a per-IP rate limit at the edge
+# proxy as the primary abuse control.
+_COVERAGE_CACHE: dict[str, tuple[float, int]] = {}
+_COVERAGE_LOCK = asyncio.Lock()
+
+
+async def _servable_domain_count(domain: str) -> int:
+    """Distinct on-domain, non-suppressed corpus contacts for ``domain`` — the count
+    a Pro harvest would actually append. Mirrors ``_serve_domain``'s servable set
+    (minus the projection; we only need the length). Capped at ``_DEPTH_CAP``.
+
+    Raises :class:`SuppressionUnavailable` so the route can fail CLOSED.
+    """
+    target = _norm_domain(domain)
+    if _is_consumer_domain(target):
+        return 0
+    rows, _total, orgs = await _collect(domain, verified_only=False, cap=_DEPTH_CAP)
+    business = [r for r in rows if _email_domain(r.get("email")) == target]
+    index = await suppression.load_index()
+    company_name = _org_name_for_domain(orgs, domain)
+    if suppression.subject_suppressed(index, domain=target) or (
+        company_name and suppression.subject_suppressed(index, company=company_name)
+    ):
+        return 0
+    leads = suppression.filter_rows([_project_lead(r) for r in business], index)
+    return len(leads)
+
+
+@router.get("/coverage")
+async def coverage(domain: str) -> dict[str, Any]:
+    """Unauthenticated corpus-coverage COUNT for ``domain`` (free-tier upsell).
+
+    Returns ``{available, domain, count}`` — an integer only, never rows/PII.
+    ``available`` is False (with a ``reason``) when the tier is dark, the domain is
+    invalid/consumer, the engine is unreachable, or suppression can't be read
+    (fail-closed). Cached per domain (24h) and serialized against the engine.
+    """
+    d = _norm_domain(domain)
+    if not d or not _looks_like_domain(d):
+        return {"available": False, "reason": "invalid_domain"}
+    # Same server-authoritative gate as /v1/enrich — the teaser stays dark until the
+    # lawful basis is established.
+    if not settings.mailaccess_pro_lawful_basis_established:
+        return {"available": False, "reason": _REASON_LAWFUL_BASIS}
+
+    now = time.monotonic()
+    cached = _COVERAGE_CACHE.get(d)
+    if cached is not None and now - cached[0] < _COVERAGE_TTL_SECONDS:
+        return {"available": True, "domain": d, "count": cached[1]}
+
+    try:
+        async with _COVERAGE_LOCK:
+            # Re-check under the lock — a concurrent miss may have filled it.
+            cached = _COVERAGE_CACHE.get(d)
+            if cached is not None and time.monotonic() - cached[0] < _COVERAGE_TTL_SECONDS:
+                return {"available": True, "domain": d, "count": cached[1]}
+            count = await asyncio.wait_for(
+                _servable_domain_count(d), timeout=_SERVE_DEADLINE_SECONDS
+            )
+    except SuppressionUnavailable:
+        # Fail CLOSED — never advertise a count we cannot prove is suppression-clean.
+        return {"available": False, "reason": _REASON_SUPPRESSION}
+    except (ProEngineUnavailable, ProQueueUnavailable, asyncio.TimeoutError):
+        return {"available": False, "reason": _REASON_ENGINE}
+    except Exception:
+        _LOG.exception("mailaccess_pro /v1/coverage unexpected error; serving unavailable")
+        return {"available": False, "reason": _REASON_ENGINE}
+
+    _COVERAGE_CACHE[d] = (time.monotonic(), count)
+    return {"available": True, "domain": d, "count": count}

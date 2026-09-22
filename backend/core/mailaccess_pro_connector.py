@@ -31,6 +31,10 @@ from ..config import settings
 _LOG = logging.getLogger(__name__)
 
 _ENRICH_PATH = "/v1/enrich"
+_COVERAGE_PATH = "/v1/coverage"
+# The coverage teaser is a best-effort, human-facing nicety — keep it snappy so it
+# never noticeably delays the end-of-harvest summary.
+_COVERAGE_TIMEOUT = 4.0
 # C2 — TOTAL wall-clock budget for one hosted call (connect + full streamed body),
 # enforced with asyncio.wait_for so a drip response cannot outlive it.
 _TIMEOUT = 20.0
@@ -190,6 +194,37 @@ async def _stream_json(
                 raise ValueError("response too large")
             chunks.append(chunk)
     return json.loads(b"".join(chunks))
+
+
+async def fetch_coverage_count(domain: str) -> int | None:
+    """Best-effort corpus-coverage COUNT for *domain* from the public ``/v1/coverage``.
+
+    Needs NO Pro key — it powers the free-tier upsell line ("N found · M available
+    with Pro"). Returns the corpus contact count (>= 0), or ``None`` on any failure
+    or an ``available: false`` response. Fail-open, hard: never raises into the CLI.
+    """
+    base = _api_url()
+    if not base:
+        return None
+    url = f"{base}{_COVERAGE_PATH}"
+    try:
+        async with httpx.AsyncClient(timeout=_COVERAGE_TIMEOUT) as client:
+            resp = await asyncio.wait_for(
+                client.get(url, params={"domain": domain}), timeout=_COVERAGE_TIMEOUT
+            )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except (httpx.HTTPError, OSError, asyncio.TimeoutError, ValueError):
+        _LOG.debug("mailaccess_pro coverage unavailable; no upsell line", exc_info=True)
+        return None
+    if not isinstance(data, dict) or not data.get("available"):
+        return None
+    count = data.get("count")
+    # Strict: an int (not a bool), non-negative. Anything else → no teaser.
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        return None
+    return count
 
 
 async def resolve_company(company: str) -> dict[str, Any]:

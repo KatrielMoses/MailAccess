@@ -1,5 +1,15 @@
 # Changelog
 
+### 0.17.5 (2026-09-22)
+
+- Free-tier harvest now shows the exact Pro coverage for the domain
+  (`N found · M available with Pro`) instead of an estimated multiplier. The
+  number is fetched count-only from the hosted `/v1/coverage` endpoint — no
+  contact data is transferred — and corpus contacts are labelled unverified.
+- Add the keyless `GET /v1/coverage` endpoint (count only, never rows/PII),
+  honoring the lawful-basis gate, consumer-domain rejection, and suppression
+  (fail-closed); cached per domain.
+
 ### 0.17.4 (2026-09-21)
 
 - Refresh the interactive CLI banner, rendered from a packaged art asset with a

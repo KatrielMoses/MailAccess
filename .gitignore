@@ -204,6 +204,7 @@ docs/audit/
 !tests/test_pro_brief_c.py
 !tests/test_pro_brief_d.py
 !tests/test_pro_cli.py
+!tests/test_pro_coverage_route.py
 !tests/test_pro_enrich_route.py
 !tests/test_pro_injection.py
 !tests/test_pro_internal.py
