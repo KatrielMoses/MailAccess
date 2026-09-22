@@ -101,7 +101,8 @@ def _render_banner() -> None:
     else:
         err_console.print(_BANNER_ART_FALLBACK)
     err_console.print(
-        "[link=https://mailaccess.pro/pricing][bold cyan]mailaccess.pro/pricing[/bold cyan][/link]\n"
+        "[link=https://mailaccess.pro/pricing?src=cli]"
+        "[bold #D8455A]mailaccess.pro/pricing?src=cli[/bold #D8455A][/link]\n"
         "[dim]Explore the live application and MailAccess Pro.[/dim]\n"
         "[dim]Open-source OSINT email intelligence tool[/dim]\n"
         f"[dim]v{APP_VERSION} · pypi.org/project/mailaccess[/dim]"

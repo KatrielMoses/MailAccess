@@ -1227,32 +1227,46 @@ def run_harvest_emails(
 
     # Pro upsell — free-tier users (no MailAccess Pro key) see the EXACT number of
     # business contacts Pro would add for this domain, fetched count-only (no data)
-    # from the public /v1/coverage endpoint. The line reads "<found> · <found +
-    # corpus> available with Pro". Best-effort: any failure (dead API, tier dark,
-    # suppressed subject) simply omits the line — it never blocks or errors the
-    # harvest. Corpus contacts are unverified by definition, so we say so and never
-    # dress them as verified.
+    # from the public /v1/coverage endpoint, plus the live founder-pricing counter
+    # from /v1/founder. The block reads "<found> · <found+corpus> available with
+    # Pro" then the seats line. Themed in the banner-art maroon (#D8455A). The
+    # ?src=cli tag on the link attributes CLI-driven upgrades. Best-effort: any
+    # failure (dead API, tier dark, suppressed subject) simply omits the line — it
+    # never blocks or errors the harvest.
     has_pro_key = bool(getattr(settings, "mailaccess_pro_key", None))
     if not has_pro_key and n_emails > 0:
         corpus_count: int | None = None
+        founder: dict | None = None
         try:
             from backend.core import mailaccess_pro_connector
 
-            corpus_count = asyncio.run(
-                mailaccess_pro_connector.fetch_coverage_count(cleaned_domain)
-            )
+            async def _fetch_pro_teaser():
+                return await asyncio.gather(
+                    mailaccess_pro_connector.fetch_coverage_count(cleaned_domain),
+                    mailaccess_pro_connector.fetch_founder_status(),
+                )
+
+            corpus_count, founder = asyncio.run(_fetch_pro_teaser())
         except Exception:
-            corpus_count = None
+            corpus_count, founder = None, None
         if corpus_count and corpus_count > 0:
             available = n_emails + corpus_count
             console.print(
-                f"\n[bold cyan]{n_emails:,} found[/] · "
+                f"\n[bold #D8455A]{n_emails:,} found[/] · "
                 f"[bold]{available:,} available with Pro[/]\n"
-                f"[dim]Pro appends {corpus_count:,} business contacts (unverified) "
-                f"from the corpus. Upgrade → [/dim]"
-                f"[link=https://mailaccess.pro/pricing]"
-                f"[bold cyan]mailaccess.pro/pricing[/bold cyan][/link]"
+                f"[dim]Pro appends {corpus_count:,} business contacts — name, role, "
+                f"company, source. Upgrade → [/dim]"
+                f"[link=https://mailaccess.pro/pricing?src=cli]"
+                f"[bold #D8455A]mailaccess.pro/pricing?src=cli[/bold #D8455A][/link]"
             )
+            if founder and isinstance(founder.get("seats_left"), int):
+                price = founder.get("price_label") or "$19/mo"
+                total = founder.get("seats_total") or 100
+                seats_left = founder["seats_left"]
+                console.print(
+                    f"[bold]{price} for the first {total:,}[/] · "
+                    f"[bold #D8455A]{seats_left:,} seats left[/]"
+                )
     return 0
 
 

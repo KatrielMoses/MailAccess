@@ -1,5 +1,16 @@
 # Changelog
 
+### 0.17.6 (2026-09-22)
+
+- Free-tier harvest upsell now names what a Pro contact contains
+  (`name, role, company, source`) and shows the live founder-pricing counter
+  (`$19/mo for the first 100 · N seats left`), with `N` fetched from the new
+  keyless `GET /v1/founder` endpoint so it can never go stale.
+- `GET /v1/founder` derives `seats_left` live from the entitlement store (seats
+  total minus provisioned keys, floored at 0); integers only, lawful-basis gated.
+- CLI pricing links carry `?src=cli` for upgrade attribution, and the banner
+  footer plus harvest upsell are re-themed to the brand maroon.
+
 ### 0.17.5 (2026-09-22)
 
 - Free-tier harvest now shows the exact Pro coverage for the domain

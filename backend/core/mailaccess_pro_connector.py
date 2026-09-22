@@ -32,6 +32,7 @@ _LOG = logging.getLogger(__name__)
 
 _ENRICH_PATH = "/v1/enrich"
 _COVERAGE_PATH = "/v1/coverage"
+_FOUNDER_PATH = "/v1/founder"
 # The coverage teaser is a best-effort, human-facing nicety — keep it snappy so it
 # never noticeably delays the end-of-harvest summary.
 _COVERAGE_TIMEOUT = 4.0
@@ -225,6 +226,42 @@ async def fetch_coverage_count(domain: str) -> int | None:
     if isinstance(count, bool) or not isinstance(count, int) or count < 0:
         return None
     return count
+
+
+async def fetch_founder_status() -> dict[str, Any] | None:
+    """Best-effort founder-pricing status from the public keyless ``/v1/founder``.
+
+    Returns ``{seats_left, seats_total, price_label}`` (seats_left always a
+    non-negative int; the other two may be ``None``), or ``None`` on any failure or
+    an ``available: false`` response. Fail-open, hard: never raises into the CLI.
+    """
+    base = _api_url()
+    if not base:
+        return None
+    url = f"{base}{_FOUNDER_PATH}"
+    try:
+        async with httpx.AsyncClient(timeout=_COVERAGE_TIMEOUT) as client:
+            resp = await asyncio.wait_for(client.get(url), timeout=_COVERAGE_TIMEOUT)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except (httpx.HTTPError, OSError, asyncio.TimeoutError, ValueError):
+        _LOG.debug("mailaccess_pro founder status unavailable; no urgency line", exc_info=True)
+        return None
+    if not isinstance(data, dict) or not data.get("available"):
+        return None
+    seats_left = data.get("seats_left")
+    if isinstance(seats_left, bool) or not isinstance(seats_left, int) or seats_left < 0:
+        return None
+    seats_total = data.get("seats_total")
+    price_label = data.get("price_label")
+    return {
+        "seats_left": seats_left,
+        "seats_total": seats_total
+        if isinstance(seats_total, int) and not isinstance(seats_total, bool)
+        else None,
+        "price_label": price_label if isinstance(price_label, str) and price_label else None,
+    }
 
 
 async def resolve_company(company: str) -> dict[str, Any]:

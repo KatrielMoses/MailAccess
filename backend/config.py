@@ -782,6 +782,12 @@ class Settings(BaseSettings):
     # is empty the endpoint rejects every request, so the route is inert until it is
     # deliberately configured. Never logged.
     mailaccess_pro_internal_secret: str = ""
+    # 0.17.6 — founder-pricing counter surfaced in the free-tier CLI upsell. The
+    # seat total and price label are operator-configurable; ``seats_left`` is derived
+    # LIVE from the entitlement store (count of provisioned Pro keys) so the
+    # "N seats left" urgency line can never go stale. Hidden while the tier is dark.
+    mailaccess_pro_founder_seats_total: int = 100
+    mailaccess_pro_founder_price_label: str = "$19/mo"
 
     # Proxy (single static endpoint — legacy; superseded by the Phase 5B egress
     # pool below, which treats a single configured proxy as a pool of one).

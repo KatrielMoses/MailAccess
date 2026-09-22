@@ -22,7 +22,7 @@ import hashlib
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 
 from ..db.database import AsyncSessionLocal, init_db
 from ..db.models import ProKey
@@ -212,6 +212,18 @@ async def delete_pro_key_hash(digest: str) -> bool:
 async def deactivate_pro_key_hash(digest: str) -> bool:
     """Revoke an entitlement by its SHA-256 hash (compat shim → status='revoked')."""
     return await set_pro_key_status_hash(digest, "revoked")
+
+
+async def count_pro_keys() -> int:
+    """Number of provisioned entitlements (any status). Used to derive founder
+    seats-left live: a cancelled subscription deletes its row (freeing a seat), so a
+    plain row count tracks currently-held seats. Raises on store error (the caller
+    fails closed to hiding the counter)."""
+    await init_db()
+    async with AsyncSessionLocal() as session:
+        return int(
+            (await session.execute(select(func.count()).select_from(ProKey))).scalar_one()
+        )
 
 
 async def list_pro_keys() -> list[dict]:

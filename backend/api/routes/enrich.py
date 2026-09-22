@@ -42,7 +42,7 @@ from ...config import settings
 from ...core import mailaccess_pro_client as pro_client
 from ...core import suppression
 from ...core.mailaccess_pro_client import ProEngineUnavailable
-from ...core.pro_keys import hash_key, validate_pro_key
+from ...core.pro_keys import count_pro_keys, hash_key, validate_pro_key
 from ...core.pro_query_queue import ProQueueUnavailable, get_queue
 from ...core.suppression import SuppressionUnavailable
 
@@ -731,3 +731,50 @@ async def coverage(domain: str) -> dict[str, Any]:
 
     _COVERAGE_CACHE[d] = (time.monotonic(), count)
     return {"available": True, "domain": d, "count": count}
+
+
+# ── Founder-pricing counter (free-tier upsell urgency) ────────────────────────
+# A keyless, integer-only view of the founder deal: how many of the discounted
+# seats remain. ``seats_left`` is derived LIVE from the entitlement store (seats
+# total minus provisioned keys) so a hardcoded "N left" can never go stale. Same
+# lawful-basis gate as the rest of the tier. Cached briefly (seat counts move
+# slowly and the CLI calls this once per run).
+_FOUNDER_TTL_SECONDS = 60
+_FOUNDER_CACHE: dict[str, tuple[float, int]] = {}
+_FOUNDER_LOCK = asyncio.Lock()
+
+
+async def _founder_seats_used() -> int:
+    now = time.monotonic()
+    cached = _FOUNDER_CACHE.get("used")
+    if cached is not None and now - cached[0] < _FOUNDER_TTL_SECONDS:
+        return cached[1]
+    async with _FOUNDER_LOCK:
+        cached = _FOUNDER_CACHE.get("used")
+        if cached is not None and time.monotonic() - cached[0] < _FOUNDER_TTL_SECONDS:
+            return cached[1]
+        used = await asyncio.wait_for(count_pro_keys(), timeout=10.0)
+        _FOUNDER_CACHE["used"] = (time.monotonic(), used)
+        return used
+
+
+@router.get("/founder")
+async def founder() -> dict[str, Any]:
+    """Keyless founder-pricing status: ``{available, seats_total, seats_left,
+    price_label}``. ``seats_left`` is live (total − provisioned keys, floored at 0).
+    Unavailable while the tier is dark or the store can't be counted."""
+    if not settings.mailaccess_pro_lawful_basis_established:
+        return {"available": False, "reason": _REASON_LAWFUL_BASIS}
+    total = int(getattr(settings, "mailaccess_pro_founder_seats_total", 100) or 0)
+    price = str(getattr(settings, "mailaccess_pro_founder_price_label", "") or "")
+    try:
+        used = await _founder_seats_used()
+    except Exception:
+        _LOG.exception("mailaccess_pro /v1/founder count failed; serving unavailable")
+        return {"available": False, "reason": _REASON_ENGINE}
+    return {
+        "available": True,
+        "seats_total": total,
+        "seats_left": max(0, total - used),
+        "price_label": price,
+    }
