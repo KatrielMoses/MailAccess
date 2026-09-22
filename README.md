@@ -1,25 +1,25 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/mailaccess-logo-reversed.svg">
-    <img src="assets/brand/mailaccess-logo.svg" alt="MailAccess" width="440">
-  </picture>
+  <img src="assets/terminal-banner.svg" alt="mailaccess" width="640">
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-0D0D0D.svg" alt="License: MIT"></a>
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11%2B-0D0D0D.svg" alt="Python 3.11+"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10%2B-0D0D0D.svg" alt="Python 3.10+"></a>
   <a href="docker-compose.yml"><img src="https://img.shields.io/badge/Docker-Compose-0D0D0D.svg" alt="Docker Compose"></a>
-  <a href="https://pypi.org/project/mailaccess/"><img src="https://img.shields.io/static/v1?label=PyPI&message=0.17.3&color=8A1C2B&logo=pypi&logoColor=white" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/mailaccess/"><img src="https://img.shields.io/static/v1?label=PyPI&message=0.17.6&color=8A1C2B&logo=pypi&logoColor=white" alt="PyPI version"></a>
   <a href="https://pepy.tech/projects/mailaccess"><img src="https://img.shields.io/pepy/dt/mailaccess?color=8A1C2B&amp;label=downloads" alt="PyPI downloads"></a>
 </p>
 
-Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web — get back a unified exposure score and structured findings you can export or pipe into Maltego.
+<p align="center">
+  <a href="https://mailaccess.pro"><b>mailaccess.pro</b></a>
+  &nbsp;·&nbsp; <a href="docs/modules.md">Docs</a>
+  &nbsp;·&nbsp; <a href="https://pypi.org/project/mailaccess/">PyPI</a>
+  &nbsp;·&nbsp; <a href="CHANGELOG.md">Changelog</a>
+</p>
+
+Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web, then get back a unified exposure score and structured findings you can export or pipe into Maltego.
 
 Built for security researchers, OSINT analysts, and penetration testers operating under authorization. Read [DISCLAIMER.md](DISCLAIMER.md) before use.
-
-## Terminal Output
-
-![MailAccess terminal output](assets/terminal-hero.png)
 
 ## Install
 
@@ -32,7 +32,7 @@ The CLI auto-starts and stops the backend for each investigation. Use
 `mailaccess serve` when you want a persistent server, or install
 `mailaccess[ml]` for optional spaCy-based name classification.
 
-Full install options (Docker, persistent server, self-hosting) -> [docs/self-hosting.md](docs/self-hosting.md).
+Full install options (Docker, persistent server, self-hosting) in [docs/self-hosting.md](docs/self-hosting.md).
 
 ## Quick Start
 
@@ -43,135 +43,89 @@ mailaccess harvest-emails --domain company.com
 mailaccess harvest-emails --domain company.com --export harvest.csv
 mailaccess find-email --name "Jane Doe" --domain company.com
 mailaccess keys set HIBP_API_KEY your-key
-mailaccess keys list
+mailaccess pro
+mailaccess upgrade
 mailaccess serve
-mailaccess modules
 ```
 
-Pipeline, stdin, JSONL, and CI examples -> [docs/integrations.md](docs/integrations.md#pipeline-integration).
-
-![Investigation demo](assets/investigate.gif)
-
-![Harvest emails demo](assets/harvest-emails.gif)
+Pipeline, stdin, JSONL, and CI examples in [docs/integrations.md](docs/integrations.md#pipeline-integration).
 
 ## What It Does
 
-- **Identity graph** - cross-platform correlation of accounts, usernames, names, avatars, breach data, and profile links.
-- **Name Consensus Engine** - synthesizes independent name signals into confirmed, probable, possible, or unknown identity bands.
-- **Defender's Brief** - security-manager-ready risk summary with prioritized findings and a concrete next action.
-- **Domain email harvesting** - `harvest-emails` discovers organization addresses across Common Crawl, GitHub, CT logs, registries, keyservers, dorks, employee pages, and patterns.
-- **Company email patterns** - `find-email` turns a name plus an employer domain into one honestly-graded likely address, offline from a bundled 384K-domain pattern index; unverified guesses are labelled as such, and Microsoft 365 mailboxes are verified where the provider allows.
-- **5,000+ platform corpus** - a native username-platform engine over a MailAccess-verified corpus of 5,000+ platform definitions (`data/mailaccess_sites.json`), with two-marker detection and zero runtime dependencies; each investigation probes a bounded, rank- and health-prioritized subset of the highest-signal platforms. Plus a native account-existence engine covering 250+ email-checkable services, and native Google-account intelligence (unauthenticated, on by default).
-- **Deep breach mode** - probes the highest-severity breach corpus for account-existence risk.
-- **Credential Risk Score** - separate 0-100 credential exposure band with top drivers and recommended next steps.
-- **6 export formats** - JSON, CSV, PDF, Markdown, STIX 2.1, and Maltego XML.
+- **Identity graph:** cross-platform correlation of accounts, usernames, names, avatars, breach data, and profile links. View it at `/investigation/:id/graph` or export with `GET /api/report/{id}/graph`.
+- **Name Consensus Engine:** synthesizes independent name signals into confirmed, probable, possible, or unknown identity bands.
+- **Defender's Brief:** security-manager-ready risk summary with prioritized findings and a concrete next action.
+- **Credential Risk Score:** separate 0-100 credential exposure band with top drivers and recommended next steps.
+- **Domain email harvesting:** `harvest-emails` discovers organization addresses across Common Crawl, GitHub, CT logs, registries, keyservers, dorks, employee pages, and patterns. *(Pro adds the decision-makers behind the domain.)*
+- **Company email patterns:** `find-email` turns a name plus an employer domain into one honestly-graded likely address, offline from a bundled 384K-domain pattern index. Microsoft 365 mailboxes are verified where the provider allows.
+- **5,000+ platform corpus:** a native username-platform engine over a MailAccess-verified corpus of 5,000+ platform definitions, with two-marker detection and zero runtime dependencies. Plus a native account-existence engine covering 250+ email-checkable services, and native Google-account intelligence.
+- **Deep breach mode:** probes the highest-severity breach corpus for account-existence risk.
+- **6 export formats:** JSON, CSV, PDF, Markdown, STIX 2.1, and Maltego XML.
 
-## Identity Graph
+## MailAccess Pro
 
-Every investigation builds an identity graph linking accounts by shared usernames, photos, display names, and breach data. View it at `/investigation/:id/graph`, export it with `GET /api/report/{id}/graph`, or read the full model in [docs/modules.md](docs/modules.md).
+**Your free harvest finds the addresses that are public. It does not find the people who make the decisions.**
 
-## Name Consensus Engine
-
-MailAccess collects name signals from profile modules and returns a defensible identity summary:
+The names that matter, heads of security, procurement, and engineering, rarely show up in Common Crawl, CT logs, or a GitHub commit. MailAccess Pro closes that gap. Add a Pro key and any lead-gen harvest is enriched with real business contacts, each carrying **name, role, company, email, and LinkedIn**, aggregated from publicly-available and third-party commercial sources. One command turns a bare domain into a working outreach list:
 
 ```text
-CONFIRMED IDENTITY
-  Name:     Katriel Moses  [CONFIRMED]
-  Sources:  GitHub . Gravatar . Keybase . PGP
-  Reasoning: 4 independent sources agree.
+$ mailaccess harvest-emails --domain acme.com
+  312 addresses found
+
+$ mailaccess harvest-emails --domain acme.com --mode public-business-contact
+  312 found · 968 available with Pro
+  ──────────────────────────────────────────────────────────────────
+  Dana Reed    VP Security           Acme   dana.reed@acme.com   in/danareed
+  Sam Okoye    Head of Procurement   Acme   s.okoye@acme.com     in/samokoye
+  Priya Nair   Director, Platform    Acme   priya@acme.com       in/priyanair
+  … 653 more business contacts (name, role, company, email, LinkedIn)
 ```
 
-Full confidence rules and source behavior -> [docs/modules.md](docs/modules.md).
+Why teams upgrade:
 
-## Defender's Brief
+- **See the gap before you pay.** Every free harvest prints the exact number of extra contacts Pro would add for that domain. No guessing, no vague multiplier.
+- **Coverage the open web cannot give you.** Reach the budget-owners and inboxes that public crawling misses entirely.
+- **Company-name resolution.** Skip the domain lookup: `--company "Stripe"` resolves it for you.
+- **Founder pricing: $19/mo for the first 100 seats.** Locked for life, limited seats remaining. Run `mailaccess pro` for live availability.
 
-Every investigation includes a 30-second risk summary designed for security managers:
+Corpus contacts are live-only: they render in their own Pro surface and never touch your exports, local database, or history. If the service is unreachable, the harvest shows the full open result. Without a key, nothing changes.
 
-```text
-DEFENDER'S BRIEF
-  Risk:    CRITICAL
-  Summary: Active infostealer infection detected.
-  1. Active credential theft   [CRITICAL]
-     -> Rotate credentials immediately.
-  Next action: Immediately rotate credentials and enforce hardware MFA.
-```
+[Start with Pro →](https://mailaccess.pro/pricing?src=readme) · [how it works](docs/modules.md#mailaccess-pro-corpus-lead-enrichment)
 
-Suppress it with `--no-brief`; full details live in [docs/modules.md](docs/modules.md).
+## Staying Up To Date
 
-## Find Email (Company Patterns)
-
-Give MailAccess a person's name and their employer domain and it returns **one** most-likely email address — not a spray of guesses:
+MailAccess checks PyPI for a newer release (cached, best-effort, never blocking) and
+prints an upgrade hint after a command when you're behind. Update in place with:
 
 ```bash
-mailaccess find-email --name "Jane Doe" --domain company.com
+mailaccess upgrade
 ```
 
-```text
-Company email pattern - company.com
-  email          jane.doe@company.com
-  verification   unverified
-  confidence     likely (0.78)
-  support        142 verified samples
-  provenance     company email pattern (P04, 142 verified samples, conf 0.91)
-```
-
-The pattern comes from a bundled index of ~384,000 domains learned from real verified addresses — it loads offline, no network access. The result is **honest by construction**: an inferred address is always labelled `unverified` and graded *likely*, never presented as confirmed. Where the domain runs on Microsoft 365, the candidate is checked against the mailbox-existence oracle — a confirmed one is upgraded to `provider_verified`, and one proven not to exist is dropped. Add `--title` to apply per-role pattern overrides. Domains the index doesn't cover fall back cleanly to live inference. Full details -> [docs/modules.md](docs/modules.md#find-email-company-email-pattern-index).
-
-## MailAccess Pro — corpus lead enrichment
-
-> **Availability is controlled by the hosted service.** The tier is served only when its
-> server-side compliance gate is enabled; this section documents the client surface.
-
-MailAccess Pro is an optional **paid** managed-enrichment add-on that enriches a lead-gen-mode
-harvest with business-contact leads (name, title, email, LinkedIn) aggregated from
-publicly-available and third-party commercial sources. It is strictly additive: without a key the
-open engine behaves exactly as it always has.
-
-```bash
-mailaccess keys set MAILACCESS_PRO_KEY <your-key>
-# harvest a domain, with corpus leads appended (lead-gen mode required):
-mailaccess harvest-emails --domain company.com --mode public-business-contact
-# or resolve a company name to its domain first (a Pro-tier feature):
-mailaccess harvest-emails --company "Stripe" --mode public-business-contact
-```
-
-Honest by construction:
-
-- Corpus leads are always labelled **`unverified`** with explicit `[MailAccess Pro · corpus · unverified]` provenance — never dressed as a verified/native hit — and the eligibility gate caps them at **REVIEW** (research / outreach-review, not ready-to-send).
-- **The key never forces a mode.** Corpus leads are only injected in a lead-gen mode (`public-business-contact` / `org-authorized-verification`); a key in the default `security-investigation` mode prints a hint and injects nothing.
-- **Fail-open.** If the service is unreachable, the harvest shows the full open result with a one-line "corpus enrichment unavailable" note.
-- Honest framing: the fee recovers paid infrastructure and processing cost; queries are unlimited but serialized per key (one at a time) to protect result quality.
-
-Corpus leads are live-only: they remain in their own unverified Pro surface and never enter the
-open-result exports, local database, or history. See [docs/modules.md](docs/modules.md#mailaccess-pro-corpus-lead-enrichment).
+Silence the check with `MAILACCESS_NO_UPDATE_CHECK=1`. Prefer email? [Get release notes in your inbox](https://mailaccess.pro/updates?src=readme).
 
 ## Modules
 
-75 modules over a 5,000+ platform corpus. Investigations probe a bounded, evidence-first wave of the highest-signal platforms (~700 vetted by default) rather than the whole corpus. Full module reference -> [docs/modules.md](docs/modules.md).
+75 modules over a 5,000+ platform corpus. Investigations probe a bounded, evidence-first wave of the highest-signal platforms (~700 vetted by default) rather than the whole corpus. Full module reference in [docs/modules.md](docs/modules.md).
 
 ## API Keys
 
-Most modules work with zero keys. Optional keys unlock more coverage. Full list -> [docs/api-keys.md](docs/api-keys.md).
+Most modules work with zero keys. Optional keys unlock more coverage. Full list in [docs/api-keys.md](docs/api-keys.md).
 
 ## Export Formats
 
-Save reports as JSON, CSV, PDF, Markdown, STIX 2.1, or Maltego XML with `-o`. Full export reference -> [docs/exports.md](docs/exports.md).
-
-## Integrations
-
-Use Maltego, Slack, Discord, generic webhooks, JSONL pipelines, and CI workflows. Full integration guide -> [docs/integrations.md](docs/integrations.md).
+Save reports as JSON, CSV, PDF, Markdown, STIX 2.1, or Maltego XML with `-o`. Full export reference in [docs/exports.md](docs/exports.md).
 
 ## Self-Hosting
 
-Run the CLI locally or launch the full web stack with Docker Compose. Full guide -> [docs/self-hosting.md](docs/self-hosting.md).
+Run the CLI locally or launch the full web stack with Docker Compose. Full guide in [docs/self-hosting.md](docs/self-hosting.md).
 
-## Changelog
+## Sponsors
 
-See [CHANGELOG.md](CHANGELOG.md) for release history.
+MailAccess is free and MIT licensed. Sponsors keep the corpus and infrastructure running.
 
-## Troubleshooting
+<!-- Sponsor logos are rendered here. -->
 
-![Troubleshooting demo](assets/troubleshoot.gif)
+[Sponsor this project →](https://mailaccess.pro/sponsors?src=readme)
 
 ## Links
 
@@ -184,11 +138,12 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 | [Export formats](docs/exports.md) | Supported formats, MIME types, filename conventions |
 | [Integrations](docs/integrations.md) | Maltego, Slack, Discord, generic webhooks |
 | [Brand assets](docs/brand.md) | Logo lockups, palette, typography, clearspace, downloadable SVGs |
-| [Sponsors](docs/sponsors.md) | Current partners and categories accepting sponsors |
 | [Contributing](CONTRIBUTING.md) | Adding modules, adding exporters, code style, PR checklist |
-| [PyPI](https://pypi.org/project/mailaccess/) | `pip install mailaccess` |
-| [GitHub](https://github.com/KatrielMoses/MailAccess) | Source code, issues, releases |
 
 ## License
 
 MIT. All data queried by MailAccess comes from public sources. See [DISCLAIMER.md](DISCLAIMER.md) for authorized use cases and legal responsibility.
+
+---
+
+If MailAccess saved you time, a ⭐ on GitHub helps other researchers find it.
