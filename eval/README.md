@@ -61,6 +61,25 @@ uv run python -m eval.harness.gate check
   reads the repo `./.env` keys itself. Reported separately, never mixed into the
   primary numbers. The harness never reads or stores key values.
 
+## Phase JEV — side-by-side (JEV off vs JEV on)
+
+`jev_compare` runs the same target set twice on the local build — JEV forced
+**off** (== current behavior) and JEV forced **on** — scores both with the
+unchanged scorer, and writes `comparison.json` / `comparison.md`: per-task JEV
+defer rate / reasons, cache-hit rate and latency, per-target output deltas,
+quality deltas vs truth, and any score drift. Every JEV phase is accepted or
+dropped on this scorecard.
+
+```bash
+export JEV_API_KEY=... JEV_BASE_URL=... JEV_MODEL=...   # read from THIS shell only
+uv run python -m eval.harness.jev_compare run --base keyless-default --runs 2
+uv run python -m eval.harness.jev_compare compare --off <dir>/off --on <dir>/on
+```
+
+Legacy configs (`keyless-default`, …) strip every `JEV_*` variable, so an exported
+JEV setting can never leak into a baseline. `--refresh-cache` makes the ON pass
+skip JEV cache reads.
+
 ## Safety / authorized-use
 
 Authorized evaluation only. The target set, truth labels, and scorecards stay

@@ -789,6 +789,36 @@ class Settings(BaseSettings):
     mailaccess_pro_founder_seats_total: int = 100
     mailaccess_pro_founder_price_label: str = "$19/mo"
 
+    # Phase JEV — hosted reasoning seam (backend/core/jev/). A fast OpenAI-
+    # compatible chat model consulted for bounded judgment calls (classifications,
+    # matches, selections) alongside the deterministic engine. It never owns a
+    # number and every call has a deterministic fallback: disabled / no key /
+    # timeout / error / invalid output / low confidence all return DEFER and the
+    # caller runs today's logic. OFF by default — with it off the seam makes zero
+    # network calls. Provider, model and key are configuration only. Never logged.
+    jev_enabled: bool = False
+    jev_api_key: str | None = None
+    jev_base_url: str = ""
+    jev_model: str = ""
+    # Per-call total deadline (connect + full body + semaphore wait).
+    jev_timeout_ms: int = 2000
+    jev_max_concurrency: int = 4
+    # Content-addressed verdict cache (task + payload + model + prompt version).
+    jev_cache_ttl_seconds: int = 7 * 24 * 3600
+    # Empty = <repo>/data/cache/jev (git-ignored, like the breach-corpus cache).
+    jev_cache_path: str = ""
+    # Eval switch: skip cache reads (writes still land) so a side-by-side run
+    # re-asks the model instead of replaying an earlier verdict.
+    jev_cache_refresh: bool = False
+    # Global confidence floor; a task spec may raise (never lower) it.
+    jev_min_confidence: float = 0.7
+    # Overall JEV wall-clock ceiling inside one jev.run_scope() (an investigation
+    # or harvest). Once spent, every further call DEFERs immediately.
+    jev_run_ceiling_seconds: float = 20.0
+    # Optional: directory the per-process JEV metrics snapshot is written to (the
+    # eval harness sets this per target run). Empty = in-memory only.
+    jev_metrics_dir: str = ""
+
     # Proxy (single static endpoint — legacy; superseded by the Phase 5B egress
     # pool below, which treats a single configured proxy as a pool of one).
     proxy_url: str | None = None

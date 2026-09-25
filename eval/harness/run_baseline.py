@@ -42,6 +42,7 @@ from eval.harness.manifest import _KEY_NAMES, REPO_ROOT, _dotenv_key_names, buil
 
 SCORECARDS_DIR = REPO_ROOT / "eval" / "scorecards"
 TARGETS_FILE = REPO_ROOT / "eval" / "targets.yaml"
+JEV_METRICS_SUBDIR = "jev-metrics"
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +59,13 @@ class RunConfig:
     # v0.14.4 baseline (the regression proof must not change the command line).
     extra_env: dict[str, str] = field(default_factory=dict)
     mode: str | None = None
+    # Phase JEV side-by-side (eval/harness/jev_compare.py). None = legacy configs:
+    # JEV untouched by the harness (and stripped under keyless, so a stray shell
+    # export can never leak JEV into a baseline). False = force JEV off. True =
+    # force JEV on, forwarding the harness process's own JEV_* env (the key is
+    # passed through to the subprocess only — never recorded).
+    jev: bool | None = None
+    jev_cache_refresh: bool = False
 
     def build_env(self, home_dir: Path) -> dict[str, str]:
         env = dict(os.environ)
@@ -80,6 +88,18 @@ class RunConfig:
             names_to_strip |= _dotenv_key_names(Path.home() / ".mailaccess" / ".env")
             for name in names_to_strip:
                 env.pop(name, None)
+            for name in [n for n in env if n.startswith("JEV_")]:
+                env.pop(name, None)
+        if self.jev is not None:
+            for name in [n for n in env if n.startswith("JEV_")]:
+                env.pop(name, None)
+            if self.jev:
+                env.update({k: v for k, v in os.environ.items() if k.startswith("JEV_")})
+                if self.jev_cache_refresh:
+                    env["JEV_CACHE_REFRESH"] = "true"
+            env["JEV_ENABLED"] = "true" if self.jev else "false"
+            # Per-target-run metrics sink; jev_compare merges these per task.
+            env["JEV_METRICS_DIR"] = str(home_dir / JEV_METRICS_SUBDIR)
         # Config B: apply native-module enable toggles AFTER stripping so they
         # survive the keyless purge (they are behavior flags, not API keys).
         for name, value in self.extra_env.items():
@@ -422,6 +442,9 @@ def main(argv: list[str] | None = None) -> int:
             # explicitly (the harness-process resolved_config cannot see them).
             "cli_mode": cfg.mode,
             "module_enable_env": cfg.extra_env,
+            "jev": cfg.jev,
+            "jev_cache_refresh": cfg.jev_cache_refresh if cfg.jev else None,
+            "jev_model": os.environ.get("JEV_MODEL") if cfg.jev else None,
         },
     )
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
