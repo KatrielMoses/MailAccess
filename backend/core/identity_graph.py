@@ -82,6 +82,8 @@ class IdentityGraph:
     edges: list[GraphEdge] = field(default_factory=list)
     clusters: list[list[str]] = field(default_factory=list)
     shadow_findings: list[dict[str, Any]] = field(default_factory=list)
+    # Phase JEV-1: record of JEV-reviewed platform pairs (set only when JEV ran).
+    jev_review: list[dict[str, Any]] = field(default_factory=list)
     _edge_keys: set[tuple[str, str, str]] = field(
         default_factory=set,
         init=False,
@@ -483,8 +485,13 @@ class IdentityGraph:
             "same_bio",
             "same_signup_window",
             "shared_infrastructure",
+            "same_person",
         })
         for edge in self.edges:
+            # JEV-1: an edge JEV judged "different person" stays visible but no
+            # longer merges clusters.
+            if edge.metadata.get("jev_suppressed"):
+                continue
             if edge.type in shared_types:
                 if edge.source in parent and edge.target in parent:
                     union(edge.source, edge.target)
@@ -516,7 +523,45 @@ class IdentityGraph:
             ],
             "clusters": self.clusters,
             "shadow_findings": self.shadow_findings,
+            **({"jev_review": self.jev_review} if self.jev_review else {}),
         }
+
+    # ------------------------------------------------------------------
+    # Phase JEV-1 — identity.same_person refinement (correlation layer only)
+    # ------------------------------------------------------------------
+    def pair_edges(self, a: str, b: str) -> list[GraphEdge]:
+        """Direct edges between two platform nodes (either direction)."""
+        return [
+            e for e in self.edges
+            if (e.source, e.target) in ((a, b), (b, a))
+        ]
+
+    def apply_same_person_verdicts(self, verdicts: list[dict[str, Any]]) -> None:
+        """Apply JEV same-person verdicts to an already-built graph.
+
+        Each verdict: ``{"a", "b", "verdict": "yes"|"no", "suppress": [(src, tgt,
+        type), ...], "task"}``. ``yes`` adds a ``same_person`` edge; ``no`` marks
+        the listed heuristic edges ``jev_suppressed`` so they stop merging
+        clusters. Graph edges are the display/correlation layer — no score reads
+        them. Node degrees and clusters are recomputed afterwards.
+        """
+        changed = False
+        for v in verdicts:
+            task = v.get("task", "identity.same_person")
+            if v["verdict"] == "yes":
+                self._add_edge(v["a"], v["b"], "same_person", jev_assisted=True, jev_task=task)
+                changed = True
+            elif v["verdict"] == "no":
+                wanted = {tuple(k) for k in v.get("suppress", [])}
+                for edge in self.edges:
+                    if (edge.source, edge.target, edge.type) in wanted:
+                        edge.metadata["jev_suppressed"] = True
+                        edge.metadata["jev_assisted"] = True
+                        edge.metadata["jev_task"] = task
+                        changed = True
+        if changed:
+            self._score_nodes()
+            self._identify_clusters()
 
     def to_d3(self) -> dict[str, list[dict[str, Any]]]:
         return {

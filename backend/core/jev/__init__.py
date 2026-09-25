@@ -38,8 +38,8 @@ from .contract import (
     register,
     registered_tasks,
 )
-from .limits import run_scope
-from .seam import judge
+from .limits import enter_run_scope, exit_run_scope, run_scope
+from .seam import is_active, judge
 
 __all__ = [
     "DEFER",
@@ -50,7 +50,10 @@ __all__ = [
     "TaskSpecError",
     "Verdict",
     "breaker",
+    "enter_run_scope",
+    "exit_run_scope",
     "get_task",
+    "is_active",
     "judge",
     "metrics",
     "register",

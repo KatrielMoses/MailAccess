@@ -32,6 +32,29 @@ class NameConsensusResult:
     name_reasoning: str
     conflicting_names: list[str]
     all_candidates: list[NameCandidate]
+    # Phase JEV-1: True when a JEV name hint changed the candidate set, grouping
+    # or cluster label. The band is still computed by this engine either way.
+    jev_assisted: bool = False
+
+
+@dataclass(frozen=True)
+class NameHint:
+    """Phase JEV-1 (identity.name_reconcile) — candidate cleanup fed INTO the engine.
+
+    All entries are :func:`canonical_name` keys of observed candidates, so a hint
+    can only drop, group or relabel among names the engine already saw. It never
+    carries a confidence or a band: those stay this engine's computation.
+    """
+
+    drop: frozenset[str] = frozenset()
+    groups: tuple[frozenset[str], ...] = ()
+    canonical: str | None = None
+
+    def same_group(self, a: str, b: str) -> bool:
+        return a != b and any(a in group and b in group for group in self.groups)
+
+
+JEV_REASONING_NOTE = " Candidate grouping was JEV-assisted (identity.name_reconcile)."
 
 
 SOURCE_WEIGHTS: dict[str, tuple[float, str]] = {
@@ -475,14 +498,19 @@ def _empty_result(
 
 
 class NameConsensusEngine:
-    def __init__(self, target_email: str | None = None) -> None:
+    def __init__(
+        self, target_email: str | None = None, jev_hint: NameHint | None = None
+    ) -> None:
         self.target_email = target_email
+        self.jev_hint = jev_hint
+        self._hint_applied = False
 
     def resolve(self, raw_candidates: list[dict[str, Any] | NameCandidate]) -> NameConsensusResult:
         if is_role_or_system_email(self.target_email):
             return _empty_result(ROLE_SKIP_REASON)
 
         candidates = self._prepare_candidates(raw_candidates)
+        candidates = self._apply_hint_drops(candidates)
         if not candidates:
             return _empty_result("No usable name signals found.")
         if all(candidate.is_username_class for candidate in candidates):
@@ -507,6 +535,8 @@ class NameConsensusEngine:
         source_classes = sorted({c.source_class for c in top["candidates"]})
         sources = sorted({c.source for c in top["candidates"]})
         reasoning = self._reasoning(top, second, confidence, conflict)
+        if self._hint_applied:
+            reasoning += JEV_REASONING_NOTE
         return NameConsensusResult(
             confirmed_name=str(top["name"]) if confidence != "unknown" else None,
             name_confidence=confidence,
@@ -516,7 +546,19 @@ class NameConsensusEngine:
             name_reasoning=reasoning,
             conflicting_names=names if conflict else [],
             all_candidates=candidates,
+            jev_assisted=self._hint_applied,
         )
+
+    def _apply_hint_drops(self, candidates: list[NameCandidate]) -> list[NameCandidate]:
+        hint = self.jev_hint
+        if hint is None or not hint.drop:
+            return candidates
+        kept = [c for c in candidates if canonical_name(c.normalized_name) not in hint.drop]
+        # Never let a hint empty the set — that would turn "weak name" into "no name".
+        if not kept or len(kept) == len(candidates):
+            return candidates
+        self._hint_applied = True
+        return kept
 
     def _prepare_candidates(
         self, raw_candidates: list[dict[str, Any] | NameCandidate]
@@ -673,6 +715,7 @@ class NameConsensusEngine:
                 # trivial and not worth surfacing.
                 merge = False
                 used_token_set_for_merge = False
+                jev_merge = False
                 if use_token_set and score >= threshold:
                     merge = True
                     used_token_set_for_merge = True
@@ -680,12 +723,24 @@ class NameConsensusEngine:
                     merge = True
                 elif subset:
                     merge = True
+                elif self.jev_hint is not None and any(
+                    self.jev_hint.same_group(
+                        candidate_canonical, canonical_name(member.normalized_name)
+                    )
+                    for member in cluster["candidates"]
+                ):
+                    # JEV-1: an equivalence the fuzzy metrics missed (nickname,
+                    # initials, transliteration). Grouping only — scoring below is
+                    # unchanged.
+                    merge = True
+                    jev_merge = True
+                    self._hint_applied = True
 
                 if merge:
                     # Record the merge only when canonicals actually differ.
                     # Exact-canonical matches are trivial equalities, not
                     # "fuzzy" events.
-                    if candidate_canonical != cluster_canonical:
+                    if candidate_canonical != cluster_canonical and not jev_merge:
                         if used_token_set_for_merge:
                             cluster["display_matches"].append(
                                 (
@@ -731,6 +786,9 @@ class NameConsensusEngine:
                     "display_matches": [],
                 })
 
+        if self.jev_hint is not None and self.jev_hint.canonical:
+            self._apply_hint_canonical(clusters, self.jev_hint.canonical)
+
         for cluster in clusters:
             members = cluster["candidates"]
             score = sum(candidate.final_score for candidate in members)
@@ -747,6 +805,23 @@ class NameConsensusEngine:
         # equal-score clusters always rank identically regardless of input order.
         clusters.sort(key=lambda cluster: (-float(cluster["score"]), str(cluster["name"])))
         return clusters
+
+    def _apply_hint_canonical(self, clusters: list[dict[str, Any]], canonical: str) -> None:
+        """Label the cluster holding the JEV-chosen canonical form with that form."""
+        for cluster in clusters:
+            matches = [
+                c for c in cluster["candidates"]
+                if canonical_name(c.normalized_name) == canonical
+            ]
+            if not matches:
+                continue
+            best = max(
+                matches,
+                key=lambda c: (c.final_score, c.base_weight, c.source_class, c.normalized_name),
+            )
+            if cluster["name"] != best.normalized_name:
+                cluster["name"] = best.normalized_name
+                self._hint_applied = True
 
     def _confidence_for_cluster(self, cluster: dict[str, Any]) -> str:
         score = float(cluster["score"])

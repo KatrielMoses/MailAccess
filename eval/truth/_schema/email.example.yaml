@@ -14,6 +14,10 @@ identity:
   name_confidence: unknown        # high | medium | low | unknown (your MANUAL confidence)
   verification: ""                # how you know (e.g. "own account", "public bio at <url>")
   freshness: ""                   # is this current? note date checked
+  # Phase JEV-1 (identity.bio_extract) — optional; leave `unknown` if not verified.
+  employer: unknown               # current employer as the subject states it publicly
+  role_title: unknown             # current role / job title
+  location: unknown               # city / region the subject states publicly
 
 # Discovered accounts/profiles the tool surfaces. Label each TP/FP/unknown.
 # `key` should be a stable "<module_or_platform>:<identifier>" you can match to

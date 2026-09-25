@@ -59,16 +59,30 @@ async def run_scope(
     ceiling_seconds: float | None = None, *, budget: _Budget | None = None
 ) -> AsyncIterator[RunScope]:
     """Bound all JEV calls in this context to one shared wall-clock ceiling."""
+    token = enter_run_scope(ceiling_seconds, budget=budget)
+    try:
+        yield _SCOPE.get()  # type: ignore[misc]
+    finally:
+        exit_run_scope(token)
+
+
+def enter_run_scope(
+    ceiling_seconds: float | None = None, *, budget: _Budget | None = None
+) -> contextvars.Token[RunScope | None]:
+    """Non-``with`` form of :func:`run_scope` for a long task body (the engine).
+
+    Sets the scope in the current context (task-local) and returns the token for
+    :func:`exit_run_scope`.
+    """
     if ceiling_seconds is None:
         from ...config import settings
 
         ceiling_seconds = float(getattr(settings, "jev_run_ceiling_seconds", 0.0) or 0.0)
-    scope = RunScope(ceiling_seconds, budget)
-    token = _SCOPE.set(scope)
-    try:
-        yield scope
-    finally:
-        _SCOPE.reset(token)
+    return _SCOPE.set(RunScope(ceiling_seconds, budget))
+
+
+def exit_run_scope(token: contextvars.Token[RunScope | None]) -> None:
+    _SCOPE.reset(token)
 
 
 # One semaphore per (event loop, limit); weak keys so dead loops (tests) vanish.

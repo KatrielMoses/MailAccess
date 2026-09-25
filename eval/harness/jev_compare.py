@@ -205,6 +205,130 @@ def _mean_pair(pairs: list[dict[str, Any]], field: str) -> dict[str, float | Non
     return {"off": mean_off, "on": mean_on, "delta": delta, "n_off": len(offs), "n_on": len(ons)}
 
 
+# ---------------------------------------------------------------------------
+# Per-task gate vs gold truth (JEV-1+). A task is KEPT only if its JEV score beats
+# the heuristic score on labelled data; a tie — including "no labels" — drops it.
+# ---------------------------------------------------------------------------
+_NAME_NOTE = "JEV-assisted (identity.name_reconcile)"
+
+
+def _investigate_raws(off_dir: Path, on_dir: Path) -> list[tuple[str, Any, Any]]:
+    off_log = _load(off_dir / "runlog.json") or {"records": []}
+    on_log = _load(on_dir / "runlog.json") or {"records": []}
+    on_by_key = {(r["target_id"], r["pipeline"], r["run_idx"]): r for r in on_log["records"]}
+    out = []
+    for rec in off_log["records"]:
+        if rec["pipeline"] != "investigate" or not rec.get("ok"):
+            continue
+        on_rec = on_by_key.get((rec["target_id"], "investigate", rec["run_idx"]))
+        if not on_rec or not on_rec.get("ok"):
+            continue
+        raw_off, raw_on = _load(off_dir / rec["raw_path"]), _load(on_dir / on_rec["raw_path"])
+        if raw_off is not None and raw_on is not None:
+            out.append((rec["target_id"], raw_off, raw_on))
+    return out
+
+
+def _gate(heuristic: float, jev_score: float, n: int, extra_ok: bool = True) -> str:
+    if n == 0:
+        return "drop (no labels)"
+    return "keep" if jev_score > heuristic and extra_ok else "drop"
+
+
+def _gate_names(raws: list[tuple[str, Any, Any]], truth: dict[str, Any]) -> dict[str, Any]:
+    n = off = on = assisted = 0
+    for tid, raw_off, raw_on in raws:
+        if _NAME_NOTE in str(raw_on.get("name_reasoning") or ""):
+            assisted += 1
+        real = ((truth.get(tid) or {}).get("identity") or {}).get("real_name")
+        if not real or real == "unknown":
+            continue
+        n += 1
+        want = str(real).strip().lower()
+        off += (str(raw_off.get("confirmed_name") or "").strip().lower() == want)
+        on += (str(raw_on.get("confirmed_name") or "").strip().lower() == want)
+    return {"labelled": n, "heuristic_correct": off, "jev_correct": on,
+            "jev_assisted_runs": assisted, "decision": _gate(off, on, n)}
+
+
+def _account_verdicts(t: dict[str, Any]) -> dict[str, set[str]]:
+    by_platform: dict[str, set[str]] = {}
+    for acct in t.get("accounts") or []:
+        key = str(acct.get("key") or "")
+        if ":" in key:
+            by_platform.setdefault(key.split(":", 1)[0].lower(), set()).add(
+                str(acct.get("verdict") or "unknown"))
+    return by_platform
+
+
+def _pair_truth(a: str, b: str, verdicts: dict[str, set[str]]) -> bool | None:
+    va, vb = verdicts.get(a.lower(), set()), verdicts.get(b.lower(), set())
+    if "false_positive" in va or "false_positive" in vb:
+        return False  # one side is not the subject → merging them is wrong
+    if "true_positive" in va and "true_positive" in vb:
+        return True
+    return None
+
+
+def _gate_same_person(raws: list[tuple[str, Any, Any]], truth: dict[str, Any]) -> dict[str, Any]:
+    n = heur = jev_ok = wrong_yes = new_wrong = reviewed = 0
+    for tid, _raw_off, raw_on in raws:
+        verdicts = _account_verdicts(truth.get(tid) or {})
+        for r in ((raw_on.get("graph_data") or {}).get("jev_review") or []):
+            reviewed += 1
+            label = _pair_truth(str(r.get("a")), str(r.get("b")), verdicts)
+            if label is None:
+                continue
+            n += 1
+            heuristic_merge = bool(r.get("heuristic_merge"))
+            decision = {"yes": True, "no": False}.get(r.get("jev"), heuristic_merge)
+            heur += heuristic_merge == label
+            jev_ok += decision == label
+            if r.get("jev") == "yes" and label is False:
+                wrong_yes += 1
+                new_wrong += not heuristic_merge
+    return {"labelled_pairs": n, "reviewed_pairs": reviewed, "heuristic_correct": heur,
+            "jev_correct": jev_ok, "wrong_yes": wrong_yes, "new_wrong_merges": new_wrong,
+            "decision": _gate(heur, jev_ok, n, extra_ok=new_wrong == 0)}
+
+
+def _gate_bio(raws: list[tuple[str, Any, Any]], truth: dict[str, Any]) -> dict[str, Any]:
+    n = correct = wrong = populated = 0
+    for tid, _raw_off, raw_on in raws:
+        ident = (truth.get(tid) or {}).get("identity") or {}
+        for f in raw_on.get("findings") or []:
+            data = f.get("data") if isinstance(f.get("data"), dict) else f
+            meta = data.get("metadata") if isinstance(data, dict) else None
+            bio = meta.get("bio_structured") if isinstance(meta, dict) else None
+            if not isinstance(bio, dict):
+                continue
+            populated += 1
+            for field in ("employer", "role_title", "location"):
+                got, want = bio.get(field), ident.get(field)
+                if not got or not want or want == "unknown":
+                    continue
+                n += 1
+                g, w = str(got).lower(), str(want).lower()
+                if g in w or w in g:
+                    correct += 1
+                else:
+                    wrong += 1
+    # The heuristic extracts none of these fields, so its score is 0.
+    return {"labelled_fields": n, "populated_profiles": populated, "correct": correct,
+            "wrong": wrong, "heuristic_score": 0, "jev_score": correct - wrong,
+            "decision": _gate(0, correct - wrong, n)}
+
+
+def task_gate(off_dir: Path, on_dir: Path) -> dict[str, Any]:
+    truth = score.load_truth()
+    raws = _investigate_raws(off_dir, on_dir)
+    return {
+        "identity.name_reconcile": _gate_names(raws, truth),
+        "identity.same_person": _gate_same_person(raws, truth),
+        "identity.bio_extract": _gate_bio(raws, truth),
+    }
+
+
 def compare(off_dir: Path, on_dir: Path, out_dir: Path) -> dict[str, Any]:
     _scorecard(off_dir)
     sc_on = _scorecard(on_dir)
@@ -239,6 +363,7 @@ def compare(off_dir: Path, on_dir: Path, out_dir: Path) -> dict[str, Any]:
                 "on": round(statistics.fmean(w[1] for w in walls), 3) if walls else None,
             },
         },
+        "task_gate": task_gate(off_dir, on_dir),
         "pairs": pairs,
     }
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -292,6 +417,23 @@ def render_markdown(c: dict[str, Any]) -> str:
                 f"| {reasons} | {_fmt(t['cache_hit_rate'])} | {t['model_calls']} "
                 f"| {_fmt(t['latency_mean_ms'])} | {_fmt(t['latency_max_ms'])} |"
             )
+    lines += ["", "## Task gate (keep only if JEV beats the heuristic; ties drop)", "",
+              "| task | labelled | heuristic | JEV | detail | decision |",
+              "|---|---|---|---|---|---|"]
+    for name, g in c.get("task_gate", {}).items():
+        if name == "identity.bio_extract":
+            row = (g["labelled_fields"], g["heuristic_score"], g["jev_score"],
+                   f"correct {g['correct']}, wrong {g['wrong']}, "
+                   f"profiles populated {g['populated_profiles']}")
+        elif name == "identity.same_person":
+            row = (g["labelled_pairs"], g["heuristic_correct"], g["jev_correct"],
+                   f"reviewed {g['reviewed_pairs']}, wrong yes {g['wrong_yes']}, "
+                   f"new wrong merges {g['new_wrong_merges']}")
+        else:
+            row = (g["labelled"], g["heuristic_correct"], g["jev_correct"],
+                   f"JEV-assisted runs {g['jev_assisted_runs']}")
+        lines.append(f"| {name} | {row[0]} | {row[1]} | {row[2]} | {row[3]} | "
+                     f"**{g['decision']}** |")
     lines += ["", "## Per target", "",
               "| target | pipeline | run | identical | +/− | precision | recall | wall off/on "
               "| JEV calls | score drift |",

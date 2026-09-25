@@ -83,6 +83,15 @@ a machine that has a key. The ON pass takes `JEV_*` from the shell, falling back
 to `~/.mailaccess/.env`. `--refresh-cache` makes the ON pass
 skip JEV cache reads.
 
+Each JEV task is gated against the gold truth in the comparison's **Task gate**
+table: a task is **kept only if its JEV score beats the heuristic** on labelled
+data — ties, including "no labels", drop it. JEV-1 identity tasks are scored as:
+`identity.name_reconcile` — correct `confirmed_name` vs `identity.real_name`;
+`identity.same_person` — JEV-reviewed platform pairs vs the `accounts` TP/FP labels
+(a pair with a false-positive side must not merge; no new wrong merges allowed);
+`identity.bio_extract` — extracted employer / role / location vs the optional
+`identity.employer|role_title|location` labels (correct − wrong must be > 0).
+
 ## Safety / authorized-use
 
 Authorized evaluation only. The target set, truth labels, and scorecards stay

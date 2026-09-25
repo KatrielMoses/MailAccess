@@ -12,6 +12,7 @@ from sqlalchemy import update
 from ..db.database import AsyncSessionLocal
 from ..db.models import Finding, Investigation, InvestigationStatus, ModuleRun
 from ..modules.base import ModuleResult, ModuleStatus
+from . import jev, jev_identity
 from .breach_normalizer import collapse_breach_findings
 from .credential_risk import assess_credential_risk_from_results
 from .defenders_brief import defenders_brief_to_dict, generate_defenders_brief
@@ -104,11 +105,11 @@ def _compute_exposure_score(
     return min(int(total) + name_bonus, 100)
 
 
-def _build_graph(
+def _build_graph_object(
     canonical_email: str,
     collected: dict[str, ModuleResult],
     name_consensus: Any = None,
-) -> dict | None:
+) -> tuple[Any, list[dict[str, Any]]] | None:
     try:
         from .identity_graph import IdentityGraph
 
@@ -122,12 +123,23 @@ def _build_graph(
             {"email": canonical_email, "findings": findings},
             name_consensus=name_consensus,
         )
-        # Store the full to_dict() output so shadow_findings + clusters
-        # survive persistence.  The /graph endpoint extracts just
-        # nodes/links for D3 rendering.
-        return graph.to_dict()
+        return graph, findings
     except Exception:
         return None
+
+
+def _build_graph(
+    canonical_email: str,
+    collected: dict[str, ModuleResult],
+    name_consensus: Any = None,
+) -> dict | None:
+    built = _build_graph_object(canonical_email, collected, name_consensus)
+    if built is None:
+        return None
+    # Store the full to_dict() output so shadow_findings + clusters
+    # survive persistence.  The /graph endpoint extracts just
+    # nodes/links for D3 rendering.
+    return built[0].to_dict()
 
 
 async def _build_graph_with_timeout(
@@ -143,15 +155,35 @@ async def _build_graph_with_timeout(
     can freeze both investigation progress and the health endpoint.
     """
     try:
-        return await asyncio.wait_for(
+        if not jev.is_active():
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    _build_graph,
+                    canonical_email,
+                    collected,
+                    name_consensus,
+                ),
+                timeout=_ENRICHMENT_TIMEOUT_SECONDS,
+            )
+        built = await asyncio.wait_for(
             asyncio.to_thread(
-                _build_graph,
+                _build_graph_object,
                 canonical_email,
                 collected,
                 name_consensus,
             ),
             timeout=_ENRICHMENT_TIMEOUT_SECONDS,
         )
+        if built is None:
+            return None
+        graph, findings = built
+        # Phase JEV-1 (identity.same_person): refine borderline edges of the
+        # built graph. Correlation layer only; bounded by the JEV run scope.
+        await jev_identity.refine_graph(graph, findings)
+        try:
+            return graph.to_dict()
+        except Exception:
+            return None
     except asyncio.TimeoutError:
         logger.warning(
             "Graph enrichment timed out after %ss; continuing without graph data",
@@ -299,6 +331,9 @@ class InvestigationEngine:
                     if name in _OPT_IN_FLAG_BY_MODULE
                 }
                 opt_in_token = set_run_opt_in_flags(opt_in_flags)
+                # Phase JEV — every JEV call in this investigation shares one
+                # wall-clock ceiling, capped by the investigation budget.
+                jev_token = jev.enter_run_scope(budget=budget)
 
                 # RC5 (Output-Trust): decide the investigate entry gates ONCE.
                 # If the domain does not resolve, the mailbox cannot exist — do NOT
@@ -375,10 +410,15 @@ class InvestigationEngine:
                                     or current_email
                                 )
 
+                    # Phase JEV-1 — improve identity INPUTS before names, the
+                    # graph and scoring consume them. No-ops without a JEV key.
+                    await jev_identity.enrich_bios(collected, domain or None)
+                    name_hint = await jev_identity.reconcile_names(email, collected)
+
                     # Compute name consensus before the graph build so
                     # the Phase 6B.2 V2 shadow-profile detector can use
                     # the resolved confirmed_name.
-                    name_result = NameConsensusEngine(email).resolve(
+                    name_result = NameConsensusEngine(email, jev_hint=name_hint).resolve(
                         extract_name_candidates(collected, email)
                     )
                     name_consensus = {
@@ -398,6 +438,9 @@ class InvestigationEngine:
                         email,
                         graph_data,
                         mode=resolved_mode.value,
+                        # Only passed when JEV produced a hint, so keyless calls
+                        # keep today's exact signature.
+                        **({"name_hint": name_hint} if name_hint is not None else {}),
                     )
                     # Phase 1C — dual-write the canonical evidence ledger. Runs
                     # after _persist in its own transaction so a ledger failure
@@ -417,8 +460,14 @@ class InvestigationEngine:
                         )
                     except Exception:
                         logger.exception("run manifest skipped for %s", investigation_id)
-                    await self._dispatch_webhooks(investigation_id, email, final)
+                    await self._dispatch_webhooks(
+                        investigation_id,
+                        email,
+                        final,
+                        **({"name_hint": name_hint} if name_hint is not None else {}),
+                    )
                 finally:
+                    jev.exit_run_scope(jev_token)
                     reset_run_opt_in_flags(opt_in_token)
                     reset_target_gate(gate_token)
             except Exception:
@@ -443,11 +492,12 @@ class InvestigationEngine:
         investigation_id: str,
         email: str,
         final: dict[str, ModuleResult],
+        name_hint: Any = None,
     ) -> None:
         try:
             from ..integrations.webhooks import WebhookDispatcher
 
-            name_result = NameConsensusEngine(email).resolve(
+            name_result = NameConsensusEngine(email, jev_hint=name_hint).resolve(
                 extract_name_candidates(final, email)
             )
             score = _compute_exposure_score(final, name_result.name_confidence)
@@ -524,13 +574,16 @@ class InvestigationEngine:
         original_email: str,
         graph_data: dict | None = None,
         mode: str = "security-investigation",
+        name_hint: Any = None,
     ) -> None:
         now = datetime.now(timezone.utc)
         safe_collected = {
             name: _normalize_module_result(name, result)
             for name, result in collected.items()
         }
-        name_result = NameConsensusEngine(original_email).resolve(
+        # The JEV name hint (if any) was computed BEFORE this point; scoring
+        # below only consumes the engine's resolved band — never a JEV output.
+        name_result = NameConsensusEngine(original_email, jev_hint=name_hint).resolve(
             extract_name_candidates(safe_collected, original_email)
         )
         score = _compute_exposure_score(safe_collected, name_result.name_confidence)

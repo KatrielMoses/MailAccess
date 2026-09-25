@@ -39,6 +39,16 @@ _MIN_CALL_SECONDS = 0.05
 _INERT_REASONS = frozenset({DeferReason.NO_KEY.value, DeferReason.FORCED_OFF.value})
 
 
+def is_active() -> bool:
+    """Whether JEV may be consulted at all: a key is set and not forced off.
+
+    The same condition :func:`judge` checks first — exposed so a call site can
+    skip building JEV payloads entirely on a default (keyless) install.
+    """
+    s = _config.settings
+    return bool((s.jev_api_key or "").strip()) and not s.jev_force_off
+
+
 async def judge(task_name: str, payload: BaseModel | dict[str, Any]) -> Verdict[Any] | DeferType:
     start = time.monotonic()
     cache_hit = model_called = False

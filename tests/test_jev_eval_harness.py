@@ -142,3 +142,77 @@ def test_compare_flags_score_drift(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     inv = next(p for p in c["pairs"] if p["pipeline"] == "investigate")
     assert inv["score_drift"] == {"exposure_score": (42, 55)}
     assert c["summary"]["n_score_drift"] == 1
+
+
+# ---------------------------------------------------------------------------
+# JEV-1 per-task gate vs gold truth
+# ---------------------------------------------------------------------------
+def _write_investigate(run_dir: Path, raw: dict[str, Any]) -> None:
+    (run_dir / "raw").mkdir(parents=True)
+    (run_dir / "raw" / "e1.run1.investigate.json").write_text(json.dumps(raw))
+    (run_dir / "runlog.json").write_text(json.dumps({"run_id": run_dir.name, "records": [
+        {"target_id": "e1", "target_value": "a@example.com", "category": "free",
+         "pipeline": "investigate", "run_idx": 1, "ok": True, "wall_seconds": 1.0,
+         "raw_path": "raw/e1.run1.investigate.json", "exit_code": 0}]}))
+    (run_dir / "manifest.json").write_text(json.dumps({"tool_version": "t", "extra": {}}))
+
+
+_TRUTH = {"e1": {
+    "identity": {"real_name": "Robert Smith", "employer": "Northwind Labs",
+                 "role_title": "unknown", "location": "Leeds"},
+    "accounts": [
+        {"key": "github:nightowl", "verdict": "true_positive"},
+        {"key": "gitlab:nightowl", "verdict": "false_positive"},
+        {"key": "reddit:jq", "verdict": "true_positive"},
+        {"key": "mastodon:jq", "verdict": "true_positive"},
+    ],
+}}
+
+
+def test_task_gate_keeps_winners_and_drops_ties(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(score, "load_truth", lambda: _TRUTH)
+    off = {"confirmed_name": "Bob Smith", "findings": [], "module_runs": []}
+    on = {
+        "confirmed_name": "Robert Smith",
+        "name_reasoning": "… Candidate grouping was JEV-assisted (identity.name_reconcile).",
+        "module_runs": [],
+        "findings": [{"module_name": "github_commits", "data": {"platform": "github_user",
+            "metadata": {"bio_structured": {"employer": "Northwind Labs",
+                                            "location": "Paris", "jev_assisted": True}}}}],
+        "graph_data": {"jev_review": [
+            {"a": "github", "b": "gitlab", "heuristic_merge": True, "jev": "no"},
+            {"a": "reddit", "b": "mastodon", "heuristic_merge": True, "jev": "unclear"},
+            {"a": "x", "b": "y", "heuristic_merge": True, "jev": "yes"},  # unlabelled
+        ]},
+    }
+    _write_investigate(tmp_path / "off", off)
+    _write_investigate(tmp_path / "on", on)
+
+    gate = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")
+
+    names = gate["identity.name_reconcile"]
+    assert (names["heuristic_correct"], names["jev_correct"], names["decision"]) == (0, 1, "keep")
+    assert names["jev_assisted_runs"] == 1
+
+    sp = gate["identity.same_person"]
+    # github/gitlab: heuristic merged a TP with an FP (wrong); JEV said no (right).
+    # reddit/mastodon: unclear → heuristic merge stands (right for both).
+    assert (sp["labelled_pairs"], sp["heuristic_correct"], sp["jev_correct"]) == (2, 1, 2)
+    assert sp["new_wrong_merges"] == 0 and sp["decision"] == "keep"
+
+    bio = gate["identity.bio_extract"]
+    assert (bio["correct"], bio["wrong"], bio["jev_score"]) == (1, 1, 0)
+    assert bio["decision"] == "drop"  # a tie with the heuristic's 0 is dropped
+
+
+def test_task_gate_without_labels_drops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(score, "load_truth", lambda: {})
+    for sub in ("off", "on"):
+        _write_investigate(tmp_path / sub, {"findings": [], "module_runs": []})
+    gate = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")
+    assert {g["decision"] for g in gate.values()} == {"drop (no labels)"}
+    c = jev_compare.compare(tmp_path / "off", tmp_path / "on", tmp_path)
+    assert "## Task gate" in (tmp_path / "comparison.md").read_text()
+    assert c["task_gate"] == gate
