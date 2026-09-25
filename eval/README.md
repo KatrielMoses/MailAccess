@@ -109,6 +109,12 @@ over-merged) — AND the roster must get cleaner (fewer rows) or per-contact
 seniority accuracy must rise. The recall guard is the primary acceptance metric; a
 task that cleans the roster but drops a labeled contact is dropped.
 
+JEV-4 reach tasks (`reach.platform_select`, `reach.query_generate`) pick better
+within the same budget and are scored under `reach.*`: the username-platform hit
+count (`platforms_confirmed`) must rise at an **equal wave-1 probe count** — the
+equal-cost guard is primary, so any change in probe count drops the task. Open-web
+query yield (harvest email count) is reported informationally.
+
 ## Safety / authorized-use
 
 Authorized evaluation only. The target set, truth labels, and scorecards stay

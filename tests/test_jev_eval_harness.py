@@ -212,7 +212,9 @@ def test_task_gate_without_labels_drops(tmp_path: Path, monkeypatch: pytest.Monk
     for sub in ("off", "on"):
         _write_investigate(tmp_path / sub, {"findings": [], "module_runs": []})
     gate = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")
-    assert {g["decision"] for g in gate.values()} == {"drop (no labels)"}
+    # No labels and no probes → every task drops (verify/roster: "no labels";
+    # reach: "no probes"). None is kept without evidence.
+    assert all(str(g["decision"]).startswith("drop") for g in gate.values())
     c = jev_compare.compare(tmp_path / "off", tmp_path / "on", tmp_path)
     assert "## Task gate" in (tmp_path / "comparison.md").read_text()
     assert c["task_gate"] == gate
@@ -315,3 +317,40 @@ def test_roster_gate_drops_when_recall_regresses(
     g = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")["roster.*"]
     assert g["jev_recall"] < g["heuristic_recall"]
     assert g["recall_held"] is False and g["decision"] == "drop"
+
+
+# ---------------------------------------------------------------------------
+# JEV-4 reach gate (equal-cost guard is primary)
+# ---------------------------------------------------------------------------
+def _write_investigate_with_username(run_dir: Path, probes: int, confirmed: int) -> None:
+    (run_dir / "raw").mkdir(parents=True)
+    raw = {"findings": [], "module_runs": [
+        {"module_name": "username_platforms", "status": "success",
+         "run_metadata": {"wave1_probes": probes, "platforms_confirmed": confirmed}}]}
+    (run_dir / "raw" / "e1.run1.investigate.json").write_text(json.dumps(raw))
+    (run_dir / "runlog.json").write_text(json.dumps({"run_id": run_dir.name, "records": [
+        {"target_id": "e1", "target_value": "a@x.com", "category": "free",
+         "pipeline": "investigate", "run_idx": 1, "ok": True, "wall_seconds": 1.0,
+         "raw_path": "raw/e1.run1.investigate.json", "exit_code": 0}]}))
+    (run_dir / "manifest.json").write_text(json.dumps({"tool_version": "t", "extra": {}}))
+
+
+def test_reach_gate_keeps_on_equal_cost_more_hits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(score, "load_truth", lambda: {})
+    _write_investigate_with_username(tmp_path / "off", probes=50, confirmed=3)
+    _write_investigate_with_username(tmp_path / "on", probes=50, confirmed=5)  # same probes, +hits
+    g = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")["reach.*"]
+    assert (g["heuristic_probes"], g["jev_probes"]) == (50, 50)
+    assert g["equal_cost"] is True and g["jev_confirmed"] == 5 and g["decision"] == "keep"
+
+
+def test_reach_gate_drops_if_probe_count_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(score, "load_truth", lambda: {})
+    _write_investigate_with_username(tmp_path / "off", probes=50, confirmed=3)
+    _write_investigate_with_username(tmp_path / "on", probes=60, confirmed=6)  # MORE probes
+    g = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")["reach.*"]
+    assert g["equal_cost"] is False and g["decision"] == "drop"  # cost went up → drop

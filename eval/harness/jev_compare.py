@@ -460,11 +460,54 @@ def _gate_roster(off_dir: Path, on_dir: Path, truth: dict[str, Any]) -> dict[str
     }
 
 
+def _module_meta(raw: Any, module_name: str) -> dict[str, Any] | None:
+    for m in raw.get("module_runs") or []:
+        if m.get("module_name") == module_name and isinstance(m.get("run_metadata"), dict):
+            return m["run_metadata"]
+    return None
+
+
+def _gate_reach(off_dir: Path, on_dir: Path) -> dict[str, Any]:
+    """Score reach/selection: username hit-rate at EQUAL probe count (JEV-4 Task 1).
+
+    The equal-cost guard is primary: JEV must not change the probe count. Kept only
+    when wave-1 probe count is unchanged AND confirmed platforms rise. Open-web query
+    yield is reported informationally (harvest email yield).
+    """
+    off = {"wave1_probes": 0, "confirmed": 0}
+    on = dict(off)
+    for _tid, raw_off, raw_on in _investigate_raws(off_dir, on_dir):
+        for acc, src in ((off, raw_off), (on, raw_on)):
+            meta = _module_meta(src, "username_platforms")
+            if meta:
+                acc["wave1_probes"] += int(meta.get("wave1_probes") or 0)
+                acc["confirmed"] += int(meta.get("platforms_confirmed") or 0)
+    off_yield = on_yield = 0
+    for _tid, raw_off, raw_on in _harvest_raws(off_dir, on_dir):
+        off_yield += len(raw_off.get("emails") or [])
+        on_yield += len(raw_on.get("emails") or [])
+    equal_cost = on["wave1_probes"] == off["wave1_probes"]
+    hit_up = on["confirmed"] > off["confirmed"]
+    if off["wave1_probes"] == 0 and on["wave1_probes"] == 0:
+        decision = "drop (no probes)"
+    elif equal_cost and hit_up:
+        decision = "keep"
+    else:
+        decision = "drop"
+    return {
+        "heuristic_probes": off["wave1_probes"], "jev_probes": on["wave1_probes"],
+        "heuristic_confirmed": off["confirmed"], "jev_confirmed": on["confirmed"],
+        "heuristic_email_yield": off_yield, "jev_email_yield": on_yield,
+        "equal_cost": equal_cost, "decision": decision,
+    }
+
+
 def task_gate(off_dir: Path, on_dir: Path) -> dict[str, Any]:
     truth = score.load_truth()
     raws = _investigate_raws(off_dir, on_dir)
     verification = _gate_verification(off_dir, on_dir, truth)
     roster = _gate_roster(off_dir, on_dir, truth)
+    reach = _gate_reach(off_dir, on_dir)
     return {
         "identity.name_reconcile": _gate_names(raws, truth),
         "identity.same_person": _gate_same_person(raws, truth),
@@ -475,6 +518,9 @@ def task_gate(off_dir: Path, on_dir: Path) -> dict[str, Any]:
         # The four JEV-3 roster.* tasks clean the harvest roster; scored jointly on
         # recall held (no labeled contact dropped) + cleanliness / seniority.
         "roster.*": roster,
+        # The two JEV-4 reach.* tasks pick within the same budget; scored on username
+        # hit-rate at EQUAL probe count (the equal-cost guard is primary).
+        "reach.*": reach,
     }
 
 
@@ -587,6 +633,10 @@ def render_markdown(c: dict[str, Any]) -> str:
                    f"roster size {g['heuristic_roster_size']}→{g['jev_roster_size']}, "
                    f"seniority {g['heuristic_seniority_correct']}→{g['jev_seniority_correct']}, "
                    f"recall held {g['recall_held']}")
+        elif name == "reach.*":
+            row = (g["heuristic_probes"], g["heuristic_confirmed"], g["jev_confirmed"],
+                   f"probes {g['heuristic_probes']}→{g['jev_probes']} (equal {g['equal_cost']}), "
+                   f"email yield {g['heuristic_email_yield']}→{g['jev_email_yield']}")
         else:
             row = (g["labelled"], g["heuristic_correct"], g["jev_correct"],
                    f"JEV-assisted runs {g['jev_assisted_runs']}")

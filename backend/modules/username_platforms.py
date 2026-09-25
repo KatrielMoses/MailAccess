@@ -206,6 +206,68 @@ def _drop_low_precision(
     return [item for item in queue if _is_high_precision(item[1])]
 
 
+def _platform_candidate(name: str, defn: dict[str, Any]) -> dict[str, Any]:
+    """Shape one eligible platform for the JEV selector (id + coarse affinity)."""
+    tags = _tags(defn)
+    region = "cn" if "cn" in tags else ("ru" if "ru" in tags else None)
+    return {
+        "id": name,
+        "category": tags[0] if tags else None,
+        "region": region,
+        "rank": _alexa_rank(defn),
+    }
+
+
+async def _jev_select_wave1(
+    wave1_queue: list[tuple[str, dict[str, Any], str]], cap: int, email: str
+) -> tuple[list[tuple[str, dict[str, Any], str]], bool]:
+    """Phase JEV-4 (reach.platform_select): pick WHICH platforms fill the wave-1 cap.
+
+    Same count as today's static-rank cap — JEV only chooses among the eligible pool
+    when that pool exceeds the cap; otherwise every eligible platform is probed
+    anyway and JEV is not consulted. The chosen set is re-validated to the eligible
+    ids and topped up with the static-rank order so exactly ``cap`` platforms remain
+    (never more). Returns ``(queue, jev_assisted)``; DEFER / no key → today's order.
+    """
+    pre = _drop_low_precision(wave1_queue)
+    baseline = _cap_queue_by_rank(pre, cap)
+    defn_by_name: dict[str, dict[str, Any]] = {}
+    for name, defn, _variant in pre:
+        defn_by_name.setdefault(name, defn)
+    distinct = list(defn_by_name)
+    # The cap only bites when the eligible pool has more platforms than the cap.
+    if cap <= 0 or len(distinct) <= cap:
+        return baseline, False
+
+    from ..core import jev_reach
+
+    if not jev_reach.jev.is_active():
+        return baseline, False
+    localpart = email.split("@", 1)[0] if "@" in email else email
+    chosen = await jev_reach.select_platforms(
+        eligible_ids=distinct,
+        candidates=[_platform_candidate(n, defn_by_name[n]) for n in distinct],
+        wave_cap=cap,
+        email_localpart=localpart,
+    )
+    if not chosen:
+        return baseline, False
+    # Preserve the exact count: fill any remaining slots with the static-rank order
+    # so JEV never shrinks the wave below today's size (and never grows it).
+    keep_order = list(dict.fromkeys(chosen))
+    if len(keep_order) < cap:
+        static = sorted(distinct, key=lambda n: (_alexa_rank(defn_by_name[n]) or 10**9, n))
+        picked = set(keep_order)
+        for n in static:
+            if len(keep_order) >= cap:
+                break
+            if n not in picked:
+                keep_order.append(n)
+                picked.add(n)
+    keep = set(keep_order[:cap])
+    return [item for item in pre if item[0] in keep], True
+
+
 def _cap_queue_by_rank(
     queue: list[tuple[str, dict[str, Any], str]], cap: int
 ) -> list[tuple[str, dict[str, Any], str]]:
@@ -354,8 +416,8 @@ class UsernamePlatformsModule(BaseModule):
         # T1 — Wave 1 is the DEFAULT speculative localpart sweep: drop its
         # low-precision tail (keep ranked majors + discriminating contracts) before
         # the rank ceiling. Wave 2 is the opt-in wide net and keeps its tail.
-        wave1_queue = _cap_queue_by_rank(
-            _drop_low_precision(wave1_queue), settings.username_wave1_cap
+        wave1_queue, jev_wave_assisted = await _jev_select_wave1(
+            wave1_queue, settings.username_wave1_cap, email
         )
         wave2_queue = _cap_queue_by_rank(wave2_queue, settings.username_wave2_cap)
 
@@ -483,6 +545,7 @@ class UsernamePlatformsModule(BaseModule):
                 "wave2_probes": len(wave2_queue),
                 "wave1_platform_cap": settings.username_wave1_cap,
                 "wave2_platform_cap": settings.username_wave2_cap,
+                "jev_assisted": jev_wave_assisted,
                 "auto_demoted_skipped": len(applied_skip),
                 "auto_demoted_to_wave2": len(applied_demote),
                 "auto_upgraded_to_wave1": len(applied_upgrade),

@@ -30,7 +30,7 @@ from ..config import settings
 from ..core.bing_dorker import BingDorker
 from ..core.brave_dorker import BraveSearchDorker
 from ..core.concurrent_fetch_cache import CachedFetch
-from ..core.dork_queries import build_dork_queries
+from ..core.dork_queries import DorkQuery, build_dork_queries
 from ..core.duckduckgo_dorker import DuckDuckGoDorker
 from ..core.email_confidence import compute_confidence_breakdown, label_for_score
 from ..core.email_extraction import extract_emails, infer_template_from_local_part
@@ -128,6 +128,25 @@ class EmailSearchDorkModule(BaseModule):
     requires_key = False
     default_enabled = False  # Opt-in: domain harvest mode only
 
+    async def _jev_queries(self, domain: str, cap: int) -> list[DorkQuery] | None:
+        """Phase JEV-4 (reach.query_generate): domain-scoped queries, SAME count cap.
+
+        Returns JEV queries wrapped as DorkQuery (validated: scoped to the domain,
+        length-capped, count <= cap), or None to keep today's templates. No-op
+        without a JEV key.
+        """
+        from ..core import jev_reach
+
+        queries = await jev_reach.generate_queries(
+            engine="ddg/bing/brave/cse", max_queries=cap, domain=domain
+        )
+        if not queries:
+            return None
+        return [
+            DorkQuery(query=q, pattern_id=1000 + i, description="jev_generated")
+            for i, q in enumerate(queries[:cap])
+        ]
+
     async def run(
         self,
         target: str,
@@ -174,6 +193,12 @@ class EmailSearchDorkModule(BaseModule):
             min(int(settings.dork_max_queries_per_engine), _MAX_QUERIES_HARD_CAP),
         )
         queries_for_run = queries[:per_engine_cap]
+        # Phase JEV-4 (reach.query_generate): swap the fixed templates for
+        # subject-scoped queries, SAME count cap. Validated (scoped to the domain,
+        # length-capped) at the boundary; DEFER / no key → today's templates.
+        jev_assisted_queries = await self._jev_queries(domain, per_engine_cap)
+        if jev_assisted_queries is not None:
+            queries_for_run = jev_assisted_queries
 
         ddg_delay = float(settings.dork_ddg_delay_seconds)
         bing_delay = float(settings.dork_bing_delay_seconds)
@@ -651,6 +676,7 @@ class EmailSearchDorkModule(BaseModule):
                 "dual_engine_confirmed": dual_engine_confirmed,
                 "lite_mode": effective_lite_mode,
                 "aggressive": effective_aggressive,
+                "jev_assisted": jev_assisted_queries is not None,
                 "use_proxies": use_proxies,
                 "active_scrapingant_transport": get_active_transport()
                 if use_proxies
