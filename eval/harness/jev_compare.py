@@ -400,10 +400,71 @@ def _gate_verification(off_dir: Path, on_dir: Path, truth: dict[str, Any]) -> di
     }
 
 
+def _seniority_of(contact: dict[str, Any]) -> str | None:
+    val = str(contact.get("seniority") or "").strip().lower()
+    return val or None
+
+
+def _roster_stats(raw: Any, truth: dict[str, Any]) -> dict[str, int]:
+    labelled = {
+        score._norm_email(c.get("email", "")): c for c in (truth.get("known_contacts") or [])
+    }
+    emails = raw.get("emails") or []
+    found = {score._norm_email(e.get("email", "")): e for e in emails}
+    recall = sum(1 for k in labelled if k in found)
+    seniority_correct = seniority_labelled = 0
+    for key, contact in labelled.items():
+        want = _seniority_of(contact)
+        got = _seniority_of(found.get(key) or {})
+        if want and want != "unknown":
+            seniority_labelled += 1
+            seniority_correct += got == want
+    return {"roster_size": len(emails), "recall": recall,
+            "seniority_correct": seniority_correct, "seniority_labelled": seniority_labelled}
+
+
+def _gate_roster(off_dir: Path, on_dir: Path, truth: dict[str, Any]) -> dict[str, Any]:
+    """Score roster cleanliness across harvest runs (the JEV-3 roster.* tasks).
+
+    Primary guard: RECALL HELD — no labeled real contact is dropped
+    (``jev_recall >= heuristic_recall``). Kept only when the roster gets cleaner
+    (fewer rows) or seniority accuracy rises, AND recall holds.
+    """
+    off = {"roster_size": 0, "recall": 0, "seniority_correct": 0, "seniority_labelled": 0}
+    on = dict(off)
+    for tid, raw_off, raw_on in _harvest_raws(off_dir, on_dir):
+        t = truth.get(tid)
+        if not t:
+            continue
+        for acc, src in ((off, raw_off), (on, raw_on)):
+            stats = _roster_stats(src, t)
+            for k in acc:
+                acc[k] += stats[k]
+    recall_held = on["recall"] >= off["recall"]
+    cleaner = on["roster_size"] < off["roster_size"]
+    seniority_up = on["seniority_correct"] > off["seniority_correct"]
+    if on["recall"] == 0 and off["recall"] == 0 and on["seniority_labelled"] == 0:
+        decision = "drop (no labels)"
+    elif recall_held and (cleaner or seniority_up):
+        decision = "keep"
+    else:
+        decision = "drop"
+    return {
+        "labelled_contacts": on["recall"] if on["recall"] else off["recall"],
+        "heuristic_recall": off["recall"], "jev_recall": on["recall"],
+        "heuristic_roster_size": off["roster_size"], "jev_roster_size": on["roster_size"],
+        "heuristic_seniority_correct": off["seniority_correct"],
+        "jev_seniority_correct": on["seniority_correct"],
+        "seniority_labelled": on["seniority_labelled"],
+        "recall_held": recall_held, "decision": decision,
+    }
+
+
 def task_gate(off_dir: Path, on_dir: Path) -> dict[str, Any]:
     truth = score.load_truth()
     raws = _investigate_raws(off_dir, on_dir)
     verification = _gate_verification(off_dir, on_dir, truth)
+    roster = _gate_roster(off_dir, on_dir, truth)
     return {
         "identity.name_reconcile": _gate_names(raws, truth),
         "identity.same_person": _gate_same_person(raws, truth),
@@ -411,6 +472,9 @@ def task_gate(off_dir: Path, on_dir: Path) -> dict[str, Any]:
         # The three JEV-2 verify.* tasks all feed the deliverability grade; scored
         # jointly on precision (no new false 'valid') + correct classification.
         "verify.*": verification,
+        # The four JEV-3 roster.* tasks clean the harvest roster; scored jointly on
+        # recall held (no labeled contact dropped) + cleanliness / seniority.
+        "roster.*": roster,
     }
 
 
@@ -518,6 +582,11 @@ def render_markdown(c: dict[str, Any]) -> str:
             row = (g["labelled"], g["heuristic_correct"], g["jev_correct"],
                    f"false-valid {g['heuristic_false_valid']}→{g['jev_false_valid']}, "
                    f"precision held {g['precision_held']}")
+        elif name == "roster.*":
+            row = (g["labelled_contacts"], g["heuristic_recall"], g["jev_recall"],
+                   f"roster size {g['heuristic_roster_size']}→{g['jev_roster_size']}, "
+                   f"seniority {g['heuristic_seniority_correct']}→{g['jev_seniority_correct']}, "
+                   f"recall held {g['recall_held']}")
         else:
             row = (g["labelled"], g["heuristic_correct"], g["jev_correct"],
                    f"JEV-assisted runs {g['jev_assisted_runs']}")

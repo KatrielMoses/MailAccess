@@ -273,3 +273,45 @@ def test_verification_gate_drops_on_new_false_valid(
     # though the real address was newly graded correctly.
     assert (g["heuristic_false_valid"], g["jev_false_valid"]) == (0, 1)
     assert g["precision_held"] is False and g["decision"] == "drop"
+
+
+# ---------------------------------------------------------------------------
+# JEV-3 roster gate (recall guard is primary)
+# ---------------------------------------------------------------------------
+_ROSTER_TRUTH = {"d1": {"kind": "domain", "known_contacts": [
+    {"email": "real@x.com", "seniority": "vp"},
+    {"email": "two@x.com", "seniority": "unknown"},
+]}}
+
+
+def test_roster_gate_keeps_when_cleaner_and_recall_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(score, "load_truth", lambda: _ROSTER_TRUTH)
+    # OFF: both labeled contacts present + a junk row; real@ has wrong seniority.
+    _write_harvest(tmp_path / "off", [
+        {"email": "real@x.com", "seniority": "ic"},
+        {"email": "two@x.com"},
+        {"email": "junkrow@x.com"}])
+    # ON: junk row dropped (cleaner), real@ seniority fixed, both labeled kept (recall held).
+    _write_harvest(tmp_path / "on", [
+        {"email": "real@x.com", "seniority": "vp"},
+        {"email": "two@x.com"}])
+    g = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")["roster.*"]
+    assert (g["heuristic_recall"], g["jev_recall"]) == (2, 2)
+    assert (g["heuristic_roster_size"], g["jev_roster_size"]) == (3, 2)
+    assert g["recall_held"] is True and g["decision"] == "keep"
+
+
+def test_roster_gate_drops_when_recall_regresses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(score, "load_truth", lambda: _ROSTER_TRUTH)
+    _write_harvest(tmp_path / "off", [
+        {"email": "real@x.com", "seniority": "vp"},
+        {"email": "two@x.com"}, {"email": "junk@x.com"}])
+    # ON drops a junk row but ALSO loses a labeled real contact → recall regressed.
+    _write_harvest(tmp_path / "on", [{"email": "real@x.com", "seniority": "vp"}])
+    g = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")["roster.*"]
+    assert g["jev_recall"] < g["heuristic_recall"]
+    assert g["recall_held"] is False and g["decision"] == "drop"

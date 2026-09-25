@@ -516,10 +516,34 @@ async def _resolve_company(query: str) -> dict[str, Any]:
             "domain": str(chosen.get("domain")),
             "company": _org_candidate(chosen),
         }
-    return {
-        "status": "disambiguation",
-        "candidates": [_org_candidate(o) for o in top_tier[:10]],
-    }
+    candidates = [_org_candidate(o) for o in top_tier[:10]]
+    # Phase JEV-3 (roster.company_resolve): the ambiguous multi-candidate case only.
+    # JEV may pick ONE of these real candidates (it returns an index, never a name
+    # or domain, so it can never fabricate one); a null/DEFER keeps disambiguation.
+    # No-op without a JEV key, so this branch stays byte-identical then.
+    chosen = await _jev_pick_org(query, candidates)
+    if chosen is not None:
+        return {
+            "status": "ok",
+            "domain": str(chosen.get("domain")),
+            "company": chosen,
+            "jev_assisted": True,
+        }
+    return {"status": "disambiguation", "candidates": candidates}
+
+
+async def _jev_pick_org(
+    query: str, candidates: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Let JEV disambiguate among real org candidates; None keeps disambiguation."""
+    from ...core import jev_roster
+
+    idx = await jev_roster.choose_company(query, candidates)
+    if idx is None:
+        return None
+    chosen = candidates[idx]
+    # Defence in depth: only accept a candidate that carries a real domain.
+    return chosen if chosen.get("domain") else None
 
 
 async def _serve(query: str, query_type: str, limit: int) -> dict[str, Any]:

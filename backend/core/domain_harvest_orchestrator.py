@@ -1716,6 +1716,50 @@ def _apply_person_attribution(emails: list[HarvestedEmail]) -> None:
         entry.person_field_provenance = person.field_provenance
 
 
+async def _apply_jev_title_normalization(result: Any) -> None:
+    """Phase JEV-3 (roster.title_normalize) — fill only UNKNOWN seniority + a
+    normalized-title note, for titles the fast classifier left unresolved.
+
+    Metadata only: it never changes a resolved band, an address, a verification/
+    confidence label, or a score. No-op without a JEV key; bounded per run.
+    """
+    from . import jev, jev_roster
+
+    if not jev.is_active():
+        return
+    entries = getattr(result, "unique_emails", None)
+    if not entries:
+        return
+    try:
+        pending = [
+            e for e in entries
+            if getattr(e, "job_title", None) and not getattr(e, "seniority", None)
+        ][: jev_roster.MAX_TITLES_PER_RUN]
+        if not pending:
+            return
+        async with jev.run_scope():
+            import asyncio
+
+            results = await asyncio.gather(*(
+                jev_roster.normalize_title(str(e.job_title)) for e in pending
+            ))
+        for entry, (bucket, normalized) in zip(pending, results):
+            if bucket is None or bucket == "unknown":
+                continue
+            entry.seniority = bucket
+            prov = getattr(entry, "person_field_provenance", None)
+            if isinstance(prov, dict):
+                prov["seniority_jev"] = {
+                    "value": bucket,
+                    "normalized_title": normalized,
+                    "derived_from": "job_title",
+                    "jev_assisted": True,
+                    "jev_task": jev_roster.TITLE_NORMALIZE,
+                }
+    except Exception:
+        _LOG.exception("JEV title normalization skipped")
+
+
 def _email_verification_signals(entry: HarvestedEmail) -> dict[str, Any]:
     """Extract per-email SMTP/provider signals the grade fuser needs, from the
     already-assembled evidence + typed fields. No new probing."""
@@ -4360,6 +4404,9 @@ async def run_domain_harvest(
         display_subscriber=display_subscriber,
         on_harvest_end=on_harvest_end,
     )
+    # Phase JEV-3 (roster.title_normalize) — fill only UNKNOWN seniority buckets on
+    # the assembled roster before persistence. Guarded + no-op without a JEV key.
+    await _apply_jev_title_normalization(result)
     # Phase 2B — stamp the run's product mode onto the result (the harvest run
     # manifest) before write-back, so the corpus snapshot and the ledger record
     # the collection mode. ``resolved_mode`` was computed above with the gate.

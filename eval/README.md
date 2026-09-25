@@ -101,6 +101,14 @@ false-positive or known-undeliverable address graded `Valid`) must not increase.
 The false-`valid` precision guard is the primary acceptance metric — a task that
 raises recall but adds a false `Valid` is dropped.
 
+JEV-3 roster tasks (`roster.person_filter`, `roster.title_normalize`,
+`roster.person_dedupe`, `roster.company_resolve`) clean the harvest roster and are
+scored jointly under `roster.*`: over the harvest runs, **recall must hold** — the
+count of labeled `known_contacts` present must not fall (no real person dropped or
+over-merged) — AND the roster must get cleaner (fewer rows) or per-contact
+seniority accuracy must rise. The recall guard is the primary acceptance metric; a
+task that cleans the roster but drops a labeled contact is dropped.
+
 ## Safety / authorized-use
 
 Authorized evaluation only. The target set, truth labels, and scorecards stay

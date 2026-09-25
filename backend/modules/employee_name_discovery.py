@@ -301,6 +301,11 @@ class EmployeeNameDiscoveryModule(BaseModule):
             linkedin_findings + company_findings + press_findings + sec_findings + oc_findings
         )
 
+        # Phase JEV-3 (roster.person_filter): drop borderline candidates JEV is
+        # confident are page noise, not people. No-op without a JEV key; only a
+        # confident 'no' drops, so a real person is never removed on doubt.
+        jev_dropped: set[str] = await self._jev_filter_names(all_names)
+
         # Source-OK mask: True if that source finished without raising
         # (zero-name successes count as "OK" per spec).  A source that
         # raised is reflected as ``False`` here.
@@ -336,6 +341,8 @@ class EmployeeNameDiscoveryModule(BaseModule):
 
         def _record(nd: NameDiscovery) -> None:
             cleaned = nd.name.strip()
+            if cleaned.lower() in jev_dropped:
+                return  # Phase JEV-3: JEV confidently judged this page noise.
             result = classify_name(cleaned)
             if not result.is_person:
                 return
@@ -398,6 +405,11 @@ class EmployeeNameDiscoveryModule(BaseModule):
             else:
                 role_delta_counts["none"] += 1
 
+        # Phase JEV-3 (roster.person_dedupe): merge near-duplicate name rows JEV is
+        # confident are the same person (spelling/nickname variants that the exact
+        # key kept apart). No-op without a JEV key; only a confident 'yes' merges.
+        jev_merged = await self._jev_dedupe_names(aggregated)
+
         # ------------------------------------------------------------------
         # Wrap into BaseModule's FindingItem shape so Phase C2's
         # orchestrator can consume via the standard findings pipeline.
@@ -447,6 +459,9 @@ class EmployeeNameDiscoveryModule(BaseModule):
             snippet_emails = snippet_emails_by_name.get(agg.name.strip().lower())
             if snippet_emails:
                 finding_metadata["snippet_emails"] = list(snippet_emails)
+            if agg.name.strip().lower() in jev_merged:
+                finding_metadata["jev_assisted"] = True
+                finding_metadata["jev_task"] = "roster.person_dedupe"
             findings.append(
                 {
                     "platform": "employee_name_discovery",
@@ -512,6 +527,101 @@ class EmployeeNameDiscoveryModule(BaseModule):
     # ----------------------------------------------------------------------
     # Source 1 — LinkedIn via search-engine dorking
     # ----------------------------------------------------------------------
+    async def _jev_filter_names(self, all_names: list[NameDiscovery]) -> set[str]:
+        """Phase JEV-3: return lowercased names JEV confidently rejects as noise.
+
+        Only borderline candidates are sent: those today's heuristic ACCEPTS but
+        with a suspicion penalty (confidence < 1.0). A clean, high-confidence name
+        is never sent, so a real person cannot be dropped. Empty without a JEV key.
+        """
+        from ..core import jev_roster
+
+        if not jev_roster.jev.is_active() or not all_names:
+            return set()
+        try:
+            borderline: dict[str, NameDiscovery] = {}
+            for nd in all_names:
+                cleaned = nd.name.strip()
+                key = cleaned.lower()
+                if key in borderline:
+                    continue
+                result = classify_name(cleaned)
+                # Ambiguous = accepted-but-penalized. Rejected names already drop;
+                # clean names (penalty 1.0) are obvious keeps — neither is sent.
+                if result.is_person and result.confidence < 1.0:
+                    borderline[key] = nd
+            if not borderline:
+                return set()
+            keys = list(borderline)
+            candidates = [
+                {
+                    "candidate": borderline[k].name.strip(),
+                    "context": borderline[k].title_or_role,
+                    "source": borderline[k].source,
+                }
+                for k in keys
+            ]
+            drop_idx, _norm = await jev_roster.drop_junk_names(candidates)
+            return {keys[i] for i in drop_idx}
+        except Exception:
+            _LOG.exception("JEV name filter skipped")
+            return set()
+
+    async def _jev_dedupe_names(
+        self, aggregated: dict[str, EmployeeNameResult]
+    ) -> set[str]:
+        """Phase JEV-3: merge near-duplicate name rows JEV confirms are one person.
+
+        Returns the set of surviving lowercased names that absorbed a duplicate (so
+        the finding can be marked jev_assisted). Mutates ``aggregated`` in place.
+        Empty without a JEV key.
+        """
+        from ..core import jev_roster
+
+        if not jev_roster.jev.is_active() or len(aggregated) < 2:
+            return set()
+        try:
+            keys = list(aggregated)
+            names = [aggregated[k].name for k in keys]
+            pairs = jev_roster.candidate_dedupe_pairs(names)
+            if not pairs:
+                return set()
+            entries = [
+                {
+                    "name": aggregated[k].name,
+                    "titles": [aggregated[k].title_or_role] if aggregated[k].title_or_role else [],
+                    "source": ", ".join(sorted(aggregated[k].sources)),
+                    "profile_links": list(aggregated[k].source_urls),
+                }
+                for k in keys
+            ]
+            confirmed = await jev_roster.same_person_pairs(entries, pairs)
+            merged: set[str] = set()
+            for i, j in confirmed:
+                ki, kj = keys[i], keys[j]
+                keep = aggregated.get(ki)
+                drop = aggregated.get(kj)
+                if keep is None or drop is None or ki == kj:
+                    continue  # already merged away by an earlier pair
+                # Merge drop -> keep: union sources/urls, keep the higher confidence
+                # and the more complete title. No address or observation is lost.
+                for src in drop.sources:
+                    if src not in keep.sources:
+                        keep.sources.append(src)
+                for url in drop.source_urls:
+                    if url not in keep.source_urls:
+                        keep.source_urls.append(url)
+                keep.source_count = len(keep.sources)
+                keep.confidence = max(keep.confidence, drop.confidence)
+                if drop.title_or_role and not keep.title_or_role:
+                    keep.title_or_role = drop.title_or_role
+                aggregated.pop(kj, None)
+                merged.add(keep.name.strip().lower())
+            return merged
+        except Exception:
+            _LOG.exception("JEV name dedupe skipped")
+            return set()
+
     async def _linkedin(self, domain: str) -> list[NameDiscovery]:
         # scrapingant: keep for LinkedIn/search HTML where proxy/fingerprint helps
         if getattr(self, "_use_proxies", False):
