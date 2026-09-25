@@ -216,3 +216,60 @@ def test_task_gate_without_labels_drops(tmp_path: Path, monkeypatch: pytest.Monk
     c = jev_compare.compare(tmp_path / "off", tmp_path / "on", tmp_path)
     assert "## Task gate" in (tmp_path / "comparison.md").read_text()
     assert c["task_gate"] == gate
+
+
+# ---------------------------------------------------------------------------
+# JEV-2 verification gate (harvest deliverability precision)
+# ---------------------------------------------------------------------------
+def _write_harvest(run_dir: Path, emails: list[dict[str, Any]]) -> None:
+    (run_dir / "raw").mkdir(parents=True)
+    (run_dir / "raw" / "d1.run1.harvest.json").write_text(
+        json.dumps({"emails": emails, "summary": {}}))
+    (run_dir / "runlog.json").write_text(json.dumps({"run_id": run_dir.name, "records": [
+        {"target_id": "d1", "target_value": "x.com", "category": "corporate_small",
+         "pipeline": "harvest", "run_idx": 1, "ok": True, "wall_seconds": 1.0,
+         "raw_path": "raw/d1.run1.harvest.json", "exit_code": 0}]}))
+    (run_dir / "manifest.json").write_text(json.dumps({"tool_version": "t", "extra": {}}))
+
+
+_HARVEST_TRUTH = {"d1": {"kind": "domain", "known_contacts": [
+    {"email": "real@x.com", "currently_deliverable": "true"},
+], "false_positive_emails": ["ghost@x.com"]}}
+
+
+def test_verification_gate_keeps_when_precision_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(score, "load_truth", lambda: _HARVEST_TRUTH)
+    # OFF: real address only Risky (missed), ghost wrongly Valid (a false valid).
+    _write_harvest(tmp_path / "off", [
+        {"email": "real@x.com", "deliverability_grade": "Risky"},
+        {"email": "ghost@x.com", "deliverability_grade": "Valid"}])
+    # ON: real correctly Valid, ghost demoted to Invalid → more correct, fewer false-valid.
+    _write_harvest(tmp_path / "on", [
+        {"email": "real@x.com", "deliverability_grade": "Valid"},
+        {"email": "ghost@x.com", "deliverability_grade": "Invalid"}])
+
+    g = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")["verify.*"]
+    assert (g["heuristic_correct"], g["jev_correct"]) == (0, 2)
+    assert (g["heuristic_false_valid"], g["jev_false_valid"]) == (1, 0)
+    assert g["precision_held"] is True and g["decision"] == "keep"
+
+
+def test_verification_gate_drops_on_new_false_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(score, "load_truth", lambda: _HARVEST_TRUTH)
+    _write_harvest(tmp_path / "off", [
+        {"email": "real@x.com", "deliverability_grade": "Risky"},
+        {"email": "ghost@x.com", "deliverability_grade": "Invalid"}])
+    # ON gets real right (+1 correct) but also flips ghost to Valid (a NEW false valid).
+    _write_harvest(tmp_path / "on", [
+        {"email": "real@x.com", "deliverability_grade": "Valid"},
+        {"email": "ghost@x.com", "deliverability_grade": "Valid"}])
+
+    g = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")["verify.*"]
+    # A new false 'valid' appeared (0 → 1): the precision guard fails, so drop even
+    # though the real address was newly graded correctly.
+    assert (g["heuristic_false_valid"], g["jev_false_valid"]) == (0, 1)
+    assert g["precision_held"] is False and g["decision"] == "drop"

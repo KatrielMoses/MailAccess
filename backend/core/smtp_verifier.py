@@ -173,6 +173,12 @@ class SMTPVerificationResult:
     verification_status: str = "not_attempted"
     mx_host: str | None = None
     transport_error: str | None = None
+    # Phase JEV-2: set when a JEV read of an otherwise-inconclusive RCPT reply
+    # decided this result. Default False keeps every non-JEV path byte-identical.
+    jev_assisted: bool = False
+    # Phase JEV-2: the raw RCPT reply, kept only on an inconclusive result so the
+    # catch-all detector can hand it to JEV. Not serialized by any consumer.
+    reply_text: str | None = None
     # "verified" / "not_found" / "inconclusive" / "blocked" /
     # "not_attempted" / "temporary_failure"
 
@@ -303,9 +309,32 @@ class SMTPVerifier:
         # mailbox.  Treat it the same as a 250 to a random probe.
         if result.catchall_hint:
             return True
+        if result.exists is True:
+            return True
+        # Phase JEV-2: the control probe was ambiguous (today → "unknown", caller
+        # does not proceed). Let JEV read the control reply; it may only ADD a
+        # catch-all (→ True, still blocks a positive), never clear one. No-op
+        # without a key, so this stays byte-identical then.
         if result.exists is None:
+            if await self._jev_catchall(domain, result):
+                return True
             return None
         return bool(result.exists)
+
+    async def _jev_catchall(self, domain: str, control: SMTPVerificationResult) -> bool:
+        """Ask JEV whether an ambiguous control reply signals a catch-all domain.
+
+        Conservative: only a confident ``yes`` returns True (blocks positive
+        verification); everything else returns False so today's ``unknown`` stands.
+        """
+        from .jev_verify import catchall_yes
+
+        return await catchall_yes(
+            domain=domain,
+            provider=None,
+            control_code=control.response_code,
+            control_text=control.reply_text,
+        )
 
     # ------------------------------------------------------------------
     # Single recipient
@@ -394,6 +423,42 @@ class SMTPVerifier:
             mx_host=last_result.mx_host if last_result else last_mx_host,
             transport_error="; ".join(errors) or "no_mx_response",
         )
+
+    async def _jev_rcpt_verdict(
+        self, email: str, rcpt_code: int, rcpt_reply: str
+    ) -> SMTPVerificationResult | None:
+        """Map a JEV read of an ambiguous RCPT reply to a result, else None.
+
+        Conservative: ``no_such_user`` / ``catch_all`` / ``temporary`` / ``blocked``
+        only make the verdict more cautious; ``exists`` supplies the same
+        classification input the code matcher would have (grading decides the
+        label). ``unknown`` / DEFER return None so the caller stays inconclusive.
+        """
+        from .jev_verify import reply_verdict
+
+        verdict = await reply_verdict(
+            protocol="smtp_rcpt", text=rcpt_reply, code=rcpt_code or None
+        )
+        if verdict is None:
+            return None
+        base = {"email": email, "response_code": rcpt_code or None, "jev_assisted": True}
+        if verdict == "exists":
+            return SMTPVerificationResult(exists=True, **base)
+        if verdict == "no_such_user":
+            return SMTPVerificationResult(exists=False, **base)
+        if verdict == "catch_all":
+            return SMTPVerificationResult(
+                exists=None, catchall_hint=True, verification_status="catch_all", **base
+            )
+        if verdict == "temporary":
+            return SMTPVerificationResult(
+                exists=None, verification_status="temporary_failure", **base
+            )
+        if verdict == "blocked":
+            return SMTPVerificationResult(
+                exists=None, blocked_signal=True, verification_status="blocked", **base
+            )
+        return None
 
     async def _smtp_rcpt(self, mx: MXRecord, email: str) -> SMTPVerificationResult:
         """Walk HELO / MAIL FROM / RCPT TO for a single address."""
@@ -502,11 +567,19 @@ class SMTPVerifier:
                     blocked_signal=True,
                     verification_status="blocked",
                 )
+            # Phase JEV-2: no known RCPT code matched — a novel/ambiguous reply.
+            # Let JEV read the raw reply before settling on inconclusive. Only this
+            # fall-through is sent; every code-matched verdict above is untouched.
+            # No-op without a JEV key, so this branch stays byte-identical then.
+            jev_result = await self._jev_rcpt_verdict(email, rcpt_code, rcpt_reply)
+            if jev_result is not None:
+                return jev_result
             return SMTPVerificationResult(
                 email=email,
                 exists=None,
                 response_code=rcpt_code or None,
                 verification_status="inconclusive",
+                reply_text=(rcpt_reply or "").strip()[:400] or None,
             )
         except Exception:
             # The transport layer raised; surface as inconclusive so the

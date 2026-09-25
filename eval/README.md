@@ -92,6 +92,15 @@ data — ties, including "no labels", drop it. JEV-1 identity tasks are scored a
 `identity.bio_extract` — extracted employer / role / location vs the optional
 `identity.employer|role_title|location` labels (correct − wrong must be > 0).
 
+JEV-2 verification tasks (`verify.reply_classify`, `verify.catchall_judge`,
+`verify.m365_signal_read`) all feed the deliverability grade, so they are scored
+jointly under `verify.*`: over the harvest runs, correct `Valid`/not-`Valid`
+classification vs the domain truth (`known_contacts` deliverability +
+`false_positive_emails`) must rise **and** the count of false `Valid` (a
+false-positive or known-undeliverable address graded `Valid`) must not increase.
+The false-`valid` precision guard is the primary acceptance metric — a task that
+raises recall but adds a false `Valid` is dropped.
+
 ## Safety / authorized-use
 
 Authorized evaluation only. The target set, truth labels, and scorecards stay

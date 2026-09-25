@@ -319,13 +319,98 @@ def _gate_bio(raws: list[tuple[str, Any, Any]], truth: dict[str, Any]) -> dict[s
             "decision": _gate(0, correct - wrong, n)}
 
 
+def _harvest_raws(off_dir: Path, on_dir: Path) -> list[tuple[str, Any, Any]]:
+    off_log = _load(off_dir / "runlog.json") or {"records": []}
+    on_log = _load(on_dir / "runlog.json") or {"records": []}
+    on_by_key = {(r["target_id"], r["pipeline"], r["run_idx"]): r for r in on_log["records"]}
+    out = []
+    for rec in off_log["records"]:
+        if rec["pipeline"] != "harvest" or not rec.get("ok"):
+            continue
+        on_rec = on_by_key.get((rec["target_id"], "harvest", rec["run_idx"]))
+        if not on_rec or not on_rec.get("ok"):
+            continue
+        raw_off, raw_on = _load(off_dir / rec["raw_path"]), _load(on_dir / on_rec["raw_path"])
+        if raw_off is not None and raw_on is not None:
+            out.append((rec["target_id"], raw_off, raw_on))
+    return out
+
+
+_VALID_GRADES = {"valid"}
+
+
+def _grade_stats(raw: Any, truth: dict[str, Any]) -> dict[str, int]:
+    """Count correct classifications and false 'valid' against a domain's truth."""
+    deliverable = {
+        score._norm_email(c.get("email", "")): _deliverable(c)
+        for c in (truth.get("known_contacts") or [])
+    }
+    fp = {score._norm_email(e) for e in (truth.get("false_positive_emails") or [])}
+    correct = labelled = false_valid = valid_total = 0
+    for em in raw.get("emails") or []:
+        key = score._norm_email(em.get("email", ""))
+        grade = str(em.get("deliverability_grade") or "").strip().lower()
+        is_valid = grade in _VALID_GRADES
+        valid_total += is_valid
+        # A false 'valid': graded Valid but labelled a false positive or a
+        # known non-deliverable address. This is the precision guard's numerator.
+        if is_valid and (key in fp or deliverable.get(key) is False):
+            false_valid += 1
+        want = None
+        if key in fp:
+            want = False
+        elif key in deliverable and deliverable[key] is not None:
+            want = deliverable[key]
+        if want is None:
+            continue
+        labelled += 1
+        correct += is_valid == want
+    return {"correct": correct, "labelled": labelled, "false_valid": false_valid,
+            "valid_total": valid_total}
+
+
+def _deliverable(contact: dict[str, Any]) -> bool | None:
+    val = score._deliverability_outcome(contact)
+    return None if val is None else bool(val)
+
+
+def _gate_verification(off_dir: Path, on_dir: Path, truth: dict[str, Any]) -> dict[str, Any]:
+    """Grade verification precision/recall across harvest runs (JEV-2 tasks share it).
+
+    The primary guard: JEV must not increase false 'valid'. Kept only when correct
+    classification rises AND false-valid does not.
+    """
+    off = {"correct": 0, "labelled": 0, "false_valid": 0, "valid_total": 0}
+    on = dict(off)
+    for tid, raw_off, raw_on in _harvest_raws(off_dir, on_dir):
+        t = truth.get(tid)
+        if not t:
+            continue
+        for acc, src in ((off, raw_off), (on, raw_on)):
+            stats = _grade_stats(src, t)
+            for k in acc:
+                acc[k] += stats[k]
+    precision_held = on["false_valid"] <= off["false_valid"]
+    decision = _gate(off["correct"], on["correct"], on["labelled"], extra_ok=precision_held)
+    return {
+        "labelled": on["labelled"],
+        "heuristic_correct": off["correct"], "jev_correct": on["correct"],
+        "heuristic_false_valid": off["false_valid"], "jev_false_valid": on["false_valid"],
+        "precision_held": precision_held, "decision": decision,
+    }
+
+
 def task_gate(off_dir: Path, on_dir: Path) -> dict[str, Any]:
     truth = score.load_truth()
     raws = _investigate_raws(off_dir, on_dir)
+    verification = _gate_verification(off_dir, on_dir, truth)
     return {
         "identity.name_reconcile": _gate_names(raws, truth),
         "identity.same_person": _gate_same_person(raws, truth),
         "identity.bio_extract": _gate_bio(raws, truth),
+        # The three JEV-2 verify.* tasks all feed the deliverability grade; scored
+        # jointly on precision (no new false 'valid') + correct classification.
+        "verify.*": verification,
     }
 
 
@@ -429,6 +514,10 @@ def render_markdown(c: dict[str, Any]) -> str:
             row = (g["labelled_pairs"], g["heuristic_correct"], g["jev_correct"],
                    f"reviewed {g['reviewed_pairs']}, wrong yes {g['wrong_yes']}, "
                    f"new wrong merges {g['new_wrong_merges']}")
+        elif name == "verify.*":
+            row = (g["labelled"], g["heuristic_correct"], g["jev_correct"],
+                   f"false-valid {g['heuristic_false_valid']}→{g['jev_false_valid']}, "
+                   f"precision held {g['precision_held']}")
         else:
             row = (g["labelled"], g["heuristic_correct"], g["jev_correct"],
                    f"JEV-assisted runs {g['jev_assisted_runs']}")

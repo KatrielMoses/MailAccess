@@ -127,6 +127,8 @@ class ImapProbeResult:
     port: int | None = None
     elapsed_ms: float | None = None
     error: str | None = None
+    # Phase JEV-2: set when a JEV reply read (not the string matcher) decided this.
+    jev_assisted: bool = False
 
     @property
     def exists(self) -> bool | None:
@@ -153,6 +155,35 @@ def _inconclusive(
         host=host,
         port=port,
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase JEV-2 — optional reply read for ambiguous (non-phrase) IMAP replies
+# ---------------------------------------------------------------------------
+#: The classifier details that mean "no clear text phrase matched" — the only
+#: cases sent to JEV. A clear phrase (text_exists / text_not_found) is never sent.
+_JEV_AMBIGUOUS_DETAILS = frozenset(
+    {"ambiguous_no_timing", "timing_fast_reject", "timing_slow_lookup"}
+)
+
+
+async def _jev_refine_imap(
+    response: str | None,
+    status: str,
+    confidence: float,
+    detail: str | None,
+) -> tuple[str, float, str | None, bool]:
+    """Ask JEV to read an ambiguous IMAP reply; keep today's verdict on DEFER."""
+    from ..core import jev_verify
+
+    verdict = await jev_verify.reply_verdict(protocol="imap_login", text=response)
+    if verdict == "exists":
+        return "exists", _EXISTS_CONFIDENCE, "jev_text_exists", True
+    if verdict == "no_such_user":
+        return "not_found", _NOT_FOUND_CONFIDENCE, "jev_text_not_found", True
+    # catch_all / temporary / blocked / None: IMAP-login existence cannot assert
+    # those, so keep today's verdict (conservative fallback).
+    return status, confidence, detail, False
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +461,14 @@ async def run_imap_existence_check(
         )
 
     status, confidence, detail = classify_imap_response(response, elapsed_ms)
+    jev_assisted = False
+    # Phase JEV-2: the string matcher found no clear phrase — a bare "NO" that
+    # timing (a weak heuristic) resolved, or could not resolve. Let JEV read the
+    # raw reply. A clear phrase match above is never sent. No-op without a key.
+    if detail in _JEV_AMBIGUOUS_DETAILS:
+        status, confidence, detail, jev_assisted = await _jev_refine_imap(
+            response, status, confidence, detail
+        )
     result = ImapProbeResult(
         email=cleaned,
         status=status,
@@ -437,6 +476,7 @@ async def run_imap_existence_check(
         host=chosen_host,
         port=chosen_port,
         elapsed_ms=round(elapsed_ms, 2),
+        jev_assisted=jev_assisted,
     )
     if status != "inconclusive":
         result.source_type = SOURCE_IMAP

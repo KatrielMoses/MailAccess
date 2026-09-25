@@ -47,6 +47,9 @@ SOURCE_AADSTS = "aadsts_probe"
 SOURCE_ACTIVESYNC = "activesync_probe"
 SOURCE_WSTRUST = "wstrust_probe"
 
+#: Confidence stamped on a JEV-decided existence signal from inconclusive probes.
+_JEV_M365_CONFIDENCE = 0.55
+
 # Microsoft's own public client ID (Azure PowerShell). Widely used by every
 # O365 enumeration tool; public, first-party, and accepted for ROPC.
 _MS_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
@@ -153,6 +156,9 @@ class ActiveProbeResult:
     aadsts_code: str | None = None
     elapsed_ms: float | None = None
     error: str | None = None
+    # Phase JEV-2: set when a JEV read of inconclusive signals decided this.
+    jev_assisted: bool = False
+    managed_tenant: bool | None = None
 
     @property
     def exists(self) -> bool | None:
@@ -541,16 +547,65 @@ async def run_m365_active_intel(
     if check == "wstrust":
         if not enable_wstrust:
             return _inconclusive(cleaned, "wstrust", error="disabled")
-        return await probe_wstrust(cleaned, adfs_url, timeout_seconds=timeout_seconds)
-    if check == "aadsts":
+        result = await probe_wstrust(cleaned, adfs_url, timeout_seconds=timeout_seconds)
+    elif check == "aadsts":
         if not enable_aadsts:
             return _inconclusive(cleaned, "aadsts", error="disabled")
-        return await probe_aadsts(cleaned, timeout_seconds=timeout_seconds)
-    if not enable_activesync:
+        result = await probe_aadsts(cleaned, timeout_seconds=timeout_seconds)
+    elif not enable_activesync:
         return _inconclusive(cleaned, "activesync", error="disabled")
-    return await probe_activesync(
-        cleaned, domain=domain, mail_host=mail_host, timeout_seconds=timeout_seconds
-    )
+    else:
+        result = await probe_activesync(
+            cleaned, domain=domain, mail_host=mail_host, timeout_seconds=timeout_seconds
+        )
+    # Phase JEV-2: only an inconclusive probe (the fast rules could not decide) is
+    # sent to JEV to read the collected signals. A decisive exists/not_found is
+    # never sent. No-op without a JEV key, so this stays byte-identical then.
+    if result.status == "inconclusive":
+        result = await _jev_refine_m365(result, provider=provider, adfs_url=adfs_url)
+    return result
+
+
+async def _jev_refine_m365(
+    result: ActiveProbeResult,
+    *,
+    provider: Any = None,
+    adfs_url: str | None = None,
+) -> ActiveProbeResult:
+    """Let JEV interpret inconclusive M365 signals; keep today's result on DEFER.
+
+    Only ever moves an inconclusive result to a decided one (conservative:
+    ``unknown`` stays inconclusive); never overrides a decisive probe.
+    """
+    from ..core import jev_verify
+
+    signals = {
+        "check": result.check,
+        "probe_status": result.status,
+        "detail": result.detail,
+        "http_status": result.http_status,
+        "aadsts_code": result.aadsts_code,
+        "provider": str(provider) if provider is not None else None,
+        "has_adfs": adfs_url is not None,
+    }
+    mailbox, tenant = await jev_verify.m365_verdict(signals)
+    if mailbox is None and tenant is None:
+        return result
+    if tenant is not None:
+        result.managed_tenant = tenant == "yes"
+    if mailbox == "exists":
+        result.status = "exists"
+        result.detail = "jev_signal_exists"
+        result.confidence = result.confidence or _JEV_M365_CONFIDENCE
+        result.source_type = result.source_type or SOURCE_AADSTS
+        result.jev_assisted = True
+    elif mailbox == "not_exists":
+        result.status = "not_found"
+        result.detail = "jev_signal_not_found"
+        result.jev_assisted = True
+    elif tenant is not None:
+        result.jev_assisted = True
+    return result
 
 
 __all__ = [

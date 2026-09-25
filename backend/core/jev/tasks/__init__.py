@@ -5,4 +5,4 @@ JEV-1…6 each add one module here and one import line below — nothing else.
 
 from __future__ import annotations
 
-from . import demo, identity  # noqa: F401
+from . import demo, identity, verify  # noqa: F401

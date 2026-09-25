@@ -213,6 +213,7 @@ docs/audit/
 !tests/test_jev_eval_harness.py
 !tests/test_jev_cli_keys.py
 !tests/test_jev_identity.py
+!tests/test_jev_verify.py
 
 # Local 0.17.0 release workspace and operator-only material.
 /.venv-017/
