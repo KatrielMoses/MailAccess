@@ -17,14 +17,15 @@ Guarantees enforced here, not by callers:
    no score is ever computed from a verdict by the seam.
 2. Every call has a deterministic fallback — any failure resolves to DEFER.
 3. Output is schema-bounded — strict validation against the task's pydantic model.
-4. OFF by default — with ``JEV_ENABLED`` unset the seam does no I/O at all.
+4. Active only when ``JEV_API_KEY`` is set — with no key the seam does no I/O at
+   all; a circuit breaker stops retrying a key that is out of credits.
 
 Adding a task = one new module in ``tasks/`` that calls :func:`register`.
 """
 
 from __future__ import annotations
 
-from . import metrics, tasks  # noqa: F401  (importing tasks registers them)
+from . import breaker, metrics, tasks  # noqa: F401  (importing tasks registers them)
 from .contract import (
     DEFER,
     DeferReason,
@@ -48,6 +49,7 @@ __all__ = [
     "Provenance",
     "TaskSpecError",
     "Verdict",
+    "breaker",
     "get_task",
     "judge",
     "metrics",

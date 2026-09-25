@@ -77,23 +77,54 @@ async def _post(
     task: str,
 ) -> dict[str, Any] | DeferReason:
     async with client.stream("POST", url, json=body, headers=headers) as resp:
-        if resp.status_code != 200:
-            _LOG.debug("JEV HTTP %d (task=%s)", resp.status_code, task)
-            return DeferReason.HTTP_STATUS
         chunks: list[bytes] = []
         size = 0
         async for chunk in resp.aiter_bytes():
             size += len(chunk)
             if size > _MAX_RESPONSE_BYTES:
+                if resp.status_code != 200:
+                    break  # an error page only needs its head for classification
                 return DeferReason.OVERSIZE
             chunks.append(chunk)
-    return _extract_object(b"".join(chunks))
+        status = resp.status_code
+    body = b"".join(chunks)
+    if status != 200:
+        reason = classify_error(status, body)
+        _LOG.debug("JEV HTTP %d → %s (task=%s)", status, reason.value, task)
+        return reason
+    return _extract_object(body)
+
+
+# Provider error vocabularies for "out of credits / quota". OpenAI-compatible
+# APIs signal this as 429 insufficient_quota, 402 Payment Required, or a
+# billing/credit message; matched case-insensitively on the error body.
+_CREDIT_MARKERS = (
+    "insufficient_quota", "quota", "credit", "billing", "payment", "balance",
+    "exceeded your current", "out of tokens",
+)
+
+
+def classify_error(status: int, body: bytes) -> DeferReason:
+    """Map a non-success response to a DeferReason the circuit breaker understands."""
+    text = body[:8192].decode("utf-8", "replace").lower()
+    if status == 402 or any(m in text for m in _CREDIT_MARKERS):
+        return DeferReason.CREDITS_EXHAUSTED
+    if status in (401, 403):
+        return DeferReason.AUTH_FAILED
+    if status == 429:
+        return DeferReason.RATE_LIMITED
+    if status >= 500:
+        return DeferReason.SERVER_ERROR
+    return DeferReason.HTTP_STATUS
 
 
 def _extract_object(raw: bytes) -> dict[str, Any] | DeferReason:
     """Pull the JSON object out of an OpenAI-style completion envelope."""
     try:
         envelope = json.loads(raw)
+        if isinstance(envelope, dict) and "error" in envelope and "choices" not in envelope:
+            # Some gateways report failures (incl. exhausted credits) with HTTP 200.
+            return classify_error(200, raw)
         content = envelope["choices"][0]["message"]["content"]
     except (ValueError, KeyError, IndexError, TypeError):
         return DeferReason.NON_JSON

@@ -129,6 +129,7 @@ _API_KEYS: list[tuple[str, str, str]] = [
     ("GOOGLE_CSE_CX", "email_search_dork", "Google CSE Engine ID"),
     ("COMPANIES_HOUSE_API_KEY", "companies_house", "developer.company-information.service.gov.uk"),
     ("MAILACCESS_PRO_KEY", "mailaccess_pro", "mailaccess.pro — paid lead-enrichment tier"),
+    ("JEV_API_KEY", "jev", "JEV reasoning add-on (optional; set = on, unset = off)"),
     ("SLACK_WEBHOOK_URL", "notifications", "Slack app webhooks"),
     ("DISCORD_WEBHOOK_URL", "notifications", "Discord server webhooks"),
 ]
@@ -2149,6 +2150,24 @@ def keys_set(
     console.print(f"[green]✓ {key_name} saved to ~/.mailaccess/.env[/green]")
     if key_name in _SCRAPINGANT_KEY_NAMES:
         console.print("[dim]Key is active in this session.[/dim]")
+    if key_name == "JEV_API_KEY":
+        _print_jev_activation_hint()
+
+
+def _print_jev_activation_hint() -> None:
+    """JEV turns on with its key; flag the endpoint settings it still needs.
+
+    Until JEV_BASE_URL and JEV_MODEL are both configured every JEV call DEFERs
+    (``missing_config``) and the existing engine runs as before — never an error.
+    """
+    console.print("[dim]JEV is on (remove the key to turn it off). A running "
+                  "`mailaccess serve` picks it up on restart.[/dim]")
+    missing = [n for n in ("JEV_BASE_URL", "JEV_MODEL") if not os.environ.get(n)]
+    if missing:
+        console.print(
+            f"[yellow]JEV still needs {' and '.join(missing)} — until set, JEV "
+            f"steps aside and the existing engine runs as before.[/yellow]"
+        )
 
 
 # ---------------------------------------------------------------------------

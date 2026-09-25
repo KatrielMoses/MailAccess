@@ -71,13 +71,16 @@ quality deltas vs truth, and any score drift. Every JEV phase is accepted or
 dropped on this scorecard.
 
 ```bash
-export JEV_API_KEY=... JEV_BASE_URL=... JEV_MODEL=...   # read from THIS shell only
+mailaccess keys set JEV_API_KEY <key>   # or export JEV_* in this shell
 uv run python -m eval.harness.jev_compare run --base keyless-default --runs 2
 uv run python -m eval.harness.jev_compare compare --off <dir>/off --on <dir>/on
 ```
 
-Legacy configs (`keyless-default`, …) strip every `JEV_*` variable, so an exported
-JEV setting can never leak into a baseline. `--refresh-cache` makes the ON pass
+JEV is active only when a key is configured. The OFF pass (and every legacy
+config: `keyless-default`, …) strips all `JEV_*` variables and sets the
+testing-only `JEV_FORCE_OFF=true` override, so it matches a no-key install even on
+a machine that has a key. The ON pass takes `JEV_*` from the shell, falling back
+to `~/.mailaccess/.env`. `--refresh-cache` makes the ON pass
 skip JEV cache reads.
 
 ## Safety / authorized-use

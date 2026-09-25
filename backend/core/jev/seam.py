@@ -25,7 +25,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from ... import config as _config
-from . import cache, client, limits, metrics
+from . import breaker, cache, client, limits, metrics
 from .contract import DEFER, DeferReason, DeferType, JevTask, Provenance, Verdict, get_task
 
 _LOG = logging.getLogger(__name__)
@@ -35,6 +35,8 @@ _LOG = logging.getLogger(__name__)
 _CONTRACT_VERSION = "c1"
 # Below this much run-ceiling headroom a call is not worth starting.
 _MIN_CALL_SECONDS = 0.05
+# Outcomes where JEV is inactive: nothing (not even a metrics file) is written.
+_INERT_REASONS = frozenset({DeferReason.NO_KEY.value, DeferReason.FORCED_OFF.value})
 
 
 async def judge(task_name: str, payload: BaseModel | dict[str, Any]) -> Verdict[Any] | DeferType:
@@ -53,7 +55,7 @@ async def judge(task_name: str, payload: BaseModel | dict[str, Any]) -> Verdict[
         cache_hit=cache_hit,
         model_called=model_called,
     )
-    if reason != DeferReason.DISABLED.value:
+    if reason not in _INERT_REASONS:
         metrics.persist(str(getattr(_config.settings, "jev_metrics_dir", "") or ""))
     return DEFER if isinstance(outcome, DeferReason) else outcome
 
@@ -62,17 +64,23 @@ async def _judge(
     task_name: str, payload: BaseModel | dict[str, Any]
 ) -> tuple[Verdict[Any] | DeferReason, bool, bool]:
     s = _config.settings
-    if not s.jev_enabled:
-        return DeferReason.DISABLED, False, False
+    api_key = (s.jev_api_key or "").strip()
+    if not api_key:
+        return DeferReason.NO_KEY, False, False
+    if s.jev_force_off:
+        return DeferReason.FORCED_OFF, False, False
     task = get_task(task_name)
     if task is None:
         return DeferReason.UNKNOWN_TASK, False, False
-    api_key = s.jev_api_key or ""
-    if not (api_key and s.jev_base_url and s.jev_model):
+    if not (s.jev_base_url and s.jev_model):
         return DeferReason.MISSING_CONFIG, False, False
     inp = _coerce_input(task, payload)
     if inp is None:
         return DeferReason.INVALID_INPUT, False, False
+    ident = breaker.identity(s.jev_base_url, api_key)
+    cooldown = float(s.jev_breaker_cooldown_seconds)
+    if breaker.blocked(ident, cooldown):
+        return DeferReason.CIRCUIT_OPEN, False, False
 
     floor = max(float(s.jev_min_confidence), float(task.min_confidence or 0.0))
     version = f"{task.prompt_version}+{_CONTRACT_VERSION}"
@@ -115,14 +123,25 @@ async def _judge(
             left = timeout - (time.monotonic() - t0)
             if left <= 0:
                 return DeferReason.TIMEOUT, False, False
-            result = await client.chat_json(
-                base_url=s.jev_base_url,
-                api_key=api_key,
-                model=s.jev_model,
-                system=system,
-                user=user,
-                timeout=left,
-                task=task.name,
+            if not breaker.acquire(ident, cooldown):
+                return DeferReason.CIRCUIT_OPEN, False, False
+            try:
+                result = await client.chat_json(
+                    base_url=s.jev_base_url,
+                    api_key=api_key,
+                    model=s.jev_model,
+                    system=system,
+                    user=user,
+                    timeout=left,
+                    task=task.name,
+                )
+            except BaseException:  # cancelled mid-request: free a half-open probe
+                breaker.release_probe(ident)
+                raise
+            breaker.record(
+                ident,
+                result if isinstance(result, DeferReason) else None,
+                int(s.jev_breaker_failure_threshold),
             )
         finally:
             sem.release()

@@ -18,33 +18,47 @@ from eval.harness.run_baseline import CONFIGS, JEV_METRICS_SUBDIR
 
 
 @pytest.fixture(autouse=True)
-def _jev_shell_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _jev_shell_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("JEV_API_KEY", "shell-key-not-real")
     monkeypatch.setenv("JEV_BASE_URL", "https://jev.invalid/v1")
     monkeypatch.setenv("JEV_MODEL", "jev-test")
-    monkeypatch.setenv("JEV_ENABLED", "true")  # a stray export must not leak
+    monkeypatch.setenv("JEV_FORCE_OFF", "false")  # a stray export must not leak
+    # The harness's "real" home (where `keys set` stores keys) — empty by default.
+    monkeypatch.setenv("HOME", str(tmp_path / "realhome"))
 
 
-def test_legacy_keyless_config_strips_all_jev_env(tmp_path: Path) -> None:
-    env = CONFIGS["keyless-default"].build_env(tmp_path)
-    assert not [k for k in env if k.startswith("JEV_")]
+@pytest.mark.parametrize("label", ["keyless-default", "with-keys", "security-enabled"])
+def test_legacy_configs_force_jev_off(tmp_path: Path, label: str) -> None:
+    env = CONFIGS[label].build_env(tmp_path / "run")
+    assert {k: v for k, v in env.items() if k.startswith("JEV_")} == {"JEV_FORCE_OFF": "true"}
 
 
-def test_jev_off_forces_disabled_and_drops_the_key(tmp_path: Path) -> None:
+def test_jev_off_pass_matches_no_key_install(tmp_path: Path) -> None:
     off = dataclasses.replace(CONFIGS["with-keys"], jev=False)
     env = off.build_env(tmp_path)
-    assert env["JEV_ENABLED"] == "false"
+    assert env["JEV_FORCE_OFF"] == "true"
     assert "JEV_API_KEY" not in env
     assert env["JEV_METRICS_DIR"] == str(tmp_path / JEV_METRICS_SUBDIR)
 
 
 def test_jev_on_forwards_shell_config_through_keyless(tmp_path: Path) -> None:
     on = dataclasses.replace(CONFIGS["keyless-default"], jev=True, jev_cache_refresh=True)
-    env = on.build_env(tmp_path)
-    assert env["JEV_ENABLED"] == "true"
+    env = on.build_env(tmp_path / "run")
     assert env["JEV_API_KEY"] == "shell-key-not-real"
     assert env["JEV_MODEL"] == "jev-test"
     assert env["JEV_CACHE_REFRESH"] == "true"
+    assert "JEV_FORCE_OFF" not in env
+
+
+def test_jev_on_falls_back_to_profile_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JEV_API_KEY")
+    profile = tmp_path / "realhome" / ".mailaccess" / ".env"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("JEV_API_KEY=profile-key-not-real\nHIBP_API_KEY=unrelated\n")
+    on = dataclasses.replace(CONFIGS["keyless-default"], jev=True)
+    env = on.build_env(tmp_path / "run")
+    assert env["JEV_API_KEY"] == "profile-key-not-real"
+    assert "HIBP_API_KEY" not in env  # only JEV_* is taken from the profile
 
 
 # ---------------------------------------------------------------------------

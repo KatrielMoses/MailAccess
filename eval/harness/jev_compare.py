@@ -7,9 +7,9 @@ truth corpus with the unchanged Phase-0 scorer, and writes one comparison
 scorecard: per-task JEV call/defer/cache/latency metrics, per-target output and
 quality deltas, and any score drift to review.
 
-  # both passes + comparison (JEV_* must be exported in THIS shell for the ON pass;
-  # under keyless configs a JEV key in ./.env is stripped like every other key)
-  export JEV_API_KEY=... JEV_BASE_URL=... JEV_MODEL=...
+  # both passes + comparison. The ON pass takes JEV_* from this shell, falling back
+  # to ~/.mailaccess/.env (where `mailaccess keys set JEV_API_KEY …` stores it);
+  # the OFF pass strips every JEV_* var and sets the JEV_FORCE_OFF override.
   python -m eval.harness.jev_compare run --base keyless-default --runs 1
 
   # re-compare two existing run dirs
@@ -18,7 +18,8 @@ quality deltas, and any score drift to review.
 Live targets vary run to run (rate limits, network), so a delta on one run is not
 proof: use ``--runs 2+`` and read the stability section of each scorecard before
 attributing a change to JEV. Outputs land under eval/scorecards/ (gitignored —
-they contain target PII). No key value is ever read into or written by this file.
+they contain target PII). A key value is only ever handed to the ON-pass subprocess
+environment — never recorded in a manifest, runlog or scorecard.
 """
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ import argparse
 import dataclasses
 import hashlib
 import json
-import os
 import statistics
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,10 +62,11 @@ def run_pair(args: argparse.Namespace) -> Path:
         datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"_jev-compare_{args.base}"
     )
     out = out.resolve()
-    missing = [n for n in ("JEV_API_KEY", "JEV_BASE_URL", "JEV_MODEL") if not os.environ.get(n)]
+    on_env = run_baseline._jev_env_for_on_pass()
+    missing = [n for n in ("JEV_API_KEY", "JEV_BASE_URL", "JEV_MODEL") if not on_env.get(n)]
     if missing:
-        print(f"[jev] WARNING: {', '.join(missing)} not set in this shell — the ON pass "
-              f"will DEFER everywhere and match the OFF pass.")
+        print(f"[jev] WARNING: {', '.join(missing)} not set (shell or ~/.mailaccess/.env) "
+              f"— the ON pass will DEFER everywhere and match the OFF pass.")
 
     passthrough: list[str] = ["--runs", str(args.runs),
                               "--investigate-timeout", str(args.investigate_timeout),

@@ -792,12 +792,16 @@ class Settings(BaseSettings):
     # Phase JEV — hosted reasoning seam (backend/core/jev/). A fast OpenAI-
     # compatible chat model consulted for bounded judgment calls (classifications,
     # matches, selections) alongside the deterministic engine. It never owns a
-    # number and every call has a deterministic fallback: disabled / no key /
-    # timeout / error / invalid output / low confidence all return DEFER and the
-    # caller runs today's logic. OFF by default — with it off the seam makes zero
-    # network calls. Provider, model and key are configuration only. Never logged.
-    jev_enabled: bool = False
+    # number and every call has a deterministic fallback: no key / timeout / error
+    # / no credits / invalid output / low confidence all return DEFER and the
+    # caller runs today's logic. ACTIVE iff a key is set — `mailaccess keys set
+    # JEV_API_KEY <key>` turns it on, removing the key turns it off; with no key
+    # the seam makes zero network calls. Provider, model and key are configuration
+    # only. Never logged.
     jev_api_key: str | None = None
+    # Testing-only override: forces JEV off even when a key is configured (the
+    # eval harness uses it for the side-by-side "JEV off" pass). Users never need it.
+    jev_force_off: bool = False
     jev_base_url: str = ""
     jev_model: str = ""
     # Per-call total deadline (connect + full body + semaphore wait).
@@ -818,6 +822,11 @@ class Settings(BaseSettings):
     # Optional: directory the per-process JEV metrics snapshot is written to (the
     # eval harness sets this per target run). Empty = in-memory only.
     jev_metrics_dir: str = ""
+    # Circuit breaker: auth / credit failures trip it at once, soft failures
+    # (timeout, transport, 429, 5xx) after this many in a row. While open every
+    # call DEFERs instantly (no network) for the cooldown, then one probe retries.
+    jev_breaker_failure_threshold: int = 3
+    jev_breaker_cooldown_seconds: float = 120.0
 
     # Proxy (single static endpoint — legacy; superseded by the Phase 5B egress
     # pool below, which treats a single configured proxy as a pool of one).
