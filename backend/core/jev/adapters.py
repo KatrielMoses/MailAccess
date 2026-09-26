@@ -255,17 +255,20 @@ async def _ollaya_decomposed(
     base = profile.base_url.rstrip("/")
     sem = asyncio.Semaphore(_DECOMPOSE_CONCURRENCY)
 
-    async def _one(http: httpx.AsyncClient, item: DecisionItem) -> str | DeferReason:
+    async def _one(
+        http: httpx.AsyncClient, item: DecisionItem
+    ) -> tuple[str, float | None] | DeferReason:
         body = {"model": profile.model, "state": item.state,
                 "questions": {item.field: item.question}}
         async with sem:
             answer = await _first_path(http, base, body, headers, task.name)
         if isinstance(answer, DeferReason):
             return answer
-        value = answer.get(item.field)
+        raw = answer.get(item.field)
+        value = answer_value(raw)
         if value is None:
             return DeferReason.SCHEMA  # partial answer → DEFER the whole task
-        return str(value).strip().lower()
+        return str(value).strip().lower(), answer_confidence(raw)
 
     try:
         async with httpx.AsyncClient(timeout=timeout, transport=client._TRANSPORT) as http:
@@ -280,10 +283,14 @@ async def _ollaya_decomposed(
         return DeferReason.INTERNAL
 
     answers: dict[str, str] = {}
+    confidences: list[float] = []
     for item, result in zip(items, results):
         if isinstance(result, DeferReason):
             return result  # a provider error or partial answer defers the whole task
-        answers[item.key] = result
+        value, conf = result
+        answers[item.key] = value
+        if conf is not None:
+            confidences.append(conf)
     try:
         out = decomposer.assemble(inp, answers)
     except Exception:
@@ -291,8 +298,9 @@ async def _ollaya_decomposed(
         return DeferReason.SCHEMA
     if out is None:
         return DeferReason.SCHEMA
-    # A typed decision is deterministic; the seam's floor still gates it.
-    out.setdefault("confidence", 1.0)
+    # Verdict confidence = MIN of the atomic per-item confidences (conservative); the
+    # seam's floor then gates the assembled decision. 1.0 when the provider gave none.
+    out.setdefault("confidence", min(confidences) if confidences else 1.0)
     return out
 
 
@@ -367,17 +375,51 @@ def _field_to_question(name: str, annotation: Any) -> dict[str, Any]:
     return q
 
 
+def answer_value(raw: Any) -> Any:
+    """The scalar answer from an Ollaya field result.
+
+    The real server nests each answer as ``{"type":"choice","choice":"yes",
+    "confidence":0.68,"probabilities":{...}}``; some paths/mocks return the bare
+    value. Handle both.
+    """
+    if isinstance(raw, dict):
+        for key in ("choice", "value", "answer", "number", "text"):
+            if key in raw:
+                return raw[key]
+        return None
+    return raw
+
+
+def answer_confidence(raw: Any) -> float | None:
+    if isinstance(raw, dict):
+        for key in ("confidence", "score"):
+            val = raw.get(key)
+            if isinstance(val, int | float):
+                return float(val)
+    return None
+
+
 def _answers_to_output(output_model: Any, answers: dict[str, Any]) -> dict[str, Any]:
-    """Coerce Ollaya's typed answers into the schema shape (+ a confidence)."""
+    """Coerce Ollaya's typed answers into the schema shape (+ a confidence).
+
+    The verdict confidence is the MIN of the per-field confidences (conservative —
+    the seam's floor then gates on the least-certain field); 1.0 when none is given.
+    """
     out: dict[str, Any] = {}
+    confidences: list[float] = []
     for name, field in output_model.model_fields.items():
         if name not in answers:
             continue
-        out[name] = _coerce_answer(field.annotation, answers[name])
-    confidence = answers.get("confidence", answers.get("score"))
-    # A typed decision is deterministic; default to high confidence when the
-    # provider does not score it (the seam's floor still gates it).
-    out["confidence"] = float(confidence) if isinstance(confidence, int | float) else 1.0
+        raw = answers[name]
+        out[name] = _coerce_answer(field.annotation, answer_value(raw))
+        conf = answer_confidence(raw)
+        if conf is not None:
+            confidences.append(conf)
+    if not confidences:
+        block_conf = answers.get("confidence", answers.get("score"))
+        if isinstance(block_conf, int | float):
+            confidences.append(float(block_conf))
+    out["confidence"] = min(confidences) if confidences else 1.0
     return out
 
 

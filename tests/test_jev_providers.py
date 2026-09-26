@@ -448,3 +448,42 @@ async def test_generative_tasks_still_defer_on_ollaya(monkeypatch: pytest.Monkey
 
 def test_only_two_tasks_are_decomposable() -> None:
     assert set(adapters._DECOMPOSERS) == {"identity.name_reconcile", "reach.platform_select"}
+
+
+# ---------------------------------------------------------------------------
+# Real Ollaya answer shape: {"type":"choice","choice":"yes","confidence":0.68,...}
+# ---------------------------------------------------------------------------
+async def test_ollaya_real_nested_answer_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set(monkeypatch, jev_provider="ollaya", jev_enabled=True,
+         jev_base_url="http://localhost:11435", jev_model="laya:typed-decisions",
+         jev_min_confidence=0.5)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"model": "laya:typed-decisions", "answers": {
+            "is_personal_name": {"type": "choice", "choice": "yes", "confidence": 0.68,
+                                 "probabilities": {"yes": 0.84, "no": 0.16}}},
+            "usage": {"input_tokens": 40}})
+
+    _transport(monkeypatch, handler)
+    verdict = await jev.judge(DEMO, {"text": "Ada Lovelace"})
+    assert isinstance(verdict, jev.Verdict)
+    assert verdict.output.is_personal_name is True
+    assert verdict.confidence == pytest.approx(0.68)  # per-answer confidence used
+
+
+async def test_ollaya_nested_answer_below_floor_defers(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set(monkeypatch, jev_provider="ollaya", jev_enabled=True,
+         jev_base_url="http://localhost:11435", jev_model="laya:typed-decisions",
+         jev_min_confidence=0.7)
+    _transport(monkeypatch, lambda r: httpx.Response(200, json={"answers": {
+        "is_personal_name": {"type": "choice", "choice": "yes", "confidence": 0.6}}}))
+    # Real per-answer confidence 0.6 < 0.7 floor → DEFER (existing logic runs).
+    assert await jev.judge(DEMO, {"text": "Ada Lovelace"}) is jev.DEFER
+
+
+def test_answer_value_and_confidence_helpers() -> None:
+    nested = {"type": "choice", "choice": "no", "confidence": 0.42}
+    assert adapters.answer_value(nested) == "no"
+    assert adapters.answer_confidence(nested) == 0.42
+    assert adapters.answer_value(True) is True           # flat value still supported
+    assert adapters.answer_confidence("no") is None
