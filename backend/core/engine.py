@@ -12,7 +12,7 @@ from sqlalchemy import update
 from ..db.database import AsyncSessionLocal
 from ..db.models import Finding, Investigation, InvestigationStatus, ModuleRun
 from ..modules.base import ModuleResult, ModuleStatus
-from . import jev, jev_identity
+from . import jev, jev_identity, jev_signal
 from .breach_normalizer import collapse_breach_findings
 from .credential_risk import assess_credential_risk_from_results
 from .defenders_brief import defenders_brief_to_dict, generate_defenders_brief
@@ -346,6 +346,14 @@ class InvestigationEngine:
                     from .name_consensus import is_role_or_system_email
 
                     is_role_system = bool(is_role_or_system_email(current_email))
+                    # Phase JEV-5 (role_system_classify): a NON-obvious address the
+                    # fast list missed may still be a shared/role mailbox. Only a
+                    # confident JEV verdict gates enumeration; a real person on an
+                    # unusual address is never gated out. No-op without a JEV key.
+                    if not is_role_system and await jev_signal.is_role_or_shared(
+                        current_email
+                    ):
+                        is_role_system = True
                 except Exception:
                     is_role_system = False
                 domain_resolves = True
@@ -413,7 +421,20 @@ class InvestigationEngine:
                     # Phase JEV-1 — improve identity INPUTS before names, the
                     # graph and scoring consume them. No-ops without a JEV key.
                     await jev_identity.enrich_bios(collected, domain or None)
+                    # Phase JEV-5 (breach_canonicalize): stamp confident same-breach
+                    # variants BEFORE scoring/graph so the deterministic collapse
+                    # merges them uniformly. Mutates the collected findings in place;
+                    # no JEV call ever runs inside scoring. No-op without a JEV key.
+                    await jev_signal.canonicalize_breaches([
+                        {"module_name": module_name, "data": finding}
+                        for module_name, result in collected.items()
+                        for finding in (getattr(result, "findings", None) or [])
+                    ])
                     name_hint = await jev_identity.reconcile_names(email, collected)
+                    # Phase JEV-5 (common_name_context): may lift the common-name cap
+                    # or drop a same-name stranger by augmenting the hint the engine
+                    # already consumes. The band stays the engine's computation.
+                    name_hint = await jev_signal.common_name_hint(email, collected, name_hint)
 
                     # Compute name consensus before the graph build so
                     # the Phase 6B.2 V2 shadow-profile detector can use

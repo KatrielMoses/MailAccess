@@ -49,12 +49,17 @@ class NameHint:
     drop: frozenset[str] = frozenset()
     groups: tuple[frozenset[str], ...] = ()
     canonical: str | None = None
+    # Phase JEV-5 (common_name_context): canonical names JEV confidently tied to the
+    # subject, so the static common-name cap is skipped for them. The engine still
+    # computes the band from the score; it just isn't capped as a common-name.
+    lift_common_name_cap: frozenset[str] = frozenset()
 
     def same_group(self, a: str, b: str) -> bool:
         return a != b and any(a in group and b in group for group in self.groups)
 
 
 JEV_REASONING_NOTE = " Candidate grouping was JEV-assisted (identity.name_reconcile)."
+JEV_COMMON_NAME_NOTE = " Common-name cap lifted — JEV tied this name to the subject."
 
 
 SOURCE_WEIGHTS: dict[str, tuple[float, str]] = {
@@ -504,6 +509,7 @@ class NameConsensusEngine:
         self.target_email = target_email
         self.jev_hint = jev_hint
         self._hint_applied = False
+        self._common_name_lifted = False
 
     def resolve(self, raw_candidates: list[dict[str, Any] | NameCandidate]) -> NameConsensusResult:
         if is_role_or_system_email(self.target_email):
@@ -537,6 +543,8 @@ class NameConsensusEngine:
         reasoning = self._reasoning(top, second, confidence, conflict)
         if self._hint_applied:
             reasoning += JEV_REASONING_NOTE
+        if self._common_name_lifted:
+            reasoning += JEV_COMMON_NAME_NOTE
         return NameConsensusResult(
             confirmed_name=str(top["name"]) if confidence != "unknown" else None,
             name_confidence=confidence,
@@ -546,7 +554,7 @@ class NameConsensusEngine:
             name_reasoning=reasoning,
             conflicting_names=names if conflict else [],
             all_candidates=candidates,
-            jev_assisted=self._hint_applied,
+            jev_assisted=self._hint_applied or self._common_name_lifted,
         )
 
     def _apply_hint_drops(self, candidates: list[NameCandidate]) -> list[NameCandidate]:
@@ -847,6 +855,14 @@ class NameConsensusEngine:
         # Single-word top-100 first name → cap at "possible".
         # Compound where every token is in the common-names corpus → cap at "probable".
         from backend.core.common_names import is_common_name as _is_common_name  # lazy import
+        # Phase JEV-5: when JEV confidently tied this common name to the subject, skip
+        # the cap (the engine still owns the band via the score above/below).
+        if (
+            self.jev_hint is not None
+            and canonical_name(str(cluster["name"])) in self.jev_hint.lift_common_name_cap
+        ):
+            self._common_name_lifted = True
+            return confidence
         tokens = [t.strip(".,'-") for t in str(cluster["name"]).lower().split() if t.strip(".,'-")]
         if tokens and all(_is_common_name(t) for t in tokens):
             if len(tokens) == 1 and tokens[0] in _COMMON_FIRST_NAMES_TOP100:

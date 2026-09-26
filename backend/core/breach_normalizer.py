@@ -293,6 +293,18 @@ def resolve_breach_identity(
     if not _has_breach_indicator:
         return None
 
+    # Phase JEV-5: an async pre-pass (jev_signal.canonicalize_breaches) may have
+    # stamped a confident canonical id/name onto the finding. Read it here — this is
+    # a deterministic field read, NOT a JEV call, so scoring stays JEV-free. It only
+    # ever collapses variants together; it never drops or invents a breach.
+    jev_canon = meta.get("jev_canonical_breach") if isinstance(meta, dict) else None
+    if isinstance(jev_canon, dict) and jev_canon.get("canonical_id"):
+        return BreachIdentity(
+            canonical_id=str(jev_canon["canonical_id"]),
+            canonical_name=str(jev_canon.get("canonical_name") or jev_canon["canonical_id"]),
+            matched_alias=str(jev_canon.get("matched_alias") or ""),
+        )
+
     alias_to_id, canonical_name_by_id = _load_catalog()
     candidates = _breach_candidates(payload)
 

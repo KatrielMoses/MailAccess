@@ -502,12 +502,66 @@ def _gate_reach(off_dir: Path, on_dir: Path) -> dict[str, Any]:
     }
 
 
+def _breach_names(raw: Any) -> set[str]:
+    names: set[str] = set()
+    for f in raw.get("findings") or []:
+        data = f.get("data") if isinstance(f.get("data"), dict) else f
+        meta = data.get("metadata") if isinstance(data, dict) else None
+        if isinstance(meta, dict):
+            for key in ("breach_name", "breach_source", "name"):
+                val = meta.get(key)
+                if isinstance(val, str) and val.strip():
+                    names.add(val.strip().lower())
+    return names
+
+
+def _gate_signal(raws: list[tuple[str, Any, Any]], truth: dict[str, Any]) -> dict[str, Any]:
+    """Score JEV-5 signal hygiene: name correctness up with recall held, breaches kept.
+
+    Name side: correct confirmed_name vs real_name must rise with NO regression (no
+    labeled name that was right becomes wrong). Breach side: no breach name may vanish
+    (nothing dropped); fewer records is cleaner. Kept when precision rises and both
+    recall guards hold.
+    """
+    name_off = name_on = name_regressions = 0
+    breach_names_lost = 0
+    breach_records_off = breach_records_on = 0
+    for tid, raw_off, raw_on in raws:
+        real = ((truth.get(tid) or {}).get("identity") or {}).get("real_name")
+        if real and real != "unknown":
+            want = str(real).strip().lower()
+            off_ok = str(raw_off.get("confirmed_name") or "").strip().lower() == want
+            on_ok = str(raw_on.get("confirmed_name") or "").strip().lower() == want
+            name_off += off_ok
+            name_on += on_ok
+            name_regressions += off_ok and not on_ok
+        off_names, on_names = _breach_names(raw_off), _breach_names(raw_on)
+        breach_names_lost += len(off_names - on_names)  # a source name that vanished
+        breach_records_off += len(off_names)
+        breach_records_on += len(on_names)
+    name_up = name_on > name_off
+    guards_held = name_regressions == 0 and breach_names_lost == 0
+    if not raws:
+        decision = "drop (no labels)"
+    elif guards_held and name_up:
+        decision = "keep"
+    else:
+        decision = "drop"
+    return {
+        "labelled": len(raws),
+        "heuristic_name_correct": name_off, "jev_name_correct": name_on,
+        "name_regressions": name_regressions, "breach_names_lost": breach_names_lost,
+        "recall_held": guards_held, "decision": decision,
+    }
+
+
 def task_gate(off_dir: Path, on_dir: Path) -> dict[str, Any]:
     truth = score.load_truth()
     raws = _investigate_raws(off_dir, on_dir)
     verification = _gate_verification(off_dir, on_dir, truth)
     roster = _gate_roster(off_dir, on_dir, truth)
     reach = _gate_reach(off_dir, on_dir)
+    signal = _gate_signal(raws, truth)
     return {
         "identity.name_reconcile": _gate_names(raws, truth),
         "identity.same_person": _gate_same_person(raws, truth),
@@ -521,6 +575,9 @@ def task_gate(off_dir: Path, on_dir: Path) -> dict[str, Any]:
         # The two JEV-4 reach.* tasks pick within the same budget; scored on username
         # hit-rate at EQUAL probe count (the equal-cost guard is primary).
         "reach.*": reach,
+        # The three JEV-5 signal.* tasks reduce noise; scored on name correctness up
+        # with recall held (no name regression, no breach source-name dropped).
+        "signal.*": signal,
     }
 
 
@@ -637,6 +694,10 @@ def render_markdown(c: dict[str, Any]) -> str:
             row = (g["heuristic_probes"], g["heuristic_confirmed"], g["jev_confirmed"],
                    f"probes {g['heuristic_probes']}→{g['jev_probes']} (equal {g['equal_cost']}), "
                    f"email yield {g['heuristic_email_yield']}→{g['jev_email_yield']}")
+        elif name == "signal.*":
+            row = (g["labelled"], g["heuristic_name_correct"], g["jev_name_correct"],
+                   f"name regressions {g['name_regressions']}, "
+                   f"breach names lost {g['breach_names_lost']}, recall held {g['recall_held']}")
         else:
             row = (g["labelled"], g["heuristic_correct"], g["jev_correct"],
                    f"JEV-assisted runs {g['jev_assisted_runs']}")

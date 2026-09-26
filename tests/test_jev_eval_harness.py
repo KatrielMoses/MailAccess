@@ -354,3 +354,46 @@ def test_reach_gate_drops_if_probe_count_changed(
     _write_investigate_with_username(tmp_path / "on", probes=60, confirmed=6)  # MORE probes
     g = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")["reach.*"]
     assert g["equal_cost"] is False and g["decision"] == "drop"  # cost went up → drop
+
+
+# ---------------------------------------------------------------------------
+# JEV-5 signal gate (name correctness up, recall + breach guards)
+# ---------------------------------------------------------------------------
+_SIGNAL_TRUTH = {"e1": {"identity": {"real_name": "James Smith"}}}
+
+
+def _write_signal_run(run_dir: Path, name: str, breaches: list[str]) -> None:
+    (run_dir / "raw").mkdir(parents=True)
+    raw = {"confirmed_name": name, "module_runs": [], "findings": [
+        {"module_name": "hibp", "data": {"metadata": {"breach_name": b}}} for b in breaches]}
+    (run_dir / "raw" / "e1.run1.investigate.json").write_text(json.dumps(raw))
+    (run_dir / "runlog.json").write_text(json.dumps({"run_id": run_dir.name, "records": [
+        {"target_id": "e1", "target_value": "a@x.com", "category": "free",
+         "pipeline": "investigate", "run_idx": 1, "ok": True, "wall_seconds": 1.0,
+         "raw_path": "raw/e1.run1.investigate.json", "exit_code": 0}]}))
+    (run_dir / "manifest.json").write_text(json.dumps({"tool_version": "t", "extra": {}}))
+
+
+def test_signal_gate_keeps_when_name_up_and_guards_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(score, "load_truth", lambda: _SIGNAL_TRUTH)
+    # OFF: name capped/wrong, 2 breach names. ON: name correct, breaches preserved.
+    _write_signal_run(tmp_path / "off", "J. Smith", ["Adobe 2013", "Dropbox 2012"])
+    _write_signal_run(tmp_path / "on", "James Smith", ["Adobe 2013", "Dropbox 2012"])
+    g = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")["signal.*"]
+    assert (g["heuristic_name_correct"], g["jev_name_correct"]) == (0, 1)
+    assert g["name_regressions"] == 0 and g["breach_names_lost"] == 0
+    assert g["recall_held"] is True and g["decision"] == "keep"
+
+
+def test_signal_gate_drops_if_a_breach_name_vanishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(score, "load_truth", lambda: _SIGNAL_TRUTH)
+    _write_signal_run(tmp_path / "off", "J. Smith", ["Adobe 2013", "Dropbox 2012"])
+    # ON gets the name right but a breach source name disappeared → guard fails.
+    _write_signal_run(tmp_path / "on", "James Smith", ["Adobe 2013"])
+    g = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")["signal.*"]
+    assert g["breach_names_lost"] == 1
+    assert g["recall_held"] is False and g["decision"] == "drop"

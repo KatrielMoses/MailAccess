@@ -115,6 +115,12 @@ count (`platforms_confirmed`) must rise at an **equal wave-1 probe count** — t
 equal-cost guard is primary, so any change in probe count drops the task. Open-web
 query yield (harvest email count) is reported informationally.
 
+JEV-5 signal-hygiene tasks (`signal.role_system_classify`, `signal.common_name_context`,
+`signal.breach_canonicalize`) reduce noise and are scored under `signal.*`: correct
+`confirmed_name` vs `identity.real_name` must rise with **recall held** — no labeled
+name that was right becomes wrong (no over-claim) and no breach source-name vanishes
+(nothing dropped). Recall-held + precision-up is the primary acceptance metric.
+
 ## Safety / authorized-use
 
 Authorized evaluation only. The target set, truth labels, and scorecards stay
