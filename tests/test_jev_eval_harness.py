@@ -397,3 +397,49 @@ def test_signal_gate_drops_if_a_breach_name_vanishes(
     g = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")["signal.*"]
     assert g["breach_names_lost"] == 1
     assert g["recall_held"] is False and g["decision"] == "drop"
+
+
+# ---------------------------------------------------------------------------
+# JEV-6 narrative gate (grounding violations MUST be zero)
+# ---------------------------------------------------------------------------
+def _write_narrative_run(run_dir: Path, brief: dict, leads: list[dict]) -> None:
+    (run_dir / "raw").mkdir(parents=True)
+    raw = {
+        "email": "alice@acme.com", "confirmed_name": "Alice Ng", "module_runs": [],
+        "findings": [{"module_name": "hibp", "data": {"metadata": {"breach_name": "Adobe 2013"}}}],
+        "defenders_brief": brief, "analyst_leads": leads,
+    }
+    (run_dir / "raw" / "e1.run1.investigate.json").write_text(json.dumps(raw))
+    (run_dir / "runlog.json").write_text(json.dumps({"run_id": run_dir.name, "records": [
+        {"target_id": "e1", "target_value": "alice@acme.com", "category": "free",
+         "pipeline": "investigate", "run_idx": 1, "ok": True, "wall_seconds": 1.0,
+         "raw_path": "raw/e1.run1.investigate.json", "exit_code": 0}]}))
+    (run_dir / "manifest.json").write_text(json.dumps({"tool_version": "t", "extra": {}}))
+
+
+def test_narrative_gate_keeps_when_grounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(score, "load_truth", lambda: {})
+    _write_narrative_run(tmp_path / "off", {}, [])
+    _write_narrative_run(
+        tmp_path / "on",
+        {"jev_assisted": True, "risk_summary": "Exposure for alice@acme.com via Adobe 2013.",
+         "next_action": "Reset the acme.com password.", "top_findings": []},
+        [{"text": "Adobe 2013 password may be reused.", "based_on": ["hibp:0"]}])
+    g = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")["narrative.*"]
+    assert g["briefs_reworded"] == 1 and g["leads_added"] == 1
+    assert g["grounding_violations"] == 0 and g["decision"] == "keep"
+
+
+def test_narrative_gate_drops_on_hallucinated_entity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(score, "load_truth", lambda: {})
+    _write_narrative_run(tmp_path / "off", {}, [])
+    _write_narrative_run(
+        tmp_path / "on",
+        {"jev_assisted": True, "risk_summary": "Also see evil.com for related data.",
+         "next_action": "Reset acme.com password.", "top_findings": []}, [])
+    g = jev_compare.task_gate(tmp_path / "off", tmp_path / "on")["narrative.*"]
+    assert g["grounding_violations"] >= 1 and g["decision"] == "drop"

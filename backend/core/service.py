@@ -224,6 +224,13 @@ def enrich_report(data: dict) -> dict:
             generate_defenders_brief_from_report(data)
         )
     data.pop("defenders_brief_json", None)
+    # Phase JEV-6: surface the grounded analyst-leads section (generated + stored at
+    # persist time inside the brief) as a clearly-labelled, top-level report field so
+    # the API and exporters can render it. Absent → no section (today's behavior).
+    _leads = (data.get("defenders_brief") or {}).get("analyst_leads")
+    if isinstance(_leads, list) and _leads:
+        data["analyst_leads"] = _leads
+        data["analyst_leads_label"] = "Analyst leads — hypotheses to verify, not confirmed"
 
     # RC4 (Output-Trust): reconcile the two risk systems into ONE authoritative
     # level. The exposure-derived level (breadth of what was found) and the

@@ -198,6 +198,15 @@ def _bounded(annotation: Any, metadata: list[Any]) -> bool:
         return True
     if annotation is str:
         return _has_max_len(metadata)
+    # A nested object is bounded when it forbids extra keys and every one of its own
+    # fields is bounded (recursive) — so "schema-bounded, no floats" holds all the
+    # way down. Used for list-of-object outputs like the analyst-leads section.
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        if annotation.model_config.get("extra") != "forbid" or not annotation.model_fields:
+            return False
+        return all(
+            _bounded(f.annotation, f.metadata) for f in annotation.model_fields.values()
+        )
     if origin in (typing.Union, types.UnionType):
         args = [a for a in typing.get_args(annotation) if a is not type(None)]
         return bool(args) and all(_bounded(a, metadata) for a in args)

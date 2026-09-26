@@ -28,6 +28,7 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import re
 import statistics
 from datetime import datetime, timezone
 from pathlib import Path
@@ -555,6 +556,51 @@ def _gate_signal(raws: list[tuple[str, Any, Any]], truth: dict[str, Any]) -> dic
     }
 
 
+_ENTITY_RE = re.compile(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}|"
+                        r"\b[a-z0-9\-]+(?:\.[a-z0-9\-]+)+\b", re.IGNORECASE)
+
+
+def _entities(text: str) -> set[str]:
+    return {m.group(0).lower() for m in _ENTITY_RE.finditer(text or "")}
+
+
+def _gate_narrative(raws: list[tuple[str, Any, Any]]) -> dict[str, Any]:
+    """Score JEV-6 narrative output: grounding violations MUST be zero (primary).
+
+    For every JEV-authored brief/lead in the ON runs, checks that each email/domain
+    it names also appears somewhere in that run's own report text (finding details,
+    summaries, the subject email). A single hallucinated entity fails the gate.
+    """
+    briefs_reworded = leads_added = grounding_violations = 0
+    for _tid, _raw_off, raw_on in raws:
+        allowed = _entities(json.dumps({
+            "email": raw_on.get("email"), "name": raw_on.get("confirmed_name"),
+            "findings": raw_on.get("findings"),
+        }, default=str))
+        allowed |= {e.split("@", 1)[1] for e in allowed if "@" in e}  # each email's host
+        brief = raw_on.get("defenders_brief") or {}
+        if isinstance(brief, dict) and brief.get("jev_assisted"):
+            briefs_reworded += 1
+            text = " ".join([
+                str(brief.get("risk_summary") or ""), str(brief.get("next_action") or ""),
+                *[str((f or {}).get("detail") or "") for f in brief.get("top_findings") or []],
+            ])
+            grounding_violations += len(_entities(text) - allowed)
+        for lead in raw_on.get("analyst_leads") or []:
+            leads_added += 1
+            grounding_violations += len(_entities(str(lead.get("text") or "")) - allowed)
+    if briefs_reworded == 0 and leads_added == 0:
+        decision = "drop (no jev output)"
+    elif grounding_violations == 0:
+        decision = "keep"
+    else:
+        decision = "drop"  # any hallucinated entity fails the phase
+    return {
+        "briefs_reworded": briefs_reworded, "leads_added": leads_added,
+        "grounding_violations": grounding_violations, "decision": decision,
+    }
+
+
 def task_gate(off_dir: Path, on_dir: Path) -> dict[str, Any]:
     truth = score.load_truth()
     raws = _investigate_raws(off_dir, on_dir)
@@ -562,6 +608,7 @@ def task_gate(off_dir: Path, on_dir: Path) -> dict[str, Any]:
     roster = _gate_roster(off_dir, on_dir, truth)
     reach = _gate_reach(off_dir, on_dir)
     signal = _gate_signal(raws, truth)
+    narrative = _gate_narrative(raws)
     return {
         "identity.name_reconcile": _gate_names(raws, truth),
         "identity.same_person": _gate_same_person(raws, truth),
@@ -578,6 +625,9 @@ def task_gate(off_dir: Path, on_dir: Path) -> dict[str, Any]:
         # The three JEV-5 signal.* tasks reduce noise; scored on name correctness up
         # with recall held (no name regression, no breach source-name dropped).
         "signal.*": signal,
+        # The two JEV-6 narrative.* tasks emit free text; the primary guard is ZERO
+        # grounding violations (no entity in JEV output that isn't in the input).
+        "narrative.*": narrative,
     }
 
 
@@ -698,6 +748,10 @@ def render_markdown(c: dict[str, Any]) -> str:
             row = (g["labelled"], g["heuristic_name_correct"], g["jev_name_correct"],
                    f"name regressions {g['name_regressions']}, "
                    f"breach names lost {g['breach_names_lost']}, recall held {g['recall_held']}")
+        elif name == "narrative.*":
+            row = (g["briefs_reworded"] + g["leads_added"], "—", g["grounding_violations"],
+                   f"briefs {g['briefs_reworded']}, leads {g['leads_added']}, "
+                   f"grounding violations {g['grounding_violations']} (must be 0)")
         else:
             row = (g["labelled"], g["heuristic_correct"], g["jev_correct"],
                    f"JEV-assisted runs {g['jev_assisted_runs']}")

@@ -12,7 +12,7 @@ from sqlalchemy import update
 from ..db.database import AsyncSessionLocal
 from ..db.models import Finding, Investigation, InvestigationStatus, ModuleRun
 from ..modules.base import ModuleResult, ModuleStatus
-from . import jev, jev_identity, jev_signal
+from . import jev, jev_identity, jev_narrative, jev_signal
 from .breach_normalizer import collapse_breach_findings
 from .credential_risk import assess_credential_risk_from_results
 from .defenders_brief import defenders_brief_to_dict, generate_defenders_brief
@@ -103,6 +103,23 @@ def _compute_exposure_score(
         "possible": 2,
     }.get(str(name_confidence or "").lower(), 0)
     return min(int(total) + name_bonus, 100)
+
+
+def _breach_names_from_results(results: dict[str, ModuleResult]) -> list[str]:
+    """Distinct breach source names in the results (for JEV-6 lead grounding)."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for result in results.values():
+        for finding in getattr(result, "findings", None) or []:
+            if not isinstance(finding, dict):
+                continue
+            meta = finding.get("metadata") if isinstance(finding.get("metadata"), dict) else {}
+            for src in (finding, meta):
+                val = src.get("breach_name") or src.get("breach_source")
+                if isinstance(val, str) and val.strip() and val.strip().lower() not in seen:
+                    seen.add(val.strip().lower())
+                    names.append(val.strip())
+    return names[:40]
 
 
 def _build_graph_object(
@@ -631,6 +648,24 @@ class InvestigationEngine:
                 credibility,
             )
         )
+        # Phase JEV-6 (narrative.brief_wording + finding_correlation): reword the
+        # already-decided brief and add a grounded, hypothesis-framed analyst-leads
+        # section. Wording/leads only — risk level, scores, severity order and the
+        # finding set are unchanged. Both are stored inside defenders_brief_json so
+        # the sync reporting layer reuses them without an async call. No-op without
+        # a JEV key, and any grounding violation falls back to the template.
+        defenders_brief = await jev_narrative.reword_brief(
+            defenders_brief, email=original_email, name=name_result.confirmed_name
+        )
+        _jev_leads = await jev_narrative.generate_leads(
+            email=original_email,
+            name=name_result.confirmed_name,
+            findings=jev_narrative.finding_summaries(safe_collected),
+            breaches=_breach_names_from_results(safe_collected),
+            roles=[],
+        )
+        if _jev_leads:
+            defenders_brief = {**defenders_brief, "analyst_leads": _jev_leads}
 
         async with AsyncSessionLocal() as session:
             async with session.begin():

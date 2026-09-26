@@ -121,6 +121,13 @@ JEV-5 signal-hygiene tasks (`signal.role_system_classify`, `signal.common_name_c
 name that was right becomes wrong (no over-claim) and no breach source-name vanishes
 (nothing dropped). Recall-held + precision-up is the primary acceptance metric.
 
+JEV-6 narrative tasks (`narrative.brief_wording`, `narrative.finding_correlation`)
+emit user-facing free text and are scored under `narrative.*`: the primary guard is
+**zero grounding violations** — every email/domain in a JEV-authored brief or lead
+must already appear in that run's own report input. A single hallucinated entity
+fails the phase. (Risk level, scores, the finding set and order are unchanged by
+construction; the leads section is additive and hypothesis-framed.)
+
 ## Safety / authorized-use
 
 Authorized evaluation only. The target set, truth labels, and scorecards stay
