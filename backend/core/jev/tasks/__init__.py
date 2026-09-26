@@ -14,3 +14,8 @@ from . import (  # noqa: F401
     signal,
     verify,
 )
+
+# JEV-0.4 — register the per-item Ollaya decomposers for the two decomposable
+# list tasks (name_reconcile, platform_select). Import-time, after registration.
+identity.register_ollaya_decomposers()
+reach.register_ollaya_decomposers()

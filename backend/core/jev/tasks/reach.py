@@ -129,3 +129,51 @@ register(JevTask(
     build_prompt=_query_prompt,
     description="Per-subject open-web queries within the existing query budget.",
 ))
+
+
+# ---------------------------------------------------------------------------
+# JEV-0.4 — per-item typed-decision form for platform_select (typed providers)
+# ---------------------------------------------------------------------------
+class _PlatformSelectDecomposer:
+    """platform_select as one likely/unlikely choice per eligible platform.
+
+    Our code ranks the 'likely' platforms (keeping input order, which the caller
+    pre-sorts by rank) and fills ordered_platform_ids to the SAME wave cap — no
+    increase in probe count. query_generate stays chat-only (it is generative).
+    """
+
+    def items(self, inp: PlatformSelectInput) -> list:
+        from ..adapters import DecisionItem
+
+        items: list = []
+        for i, cand in enumerate(inp.candidates):
+            items.append(DecisionItem(
+                key=f"plat:{i}",
+                field="likely",
+                question={"type": "choice", "criteria": ["likely", "unlikely"]},
+                state={
+                    "platform": cand.id, "category": cand.category, "region": cand.region,
+                    "subject_name": inp.name, "subject_localpart": inp.email_localpart,
+                    "hints": inp.hints,
+                    "question": f"For this subject, is {cand.id} a likely account location?",
+                },
+            ))
+        return items
+
+    def assemble(self, inp: PlatformSelectInput, answers: dict[str, str]) -> dict | None:
+        likely = [
+            inp.candidates[i].id
+            for i in range(len(inp.candidates))
+            if answers.get(f"plat:{i}") == "likely"
+        ]
+        if not likely:
+            return None  # nothing chosen → DEFER (the caller keeps today's rank order)
+        # Fill the existing wave cap; the caller re-validates + tops up to the cap.
+        return {"ordered_platform_ids": likely[: inp.wave_cap]}
+
+
+def register_ollaya_decomposers() -> None:
+    """Register the per-item Ollaya form (called at package import)."""
+    from ..adapters import register_decomposer
+
+    register_decomposer(PLATFORM_SELECT, _PlatformSelectDecomposer())

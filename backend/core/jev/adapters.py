@@ -17,6 +17,7 @@ Activation, caching, metrics, limits and the breaker all stay in the seam.
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import json
 import logging
@@ -128,8 +129,16 @@ async def run(
 async def _ollaya_run(
     profile: Profile, task: JevTask[Any, Any], inp: Any, *, timeout: float
 ) -> dict[str, Any] | DeferReason:
+    decomposer = _DECOMPOSERS.get(task.name)
     try:
         questions = schema_to_questions(task.output_model)
+    except UnsupportedForOllaya:
+        # JEV-0.4: a list-shaped task that decomposes into atomic choices runs the
+        # per-item form; anything else DEFERs (JEV-0.3 behavior).
+        if decomposer is None:
+            _LOG.debug("Ollaya schema unsupported, no decomposer (task=%s)", task.name)
+            return DeferReason.SCHEMA
+        return await _ollaya_decomposed(profile, task, inp, decomposer, timeout=timeout)
     except Exception:
         _LOG.debug("Ollaya schema translation failed (task=%s)", task.name)
         return DeferReason.SCHEMA
@@ -144,17 +153,10 @@ async def _ollaya_run(
     base = profile.base_url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=timeout, transport=client._TRANSPORT) as http:
-            reason: DeferReason | None = None
-            for path in _OLLAYA_PATHS:
-                answers = await _ollaya_post(http, base + path, body, headers, task.name)
-                if isinstance(answers, DeferReason):
-                    reason = answers
-                    # Only fall through to /api/decide when the endpoint is absent.
-                    if answers is DeferReason.MODEL_NOT_LOADED:
-                        continue
-                    return answers
-                return _answers_to_output(task.output_model, answers)
-            return reason or DeferReason.PROVIDER_UNREACHABLE
+            answers = await _first_path(http, base, body, headers, task.name)
+            if isinstance(answers, DeferReason):
+                return answers
+            return _answers_to_output(task.output_model, answers)
     except (httpx.ConnectError, httpx.ConnectTimeout, OSError):
         return DeferReason.PROVIDER_UNREACHABLE
     except httpx.TimeoutException:
@@ -197,6 +199,117 @@ async def _ollaya_post(
                     block[meta_key] = payload[meta_key]
             return block
     return payload
+
+
+# ---------------------------------------------------------------------------
+# JEV-0.4 — per-item typed-decision form for decomposable list tasks
+# ---------------------------------------------------------------------------
+# A decomposable task registers a Decomposer: it turns the task input into many
+# atomic choice items, then reassembles the atomic answers into the task's output
+# dict IN OUR CODE (the model only ever answers one choice). The seam validates the
+# assembled dict against the task schema exactly as for the one-shot form.
+_MAX_DECOMPOSE_ITEMS = 60
+_DECOMPOSE_CONCURRENCY = 8
+
+
+@dataclass(frozen=True)
+class DecisionItem:
+    key: str  # opaque handle the assembler uses to place this answer
+    field: str  # the Ollaya questions field name
+    question: dict[str, Any]  # a choice/typed spec (same idiom as schema_to_questions)
+    state: dict[str, Any]  # the per-item Ollaya input (context for this one decision)
+
+
+class Decomposer:
+    """Per-item form of a list task. Subclasses implement ``items`` + ``assemble``."""
+
+    def items(self, inp: Any) -> list[DecisionItem]:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    def assemble(  # pragma: no cover - interface
+        self, inp: Any, answers: dict[str, str]
+    ) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+
+_DECOMPOSERS: dict[str, Decomposer] = {}
+
+
+def register_decomposer(task_name: str, decomposer: Decomposer) -> None:
+    _DECOMPOSERS[task_name] = decomposer
+
+
+async def _ollaya_decomposed(
+    profile: Profile, task: JevTask[Any, Any], inp: Any, decomposer: Decomposer, *, timeout: float
+) -> dict[str, Any] | DeferReason:
+    try:
+        items = decomposer.items(inp)[:_MAX_DECOMPOSE_ITEMS]
+    except Exception:
+        _LOG.debug("Ollaya decompose build failed (task=%s)", task.name)
+        return DeferReason.SCHEMA
+    if not items:
+        return DeferReason.SCHEMA
+    headers = {"Content-Type": "application/json"}
+    if profile.api_key:
+        headers["Authorization"] = f"Bearer {profile.api_key}"
+    base = profile.base_url.rstrip("/")
+    sem = asyncio.Semaphore(_DECOMPOSE_CONCURRENCY)
+
+    async def _one(http: httpx.AsyncClient, item: DecisionItem) -> str | DeferReason:
+        body = {"model": profile.model, "state": item.state,
+                "questions": {item.field: item.question}}
+        async with sem:
+            answer = await _first_path(http, base, body, headers, task.name)
+        if isinstance(answer, DeferReason):
+            return answer
+        value = answer.get(item.field)
+        if value is None:
+            return DeferReason.SCHEMA  # partial answer → DEFER the whole task
+        return str(value).strip().lower()
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout, transport=client._TRANSPORT) as http:
+            results = await asyncio.gather(*(_one(http, item) for item in items))
+    except (httpx.ConnectError, httpx.ConnectTimeout, OSError):
+        return DeferReason.PROVIDER_UNREACHABLE
+    except httpx.TimeoutException:
+        return DeferReason.TIMEOUT
+    except httpx.HTTPError:
+        return DeferReason.PROVIDER_UNREACHABLE
+    except Exception:
+        return DeferReason.INTERNAL
+
+    answers: dict[str, str] = {}
+    for item, result in zip(items, results):
+        if isinstance(result, DeferReason):
+            return result  # a provider error or partial answer defers the whole task
+        answers[item.key] = result
+    try:
+        out = decomposer.assemble(inp, answers)
+    except Exception:
+        _LOG.debug("Ollaya decompose assemble failed (task=%s)", task.name)
+        return DeferReason.SCHEMA
+    if out is None:
+        return DeferReason.SCHEMA
+    # A typed decision is deterministic; the seam's floor still gates it.
+    out.setdefault("confidence", 1.0)
+    return out
+
+
+async def _first_path(
+    http: httpx.AsyncClient, base: str, body: dict[str, Any], headers: dict[str, str], task: str
+) -> dict[str, Any] | DeferReason:
+    """POST to /v1/systemone, falling back to /api/decide only when it is absent."""
+    reason: DeferReason | None = None
+    for path in _OLLAYA_PATHS:
+        answer = await _ollaya_post(http, base + path, body, headers, task)
+        if isinstance(answer, DeferReason):
+            reason = answer
+            if answer is DeferReason.MODEL_NOT_LOADED:
+                continue
+            return answer
+        return answer
+    return reason or DeferReason.PROVIDER_UNREACHABLE
 
 
 # Version of the schema→questions translation. Part of the Ollaya cache key so a

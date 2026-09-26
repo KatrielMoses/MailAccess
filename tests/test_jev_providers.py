@@ -343,3 +343,108 @@ async def test_cache_key_includes_questions_version(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(adapters, "QUESTIONS_VERSION", "q2")
     assert isinstance(await jev.judge(DEMO, {"text": "Ada Lovelace"}), jev.Verdict)
     assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# JEV-0.4 — per-item typed-decision form (name_reconcile, platform_select)
+# ---------------------------------------------------------------------------
+def _ollaya_per_item(route: Any) -> Any:
+    """A per-item Ollaya handler: `route(field, state) -> choice string`."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        (field, question), = body["questions"].items()
+        choice = route(field, body["state"])
+        return httpx.Response(200, json={"answers": {field: choice}, "confidence": 0.95})
+    return handler
+
+
+async def test_name_reconcile_decomposes_into_pair_choices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set(monkeypatch, jev_provider="ollaya", jev_enabled=True,
+         jev_base_url="http://localhost:11435", jev_model="llama3")
+
+    def route(field: str, state: dict[str, Any]) -> str:
+        if field == "is_personal_name":
+            return "no" if "Pipeline" in state["candidate"] else "yes"
+        # same_person: Bob/Robert are the same; anything else no
+        names = {state["name_a"], state["name_b"]}
+        return "yes" if names == {"Bob Smith", "Robert Smith"} else "no"
+
+    _transport(monkeypatch, _ollaya_per_item(route))
+    verdict = await jev.judge("identity.name_reconcile", {
+        "email_localpart": "rsmith",
+        "candidates": [
+            {"name": "Bob Smith", "sources": ["github_profile"], "weight": 0.6},
+            {"name": "Robert Smith", "sources": ["gravatar"], "weight": 0.5},
+            {"name": "Deploy Pipeline", "sources": ["hackernews"], "weight": 0.35},
+        ],
+    })
+    assert isinstance(verdict, jev.Verdict)
+    assert verdict.output.drop == [2]                       # junk dropped
+    assert verdict.output.equivalence_groups == [[0, 1]]    # Bob≡Robert via union-find
+    assert verdict.output.canonical_index == 0              # highest weight in the group
+
+
+async def test_platform_select_decomposes_into_per_platform_choices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set(monkeypatch, jev_provider="ollaya", jev_enabled=True,
+         jev_base_url="http://localhost:11435", jev_model="llama3")
+
+    def route(field: str, state: dict[str, Any]) -> str:
+        return "likely" if state["platform"] in {"weibo", "vk"} else "unlikely"
+
+    _transport(monkeypatch, _ollaya_per_item(route))
+    verdict = await jev.judge("reach.platform_select", {
+        "name": "Li Wei", "email_localpart": "liwei", "wave_cap": 2,
+        "candidates": [
+            {"id": "github", "rank": 1}, {"id": "weibo", "region": "cn", "rank": 2},
+            {"id": "vk", "region": "ru", "rank": 3},
+        ],
+    })
+    assert isinstance(verdict, jev.Verdict)
+    assert verdict.output.ordered_platform_ids == ["weibo", "vk"]  # likely, within cap
+
+
+async def test_platform_select_fills_to_wave_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set(monkeypatch, jev_provider="ollaya", jev_enabled=True,
+         jev_base_url="http://localhost:11435", jev_model="llama3")
+    _transport(monkeypatch, _ollaya_per_item(lambda f, s: "likely"))  # all likely
+    verdict = await jev.judge("reach.platform_select", {
+        "name": "x", "email_localpart": "x", "wave_cap": 2,
+        "candidates": [{"id": "a", "rank": 1}, {"id": "b", "rank": 2}, {"id": "c", "rank": 3}],
+    })
+    assert isinstance(verdict, jev.Verdict)
+    assert verdict.output.ordered_platform_ids == ["a", "b"]  # capped to wave_cap (not 3)
+
+
+async def test_decompose_partial_answer_defers(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set(monkeypatch, jev_provider="ollaya", jev_enabled=True,
+         jev_base_url="http://localhost:11435", jev_model="llama3")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Return an empty answers block → the field is missing → partial → DEFER.
+        return httpx.Response(200, json={"answers": {}, "confidence": 0.95})
+
+    _transport(monkeypatch, handler)
+    assert await jev.judge("reach.platform_select", {
+        "name": "x", "email_localpart": "x", "wave_cap": 1,
+        "candidates": [{"id": "a", "rank": 1}],
+    }) is jev.DEFER
+
+
+async def test_generative_tasks_still_defer_on_ollaya(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set(monkeypatch, jev_provider="ollaya", jev_enabled=True,
+         jev_base_url="http://localhost:11435", jev_model="llama3")
+    sent: list = []
+    _transport(monkeypatch, _ollaya(body={"queries": []}, capture=sent))
+    # query_generate has no decomposer → still DEFERs (schema), no request.
+    assert await jev.judge("reach.query_generate", {
+        "engine": "ddg", "max_queries": 2, "domain": "acme.com"}) is jev.DEFER
+    assert sent == []
+    assert "reach.query_generate" not in adapters._DECOMPOSERS
+
+
+def test_only_two_tasks_are_decomposable() -> None:
+    assert set(adapters._DECOMPOSERS) == {"identity.name_reconcile", "reach.platform_select"}

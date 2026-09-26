@@ -170,3 +170,115 @@ register(JevTask(
     build_prompt=_bio_prompt,
     description="Employer / role / location / entity type from bio text.",
 ))
+
+
+# ---------------------------------------------------------------------------
+# JEV-0.4 — per-item typed-decision form for name_reconcile (typed providers)
+# ---------------------------------------------------------------------------
+_YES_NO = {"type": "choice", "criteria": ["yes", "no"]}
+_NAME_PAIR_LOW = 78  # fuzzy band that makes a pair worth an atomic same-person choice
+_NAME_PAIR_HIGH = 99
+
+
+def _name_pairs(names: list[str]) -> list[tuple[int, int]]:
+    """Candidate pairs worth an atomic same-person choice.
+
+    Bounded by MAX_NAME_CANDIDATES (≤12 → ≤66 pairs). A pair qualifies when the two
+    names share a token (catches nickname/initial variants like "Bob Smith" /
+    "Robert Smith" that share a surname) OR are fuzzy-close — but not when they are
+    clearly unrelated (no shared token AND low similarity), so a same-name-stranger
+    pair is not needlessly asked.
+    """
+    try:
+        from rapidfuzz import fuzz
+    except Exception:
+        return []
+    toks = [{t for t in n.strip().lower().split() if t} for n in names]
+    pairs: list[tuple[int, int]] = []
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = names[i].strip().lower(), names[j].strip().lower()
+            if not (a and b) or a == b:
+                continue
+            shares_token = bool(toks[i] & toks[j])
+            close = _NAME_PAIR_LOW <= fuzz.token_sort_ratio(a, b) <= _NAME_PAIR_HIGH
+            if shares_token or close:
+                pairs.append((i, j))
+    return pairs
+
+
+class _NameReconcileDecomposer:
+    """name_reconcile as atomic choices: per-candidate person y/n + per-pair same y/n.
+
+    Our code reconstructs drop / equivalence_groups / canonical_index from the
+    yes/no answers (union-find); the model only answers one choice at a time.
+    """
+
+    def items(self, inp: NameReconcileInput) -> list:
+        from ..adapters import DecisionItem
+
+        names = [c.name for c in inp.candidates]
+        items: list = []
+        for i, cand in enumerate(inp.candidates):
+            items.append(DecisionItem(
+                key=f"person:{i}", field="is_personal_name", question=dict(_YES_NO),
+                state={"candidate": cand.name, "sources": cand.sources,
+                       "question": "Is this a real individual person's name?"},
+            ))
+        for i, j in _name_pairs(names):
+            items.append(DecisionItem(
+                key=f"pair:{i}:{j}", field="same_person", question=dict(_YES_NO),
+                state={"name_a": names[i], "name_b": names[j],
+                       "question": "Do these two refer to the same person's name?"},
+            ))
+        return items
+
+    def assemble(self, inp: NameReconcileInput, answers: dict[str, str]) -> dict | None:
+        n = len(inp.candidates)
+        drop = sorted(
+            i for i in range(n) if answers.get(f"person:{i}") == "no"
+        )
+        if len(drop) >= n:  # dropping everything is not a cleanup — ignore
+            drop = []
+        kept = [i for i in range(n) if i not in set(drop)]
+
+        parent = {i: i for i in kept}
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for key, val in answers.items():
+            if not key.startswith("pair:") or val != "yes":
+                continue
+            _, a, b = key.split(":")
+            ia, ib = int(a), int(b)
+            if ia in parent and ib in parent:
+                parent[find(ia)] = find(ib)
+        clusters: dict[int, list[int]] = {}
+        for i in kept:
+            clusters.setdefault(find(i), []).append(i)
+        groups = [sorted(g) for g in clusters.values() if len(g) >= 2]
+
+        # Canonical: the highest-weight member of the largest group (our code, not the
+        # model). The existing consensus engine still owns the confidence band.
+        canonical_index = None
+        if groups:
+            largest = max(groups, key=lambda g: (len(g), -min(g)))
+            canonical_index = max(largest, key=lambda i: inp.candidates[i].weight)
+        if not (drop or groups or canonical_index is not None):
+            return None  # nothing actionable → DEFER to the one-shot / engine
+        return {
+            "canonical_index": canonical_index,
+            "equivalence_groups": [list(g) for g in groups],
+            "drop": drop,
+        }
+
+
+def register_ollaya_decomposers() -> None:
+    """Register the per-item Ollaya forms (called at package import)."""
+    from ..adapters import register_decomposer
+
+    register_decomposer(NAME_RECONCILE, _NameReconcileDecomposer())
