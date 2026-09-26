@@ -1021,9 +1021,11 @@ def reasoner_enable(
         raise typer.Exit(2)
 
     if provider == "jev":
+        from backend.core.jev import adapters as _ad
         base_url = base_url or typer.prompt("JEV base URL", default=os.environ.get(
-            "JEV_BASE_URL", ""))
-        model = model or typer.prompt("JEV model", default=os.environ.get("JEV_MODEL", ""))
+            "JEV_BASE_URL", _ad.DEFAULT_JEV_BASE))
+        model = model or typer.prompt("JEV model", default=os.environ.get(
+            "JEV_MODEL", _ad.DEFAULT_JEV_MODEL))
         key = key or typer.prompt("JEV API key", hide_input=True)
     elif provider == "ollaya":
         base_url = base_url or typer.prompt(

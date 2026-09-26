@@ -72,6 +72,7 @@ class FakeJev:
 def _jev_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     s = config_mod.settings
     for name, value in {
+        "jev_provider": "openai", "jev_enabled": True,
         "jev_api_key": "test-key-not-real", "jev_force_off": False,
         "jev_base_url": "https://jev.invalid/v1", "jev_model": "jev-test",
         "jev_timeout_ms": 2000, "jev_max_concurrency": 4, "jev_cache_ttl_seconds": 3600,

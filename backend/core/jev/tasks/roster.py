@@ -45,7 +45,10 @@ class PersonFilterInput(BaseModel):
 class PersonFilterOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    is_person_name: Literal["yes", "no", "unclear"]
+    is_person_name: Literal["yes", "no", "unclear"] = Field(
+        description=("Is this candidate a real individual person's name, not a team, "
+                     "role, department, product, or navigation label?")
+    )
     normalized_name: str | None = Field(default=None, max_length=120)
 
 
@@ -74,8 +77,12 @@ class TitleInput(BaseModel):
 class TitleOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    seniority_bucket: SeniorityBucket
-    normalized_title: str = Field(max_length=120)
+    seniority_bucket: SeniorityBucket = Field(
+        description="Seniority band of this job title (c-level, vp, director, manager, ic)."
+    )
+    # Free-text; the typed core is seniority_bucket. Optional so a typed-decision
+    # provider (jev/ollaya) can answer the bucket alone and still validate.
+    normalized_title: str | None = Field(default=None, max_length=120)
 
 
 def _title_prompt(inp: TitleInput) -> tuple[str, str]:
@@ -110,7 +117,9 @@ class DedupeInput(BaseModel):
 class DedupeOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    same_person: Literal["yes", "no", "unclear"]
+    same_person: Literal["yes", "no", "unclear"] = Field(
+        description="Are entries A and B the same person (duplicate roster rows)?"
+    )
 
 
 def _dedupe_prompt(inp: DedupeInput) -> tuple[str, str]:

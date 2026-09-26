@@ -32,11 +32,18 @@ from .contract import DeferReason, JevTask
 
 _LOG = logging.getLogger(__name__)
 
-CHAT_PROVIDERS = frozenset({"jev", "openai"})
 OLLAYA = "ollaya"
-KNOWN_PROVIDERS = CHAT_PROVIDERS | {OLLAYA}
+# ``jev`` (hosted TypeSafe) and ``ollaya`` (local) both speak the typed-decisions
+# System One protocol — same request body, same nested answer shape — so they share
+# the one adapter below. ``openai`` remains a generic OpenAI-compatible chat provider
+# (atomic.chat / llama.cpp) driven by prompt-and-parse in :mod:`.client`.
+CHAT_PROVIDERS = frozenset({"openai"})
+TYPED_PROVIDERS = frozenset({"jev", OLLAYA})
+KNOWN_PROVIDERS = CHAT_PROVIDERS | TYPED_PROVIDERS
 
 DEFAULT_OLLAYA_BASE = "http://localhost:11435"
+DEFAULT_JEV_BASE = "https://api.typesafe.ai"
+DEFAULT_JEV_MODEL = "jev-latest"
 _OLLAYA_PATHS = ("/v1/systemone", "/api/decide")
 _MAX_RESPONSE_BYTES = 64 * 1024
 
@@ -56,9 +63,11 @@ class Profile:
         return f"{self.provider}\x1f{self.base_url}\x1f{self.model}\x1f{self.api_key}"
 
     def config_ok(self) -> bool:
-        if self.provider in CHAT_PROVIDERS:
-            needs_key = self.provider == "jev"
-            return bool(self.base_url and self.model and (self.api_key or not needs_key))
+        if self.provider == "openai":
+            return bool(self.base_url and self.model)
+        if self.provider == "jev":
+            # Hosted TypeSafe: an API key is mandatory (Bearer auth, off-loopback).
+            return bool(self.base_url and self.model and self.api_key)
         if self.provider == OLLAYA:
             return bool(self.base_url and self.model)
         return False
@@ -84,6 +93,9 @@ def resolve_profile(settings: Any) -> Profile | None:
     model = (getattr(settings, "jev_model", "") or "").strip()
     if provider == OLLAYA and not base:
         base = DEFAULT_OLLAYA_BASE
+    if provider == "jev":
+        base = base or DEFAULT_JEV_BASE
+        model = model or DEFAULT_JEV_MODEL
     return Profile(provider=provider, base_url=base, model=model, api_key=key)
 
 
@@ -93,10 +105,11 @@ def is_enabled(settings: Any) -> bool:
 
 
 def provider_cache_tag(profile: Profile) -> str:
-    """Cache-key fragment for the provider. Ollaya includes the questions-spec
-    version so a change to the schema→questions idiom invalidates cleanly."""
-    if profile.provider == OLLAYA:
-        return f"{OLLAYA}:{QUESTIONS_VERSION}"
+    """Cache-key fragment for the provider. Typed-decision providers include the
+    questions-spec version so a change to the schema→questions idiom invalidates
+    cleanly; the provider name keeps ``jev`` and ``ollaya`` caches distinct."""
+    if profile.provider in TYPED_PROVIDERS:
+        return f"{profile.provider}:{QUESTIONS_VERSION}"
     return profile.provider
 
 
@@ -118,7 +131,7 @@ async def run(
             base_url=profile.base_url, api_key=profile.api_key, model=profile.model,
             system=system, user=user, timeout=timeout, task=task.name,
         )
-    if profile.provider == OLLAYA:
+    if profile.provider in TYPED_PROVIDERS:
         return await _ollaya_run(profile, task, inp, timeout=timeout)
     return DeferReason.NO_PROVIDER
 
@@ -130,6 +143,12 @@ async def _ollaya_run(
     profile: Profile, task: JevTask[Any, Any], inp: Any, *, timeout: float
 ) -> dict[str, Any] | DeferReason:
     decomposer = _DECOMPOSERS.get(task.name)
+    if task.name in _GENERATIVE_TASKS and decomposer is None:
+        # Free-text extraction / generation is out of distribution for a typed-decision
+        # model: there is no decision to make, only prose to write. DEFER — these tasks
+        # need a generative provider (chat), which stays their only backend.
+        _LOG.debug("Ollaya: generative task, no typed form (task=%s)", task.name)
+        return DeferReason.SCHEMA
     try:
         questions = schema_to_questions(task.output_model)
     except UnsupportedForOllaya:
@@ -174,6 +193,8 @@ async def _ollaya_post(
     status = resp.status_code
     if status == 404:
         return DeferReason.MODEL_NOT_LOADED  # endpoint or model absent → try next path
+    if status == 402:
+        return DeferReason.CREDITS_EXHAUSTED  # hosted jev: out of credits (hard trip)
     if status in (401, 403):
         return DeferReason.AUTH_FAILED
     if status == 429:
@@ -320,11 +341,37 @@ async def _first_path(
     return reason or DeferReason.PROVIDER_UNREACHABLE
 
 
-# Version of the schema→questions translation. Part of the Ollaya cache key so a
-# change to the question idiom invalidates cleanly (JEV-0.3).
-QUESTIONS_VERSION = "q1"
-# The yes/no choice used for boolean fields (the model's trained idiom).
-_YES_NO = ("yes", "no")
+# Version of the schema→questions translation. Part of the typed-provider cache key
+# so a change to the question idiom invalidates cleanly. Bumped for JEV-0.5: the
+# System One spec — booleans → ``noul``, enums → ``choice`` with a ``criteria`` DICT
+# and per-question ``instructions`` — verified live against both api.typesafe.ai and
+# a local Ollaya server.
+QUESTIONS_VERSION = "q2"
+
+# Tasks whose real output is generated prose / free-text extraction, not a typed
+# decision. A typed-decision model (jev or ollaya) has nothing to answer for these,
+# so they DEFER to the chat provider. The list-shaped generative tasks
+# (query_generate, brief_wording, finding_correlation) already DEFER because their
+# schema has no typed fields; bio_extract needs an explicit entry because its one
+# enum field would otherwise make it look answerable while the point is the strings.
+_GENERATIVE_TASKS = frozenset({"identity.bio_extract"})
+
+
+def _humanize(token: str) -> str:
+    """A short human-readable gloss for a field/label name used as instructions or
+    per-option guidance (the model was trained on natural-language criteria)."""
+    return token.replace("_", " ").replace("-", " ").strip()
+
+
+def choice_question(labels: typing.Iterable[Any], instructions: str = "") -> dict[str, Any]:
+    """Build a System One ``choice`` question. ``criteria`` is a DICT of
+    ``{label: guidance}`` (both backends reject a bare list). Used by the one-shot
+    schema translation and by the per-item decomposers so both speak one idiom."""
+    criteria = {str(label): _humanize(str(label)) for label in labels}
+    q: dict[str, Any] = {"type": "choice", "criteria": criteria}
+    if instructions:
+        q["instructions"] = instructions
+    return q
 
 
 class UnsupportedForOllaya(ValueError):
@@ -346,56 +393,77 @@ def schema_to_questions(output_model: Any) -> dict[str, Any]:
     """
     questions: dict[str, Any] = {}
     for name, field in output_model.model_fields.items():
-        questions[name] = _field_to_question(name, field.annotation)
+        ann, _optional = _unwrap_optional(field.annotation)
+        if ann is str:
+            # A free-text field carries no typed decision. Skip it when it is not
+            # required (has a default or is Optional) — it falls back to the schema
+            # default and the typed core still validates. A REQUIRED free-text field
+            # means the task is not a typed decision → DEFER.
+            if not field.is_required():
+                continue
+            raise UnsupportedForOllaya(f"field {name!r} is a required free-text field")
+        questions[name] = _field_to_question(name, field)
+    if not questions:
+        # Nothing but free-text: no decision for the typed model to make.
+        raise UnsupportedForOllaya("no typed-decision fields in output schema")
     return questions
 
 
-def _field_to_question(name: str, annotation: Any) -> dict[str, Any]:
-    ann, optional = _unwrap_optional(annotation)
+def _field_to_question(name: str, field: Any) -> dict[str, Any]:
+    ann, _optional = _unwrap_optional(field.annotation)
     origin = typing.get_origin(ann)
-    q: dict[str, Any]
+    instructions = (getattr(field, "description", None) or _humanize(name)).strip()
     if origin is Literal:
         # Enum-as-Literal → a choice over the exact values (in the trained idiom).
-        q = {"type": "choice", "criteria": [str(v) for v in typing.get_args(ann)]}
-    elif isinstance(ann, type) and issubclass(ann, enum.Enum):
-        q = {"type": "choice", "criteria": [str(m.value) for m in ann]}
-    elif ann is bool:
-        # A boolean rides the same choice idiom as a yes/no decision.
-        q = {"type": "choice", "criteria": list(_YES_NO)}
-    elif ann is int:
-        q = {"type": "integer"}
-    elif ann is str:
-        q = {"type": "string"}
-    else:
-        # Lists / nested objects are out of distribution for the typed-decisions
-        # model — refuse so the task DEFERs cleanly instead of sending noise.
-        raise UnsupportedForOllaya(f"field {name!r} ({ann!r}) is not an Ollaya choice/typed field")
-    if optional:
-        q["required"] = False
-    return q
+        return choice_question([str(v) for v in typing.get_args(ann)], instructions)
+    if isinstance(ann, type) and issubclass(ann, enum.Enum):
+        return choice_question([str(m.value) for m in ann], instructions)
+    if ann is bool:
+        # A boolean is a yes/no probability question — the System One ``noul`` type.
+        return {"type": "noul", "instructions": instructions}
+    # int has no System One type (both backends reject ``integer``); lists / nested
+    # objects are out of distribution. Refuse so the task DEFERs cleanly.
+    raise UnsupportedForOllaya(f"field {name!r} ({ann!r}) is not a typed-decision field")
 
 
 def answer_value(raw: Any) -> Any:
-    """The scalar answer from an Ollaya field result.
+    """The scalar answer from a System One field result.
 
-    The real server nests each answer as ``{"type":"choice","choice":"yes",
-    "confidence":0.68,"probabilities":{...}}``; some paths/mocks return the bare
-    value. Handle both.
+    The server nests each answer by type:
+      * ``noul``   → ``{"type":"noul","noul":0.93}`` — a yes-probability; ≥0.5 is yes.
+      * ``choice`` → ``{"type":"choice","choice":"no_such_user","confidence":1.0,...}``.
+      * ``score``  → ``{"type":"score","score":1.0,"confidence":1.0,"legend":{...}}``.
+    Some paths / mocks return the bare value. Handle all of them.
     """
     if isinstance(raw, dict):
+        kind = raw.get("type")
+        if kind == "noul" and isinstance(raw.get("noul"), int | float):
+            return bool(float(raw["noul"]) >= 0.5)
+        if kind == "score" and "score" in raw:
+            return raw["score"]
         for key in ("choice", "value", "answer", "number", "text"):
             if key in raw:
                 return raw[key]
+        # Bare typed answers without an explicit ``type`` tag.
+        if isinstance(raw.get("noul"), int | float):
+            return bool(float(raw["noul"]) >= 0.5)
         return None
     return raw
 
 
 def answer_confidence(raw: Any) -> float | None:
+    """Per-answer confidence in [0, 1].
+
+    ``choice``/``score`` carry an explicit ``confidence``. ``noul`` carries only a
+    yes-probability ``p``; its confidence is the distance from the coin-flip, i.e.
+    ``max(p, 1 - p)`` (a 0.93 yes and a 0.07 no are both 0.93-confident)."""
     if isinstance(raw, dict):
-        for key in ("confidence", "score"):
-            val = raw.get(key)
-            if isinstance(val, int | float):
-                return float(val)
+        if isinstance(raw.get("noul"), int | float):
+            p = float(raw["noul"])
+            return max(p, 1.0 - p)
+        val = raw.get("confidence")
+        if isinstance(val, int | float):
+            return float(val)
     return None
 
 
@@ -430,6 +498,8 @@ def _coerce_answer(annotation: Any, value: Any) -> Any:
     if ann is bool:
         if isinstance(value, bool):
             return value
+        if isinstance(value, int | float):  # a bare noul probability
+            return float(value) >= 0.5
         return str(value).strip().lower() in {"true", "yes", "1"}
     if ann is int:
         try:

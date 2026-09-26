@@ -143,19 +143,22 @@ class _PlatformSelectDecomposer:
     """
 
     def items(self, inp: PlatformSelectInput) -> list:
-        from ..adapters import DecisionItem
+        from ..adapters import DecisionItem, choice_question
 
+        q = choice_question(
+            ("likely", "unlikely"),
+            "For this subject, is this platform a likely place they hold an account?",
+        )
         items: list = []
         for i, cand in enumerate(inp.candidates):
             items.append(DecisionItem(
                 key=f"plat:{i}",
                 field="likely",
-                question={"type": "choice", "criteria": ["likely", "unlikely"]},
+                question=dict(q),
                 state={
                     "platform": cand.id, "category": cand.category, "region": cand.region,
                     "subject_name": inp.name, "subject_localpart": inp.email_localpart,
                     "hints": inp.hints,
-                    "question": f"For this subject, is {cand.id} a likely account location?",
                 },
             ))
         return items

@@ -56,7 +56,14 @@ class ReplyInput(BaseModel):
 class ReplyOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    verdict: Literal["exists", "no_such_user", "catch_all", "temporary", "blocked", "unknown"]
+    verdict: Literal["exists", "no_such_user", "catch_all", "temporary", "blocked", "unknown"] = (
+        Field(description=(
+            "What does this mailbox-probe reply prove about the address? "
+            "no_such_user = permanent no-mailbox rejection; temporary = transient/greylist; "
+            "exists = accepted; catch_all = domain accepts anything; "
+            "blocked = rejected by policy/reputation; unknown = cannot tell."
+        ))
+    )
     reason: str = Field(default="", max_length=200)  # accepted; never stored
 
 
@@ -93,7 +100,9 @@ class CatchallInput(BaseModel):
 class CatchallOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    catch_all: Literal["yes", "no", "unclear"]
+    catch_all: Literal["yes", "no", "unclear"] = Field(
+        description="Does this domain accept mail for any address (a catch-all domain)?"
+    )
 
 
 def _catchall_prompt(inp: CatchallInput) -> tuple[str, str]:
@@ -119,8 +128,12 @@ class M365Input(BaseModel):
 class M365Output(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mailbox: Literal["exists", "not_exists", "unknown"]
-    managed_tenant: Literal["yes", "no", "unknown"]
+    mailbox: Literal["exists", "not_exists", "unknown"] = Field(
+        description="Do these Microsoft 365 signals show the mailbox exists?"
+    )
+    managed_tenant: Literal["yes", "no", "unknown"] = Field(
+        description="Do the signals show the domain is a managed Microsoft 365 tenant?"
+    )
 
 
 def _m365_prompt(inp: M365Input) -> tuple[str, str]:

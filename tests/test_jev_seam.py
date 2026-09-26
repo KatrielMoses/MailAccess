@@ -33,14 +33,18 @@ DEMO = demo.TASK_NAME
 @pytest.fixture(autouse=True)
 def _jev_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     s = config_mod.settings
-    monkeypatch.setattr(s, "jev_provider", "jev")
+    # Seam mechanics (cache / breaker / floor / timeout / ceiling / metrics) are
+    # provider-agnostic; exercise them through the OpenAI-compatible chat provider,
+    # whose FakeModel returns chat completions. The typed-decision providers (jev /
+    # ollaya) have their own routing coverage in test_jev_providers.py.
+    monkeypatch.setattr(s, "jev_provider", "openai")
     monkeypatch.setattr(s, "jev_enabled", True)
     monkeypatch.setattr(s, "jev_api_key", "test-key-not-real")
     monkeypatch.setattr(s, "jev_force_off", False)
     monkeypatch.setattr(s, "jev_breaker_failure_threshold", 3)
     monkeypatch.setattr(s, "jev_breaker_cooldown_seconds", 120.0)
-    monkeypatch.setattr(s, "jev_base_url", "https://jev.invalid/v1")
-    monkeypatch.setattr(s, "jev_model", "jev-test")
+    monkeypatch.setattr(s, "jev_base_url", "https://chat.invalid/v1")
+    monkeypatch.setattr(s, "jev_model", "chat-test")
     monkeypatch.setattr(s, "jev_timeout_ms", 2000)
     monkeypatch.setattr(s, "jev_max_concurrency", 4)
     monkeypatch.setattr(s, "jev_cache_ttl_seconds", 3600)
@@ -242,12 +246,12 @@ async def test_valid_verdict_carries_output_confidence_and_provenance(
     assert verdict.output.is_personal_name is True
     assert verdict.confidence == pytest.approx(0.93)
     assert verdict.provenance == jev.Provenance(
-        task=DEMO, prompt_version="demo-name-v1", model="jev-test", cached=False
+        task=DEMO, prompt_version="demo-name-v1", model="chat-test", cached=False
     )
     assert verdict.provenance.source == "jev"
 
     [req] = model.requests
-    assert req["model"] == "jev-test"
+    assert req["model"] == "chat-test"
     assert req["temperature"] == 0
     assert req["response_format"] == {"type": "json_object"}
     assert req["max_tokens"] <= 256

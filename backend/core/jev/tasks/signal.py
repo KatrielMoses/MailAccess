@@ -48,7 +48,10 @@ class RoleInput(BaseModel):
 class RoleOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["person", "role_or_shared", "unclear"]
+    kind: Literal["person", "role_or_shared", "unclear"] = Field(
+        description=("Is this mailbox one individual person, or a role/shared/automated "
+                     "inbox (e.g. sales@, support-team, no-reply)?")
+    )
 
 
 def _role_prompt(inp: RoleInput) -> tuple[str, str]:
@@ -77,7 +80,10 @@ class CommonNameInput(BaseModel):
 class CommonNameOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    relation: Literal["is_subject", "coincidental", "unclear"]
+    relation: Literal["is_subject", "coincidental", "unclear"] = Field(
+        description=("Does this name/evidence refer to the investigation's subject, or to "
+                     "a coincidental namesake (a different person with the same name)?")
+    )
 
 
 def _common_name_prompt(inp: CommonNameInput) -> tuple[str, str]:
@@ -108,7 +114,9 @@ class BreachInput(BaseModel):
 class BreachOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    same_breach: Literal["yes", "no", "unclear"]
+    same_breach: Literal["yes", "no", "unclear"] = Field(
+        description="Do these two names refer to the same breach/leak event?"
+    )
     canonical_name: str | None = Field(default=None, max_length=120)
 
 

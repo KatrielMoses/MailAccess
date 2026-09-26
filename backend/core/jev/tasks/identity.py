@@ -57,7 +57,9 @@ class SamePersonInput(BaseModel):
 class SamePersonOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    same_person: Literal["yes", "no", "unclear"]
+    same_person: Literal["yes", "no", "unclear"] = Field(
+        description="Do profiles A and B belong to the same individual person?"
+    )
     # Accepted for the model's benefit; the call site never stores it.
     reason: str = Field(default="", max_length=200)
 
@@ -175,7 +177,6 @@ register(JevTask(
 # ---------------------------------------------------------------------------
 # JEV-0.4 — per-item typed-decision form for name_reconcile (typed providers)
 # ---------------------------------------------------------------------------
-_YES_NO = {"type": "choice", "criteria": ["yes", "no"]}
 _NAME_PAIR_LOW = 78  # fuzzy band that makes a pair worth an atomic same-person choice
 _NAME_PAIR_HIGH = 99
 
@@ -215,21 +216,26 @@ class _NameReconcileDecomposer:
     """
 
     def items(self, inp: NameReconcileInput) -> list:
-        from ..adapters import DecisionItem
+        from ..adapters import DecisionItem, choice_question
 
+        q_person = choice_question(
+            ("yes", "no"),
+            "Is this a real individual person's name (not a team, role, or automated account)?",
+        )
+        q_pair = choice_question(
+            ("yes", "no"), "Do these two names refer to the same individual person?"
+        )
         names = [c.name for c in inp.candidates]
         items: list = []
         for i, cand in enumerate(inp.candidates):
             items.append(DecisionItem(
-                key=f"person:{i}", field="is_personal_name", question=dict(_YES_NO),
-                state={"candidate": cand.name, "sources": cand.sources,
-                       "question": "Is this a real individual person's name?"},
+                key=f"person:{i}", field="is_personal_name", question=dict(q_person),
+                state={"candidate": cand.name, "sources": cand.sources},
             ))
         for i, j in _name_pairs(names):
             items.append(DecisionItem(
-                key=f"pair:{i}:{j}", field="same_person", question=dict(_YES_NO),
-                state={"name_a": names[i], "name_b": names[j],
-                       "question": "Do these two refer to the same person's name?"},
+                key=f"pair:{i}:{j}", field="same_person", question=dict(q_pair),
+                state={"name_a": names[i], "name_b": names[j]},
             ))
         return items
 

@@ -1,9 +1,11 @@
 """Phase JEV-0.2 — provider adapters + activation.
 
-Both adapters mocked via httpx.MockTransport. Covers: chat JSON parse (jev/openai),
-Ollaya schema→questions translation + typed-answer mapping, provider routing, every
-DEFER path (no provider / not enabled / unreachable / model-not-loaded / auth /
-credits / circuit-open), the legacy key shortcut, and the force-off override.
+Both adapters mocked via httpx.MockTransport. Covers: chat JSON parse (openai),
+typed-decision schema→questions translation + nested-answer mapping (shared by the
+local ``ollaya`` and hosted ``jev`` / TypeSafe System One providers), provider
+routing, every DEFER path (no provider / not enabled / unreachable /
+model-not-loaded / auth / credits / circuit-open), the legacy key shortcut, and the
+force-off override.
 """
 
 from __future__ import annotations
@@ -101,7 +103,7 @@ def test_config_ok_rules() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Chat adapter (jev / openai)
+# Chat adapter (openai-compatible)
 # ---------------------------------------------------------------------------
 def _chat_ok(content: dict[str, Any]) -> Any:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -135,19 +137,24 @@ async def test_chat_local_unreachable_defers_and_trips(monkeypatch: pytest.Monke
 
 
 async def test_jev_credit_failure_trips_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    # jev is a typed-decisions provider (System One): it routes to /v1/systemone and
+    # signals credit exhaustion with 402 payment-required (a hard breaker trip).
     _set(monkeypatch, jev_provider="jev", jev_enabled=True,
-         jev_base_url="https://jev/v1", jev_model="m", jev_api_key="k")
+         jev_base_url="https://api.typesafe.ai", jev_model="jev-latest", jev_api_key="k")
+    paths: list = []
 
     def quota(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, json={"error": {"code": "insufficient_quota"}})
+        paths.append(request.url.path)
+        return httpx.Response(402, json={"detail": "out of credits"})
 
     _transport(monkeypatch, quota)
     assert await jev.judge(DEMO, {"text": "Ada Lovelace"}) is jev.DEFER
+    assert paths[0] == "/v1/systemone"  # typed endpoint, not /chat/completions
     assert _defers("credits_exhausted") == 1 and breaker.snapshot()["state"] == "open"
 
 
 # ---------------------------------------------------------------------------
-# Ollaya adapter
+# Typed-decision adapter (ollaya / jev — System One protocol)
 # ---------------------------------------------------------------------------
 def _ollaya(status: int = 200, body: Any = None, capture: list | None = None,
             exc: Exception | None = None) -> Any:
@@ -173,7 +180,9 @@ async def test_ollaya_routes_to_systemone_and_maps_answer(
     path, sent = captured[0]
     assert path == "/v1/systemone"
     assert sent["model"] == "llama3" and sent["state"]["text"] == "Ada Lovelace"
-    assert sent["questions"] == {"is_personal_name": {"type": "choice", "criteria": ["yes", "no"]}}
+    # A boolean field is a yes/no probability question — System One ``noul``.
+    assert sent["questions"]["is_personal_name"]["type"] == "noul"
+    assert "instructions" in sent["questions"]["is_personal_name"]
 
 
 async def test_ollaya_choice_question_for_enum(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -189,8 +198,14 @@ async def test_ollaya_choice_question_for_enum(monkeypatch: pytest.MonkeyPatch) 
     })
     assert isinstance(verdict, jev.Verdict) and verdict.output.same_person == "no"
     _path, sent = captured[0]
-    assert sent["questions"]["same_person"] == {
-        "type": "choice", "criteria": ["yes", "no", "unclear"]}
+    q = sent["questions"]["same_person"]
+    # A Literal enum → a choice with a DICT ``criteria`` ({label: guidance}) plus
+    # per-question ``instructions`` (both backends reject a bare-list criteria).
+    assert q["type"] == "choice"
+    assert set(q["criteria"]) == {"yes", "no", "unclear"}
+    assert "instructions" in q
+    # The free-text ``reason`` field is not required → skipped, not asked.
+    assert set(sent["questions"]) == {"same_person"}
 
 
 async def test_ollaya_falls_back_to_api_decide_on_404(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -251,18 +266,41 @@ def test_ollaya_default_base_url() -> None:
 
 
 def test_schema_to_questions_covers_types() -> None:
+    from typing import Literal
+
     from pydantic import BaseModel, ConfigDict, Field
 
     class Out(BaseModel):
         model_config = ConfigDict(extra="forbid")
-        flag: bool
-        count: int | None = None
-        label: str = Field(max_length=20)
+        flag: bool = Field(description="is it so")
+        kind: Literal["a", "b"]
+        note: str = Field(default="", max_length=20)      # optional free-text → skipped
+        alias: str | None = Field(default=None, max_length=20)  # optional → skipped
 
     q = adapters.schema_to_questions(Out)
-    assert q["flag"] == {"type": "choice", "criteria": ["yes", "no"]}
-    assert q["count"]["type"] == "integer" and q["count"]["required"] is False
-    assert q["label"] == {"type": "string"}
+    # boolean → noul; enum → choice with DICT criteria; both carry instructions.
+    assert q["flag"] == {"type": "noul", "instructions": "is it so"}
+    assert q["kind"]["type"] == "choice"
+    assert q["kind"]["criteria"] == {"a": "a", "b": "b"}
+    assert "instructions" in q["kind"]
+    # Non-required free-text fields are not questions (typed core validates without them).
+    assert "note" not in q and "alias" not in q
+
+
+def test_required_free_text_and_int_are_unsupported() -> None:
+    from pydantic import BaseModel, ConfigDict, Field
+
+    class ReqText(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        text: str = Field(max_length=20)  # required free-text → no typed decision
+
+    class HasInt(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        idx: int | None = None  # System One has no integer type
+
+    for model in (ReqText, HasInt):
+        with pytest.raises(adapters.UnsupportedForOllaya):
+            adapters.schema_to_questions(model)
 
 
 # ---------------------------------------------------------------------------
@@ -280,18 +318,24 @@ def test_no_task_questions_reference_a_preset_name() -> None:
         blob = json.dumps(questions).lower()
         assert not (presets & set(blob.split())), name
         for q in questions.values():
-            assert q["type"] in {"choice", "integer", "string"}
+            assert q["type"] in {"choice", "noul", "score"}
 
 
-def test_boolean_field_is_yes_no_choice_and_maps_back() -> None:
+def test_boolean_field_is_noul_and_maps_back() -> None:
     from backend.core.jev.tasks.demo import NameOutput
     q = adapters.schema_to_questions(NameOutput)
-    assert q == {"is_personal_name": {"type": "choice", "criteria": ["yes", "no"]}}
-    # "yes"/"no" typed answers map back to real bools.
+    assert q["is_personal_name"]["type"] == "noul"
+    assert "instructions" in q["is_personal_name"]
+    # A nested noul answer (a yes-probability) maps back to a real bool.
+    assert adapters._answers_to_output(
+        NameOutput, {"is_personal_name": {"type": "noul", "noul": 0.93}}
+    )["is_personal_name"] is True
+    assert adapters._answers_to_output(
+        NameOutput, {"is_personal_name": {"type": "noul", "noul": 0.07}}
+    )["is_personal_name"] is False
+    # Bare "yes"/"no" strings still coerce (mock/legacy paths).
     assert adapters._answers_to_output(NameOutput, {"is_personal_name": "yes"})[
         "is_personal_name"] is True
-    assert adapters._answers_to_output(NameOutput, {"is_personal_name": "no"})[
-        "is_personal_name"] is False
 
 
 async def test_list_output_task_defers_on_ollaya(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -340,7 +384,7 @@ async def test_cache_key_includes_questions_version(monkeypatch: pytest.MonkeyPa
     assert isinstance(await jev.judge(DEMO, {"text": "Ada Lovelace"}), jev.Verdict)
     assert len(calls) == 1
     # Bumping the questions version invalidates the entry → a fresh call.
-    monkeypatch.setattr(adapters, "QUESTIONS_VERSION", "q2")
+    monkeypatch.setattr(adapters, "QUESTIONS_VERSION", "qX")
     assert isinstance(await jev.judge(DEMO, {"text": "Ada Lovelace"}), jev.Verdict)
     assert len(calls) == 2
 
@@ -487,3 +531,85 @@ def test_answer_value_and_confidence_helpers() -> None:
     assert adapters.answer_confidence(nested) == 0.42
     assert adapters.answer_value(True) is True           # flat value still supported
     assert adapters.answer_confidence("no") is None
+    # noul: a yes-probability. value = p>=0.5; confidence = distance from a coin flip.
+    yes = {"type": "noul", "noul": 0.93}
+    no = {"type": "noul", "noul": 0.07}
+    assert adapters.answer_value(yes) is True and adapters.answer_value(no) is False
+    assert adapters.answer_confidence(yes) == pytest.approx(0.93)
+    assert adapters.answer_confidence(no) == pytest.approx(0.93)
+    # score: a numeric answer with its own confidence.
+    score = {"type": "score", "score": 1.0, "confidence": 0.8}
+    assert adapters.answer_value(score) == 1.0
+    assert adapters.answer_confidence(score) == 0.8
+
+
+# ---------------------------------------------------------------------------
+# JEV-0.5 — jev is a typed-decisions (TypeSafe System One) provider
+# ---------------------------------------------------------------------------
+def test_jev_defaults_to_typesafe_endpoint() -> None:
+    prof = adapters.resolve_profile(
+        type("S", (), {"jev_provider": "jev", "jev_api_key": "k",
+                       "jev_base_url": "", "jev_model": ""})()
+    )
+    assert prof is not None
+    assert prof.base_url == adapters.DEFAULT_JEV_BASE == "https://api.typesafe.ai"
+    assert prof.model == adapters.DEFAULT_JEV_MODEL == "jev-latest"
+    assert prof.config_ok() is True
+    assert "jev" in adapters.TYPED_PROVIDERS and "jev" not in adapters.CHAT_PROVIDERS
+
+
+async def test_jev_routes_to_systemone_not_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set(monkeypatch, jev_provider="jev", jev_enabled=True,
+         jev_base_url="https://api.typesafe.ai", jev_model="jev-latest", jev_api_key="k")
+    captured: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append((request.url.path, request.headers.get("authorization")))
+        return httpx.Response(200, json={"answers": {
+            "is_personal_name": {"type": "noul", "noul": 0.93}}})
+
+    _transport(monkeypatch, handler)
+    verdict = await jev.judge(DEMO, {"text": "Ada Lovelace"})
+    assert isinstance(verdict, jev.Verdict) and verdict.output.is_personal_name is True
+    path, auth = captured[0]
+    assert path == "/v1/systemone"      # typed endpoint, not /chat/completions
+    assert auth == "Bearer k"           # hosted jev sends the key
+
+
+async def test_bio_extract_is_generative_and_defers_on_typed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # bio_extract extracts free-text (employer/role/location) → it needs a generative
+    # provider. On a typed-decisions provider it DEFERs without a request.
+    _set(monkeypatch, jev_provider="jev", jev_enabled=True,
+         jev_base_url="https://api.typesafe.ai", jev_model="jev-latest", jev_api_key="k")
+    sent: list = []
+    _transport(monkeypatch, _ollaya(body={"answers": {}}, capture=sent))
+    assert await jev.judge("identity.bio_extract", {
+        "bio": "Staff engineer at Northwind Labs, based in Leeds."}) is jev.DEFER
+    assert sent == []  # generative task never issues a typed request
+    assert "identity.bio_extract" in adapters._GENERATIVE_TASKS
+
+
+async def test_typed_decision_task_produces_verdict_on_jev(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A decision task (reply_classify) validates on a typed provider: the free-text
+    # ``reason`` is skipped, only the ``verdict`` choice is asked and answered.
+    _set(monkeypatch, jev_provider="jev", jev_enabled=True,
+         jev_base_url="https://api.typesafe.ai", jev_model="jev-latest", jev_api_key="k",
+         jev_min_confidence=0.5)
+    captured: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"answers": {"verdict": {
+            "type": "choice", "choice": "no_such_user", "confidence": 0.99}}})
+
+    _transport(monkeypatch, handler)
+    verdict = await jev.judge("verify.reply_classify", {
+        "protocol": "smtp_rcpt", "code": 550, "text": "5.1.1 no mailbox"})
+    assert isinstance(verdict, jev.Verdict)
+    assert verdict.output.verdict == "no_such_user"
+    assert verdict.output.reason == ""  # skipped free-text → schema default
+    assert set(captured[0]["questions"]) == {"verdict"}

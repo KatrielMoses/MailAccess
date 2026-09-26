@@ -7,7 +7,6 @@ with a mocked model. Network-free.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +15,6 @@ import pytest
 from rich.console import Console
 
 import backend.config as config_mod
-from backend.core import jev
 from backend.core.jev import breaker as jev_breaker
 from backend.core.jev import client as jev_client
 from backend.core.jev import metrics as jev_metrics
@@ -59,9 +57,11 @@ async def test_keys_set_activates_and_unset_deactivates(
     requests: list[Any] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        # jev is a typed-decisions provider (System One): it POSTs /v1/systemone and
+        # a boolean field comes back as a ``noul`` yes-probability.
         requests.append(request)
-        content = json.dumps({"is_personal_name": True, "confidence": 0.95})
-        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+        return httpx.Response(200, json={"answers": {
+            "is_personal_name": {"type": "noul", "noul": 0.95}}})
 
     monkeypatch.setattr(jev_client, "_TRANSPORT", httpx.MockTransport(handler))
 
