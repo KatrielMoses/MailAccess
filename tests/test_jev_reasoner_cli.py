@@ -27,7 +27,7 @@ runner = CliRunner()
 
 
 @pytest.fixture
-def profile(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+def profile(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     env_file = tmp_path / ".mailaccess" / ".env"
     monkeypatch.setattr(main, "ENV_FILE", env_file)
     monkeypatch.setattr(config_mod, "_PROFILE_ENV_FILE", env_file)
@@ -39,7 +39,13 @@ def profile(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("JEV_CACHE_PATH", str(tmp_path / "cache"))
     jev_metrics.reset()
     jev_breaker.reset()
-    return env_file
+    # The CLI's internal _reload_settings() reassigns backend.config.settings
+    # (fine for a one-shot process, but it would leak into later tests). Restore it.
+    original_settings = config_mod.settings
+    try:
+        yield env_file
+    finally:
+        config_mod.settings = original_settings
 
 
 def _chat_ok(monkeypatch: pytest.MonkeyPatch) -> None:

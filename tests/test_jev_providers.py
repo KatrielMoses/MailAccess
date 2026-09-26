@@ -173,7 +173,7 @@ async def test_ollaya_routes_to_systemone_and_maps_answer(
     path, sent = captured[0]
     assert path == "/v1/systemone"
     assert sent["model"] == "llama3" and sent["state"]["text"] == "Ada Lovelace"
-    assert sent["questions"] == {"is_personal_name": {"type": "boolean"}}
+    assert sent["questions"] == {"is_personal_name": {"type": "choice", "criteria": ["yes", "no"]}}
 
 
 async def test_ollaya_choice_question_for_enum(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -260,6 +260,86 @@ def test_schema_to_questions_covers_types() -> None:
         label: str = Field(max_length=20)
 
     q = adapters.schema_to_questions(Out)
-    assert q["flag"] == {"type": "boolean"}
+    assert q["flag"] == {"type": "choice", "criteria": ["yes", "no"]}
     assert q["count"]["type"] == "integer" and q["count"]["required"] is False
     assert q["label"] == {"type": "string"}
+
+
+# ---------------------------------------------------------------------------
+# JEV-0.3 — Custom-JSON idiom, unsupported-schema DEFER, versioned cache key
+# ---------------------------------------------------------------------------
+def test_no_task_questions_reference_a_preset_name() -> None:
+    # The idiom is choice/typed only — never one of Ollaya's built-in preset names.
+    presets = {"triage", "email", "guard", "moderation", "router", "agent"}
+    for name in jev.registered_tasks():
+        out_model = jev.get_task(name).output_model
+        try:
+            questions = adapters.schema_to_questions(out_model)
+        except adapters.UnsupportedForOllaya:
+            continue  # list/nested task — never sent to Ollaya
+        blob = json.dumps(questions).lower()
+        assert not (presets & set(blob.split())), name
+        for q in questions.values():
+            assert q["type"] in {"choice", "integer", "string"}
+
+
+def test_boolean_field_is_yes_no_choice_and_maps_back() -> None:
+    from backend.core.jev.tasks.demo import NameOutput
+    q = adapters.schema_to_questions(NameOutput)
+    assert q == {"is_personal_name": {"type": "choice", "criteria": ["yes", "no"]}}
+    # "yes"/"no" typed answers map back to real bools.
+    assert adapters._answers_to_output(NameOutput, {"is_personal_name": "yes"})[
+        "is_personal_name"] is True
+    assert adapters._answers_to_output(NameOutput, {"is_personal_name": "no"})[
+        "is_personal_name"] is False
+
+
+async def test_list_output_task_defers_on_ollaya(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A task whose schema has a list/nested field is out of distribution → DEFER,
+    # no request sent, existing logic runs.
+    _set(monkeypatch, jev_provider="ollaya", jev_enabled=True,
+         jev_base_url="http://localhost:11435", jev_model="llama3")
+    sent: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path)
+        return httpx.Response(200, json={"leads": []})
+
+    _transport(monkeypatch, handler)
+    verdict = await jev.judge("narrative.finding_correlation", {
+        "subject_email": "a@x.com", "findings": [{"id": "f0", "type": "t", "summary": "s"}],
+        "max_leads": 3,
+    })
+    assert verdict is jev.DEFER
+    assert sent == []  # translation failed before any network call
+    assert jev_metrics.snapshot()["narrative.finding_correlation"][
+        "defer_reasons"].get("schema_fail") == 1
+
+
+async def test_ollaya_partial_answer_defers(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A missing required field → schema validation fails → DEFER (existing logic).
+    _set(monkeypatch, jev_provider="ollaya", jev_enabled=True,
+         jev_base_url="http://localhost:11435", jev_model="llama3")
+    _transport(monkeypatch, _ollaya(body={"answers": {}, "confidence": 0.95}))
+    verdict = await jev.judge("identity.same_person", {
+        "a": {"platform": "reddit"}, "b": {"platform": "mastodon"},
+        "avatar_match": False, "heuristic_signals": [],
+    })
+    assert verdict is jev.DEFER
+
+
+async def test_cache_key_includes_questions_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set(monkeypatch, jev_provider="ollaya", jev_enabled=True,
+         jev_base_url="http://localhost:11435", jev_model="llama3")
+    calls: list = []
+    _transport(monkeypatch, _ollaya(
+        body={"is_personal_name": True, "confidence": 0.95}, capture=calls))
+    assert isinstance(await jev.judge(DEMO, {"text": "Ada Lovelace"}), jev.Verdict)
+    assert len(calls) == 1
+    # Same payload again → served from cache (the version tag is stable within a run).
+    assert isinstance(await jev.judge(DEMO, {"text": "Ada Lovelace"}), jev.Verdict)
+    assert len(calls) == 1
+    # Bumping the questions version invalidates the entry → a fresh call.
+    monkeypatch.setattr(adapters, "QUESTIONS_VERSION", "q2")
+    assert isinstance(await jev.judge(DEMO, {"text": "Ada Lovelace"}), jev.Verdict)
+    assert len(calls) == 2

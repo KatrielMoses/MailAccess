@@ -104,8 +104,9 @@ async def _judge(
 
     floor = max(float(s.jev_min_confidence), float(task.min_confidence or 0.0))
     # The provider is part of the cache key: a chat and an Ollaya verdict for the
-    # same task/payload are not interchangeable.
-    version = f"{task.prompt_version}+{_CONTRACT_VERSION}+{profile.provider}"
+    # same task/payload are not interchangeable, and Ollaya's tag carries the
+    # questions-spec version so a spec change invalidates cleanly.
+    version = f"{task.prompt_version}+{_CONTRACT_VERSION}+{adapters.provider_cache_tag(profile)}"
     provenance = Provenance(task=task.name, prompt_version=task.prompt_version, model=profile.model)
     root = cache.cache_dir(s.jev_cache_path)
     key = cache.cache_key(

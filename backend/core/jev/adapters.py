@@ -91,6 +91,14 @@ def is_enabled(settings: Any) -> bool:
     return bool(getattr(settings, "jev_enabled", False)) or _uses_legacy_shortcut(settings)
 
 
+def provider_cache_tag(profile: Profile) -> str:
+    """Cache-key fragment for the provider. Ollaya includes the questions-spec
+    version so a change to the schema→questions idiom invalidates cleanly."""
+    if profile.provider == OLLAYA:
+        return f"{OLLAYA}:{QUESTIONS_VERSION}"
+    return profile.provider
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
@@ -191,32 +199,56 @@ async def _ollaya_post(
     return payload
 
 
+# Version of the schema→questions translation. Part of the Ollaya cache key so a
+# change to the question idiom invalidates cleanly (JEV-0.3).
+QUESTIONS_VERSION = "q1"
+# The yes/no choice used for boolean fields (the model's trained idiom).
+_YES_NO = ("yes", "no")
+
+
+class UnsupportedForOllaya(ValueError):
+    """A task output field cannot be expressed in Ollaya's Custom-JSON idiom.
+
+    Our tasks are enum/choice/boolean decisions plus short typed fields — a direct
+    fit. Anything exotic (a list, a nested object) is out of distribution, so the
+    adapter DEFERs that task to the chat providers / existing logic rather than
+    sending a shape the fine-tuned model was not trained on.
+    """
+
+
 def schema_to_questions(output_model: Any) -> dict[str, Any]:
-    """Translate a task output schema into Ollaya ``questions``."""
+    """Build a task's Ollaya Custom-JSON ``questions`` from its output schema.
+
+    The registered output schema is the source of truth — this never maps a task
+    onto one of Ollaya's built-in presets. Raises :class:`UnsupportedForOllaya`
+    when a field is not expressible in the choice/typed idiom.
+    """
     questions: dict[str, Any] = {}
     for name, field in output_model.model_fields.items():
-        questions[name] = _field_to_question(field.annotation)
+        questions[name] = _field_to_question(name, field.annotation)
     return questions
 
 
-def _field_to_question(annotation: Any) -> dict[str, Any]:
+def _field_to_question(name: str, annotation: Any) -> dict[str, Any]:
     ann, optional = _unwrap_optional(annotation)
     origin = typing.get_origin(ann)
     q: dict[str, Any]
     if origin is Literal:
+        # Enum-as-Literal → a choice over the exact values (in the trained idiom).
         q = {"type": "choice", "criteria": [str(v) for v in typing.get_args(ann)]}
     elif isinstance(ann, type) and issubclass(ann, enum.Enum):
         q = {"type": "choice", "criteria": [str(m.value) for m in ann]}
     elif ann is bool:
-        q = {"type": "boolean"}
+        # A boolean rides the same choice idiom as a yes/no decision.
+        q = {"type": "choice", "criteria": list(_YES_NO)}
     elif ann is int:
         q = {"type": "integer"}
     elif ann is str:
         q = {"type": "string"}
-    elif origin in (list, tuple):
-        q = {"type": "array"}
     else:
-        q = {"type": "string"}
+        # Lists / nested objects are out of distribution for the typed-decisions
+        # model — refuse so the task DEFERs cleanly instead of sending noise.
+        raise UnsupportedForOllaya(f"field {name!r} ({ann!r}) is not an Ollaya choice/typed field")
     if optional:
         q["required"] = False
     return q
@@ -249,9 +281,6 @@ def _coerce_answer(annotation: Any, value: Any) -> Any:
             return int(value)
         except (TypeError, ValueError):
             return value
-    origin = typing.get_origin(ann)
-    if origin in (list, tuple):
-        return list(value) if isinstance(value, list | tuple) else [value]
     return value  # choice / enum / str pass through as-is
 
 
