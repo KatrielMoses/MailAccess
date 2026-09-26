@@ -2,13 +2,13 @@
 
 Guard order (each resolves to DEFER and the caller runs today's logic):
 
-  disabled → unknown task → missing base URL / model / key → invalid input →
-  cache hit (served, still floor-gated) → run ceiling spent → concurrency slot /
-  per-call timeout → transport / HTTP / oversize → non-JSON → schema failure →
-  confidence below floor.
+  no provider → forced off → not enabled → unknown task → missing config → invalid
+  input → circuit open → cache hit (served, still floor-gated) → run ceiling spent →
+  concurrency slot / per-call timeout → provider error (unreachable / auth / credits
+  / model-not-loaded / …) → non-JSON → schema failure → confidence below floor.
 
-The disabled check is first and touches nothing else, so with JEV off (the
-default) the seam performs no I/O at all. ``judge`` never raises except for
+The provider/enabled checks are first and touch nothing else, so with the reasoner
+off (the default) the seam performs no I/O at all. ``judge`` never raises except for
 caller cancellation.
 """
 
@@ -25,7 +25,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from ... import config as _config
-from . import breaker, cache, client, limits, metrics
+from . import adapters, breaker, cache, limits, metrics
 from .contract import DEFER, DeferReason, DeferType, JevTask, Provenance, Verdict, get_task
 
 _LOG = logging.getLogger(__name__)
@@ -35,18 +35,26 @@ _LOG = logging.getLogger(__name__)
 _CONTRACT_VERSION = "c1"
 # Below this much run-ceiling headroom a call is not worth starting.
 _MIN_CALL_SECONDS = 0.05
-# Outcomes where JEV is inactive: nothing (not even a metrics file) is written.
-_INERT_REASONS = frozenset({DeferReason.NO_KEY.value, DeferReason.FORCED_OFF.value})
+# Outcomes where the reasoner is inactive: nothing (not even a metrics file) is written.
+_INERT_REASONS = frozenset({
+    DeferReason.NO_PROVIDER.value,
+    DeferReason.NOT_ENABLED.value,
+    DeferReason.FORCED_OFF.value,
+})
 
 
 def is_active() -> bool:
-    """Whether JEV may be consulted at all: a key is set and not forced off.
+    """Whether the reasoner may be consulted: a provider profile is configured AND
+    enabled AND not forced off.
 
-    The same condition :func:`judge` checks first — exposed so a call site can
-    skip building JEV payloads entirely on a default (keyless) install.
+    The same condition :func:`judge` checks first — exposed so a call site can skip
+    building payloads entirely when the reasoner is off.
     """
     s = _config.settings
-    return bool((s.jev_api_key or "").strip()) and not s.jev_force_off
+    if s.jev_force_off or not adapters.is_enabled(s):
+        return False
+    profile = adapters.resolve_profile(s)
+    return profile is not None and profile.config_ok()
 
 
 async def judge(task_name: str, payload: BaseModel | dict[str, Any]) -> Verdict[Any] | DeferType:
@@ -74,30 +82,34 @@ async def _judge(
     task_name: str, payload: BaseModel | dict[str, Any]
 ) -> tuple[Verdict[Any] | DeferReason, bool, bool]:
     s = _config.settings
-    api_key = (s.jev_api_key or "").strip()
-    if not api_key:
-        return DeferReason.NO_KEY, False, False
+    profile = adapters.resolve_profile(s)
+    if profile is None:
+        return DeferReason.NO_PROVIDER, False, False
     if s.jev_force_off:
         return DeferReason.FORCED_OFF, False, False
+    if not adapters.is_enabled(s):
+        return DeferReason.NOT_ENABLED, False, False
     task = get_task(task_name)
     if task is None:
         return DeferReason.UNKNOWN_TASK, False, False
-    if not (s.jev_base_url and s.jev_model):
+    if not profile.config_ok():
         return DeferReason.MISSING_CONFIG, False, False
     inp = _coerce_input(task, payload)
     if inp is None:
         return DeferReason.INVALID_INPUT, False, False
-    ident = breaker.identity(s.jev_base_url, api_key)
+    ident = breaker.identity(profile.identity_material, "")
     cooldown = float(s.jev_breaker_cooldown_seconds)
     if breaker.blocked(ident, cooldown):
         return DeferReason.CIRCUIT_OPEN, False, False
 
     floor = max(float(s.jev_min_confidence), float(task.min_confidence or 0.0))
-    version = f"{task.prompt_version}+{_CONTRACT_VERSION}"
-    provenance = Provenance(task=task.name, prompt_version=task.prompt_version, model=s.jev_model)
+    # The provider is part of the cache key: a chat and an Ollaya verdict for the
+    # same task/payload are not interchangeable.
+    version = f"{task.prompt_version}+{_CONTRACT_VERSION}+{profile.provider}"
+    provenance = Provenance(task=task.name, prompt_version=task.prompt_version, model=profile.model)
     root = cache.cache_dir(s.jev_cache_path)
     key = cache.cache_key(
-        task.name, cache.normalize_payload(inp.model_dump(mode="json")), s.jev_model, version
+        task.name, cache.normalize_payload(inp.model_dump(mode="json")), profile.model, version
     )
 
     if not s.jev_cache_refresh:
@@ -136,14 +148,8 @@ async def _judge(
             if not breaker.acquire(ident, cooldown):
                 return DeferReason.CIRCUIT_OPEN, False, False
             try:
-                result = await client.chat_json(
-                    base_url=s.jev_base_url,
-                    api_key=api_key,
-                    model=s.jev_model,
-                    system=system,
-                    user=user,
-                    timeout=left,
-                    task=task.name,
+                result = await adapters.run(
+                    profile, task, inp, system=system, user=user, timeout=left,
                 )
             except BaseException:  # cancelled mid-request: free a half-open probe
                 breaker.release_probe(ident)
@@ -171,7 +177,7 @@ async def _judge(
         key,
         output=output.model_dump(mode="json"),
         confidence=confidence,
-        model=s.jev_model,
+        model=profile.model,
         prompt_version=version,
     )
     if confidence < floor:

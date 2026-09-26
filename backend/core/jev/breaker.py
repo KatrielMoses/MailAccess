@@ -35,6 +35,10 @@ SOFT_FAILURES = frozenset({
     DeferReason.SERVER_ERROR,
     DeferReason.HTTP_STATUS,
     DeferReason.INTERNAL,
+    # A local provider that is down or has no model loaded: transient, so it trips
+    # after the threshold rather than instantly (it may be starting up).
+    DeferReason.PROVIDER_UNREACHABLE,
+    DeferReason.MODEL_NOT_LOADED,
 })
 
 CLOSED, OPEN, HALF_OPEN = "closed", "open", "half_open"

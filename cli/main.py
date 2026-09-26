@@ -919,6 +919,210 @@ keys_app = typer.Typer(
 )
 app.add_typer(keys_app)
 
+reasoner_app = typer.Typer(
+    name="reasoner",
+    help="Configure the optional reasoning provider (JEV-0.2). Off unless enabled.",
+    invoke_without_command=True,
+    no_args_is_help=True,
+)
+app.add_typer(reasoner_app)
+
+_REASONER_PROVIDERS = {"jev", "ollaya", "openai-compatible", "openai"}
+
+
+def _reasoner_provider_norm(value: str) -> str:
+    v = (value or "").strip().lower()
+    return "openai" if v == "openai-compatible" else v
+
+
+def _read_env_file_value(name: str) -> str | None:
+    """Read a single key from ~/.mailaccess/.env (None when absent/unreadable)."""
+    try:
+        from dotenv import dotenv_values
+
+        return dotenv_values(str(ENV_FILE)).get(name)
+    except Exception:
+        return None
+
+
+def _reload_settings() -> Any:
+    """Refresh the settings singleton so a just-written profile takes effect now.
+
+    Updates the existing object IN PLACE rather than reassigning it, so modules that
+    bound ``from ..config import settings`` at import time see the new values (and no
+    stale object leaks across an in-process reload).
+    """
+    import backend.config as _config
+
+    fresh = _config.Settings()
+    _config.settings.__dict__.update(fresh.__dict__)
+    return _config.settings
+
+
+def _reasoner_run_demo() -> tuple[str, str]:
+    """Run the demo task end-to-end; return (outcome, reason)."""
+    import asyncio
+
+    from backend.core import jev
+    from backend.core.jev import metrics as jev_metrics
+    from backend.core.jev.tasks.demo import TASK_NAME
+
+    jev_metrics.reset()
+
+    async def _call() -> Any:
+        return await jev.judge(TASK_NAME, {"text": "Ada Lovelace"})
+
+    verdict = asyncio.run(_call())
+    snap = jev_metrics.snapshot().get(TASK_NAME, {})
+    reasons = snap.get("defer_reasons") or {}
+    reason = next(iter(reasons), "verdict")
+    if verdict is jev.DEFER:
+        return "DEFER", reason
+    return "VERDICT", f"is_personal_name={verdict.output.is_personal_name}"
+
+
+def _ollaya_models(base_url: str) -> list[str]:
+    """Best-effort model pick list from Ollaya (GET /api/tags), else empty."""
+    import httpx
+
+    for path in ("/api/tags", "/v1/models"):
+        try:
+            resp = httpx.get(base_url.rstrip("/") + path, timeout=3.0)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            items = data.get("models") or data.get("data") or []
+            names = [
+                str(m.get("name") or m.get("model") or m.get("id"))
+                for m in items if isinstance(m, dict)
+            ]
+            names = [n for n in names if n and n != "None"]
+            if names:
+                return names
+        except Exception:
+            continue
+    return []
+
+
+@reasoner_app.command("enable")
+def reasoner_enable(
+    provider: str = typer.Option(None, help="jev | ollaya | openai-compatible"),
+    base_url: str = typer.Option(None, help="Provider base URL"),
+    model: str = typer.Option(None, help="Model name"),
+    key: str = typer.Option(None, help="API key (jev; ollaya only if off-loopback)"),
+    skip_test: bool = typer.Option(False, "--skip-test", help="Skip the live test call"),
+) -> None:
+    """Guided, validated setup: pick a provider, configure it, live-test, save+enable."""
+    provider = _reasoner_provider_norm(
+        provider or typer.prompt("Provider [jev/ollaya/openai-compatible]", default="ollaya")
+    )
+    if provider not in {"jev", "ollaya", "openai"}:
+        err_console.print(f"Unknown provider: {provider!r}", markup=False)
+        raise typer.Exit(2)
+
+    if provider == "jev":
+        base_url = base_url or typer.prompt("JEV base URL", default=os.environ.get(
+            "JEV_BASE_URL", ""))
+        model = model or typer.prompt("JEV model", default=os.environ.get("JEV_MODEL", ""))
+        key = key or typer.prompt("JEV API key", hide_input=True)
+    elif provider == "ollaya":
+        base_url = base_url or typer.prompt(
+            "Ollaya base URL", default="http://localhost:11435")
+        if not model:
+            picks = _ollaya_models(base_url)
+            if picks:
+                console.print("Available models: " + ", ".join(picks[:20]))
+                model = typer.prompt("Ollaya model", default=picks[0])
+            else:
+                model = typer.prompt("Ollaya model")
+        loopback = any(h in base_url for h in ("localhost", "127.0.0.1", "[::1]"))
+        if not loopback and not key:
+            key = typer.prompt("Ollaya API key (off-loopback)", hide_input=True)
+    else:  # openai-compatible
+        base_url = base_url or typer.prompt("OpenAI-compatible base URL")
+        model = model or typer.prompt("Model")
+        if key is None:
+            key = typer.prompt("API key (optional, blank for none)", default="", hide_input=True)
+
+    _set_env_key("JEV_PROVIDER", provider)
+    if base_url:
+        _set_env_key("JEV_BASE_URL", base_url)
+    if model:
+        _set_env_key("JEV_MODEL", model)
+    if key:
+        _set_env_key("JEV_API_KEY", key)
+    # Enable + reload from the just-written profile so the live test sees the config.
+    # (No os.environ mutation — the reloaded Settings reads the profile .env, and a
+    # stale shell export must not silently override a wizard-written value.)
+    _set_env_key("JEV_ENABLED", "true")
+    _reload_settings()
+
+    if not skip_test:
+        outcome, detail = _reasoner_run_demo()
+        if outcome == "VERDICT":
+            console.print(f"[green]✓ Live test OK — {detail}[/green]")
+        else:
+            console.print(
+                f"[yellow]Live test deferred ({detail}). Saving anyway; the reasoner "
+                f"falls back to existing logic until the provider responds.[/yellow]")
+
+    console.print(f"[green]✓ Reasoner enabled — provider={provider}[/green]")
+
+
+@reasoner_app.command("disable")
+def reasoner_disable() -> None:
+    """Turn the reasoner off (back to pure fallback)."""
+    # Pin the provider so the legacy bare-key shortcut can't silently re-enable it.
+    current = str(os.environ.get("JEV_PROVIDER") or _read_env_file_value("JEV_PROVIDER") or "")
+    if not current and (os.environ.get("JEV_API_KEY") or _read_env_file_value("JEV_API_KEY")):
+        _set_env_key("JEV_PROVIDER", "jev")
+    _set_env_key("JEV_ENABLED", "false")
+    console.print("[green]✓ Reasoner disabled — existing logic runs everywhere.[/green]")
+
+
+@reasoner_app.command("status")
+def reasoner_status() -> None:
+    """Show provider, endpoint, model, and enabled/active state."""
+    from backend.core.jev import adapters
+
+    settings = _reload_settings()
+    profile = adapters.resolve_profile(settings)
+    table = Table(title="Reasoner")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    if profile is None:
+        table.add_row("provider", "[red]not configured[/red]")
+    else:
+        table.add_row("provider", profile.provider)
+        table.add_row("base_url", profile.base_url or "[dim](default)[/dim]")
+        table.add_row("model", profile.model or "[red](unset)[/red]")
+        table.add_row("api_key", "[green]set[/green]" if profile.api_key else "[dim]none[/dim]")
+        table.add_row("config_ok", "yes" if profile.config_ok() else "[red]no[/red]")
+    table.add_row("enabled", "yes" if adapters.is_enabled(settings) else "no")
+    table.add_row("force_off", "yes" if settings.jev_force_off else "no")
+    from backend.core import jev
+
+    table.add_row("active", "[green]yes[/green]" if jev.is_active() else "no")
+    console.print(table)
+
+
+@reasoner_app.command("test")
+def reasoner_test() -> None:
+    """Run one demo task end-to-end and report the verdict or DEFER reason."""
+    from backend.core import jev
+
+    _reload_settings()
+    if not jev.is_active():
+        console.print("[yellow]Reasoner is not active — `mailaccess reasoner enable` "
+                      "first. (It DEFERs; existing logic runs.)[/yellow]")
+        return
+    outcome, detail = _reasoner_run_demo()
+    if outcome == "VERDICT":
+        console.print(f"[green]✓ {detail}[/green]")
+    else:
+        console.print(f"[yellow]DEFER ({detail}) — existing logic would run.[/yellow]")
+
+
 from cli.platform_health import platform_health_app  # noqa: E402
 
 app.add_typer(platform_health_app)
@@ -2151,22 +2355,28 @@ def keys_set(
     if key_name in _SCRAPINGANT_KEY_NAMES:
         console.print("[dim]Key is active in this session.[/dim]")
     if key_name == "JEV_API_KEY":
+        # JEV-0.2: the key shortcut configures + enables the hosted `jev` provider,
+        # so JEV-0.1 users are not broken. `mailaccess reasoner enable` is the primary
+        # setup path (and the only way to configure ollaya / openai-compatible).
+        _set_env_key("JEV_PROVIDER", "jev")
+        _set_env_key("JEV_ENABLED", "true")
         _print_jev_activation_hint()
 
 
 def _print_jev_activation_hint() -> None:
-    """JEV turns on with its key; flag the endpoint settings it still needs.
+    """The JEV key shortcut enabled the hosted provider; flag endpoint gaps.
 
-    Until JEV_BASE_URL and JEV_MODEL are both configured every JEV call DEFERs
+    Until JEV_BASE_URL and JEV_MODEL are both configured every reasoner call DEFERs
     (``missing_config``) and the existing engine runs as before — never an error.
     """
-    console.print("[dim]JEV is on (remove the key to turn it off). A running "
-                  "`mailaccess serve` picks it up on restart.[/dim]")
+    console.print("[dim]Reasoner enabled (provider=jev). Use `mailaccess reasoner "
+                  "disable` to turn it off; a running `mailaccess serve` picks it up "
+                  "on restart.[/dim]")
     missing = [n for n in ("JEV_BASE_URL", "JEV_MODEL") if not os.environ.get(n)]
     if missing:
         console.print(
-            f"[yellow]JEV still needs {' and '.join(missing)} — until set, JEV "
-            f"steps aside and the existing engine runs as before.[/yellow]"
+            f"[yellow]JEV still needs {' and '.join(missing)} — until set, the "
+            f"reasoner steps aside and the existing engine runs as before.[/yellow]"
         )
 
 

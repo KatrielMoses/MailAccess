@@ -218,6 +218,8 @@ docs/audit/
 !tests/test_jev_reach.py
 !tests/test_jev_signal.py
 !tests/test_jev_narrative.py
+!tests/test_jev_providers.py
+!tests/test_jev_reasoner_cli.py
 
 # Local 0.17.0 release workspace and operator-only material.
 /.venv-017/

@@ -35,6 +35,8 @@ class DeferReason(str, enum.Enum):
     """Why a call resolved to DEFER (recorded in metrics, never shown to users)."""
 
     NO_KEY = "no_key"
+    NO_PROVIDER = "no_provider"
+    NOT_ENABLED = "not_enabled"
     FORCED_OFF = "forced_off"
     MISSING_CONFIG = "missing_config"
     UNKNOWN_TASK = "unknown_task"
@@ -43,6 +45,8 @@ class DeferReason(str, enum.Enum):
     RUN_CEILING = "run_ceiling"
     TIMEOUT = "timeout"
     TRANSPORT = "transport"
+    PROVIDER_UNREACHABLE = "provider_unreachable"
+    MODEL_NOT_LOADED = "model_not_loaded"
     AUTH_FAILED = "auth_failed"
     CREDITS_EXHAUSTED = "credits_exhausted"
     RATE_LIMITED = "rate_limited"

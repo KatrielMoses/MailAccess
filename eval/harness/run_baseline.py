@@ -94,6 +94,9 @@ class RunConfig:
             env.pop(name, None)
         if self.jev:
             env.update(_jev_env_for_on_pass())
+            # The ON pass is always enabled (JEV-0.2): the operator configured a
+            # provider for the side-by-side; force the master switch on regardless.
+            env["JEV_ENABLED"] = "true"
             if self.jev_cache_refresh:
                 env["JEV_CACHE_REFRESH"] = "true"
         else:

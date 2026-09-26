@@ -789,18 +789,23 @@ class Settings(BaseSettings):
     mailaccess_pro_founder_seats_total: int = 100
     mailaccess_pro_founder_price_label: str = "$19/mo"
 
-    # Phase JEV — hosted reasoning seam (backend/core/jev/). A fast OpenAI-
-    # compatible chat model consulted for bounded judgment calls (classifications,
-    # matches, selections) alongside the deterministic engine. It never owns a
-    # number and every call has a deterministic fallback: no key / timeout / error
-    # / no credits / invalid output / low confidence all return DEFER and the
-    # caller runs today's logic. ACTIVE iff a key is set — `mailaccess keys set
-    # JEV_API_KEY <key>` turns it on, removing the key turns it off; with no key
-    # the seam makes zero network calls. Provider, model and key are configuration
-    # only. Never logged.
+    # Phase JEV — the reasoning seam (backend/core/jev/). A fast model consulted for
+    # bounded judgment calls (classifications, matches, selections) alongside the
+    # deterministic engine. It never owns a number and every call has a deterministic
+    # fallback: not enabled / timeout / error / no credits / provider unreachable /
+    # invalid output / low confidence all return DEFER and the caller runs today's
+    # logic. ACTIVE iff a provider profile is configured AND enabled (JEV-0.2) —
+    # `mailaccess reasoner enable` is the guided setup; with it off the seam makes
+    # zero network calls. Config only; keys are never logged.
+    #
+    # Provider: "jev" (hosted chat), "openai" (any OpenAI-compatible base_url, incl.
+    # local llama.cpp / atomic.chat), or "ollaya" (local typed-decision server). Empty
+    # means unconfigured. ``jev_enabled`` is the master switch the wizard sets.
+    jev_provider: str = ""
+    jev_enabled: bool = False
     jev_api_key: str | None = None
-    # Testing-only override: forces JEV off even when a key is configured (the
-    # eval harness uses it for the side-by-side "JEV off" pass). Users never need it.
+    # Testing-only override: forces JEV off even when configured+enabled (the eval
+    # harness uses it for the side-by-side "JEV off" pass). Users never need it.
     jev_force_off: bool = False
     jev_base_url: str = ""
     jev_model: str = ""

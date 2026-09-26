@@ -60,7 +60,11 @@ async def chat_json(
     except asyncio.TimeoutError:
         _LOG.debug("JEV call timed out (task=%s)", task)
         return DeferReason.TIMEOUT
-    except (httpx.HTTPError, OSError) as exc:
+    except (httpx.ConnectError, httpx.ConnectTimeout, OSError) as exc:
+        # A local OpenAI-compatible server (llama.cpp / atomic.chat) that is down.
+        _LOG.debug("JEV provider unreachable (task=%s): %s", task, type(exc).__name__)
+        return DeferReason.PROVIDER_UNREACHABLE
+    except httpx.HTTPError as exc:
         _LOG.debug("JEV transport error (task=%s): %s", task, type(exc).__name__)
         return DeferReason.TRANSPORT
     except Exception as exc:  # never let the seam raise

@@ -33,6 +33,8 @@ DEMO = demo.TASK_NAME
 @pytest.fixture(autouse=True)
 def _jev_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     s = config_mod.settings
+    monkeypatch.setattr(s, "jev_provider", "jev")
+    monkeypatch.setattr(s, "jev_enabled", True)
     monkeypatch.setattr(s, "jev_api_key", "test-key-not-real")
     monkeypatch.setattr(s, "jev_force_off", False)
     monkeypatch.setattr(s, "jev_breaker_failure_threshold", 3)
@@ -94,19 +96,21 @@ def _defers(reason: str) -> int:
 # ---------------------------------------------------------------------------
 def test_jev_is_off_by_default() -> None:
     fields = config_mod.Settings.model_fields
-    assert fields["jev_api_key"].default is None
+    assert fields["jev_provider"].default == ""      # no provider configured
+    assert fields["jev_enabled"].default is False    # master switch off
     assert fields["jev_force_off"].default is False
-    assert "jev_enabled" not in fields  # activation is key presence, not a flag
 
 
 @pytest.mark.parametrize("key", [None, "", "   "])
-async def test_no_key_makes_no_network_call_and_defers(
+async def test_no_provider_makes_no_network_call_and_defers(
     monkeypatch: pytest.MonkeyPatch, key: str | None
 ) -> None:
+    # No provider AND no key (unset the fixture's jev provider) → fully inactive.
+    monkeypatch.setattr(config_mod.settings, "jev_provider", "")
     monkeypatch.setattr(config_mod.settings, "jev_api_key", key)
 
     def _boom(*_a: Any, **_kw: Any) -> None:
-        raise AssertionError("AsyncClient constructed while JEV is disabled")
+        raise AssertionError("AsyncClient constructed while the reasoner is off")
 
     monkeypatch.setattr(jev_client.httpx, "AsyncClient", _boom)
     model = _install(monkeypatch, FakeModel({"is_personal_name": True, "confidence": 0.99}))
@@ -114,8 +118,8 @@ async def test_no_key_makes_no_network_call_and_defers(
     assert await jev.judge(DEMO, {"text": "Ada Lovelace"}) is jev.DEFER
     assert await jev.judge("no.such.task", {"x": 1}) is jev.DEFER
     assert model.requests == []
-    assert _defers("no_key") == 1
-    # No key resolves before anything else — the cache dir is never created.
+    assert _defers("no_provider") == 1
+    # No provider resolves before anything else — the cache dir is never created.
     assert not jev_cache.cache_dir(config_mod.settings.jev_cache_path).exists()
 
 
@@ -161,7 +165,7 @@ async def test_timeout_defers(monkeypatch: pytest.MonkeyPatch) -> None:
         (FakeModel({"is_personal_name": True}, status=500), "server_error"),
         (FakeModel({"is_personal_name": True}, status=404), "http_status"),
         (FakeModel({"is_personal_name": True}, status=429), "rate_limited"),
-        (FakeModel(exc=httpx.ConnectError("refused")), "transport"),
+        (FakeModel(exc=httpx.ConnectError("refused")), "provider_unreachable"),
         (FakeModel(raw=b"x" * (jev_client._MAX_RESPONSE_BYTES + 10)), "oversize"),
     ],
 )
@@ -382,7 +386,8 @@ async def test_demo_caller_falls_back_on_defer(
     assert await demo.is_plausible_personal_name("acme-support") == (False, "rule")
 
 
-async def test_demo_caller_without_key_is_pure_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_demo_caller_without_provider_is_pure_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config_mod.settings, "jev_provider", "")
     monkeypatch.setattr(config_mod.settings, "jev_api_key", None)
     assert await demo.is_plausible_personal_name("Ada Lovelace") == (True, "rule")
 
@@ -481,8 +486,8 @@ async def test_repeated_soft_failures_trip_after_threshold(
     for i in range(5):
         assert await jev.judge(DEMO, {"text": f"Person Number{i}"}) is jev.DEFER
     assert len(model.requests) == 3  # threshold=3, then open
-    assert _defers("transport") == 3 and _defers("circuit_open") == 2
-    assert jev_breaker.snapshot()["last_trip_reason"] == "transport"
+    assert _defers("provider_unreachable") == 3 and _defers("circuit_open") == 2
+    assert jev_breaker.snapshot()["last_trip_reason"] == "provider_unreachable"
 
 
 async def test_success_resets_the_soft_failure_count(
@@ -549,9 +554,10 @@ async def test_metrics_persist_and_merge(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert merged[DEMO]["latency_mean_ms"] is not None
 
 
-async def test_no_key_never_writes_metrics(
+async def test_inactive_never_writes_metrics(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
+    monkeypatch.setattr(config_mod.settings, "jev_provider", "")
     monkeypatch.setattr(config_mod.settings, "jev_api_key", None)
     monkeypatch.setattr(config_mod.settings, "jev_metrics_dir", str(tmp_path / "m"))
     await jev.judge(DEMO, {"text": "Ada Lovelace"})

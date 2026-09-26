@@ -30,8 +30,10 @@ def profile(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(main, "ENV_FILE", env_file)
     monkeypatch.setattr(config_mod, "_PROFILE_ENV_FILE", env_file)
     monkeypatch.chdir(tmp_path)  # no repo ./.env in play
-    for name in ("JEV_API_KEY", "JEV_BASE_URL", "JEV_MODEL", "JEV_FORCE_OFF"):
+    for name in ("JEV_API_KEY", "JEV_BASE_URL", "JEV_MODEL", "JEV_FORCE_OFF",
+                 "JEV_PROVIDER", "JEV_ENABLED", "JEV_CACHE_PATH"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("JEV_CACHE_PATH", str(env_file.parent / "cache"))
     monkeypatch.setattr(main, "console", Console(record=True, width=160))
     jev_metrics.reset()
     jev_breaker.reset()
@@ -71,7 +73,7 @@ async def test_keys_set_activates_and_unset_deactivates(
     main._set_env_key("JEV_MODEL", "jev-test")
     main.keys_set("JEV_API_KEY", "test-key-not-real")
     assert "JEV_API_KEY=" in profile.read_text()
-    assert "JEV is on" in main.console.export_text()
+    assert "Reasoner enabled" in main.console.export_text()
 
     _reload_settings(monkeypatch, tmp_path)
     assert await demo.is_plausible_personal_name("cher") == (True, "jev")
@@ -80,9 +82,10 @@ async def test_keys_set_activates_and_unset_deactivates(
 
     main.keys_unset("JEV_API_KEY")
     _reload_settings(monkeypatch, tmp_path)
-    assert await jev.judge(demo.TASK_NAME, {"text": "Grace Hopper"}) is jev.DEFER
+    # Removing the key deactivates: provider=jev stays but has no key → config
+    # incomplete → DEFER, and the demo caller falls back to the rule.
+    assert await demo.is_plausible_personal_name("Grace Hopper") == (True, "rule")
     assert len(requests) == 1
-    assert jev_metrics.snapshot()[demo.TASK_NAME]["defer_reasons"]["no_key"] == 2
 
 
 def test_keys_set_warns_when_endpoint_is_missing(profile: Path) -> None:
