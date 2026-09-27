@@ -296,7 +296,7 @@ class Settings(BaseSettings):
     # Account discovery — probes 250+ platforms for account existence by email
     enable_account_discovery: bool = True
 
-    # Native username platform engine — sweeps the unified 5,000+ platform corpus
+    # Native username platform engine — sweeps the unified 5,300+ platform corpus
     # (data/mailaccess_sites.json) for username-url account existence. This single
     # engine covers the full corpus (including the former standalone username sweep,
     # now folded in). Wave 2 opts into lower-ranked/long-tail platforms beyond the

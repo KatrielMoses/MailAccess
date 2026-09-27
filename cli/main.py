@@ -275,7 +275,7 @@ _HARDCODED_MODULES = [
     ("dns_lookup", "DNS", "—", "No", "DNS record enumeration for email domain"),
     ("whois_lookup", "WHOIS", "—", "No", "WHOIS registration data for email domain"),
     ("social_links", "Multi", "—", "No", "Check email on social platforms"),
-    ("username_platforms", "Platforms", "—", "No", "Username sweep across the native 5,000+ platform corpus"),
+    ("username_platforms", "Platforms", "—", "No", "Username sweep across the native 5,300+ platform corpus"),
     (
         "domain_intel",
         "Multi",

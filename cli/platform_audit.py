@@ -139,7 +139,7 @@ def _render(
     plural = "s" if total_tracked != 1 else ""
     header_lines = [
         f"[bold cyan]PLATFORM AUDIT v{APP_VERSION}[/] — {total_tracked} platform{plural} tracked",
-        "[dim](2500+ checked per investigation — tracked count grows as more investigations run)[/]",
+        "[dim](from the 5,300+ platform corpus — tracked count grows as more investigations run)[/]",
         f"[dim]Data from:[/] {_db_path_str()}",
         f"[dim]Showing:[/] top {min(top, len(stats))} by {sort_label} (min {min_probes} probes)",
     ]
