@@ -86,7 +86,7 @@ Why teams upgrade:
 - **See the gap before you pay.** Every free harvest prints the exact number of extra contacts Pro would add for that domain. No guessing, no vague multiplier.
 - **Coverage the open web cannot give you.** Reach the budget-owners and inboxes that public crawling misses entirely.
 - **Company-name resolution.** Skip the domain lookup: `--company "Stripe"` resolves it for you.
-- **Founder pricing: $19/mo for the first 100 seats.** Locked for life, limited seats remaining. Run `mailaccess pro` for live availability.
+- **Founder pricing: $5/mo for the first 100 seats, then $9/mo.** Locked for life, limited seats remaining. Run `mailaccess pro` for live availability.
 
 Corpus contacts are live-only: they render in their own Pro surface and never touch your exports, local database, or history. If the service is unreachable, the harvest shows the full open result. Without a key, nothing changes.
 

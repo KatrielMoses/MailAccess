@@ -1909,6 +1909,64 @@ def version() -> None:
     console.print(f"mailaccess {APP_VERSION}")
 
 
+@app.command(name="pro")
+def pro_command() -> None:
+    """Show what MailAccess Pro adds, live founder-seat availability, and how to start.
+
+    Distinct from ``upgrade`` (which updates the installed package). This is a
+    read-only sales surface: it prints the Pro pitch and the live seat count
+    fetched best-effort from the hosted service.
+    """
+    import asyncio
+
+    from backend.config import settings as _pro_settings
+
+    console.print()
+    console.print("[bold #D8455A]MailAccess Pro[/] · reach the people behind the domain")
+    console.print(
+        "Enrich a lead-gen harvest with business contacts: "
+        "[bold]name, role, company, email, LinkedIn[/]."
+    )
+    console.print(
+        "[dim]Aggregated from publicly-available and third-party commercial sources.[/dim]"
+    )
+    console.print()
+
+    founder = None
+    try:
+        from backend.core import mailaccess_pro_connector
+
+        founder = asyncio.run(mailaccess_pro_connector.fetch_founder_status())
+    except Exception:
+        founder = None
+    if founder and isinstance(founder.get("seats_left"), int):
+        price = founder.get("price_label") or "$5/mo"
+        total = founder.get("seats_total") or 100
+        console.print(
+            f"[bold]{price} for the first {total:,}[/], then $9/mo · "
+            f"[bold #D8455A]{founder['seats_left']:,} seats left[/]"
+        )
+    else:
+        # Seat count unavailable (offline / service down) — still show the price.
+        console.print(
+            "[bold]$5/mo[/] for the first 100 founder seats, then [bold]$9/mo[/] · locked for life"
+        )
+
+    console.print(
+        "Start → [link=https://mailaccess.pro/pricing?src=cli-pro]"
+        "[bold #D8455A]mailaccess.pro/pricing[/bold #D8455A][/link]"
+    )
+    if getattr(_pro_settings, "mailaccess_pro_key", None):
+        console.print(
+            "[dim]A Pro key is configured — add[/dim] "
+            "[bold]--mode public-business-contact[/] [dim]to a harvest.[/dim]"
+        )
+    else:
+        console.print(
+            "[dim]Have a key? [/dim][bold]mailaccess keys set MAILACCESS_PRO_KEY <key>[/]"
+        )
+
+
 @app.command(name="upgrade")
 def upgrade_command(
     yes: bool = typer.Option(

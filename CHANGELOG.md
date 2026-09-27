@@ -1,5 +1,13 @@
 # Changelog
 
+### 0.17.7 (2026-09-27)
+
+- Founder pricing updated to **$5/mo for the first 100 seats, then $9/mo**
+  (from $19/mo), reflected in the free-tier harvest upsell and the README.
+- Add the `mailaccess pro` command: a read-only Pro pitch with the live
+  founder-seat count and current pricing, fetched best-effort from the hosted
+  service (always prints the price, even when the seat count is unavailable).
+
 ### 0.17.6 (2026-09-22)
 
 - Free-tier harvest upsell now names what a Pro contact contains

@@ -787,7 +787,7 @@ class Settings(BaseSettings):
     # LIVE from the entitlement store (count of provisioned Pro keys) so the
     # "N seats left" urgency line can never go stale. Hidden while the tier is dark.
     mailaccess_pro_founder_seats_total: int = 100
-    mailaccess_pro_founder_price_label: str = "$19/mo"
+    mailaccess_pro_founder_price_label: str = "$5/mo"
 
     # Phase JEV — the reasoning seam (backend/core/jev/). A fast model consulted for
     # bounded judgment calls (classifications, matches, selections) alongside the

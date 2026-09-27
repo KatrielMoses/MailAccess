@@ -1260,11 +1260,11 @@ def run_harvest_emails(
                 f"[bold #D8455A]mailaccess.pro/pricing?src=cli[/bold #D8455A][/link]"
             )
             if founder and isinstance(founder.get("seats_left"), int):
-                price = founder.get("price_label") or "$19/mo"
+                price = founder.get("price_label") or "$5/mo"
                 total = founder.get("seats_total") or 100
                 seats_left = founder["seats_left"]
                 console.print(
-                    f"[bold]{price} for the first {total:,}[/] · "
+                    f"[bold]{price} for the first {total:,}[/], then $9/mo · "
                     f"[bold #D8455A]{seats_left:,} seats left[/]"
                 )
     return 0
