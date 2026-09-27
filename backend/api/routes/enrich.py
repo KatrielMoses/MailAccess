@@ -53,13 +53,16 @@ router = APIRouter()
 _PROVENANCE = "MailAccess Pro corpus"
 _REASON_LAWFUL_BASIS = "lead_tier_not_yet_available"
 _REASON_ENGINE = "engine_unavailable"
-# Round 2 Item B — 500-cap depth policy (replaces the limit=100 page). A request
-# `limit` is clamped to this; a domain's servable set is capped here too.
-_MAX_LIMIT = 500
+# Depth policy: a request `limit` is clamped to _MAX_LIMIT, and a domain's
+# servable set is capped at _DEPTH_CAP. Raised from the original 500 so a Pro
+# harvest feeds the full corpus a domain actually has (owner decision, 2026-09-28)
+# rather than an arbitrary slice. Realistic domains fall well under this ceiling,
+# and pagination + _MAX_PAGES + the serve deadline still bound the work.
+_MAX_LIMIT = 5000
 _DEFAULT_LIMIT = 50
-_DEPTH_CAP = 500
-# Item B edge case (DEFAULT LOCKED): when total > 500 but verified < 500, fill the
-# 500 verified-first then top up with unverified. Owner may flip to strictly
+_DEPTH_CAP = 5000
+# Over-cap edge case: when total > _DEPTH_CAP but verified < _DEPTH_CAP, fill
+# verified-first then top up with unverified. Owner may flip to strictly
 # verified-only by setting this False.
 _PRO_OVER_CAP_FILL_UNVERIFIED = True
 # The engine's max rows per page is unknown/variable; paginate in chunks this big
@@ -67,11 +70,13 @@ _PRO_OVER_CAP_FILL_UNVERIFIED = True
 _ENGINE_PAGE = 500
 # C4 — hard ceiling on pages per _collect so a duplicate / has_more-forever engine
 # response can never loop unboundedly even if every page adds one new distinct row.
-_MAX_PAGES = 8
+# Must cover _DEPTH_CAP / _ENGINE_PAGE (5000 / 500 = 10) with headroom.
+_MAX_PAGES = 12
 # C2 — overall wall-clock budget for one /v1/enrich serve, spanning company
 # resolution + all paginated depth + the personal fetch. A serve that exceeds it
-# fails open to an ``unavailable`` envelope (never an indefinite hang).
-_SERVE_DEADLINE_SECONDS = 60.0
+# fails open to an ``unavailable`` envelope (never an indefinite hang). Raised
+# with _DEPTH_CAP so a deep (multi-page) corpus serve is not cut short.
+_SERVE_DEADLINE_SECONDS = 120.0
 _REASON_TIMEOUT = "engine_timeout"
 _REASON_BUSY = "engine_busy"
 # D1 — the suppression store could not be read; fail CLOSED (serve nothing) rather

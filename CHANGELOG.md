@@ -1,5 +1,15 @@
 # Changelog
 
+### 0.17.8 (2026-09-28)
+
+- Pro corpus depth raised: a harvest now feeds the full corpus a domain actually
+  has (up to 5,000 leads) instead of a fixed 500-lead slice. `/v1/enrich` still
+  paginates and is bounded by a per-serve deadline, so realistic domains are
+  unaffected while large ones return everything they have.
+- `/v1/enrich` `_MAX_LIMIT` and `_DEPTH_CAP` raised 500 → 5000 (with `_MAX_PAGES`
+  and the serve deadline raised to match), and the CLI-direct corpus injection
+  now requests the full servable set.
+
 ### 0.17.7 (2026-09-27)
 
 - Founder pricing updated to **$5/mo for the first 100 seats, then $9/mo**

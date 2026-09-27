@@ -1130,8 +1130,9 @@ async def _fetch_pro_leads(domain: str, mode: Any) -> dict[str, Any]:
     try:
         from . import mailaccess_pro_connector
 
-        # Item B — 500-cap depth: request the full servable set in one call.
-        env = await mailaccess_pro_connector.fetch_leads(domain, type="domain", limit=500)
+        # Depth policy: request the full servable set for the domain (the hosted
+        # /v1/enrich clamps to its own _MAX_LIMIT and paginates the corpus).
+        env = await mailaccess_pro_connector.fetch_leads(domain, type="domain", limit=5000)
     except Exception:  # pragma: no cover - connector is already fail-open
         _LOG.debug("mailaccess_pro fetch failed; Stream 1 only", exc_info=True)
         return {"requested": True, "status": "unavailable", "leads": []}
