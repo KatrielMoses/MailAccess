@@ -1,5 +1,15 @@
 # Changelog
 
+### 0.18.1 (2026-09-30)
+
+- Restore the pricing and corpus work that shipped in 0.17.7/0.17.8 but was
+  missing from 0.18.0 (which branched from the 0.17.6 base):
+  - Founder pricing **$5/mo for the first 100 seats, then $9/mo**; add the
+    `mailaccess pro` command (Pro pitch + live founder-seat count).
+  - Pro corpus depth raised **500 -> 5,000** so a harvest feeds the full corpus a
+    domain has (`/v1/enrich` paginates and is bounded by a serve deadline).
+  - Platform-corpus count corrected to **5,300+** across the CLI, README and docs.
+
 ### 0.18.0 (2026-09-30)
 
 - Native account-existence engine: the email-existence checks are reimplemented

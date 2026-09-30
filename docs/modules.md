@@ -37,7 +37,7 @@
 | social | 13 platforms via YAML | No | No |
 | social_links | Username extraction, feeds pivot | No | No |
 | account_discovery | Native 250+ platform existence probes | No | Yes |
-| username_platforms | Native username-platform engine over the MailAccess corpus, 5,000+ platform definitions (two-marker detection; no runtime dependency) | No | No (disable via `ENABLE_USERNAME_PLATFORMS=false`) |
+| username_platforms | Native username-platform engine over the MailAccess corpus, 5,300+ platform definitions (two-marker detection; no runtime dependency) | No | No (disable via `ENABLE_USERNAME_PLATFORMS=false`) |
 | breachdirectory | 2nd breach source | Yes | No |
 | username_pivot | Native username sweep via recovered usernames | No | Yes |
 | permutation_discovery | 60 email variants | No | Yes |
@@ -53,7 +53,7 @@
 | common_names | Common-name and username false-positive controls | No | No (automatic) |
 | disposable_domains | Disposable-email confidence controls | No | No (automatic) |
 
-> 75 modules · 5,000+ platform corpus (~700 vetted platforms probed in the default wave)
+> 75 modules · 5,300+ platform corpus (~700 vetted platforms probed in the default wave)
 
 ### Platform Coverage
 
@@ -94,7 +94,7 @@ Findings from the native two-marker sweep and the full username-platform engine 
 ---
 
 
-MailAccess ships 75 modules over a 5,000+ platform corpus. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
+MailAccess ships 75 modules over a 5,300+ platform corpus. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
 
 A module marked **key required** skips itself with `status: skipped` when its API key is absent — it does not cause the investigation to fail.
 
@@ -989,7 +989,7 @@ Findings with `email_recovery` or `phone_hint` in metadata are flagged `high_val
 
 ## `username_platforms`
 
-MailAccess's native username-platform checking engine. It draws on a 5,000+ platform corpus via MailAccess's own `httpx` engine, and by default probes an evidence-first, precision-ranked wave of ~700 vetted platforms (two-marker detection) rather than the whole corpus. The platform site data is the native MailAccess corpus, and the runtime has no third-party dependency.
+MailAccess's native username-platform checking engine. It draws on a 5,300+ platform corpus via MailAccess's own `httpx` engine, and by default probes an evidence-first, precision-ranked wave of ~700 vetted platforms (two-marker detection) rather than the whole corpus. The platform site data is the native MailAccess corpus, and the runtime has no third-party dependency.
 
 | | |
 |--|--|

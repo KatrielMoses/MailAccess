@@ -336,7 +336,7 @@ class Settings(BaseSettings):
     # thorough sweep that gets past Cloudflare where httpx is blocked.
     enable_browser_xenforo: bool = False
 
-    # Native username platform engine — sweeps the unified 5,000+ platform corpus
+    # Native username platform engine — sweeps the unified 5,300+ platform corpus
     # (data/mailaccess_sites.json) for username-url account existence. This single
     # engine covers the full corpus (including the former standalone username sweep,
     # now folded in). Wave 2 opts into lower-ranked/long-tail platforms beyond the
@@ -827,7 +827,7 @@ class Settings(BaseSettings):
     # LIVE from the entitlement store (count of provisioned Pro keys) so the
     # "N seats left" urgency line can never go stale. Hidden while the tier is dark.
     mailaccess_pro_founder_seats_total: int = 100
-    mailaccess_pro_founder_price_label: str = "$19/mo"
+    mailaccess_pro_founder_price_label: str = "$5/mo"
 
     # Proxy (single static endpoint — legacy; superseded by the Phase 5B egress
     # pool below, which treats a single configured proxy as a pool of one).

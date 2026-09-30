@@ -5,7 +5,7 @@
 
 # Sponsor MailAccess
 
-**MailAccess is a self-hostable OSINT platform for investigating email addresses** — used by OSINT practitioners, penetration testers, and security researchers to fan out across breach corpora, 2,500+ social platforms, DNS/mail infrastructure, and the open web.
+**MailAccess is a self-hostable OSINT platform for investigating email addresses** — used by OSINT practitioners, penetration testers, and security researchers to fan out across breach corpora, 5,300+ social platforms, DNS/mail infrastructure, and the open web.
 
 ---
 

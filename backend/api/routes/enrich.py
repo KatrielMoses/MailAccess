@@ -55,9 +55,9 @@ _REASON_LAWFUL_BASIS = "lead_tier_not_yet_available"
 _REASON_ENGINE = "engine_unavailable"
 # Round 2 Item B — 500-cap depth policy (replaces the limit=100 page). A request
 # `limit` is clamped to this; a domain's servable set is capped here too.
-_MAX_LIMIT = 500
+_MAX_LIMIT = 5000
 _DEFAULT_LIMIT = 50
-_DEPTH_CAP = 500
+_DEPTH_CAP = 5000
 # Item B edge case (DEFAULT LOCKED): when total > 500 but verified < 500, fill the
 # 500 verified-first then top up with unverified. Owner may flip to strictly
 # verified-only by setting this False.
@@ -67,11 +67,11 @@ _PRO_OVER_CAP_FILL_UNVERIFIED = True
 _ENGINE_PAGE = 500
 # C4 — hard ceiling on pages per _collect so a duplicate / has_more-forever engine
 # response can never loop unboundedly even if every page adds one new distinct row.
-_MAX_PAGES = 8
+_MAX_PAGES = 12
 # C2 — overall wall-clock budget for one /v1/enrich serve, spanning company
 # resolution + all paginated depth + the personal fetch. A serve that exceeds it
 # fails open to an ``unavailable`` envelope (never an indefinite hang).
-_SERVE_DEADLINE_SECONDS = 60.0
+_SERVE_DEADLINE_SECONDS = 120.0
 _REASON_TIMEOUT = "engine_timeout"
 _REASON_BUSY = "engine_busy"
 # D1 — the suppression store could not be read; fail CLOSED (serve nothing) rather

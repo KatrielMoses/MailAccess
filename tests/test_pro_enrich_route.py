@@ -526,6 +526,9 @@ def test_depth_under_cap_returns_all(
 def test_depth_over_cap_returns_500_verified(
     monkeypatch: pytest.MonkeyPatch, lawful_on: None, valid_key: str
 ) -> None:
+    # Exercise the over-cap fill branch at a small cap (prod default is far higher).
+    monkeypatch.setattr(enrich_mod, "_DEPTH_CAP", 500)
+    monkeypatch.setattr(enrich_mod, "_MAX_LIMIT", 500)
     verified = [_engine_row(email=f"v{i}@acme.io", is_verified=True) for i in range(600)]
     unverified = [_engine_row(email=f"u{i}@acme.io", is_verified=False) for i in range(200)]
     _mock_domain_pool(monkeypatch, verified + unverified, verified)
@@ -541,7 +544,9 @@ def test_depth_over_cap_returns_500_verified(
 def test_depth_over_cap_fills_unverified(
     monkeypatch: pytest.MonkeyPatch, lawful_on: None, valid_key: str
 ) -> None:
-    # total > 500 but verified < 500 → fill to 500 verified-first, then unverified.
+    # total > cap but verified < cap → fill to the cap verified-first, then unverified.
+    monkeypatch.setattr(enrich_mod, "_DEPTH_CAP", 500)
+    monkeypatch.setattr(enrich_mod, "_MAX_LIMIT", 500)
     verified = [_engine_row(email=f"v{i}@acme.io", is_verified=True) for i in range(300)]
     unverified = [_engine_row(email=f"u{i}@acme.io", is_verified=False) for i in range(400)]
     _mock_domain_pool(monkeypatch, verified + unverified, verified)
@@ -554,6 +559,23 @@ def test_depth_over_cap_fills_unverified(
     v = sum(1 for lead in body["leads"] if lead["corpus_verified"])
     u = sum(1 for lead in body["leads"] if not lead["corpus_verified"])
     assert v == 300 and u == 200  # verified-first, filled with unverified
+
+
+def test_depth_feeds_full_corpus_beyond_legacy_500(
+    monkeypatch: pytest.MonkeyPatch, lawful_on: None, valid_key: str
+) -> None:
+    # The depth cap was raised past the legacy 500 so a harvest feeds the full
+    # corpus a domain has. A large limit now returns every servable lead, paginated.
+    rows = [_engine_row(email=f"u{i}@acme.io", is_verified=(i % 2 == 0)) for i in range(800)]
+    verified = [r for r in rows if r["is_verified"]]
+    _mock_domain_pool(monkeypatch, rows, verified)
+    client = TestClient(_make_app())
+    body = client.post(
+        "/v1/enrich", json={"query": "acme.io", "type": "domain", "limit": 5000},
+        headers=_auth(),
+    ).json()
+    assert body["status"] == "ok"
+    assert len(body["leads"]) == 800  # all of them, not the old 500 slice
 
 
 # ---------------------------------------------------------------------------

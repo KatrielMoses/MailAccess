@@ -307,7 +307,7 @@ Five opt-in features require explicit enabling per run or via `.env`:
 | `breach_deep` | Probes 100 breach sites (slow, ~90 s) |
 | `press_intel` | Press release contact extraction for business domains |
 | `email_discovery` | Name → email dorks (requires `SERPAPI_KEY`) |
-| `username_platforms` | Native username-platform engine over a 5,000+ platform corpus (set `ENABLE_USERNAME_PLATFORMS=true`) |
+| `username_platforms` | Native username-platform engine over a 5,300+ platform corpus (set `ENABLE_USERNAME_PLATFORMS=true`) |
 | `username_platforms` Wave 2 | Slower and more fragile username-platform sweep (set `ENABLE_USERNAME_WAVE2=true`) |
 
 **Enable for one run** using the `-m` / `--enable` flag:
