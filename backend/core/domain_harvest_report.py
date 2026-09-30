@@ -1651,7 +1651,7 @@ def format_harvest_cli_output(
         personal_text = Text()
         personal_text.append(
             f"  These addresses may belong to employees discovered on {result.domain}\n"
-            f"  but are not @{result.domain} addresses. Treat as unverified leads.\n\n",
+            f"  but are not @{result.domain} addresses. Review before use.\n\n",
             style="dim",
         )
         if show_personal:

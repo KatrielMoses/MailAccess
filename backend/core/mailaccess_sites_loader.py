@@ -77,6 +77,21 @@ def _load_from_file() -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
         entry.setdefault("id", str(name))
         sites[str(name)] = entry
 
+    # Merge the expanded email-existence catalogue (fresher, code-defined). These
+    # override any stale file entry with the same id so detection stays current.
+    try:
+        from .account_probe_ported import ported_sites
+
+        merged = 0
+        for site_id, defn in ported_sites().items():
+            if _valid_site(site_id, defn):
+                sites[str(site_id)] = dict(defn)
+                merged += 1
+        if merged:
+            _LOG.info("mailaccess_sites loader: merged %d expanded site checks", merged)
+    except Exception as exc:  # noqa: BLE001 - never fail the catalogue over the merge
+        _LOG.warning("mailaccess_sites loader: expanded-check merge failed: %s", exc)
+
     meta: dict[str, Any] = {
         "source": "mailaccess_sites",
         "schema_version": file_meta.get("schema_version"),

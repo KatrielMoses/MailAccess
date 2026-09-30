@@ -1,5 +1,34 @@
 # Changelog
 
+### 0.18.0 (2026-09-30)
+
+- Native account-existence engine: the email-existence checks are reimplemented
+  as declarative specs (`account_probe_ported`) run by a single spec runner that
+  supports token pre-fetch (regex/text/cookie), form/JSON/raw bodies, and
+  status/text/header/JSON response conditions. Merged into the site catalogue by
+  the loader, bringing email-existence coverage to ~357 sites — including 131
+  XenForo forum login-error checks and 25 MyBB forums.
+- New optional headless-browser oracle tier (`mailaccess[browser]` extra —
+  Playwright + `playwright-stealth`): email-first login and forgot-password
+  oracles for platforms whose existence signal only appears in a JS-driven flow.
+  Imported lazily, so default installs are unaffected. Email-first oracles send
+  no email and run by default; the XenForo browser sweep is opt-in via
+  `ENABLE_BROWSER_XENFORO`.
+- Honest probe outcomes: DNS/connect/timeout/TLS failures are now reported as
+  transport errors instead of being mislabelled as rate-limiting, and
+  `account_discovery` counts and surfaces them separately.
+- Reliability under `-m all`: a new async DNS resolver (aiodns, TTL cache with
+  in-flight coalescing) plus a global outbound request semaphore prevent
+  resolver saturation across concurrent modules.
+- `--force` now bypasses the `account_discovery` on-disk cache end to end.
+- Forgot-password oracles are gated behind `ENABLE_FORGOT_PASSWORD_PROBES` (off
+  by default) because they email the subject for a registered address; only
+  oracles that expose a reliable "no account found" negative marker are included.
+- Added email-existence checks for Steam, edX, and Kompas.
+- Account-discovery findings are labelled "email registration signal".
+- Dependencies: add `aiodns`; add the optional `[browser]` extra
+  (`playwright`, `playwright-stealth`).
+
 ### 0.17.6 (2026-09-22)
 
 - Free-tier harvest upsell now names what a Pro contact contains

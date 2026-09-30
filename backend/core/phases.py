@@ -46,6 +46,7 @@ async def _run_and_record(
     findings_input: dict[str, ModuleResult] | None = None,
     use_canonical_email: bool = True,
     mode: str = "security-investigation",
+    force: bool = False,
 ) -> tuple[str, ModuleResult]:
     default_timeout = _MODULE_DEFAULT_TIMEOUTS.get(
         mod.name, config.module_timeout_seconds
@@ -62,6 +63,7 @@ async def _run_and_record(
             collected=findings_input,
             budget=budget,
             mode=mode,
+            force=force,
         )
     collected[mod.name] = result
     await queue.put(_event_result(mod.name, result))
@@ -385,6 +387,7 @@ def _runner_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         "config": kwargs["config"],
         "budget": kwargs.get("budget"),
         "mode": kwargs.get("mode", "security-investigation"),
+        "force": kwargs.get("force", False),
     }
 
 

@@ -125,24 +125,35 @@ class AccountDiscoveryModule(BaseModule):
     )
     requires_key = False
 
-    async def run(self, email: str) -> ModuleResult:
+    async def run(self, email: str, *, force: bool = False, **_: Any) -> ModuleResult:
         if not settings.enable_account_discovery:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
                 errors=["Set ENABLE_ACCOUNT_DISCOVERY=true to run this module"],
             )
 
-        cached = _read_cache(email)
-        if cached is not None:
-            _LOG.debug("account_discovery: using cache for %s", email)
-            return cached
-        _LOG.debug("account_discovery: probing fresh for %s", email)
+        # ``--force`` must re-probe, not replay the 6h on-disk cache.
+        if not force:
+            cached = _read_cache(email)
+            if cached is not None:
+                _LOG.debug("account_discovery: using cache for %s", email)
+                return cached
+        _LOG.debug(
+            "account_discovery: probing fresh for %s (force=%s)", email, force
+        )
 
         sites, load_meta = load_mailaccess_sites()
+        # ``intrusive`` sites (forgot-password oracles that email the subject) are
+        # excluded unless explicitly opted in — a routine run never spams targets.
+        allow_intrusive = bool(
+            getattr(settings, "enable_forgot_password_probes", False)
+        )
         probeable = [
             defn
             for defn in sites.values()
-            if defn.get("check_type") == "email-existence" and not defn.get("disabled")
+            if defn.get("check_type") == "email-existence"
+            and not defn.get("disabled")
+            and (allow_intrusive or not defn.get("intrusive"))
         ]
 
         no_password_recovery = bool(
@@ -206,6 +217,7 @@ class AccountDiscoveryModule(BaseModule):
 
         inconclusive_count = 0
         none_count = 0
+        transport_errors: list[str] = []
         for item in gathered:
             if isinstance(item, Exception):
                 errors.append(str(item))
@@ -215,6 +227,10 @@ class AccountDiscoveryModule(BaseModule):
                 continue
             if item.get("rateLimit"):
                 rate_limited.append(str(item.get("name", "unknown")))
+            elif item.get("transportError"):
+                # Never got a verdict — DNS/connect/timeout/TLS, not the platform
+                # throttling us. Counted as unknown coverage, reported honestly.
+                transport_errors.append(str(item.get("name", "unknown")))
             elif item.get("exists") is True:
                 findings.append(_make_finding(item))
             elif item.get("exists") is False:
@@ -230,14 +246,29 @@ class AccountDiscoveryModule(BaseModule):
                 f"Rate-limited by {len(rate_limited)} platform(s): "
                 + ", ".join(sorted(rate_limited))
             )
+        if transport_errors:
+            errors.append(
+                f"{len(transport_errors)} platform(s) failed to connect "
+                "(DNS/timeout/TLS — likely resolver saturation under load, not "
+                "the platforms): " + ", ".join(sorted(transport_errors)[:20])
+            )
 
-        hard_errors = [e for e in errors if not e.startswith("Rate-limited")]
+        hard_errors = [
+            e
+            for e in errors
+            if not e.startswith("Rate-limited") and not e[:1].isdigit()
+        ]
         # R11 (S2) — model coverage honestly. A blocked (all-429) or all-unknown
         # sweep produced NO definitive answer, so it may never be reported as a
         # successful all-negative (SUCCESS_EMPTY) nor SUCCESS.
         executed = max(0, len(probeable) - skipped_health)
         no_response = max(0, none_count - skipped_health)
-        blocked_unknown = len(rate_limited) + inconclusive_count + no_response
+        blocked_unknown = (
+            len(rate_limited)
+            + len(transport_errors)
+            + inconclusive_count
+            + no_response
+        )
         coverage_complete = (
             executed > 0 and blocked_unknown == 0 and not hard_errors
         )
@@ -263,6 +294,7 @@ class AccountDiscoveryModule(BaseModule):
                 "platforms_executed": executed,
                 "platforms_confirmed": len(findings),
                 "platforms_rate_limited": len(rate_limited),
+                "platforms_transport_error": len(transport_errors),
                 "platforms_not_found": not_found_count,
                 "platforms_inconclusive": inconclusive_count,
                 "platforms_no_response": no_response,

@@ -24,6 +24,7 @@ __pycache__/
 .Python
 *.egg-info/
 dist/
+dist_*/
 build/
 .venv/
 venv/
@@ -220,3 +221,6 @@ docs/audit/
 /docs/0.17.0-pro-deletion-and-provenance-limits.md
 /docs/0.17.0-pro-delta-reaudit.md
 /docs/pro-failed and cancel dev brief.txt
+
+# Local reference clones / scratch (never track)
+/dev/

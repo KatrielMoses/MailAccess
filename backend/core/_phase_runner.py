@@ -51,6 +51,7 @@ async def run_one_module(
     collected: dict[str, ModuleResult] | None = None,
     budget: InvestigationBudget | None = None,
     mode: str = "security-investigation",
+    force: bool = False,
 ) -> ModuleResult:
     # Phase 2C — the lawful-public-data gate, enforced at the single universal
     # module-execution point and ABOVE the force/explicit bypass: a mode-policy
@@ -152,7 +153,9 @@ async def run_one_module(
         else:
             target_email = canonical_email or email
             if "force" in run_params or accepts_keyword_args:
-                coroutine = mod.run(target_email, force=explicit_module, **sink_kwargs)
+                coroutine = mod.run(
+                    target_email, force=(explicit_module or force), **sink_kwargs
+                )
             elif "original_email" in run_params and target_email != email:
                 coroutine = mod.run(target_email, original_email=email, **sink_kwargs)
             else:

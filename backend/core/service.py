@@ -419,6 +419,7 @@ class InvestigationService:
             budget_seconds=budget_seconds,
             min_module_seconds=settings.investigation_budget_min_module_seconds,
             mode=mode,
+            force=force,
         )
         queue = await engine.investigate(email, investigation_id, module_names, enable_modules)
         return investigation_id, created_at, queue, False

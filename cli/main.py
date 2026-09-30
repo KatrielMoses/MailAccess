@@ -3548,9 +3548,7 @@ async def _investigate_run(
                             finding.get("source", "")
                         ) == "account_discovery":
                             platform = platform.title()
-                            # Parenthesised, not bracketed: Rich would parse a
-                            # ``[...]`` payload as (invalid) markup and drop it.
-                            detail_text = "[dim]email registration signal (unverified lead)[/dim]"
+                            detail_text = "[dim]email registration signal[/dim]"
                         elif module_name == "dns_lookup":
                             pt = str(finding.get("platform", ""))
                             if pt == "dns_mx" and meta.get("mx_provider"):

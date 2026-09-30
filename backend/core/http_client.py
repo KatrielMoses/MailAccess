@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -15,6 +16,25 @@ from .scrapingant import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Process-wide ceiling on concurrent outbound requests, one semaphore per event
+# loop. Bounds total in-flight sockets/DNS lookups across ALL modules so a wide
+# per-module fan-out can't saturate the resolver. See settings.max_concurrent_requests.
+_request_semaphores: dict[int, asyncio.Semaphore] = {}
+
+
+def _get_request_semaphore() -> asyncio.Semaphore | None:
+    from ..config import settings
+
+    limit = int(getattr(settings, "max_concurrent_requests", 0) or 0)
+    if limit <= 0:
+        return None
+    loop = asyncio.get_running_loop()
+    sem = _request_semaphores.get(id(loop))
+    if sem is None:
+        sem = asyncio.Semaphore(limit)
+        _request_semaphores[id(loop)] = sem
+    return sem
 
 
 async def _before_request(request: httpx.Request) -> None:
@@ -89,7 +109,11 @@ class _MailAccessClient(httpx.AsyncClient):
     """AsyncClient subclass that converts proxy errors into ProxyConnectionError."""
 
     async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        sem = _get_request_semaphore()
         try:
+            if sem is not None:
+                async with sem:
+                    return await super().send(request, **kwargs)
             return await super().send(request, **kwargs)
         except (httpx.ProxyError, httpx.ConnectError) as exc:
             if proxy_config.is_enabled:

@@ -226,11 +226,16 @@ class InvestigationEngine:
         budget_seconds: float | None = None,
         min_module_seconds: float = 2.0,
         mode: str | None = None,
+        force: bool = False,
     ) -> None:
         self._timeout = timeout
         self._max_concurrency = max_concurrency
         self._budget_seconds = budget_seconds
         self._min_module_seconds = min_module_seconds
+        # ``--force`` / API force=True: refresh everything, including per-module
+        # on-disk caches (e.g. account_discovery's 6h cache). Threaded down to
+        # each module's run(force=...) so a forced run truly re-probes.
+        self._force = force
         # Phase 2B — per-run product mode; None means fall back to the config
         # default (resolved in investigate()).
         self._mode = mode
@@ -366,6 +371,7 @@ class InvestigationEngine:
                                 set(enable_modules) if enable_modules is not None else None
                             ),
                             mode=resolved_mode.value,
+                            force=self._force,
                         )
                         if phase.name == "email_credibility":
                             credibility = collected.get("email_credibility")

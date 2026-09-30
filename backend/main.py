@@ -48,6 +48,18 @@ async def lifespan(_app: FastAPI):
         f"{len(settings.module_timeout_overrides)} timeout overrides[/dim]"
     )
 
+    # Swap in the async, caching, coalescing DNS resolver before any module
+    # runs so a high-concurrency sweep doesn't saturate the getaddrinfo thread
+    # pool (EAI_AGAIN). Best-effort: falls back to the system resolver.
+    try:
+        from .core.async_resolver import install as _install_resolver
+
+        _install_resolver()
+    except Exception as exc:  # noqa: BLE001 - never block startup on DNS wiring
+        logging.getLogger("mailaccess.startup").debug(
+            "async DNS resolver not installed: %s", exc
+        )
+
     await init_db()
     generate_mtz_bundle(_MTZ_PATH)
     async def _warm_breach_corpus() -> None:

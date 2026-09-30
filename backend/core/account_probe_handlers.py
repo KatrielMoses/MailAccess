@@ -285,3 +285,8 @@ HANDLERS: dict[str, Any] = {
     "odnoklassniki_recovery": odnoklassniki_recovery,
     "okcupid": okcupid,
 }
+
+# Merge the expanded (spec-driven + multi-step) email-existence checks.
+from .account_probe_ported import ported_handlers as _ported_handlers  # noqa: E402
+
+HANDLERS.update(_ported_handlers())

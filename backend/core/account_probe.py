@@ -43,13 +43,21 @@ def default_health_key(defn: dict[str, Any]) -> str:
 
 
 def _empty_record(defn: dict[str, Any], *, rate_limited: bool = False,
+                  transport_error: bool = False,
                   exists: bool | None = None) -> dict[str, Any]:
     return {
         "name": defn.get("name") or defn.get("id"),
         "domain": defn.get("domain") or "",
         "method": defn.get("flow") or "other",
         "exists": exists,
+        # ``rateLimit`` means the platform ACTIVELY throttled us (HTTP 429/503/599
+        # or a rate-limit page). ``transportError`` means the probe never got a
+        # verdict because of a local/transport failure (DNS, connect, timeout,
+        # TLS) — usually resolver saturation under load, NOT the platform. Keeping
+        # them separate stops "we couldn't connect" from masquerading as
+        # "everyone rate-limited us".
         "rateLimit": rate_limited,
+        "transportError": transport_error,
         "emailrecovery": None,
         "phoneNumber": None,
         "others": None,
@@ -198,9 +206,9 @@ async def _probe_declarative(
     try:
         precheck = await run_pre_check(client, defn, timeout)
     except (httpx.TimeoutException, httpx.RequestError):
-        return _empty_record(defn, rate_limited=True)
+        return _empty_record(defn, transport_error=True)
     except Exception:
-        return _empty_record(defn, rate_limited=True)
+        return _empty_record(defn, transport_error=True)
 
     req = _build_request_kwargs(defn, email, precheck)
     if not req["url"]:
@@ -233,9 +241,9 @@ async def _probe_declarative(
             follow_redirects=bool(follow_redirects),
         )
     except (httpx.TimeoutException, httpx.RequestError):
-        return _empty_record(defn, rate_limited=True)
+        return _empty_record(defn, transport_error=True)
     except Exception:
-        return _empty_record(defn, rate_limited=True)
+        return _empty_record(defn, transport_error=True)
 
     text = response.text
     lowered = html.unescape(text).lower()
@@ -299,8 +307,8 @@ async def probe_site(
                     handler(client, defn, email, timeout), timeout=timeout * 3
                 )
             except (asyncio.TimeoutError, httpx.TimeoutException, httpx.RequestError):
-                return _empty_record(defn, rate_limited=True)
+                return _empty_record(defn, transport_error=True)
             except Exception as exc:  # noqa: BLE001 - handler isolation
                 _LOG.debug("account_probe: handler %s failed: %s", handler_name, exc)
-                return _empty_record(defn, rate_limited=True)
+                return _empty_record(defn, transport_error=True)
         return await _probe_declarative(client, defn, email, timeout)

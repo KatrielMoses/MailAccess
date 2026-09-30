@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mailaccess"
-version = "0.17.6"
+version = "0.18.0"
 description = "Open-source OSINT email intelligence tool"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,6 +27,7 @@ dependencies = [
     "pydantic[email]>=2.0",
     "pydantic-settings>=2.3",
     "httpx>=0.27",
+    "aiodns>=3.2",
     "curl-cffi>=0.7",
     "imagehash>=4.3",
     "Pillow>=10.0",
@@ -55,6 +56,12 @@ ml = [
 ]
 pdf = [
     "weasyprint>=60.0",
+]
+# Headless-browser email-existence oracles (backend/core/browser_oracle.py).
+# Optional: install with `pip install mailaccess[browser] && playwright install chromium`.
+browser = [
+    "playwright>=1.40",
+    "playwright-stealth>=1.0",
 ]
 dev = [
     "pytest>=8",

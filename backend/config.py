@@ -168,6 +168,27 @@ class Settings(BaseSettings):
     # Per-module timeout overrides: MODULE_TIMEOUT_OVERRIDES={"username_platforms": 120}
     module_timeout_overrides: dict[str, int] = {}
 
+    # Global outbound-request ceiling. Modules run at most ``max_concurrent_modules``
+    # at once, but each may fan out internally (account_discovery probes ~214
+    # hosts). Without a process-wide bound, those multiply into hundreds of
+    # simultaneous sockets/DNS lookups and saturate the resolver. Every request
+    # built by ``build_client`` acquires this shared semaphore, so total in-flight
+    # is capped regardless of how many modules or how wide each one fans out.
+    max_concurrent_requests: int = 40
+
+    # Async DNS resolver (c-ares via aiodns) — replaces the blocking getaddrinfo
+    # thread pool with a truly-async, caching, request-coalescing resolver so a
+    # high-concurrency sweep no longer produces EAI_AGAIN. Falls back to the
+    # system resolver if aiodns/c-ares is unavailable.
+    async_dns_enabled: bool = True
+    dns_cache_ttl_seconds: float = 300.0
+    dns_cache_min_ttl_seconds: float = 30.0
+    dns_resolver_timeout_seconds: float = 5.0
+    # Explicit resolvers for c-ares. Leave empty to auto-detect (reads
+    # /etc/resolv.conf on Linux). Set e.g. DNS_NAMESERVERS=["1.1.1.1","8.8.8.8"]
+    # on hosts where c-ares can't read the system config (some Windows setups).
+    dns_nameservers: list[str] = []
+
     # Investigate mode — overall wall-clock completion budget (Phase 1B).
     # The whole investigation (all phases/modules) must finish within this many
     # seconds. When the budget is reached, modules still in flight are cut short
@@ -295,6 +316,25 @@ class Settings(BaseSettings):
 
     # Account discovery — probes 250+ platforms for account existence by email
     enable_account_discovery: bool = True
+
+    # Forgot-password oracle probes are INTRUSIVE: submitting the target's email
+    # to a /forgot-password endpoint makes the platform SEND that person a real
+    # password-reset email. Off by default so a routine investigation never spams
+    # the subject. Opt in explicitly (ENABLE_FORGOT_PASSWORD_PROBES=true) for
+    # authorized, consented testing only.
+    enable_forgot_password_probes: bool = False
+
+    # Headless-browser email-existence oracles (email-first login step-transition
+    # + forgot-password). Email-first sends NO email and is on by default; it is
+    # inert unless the optional `mailaccess[browser]` (Playwright) extra is
+    # installed, so default installs are unaffected. The forgot-password subset is
+    # still governed by ``enable_forgot_password_probes`` above.
+    enable_browser_probes: bool = True
+
+    # Include the 131 XenForo login-error oracles in the browser tier. Off by
+    # default because each is a full browser page load (slow); enable for a
+    # thorough sweep that gets past Cloudflare where httpx is blocked.
+    enable_browser_xenforo: bool = False
 
     # Native username platform engine — sweeps the unified 5,000+ platform corpus
     # (data/mailaccess_sites.json) for username-url account existence. This single
