@@ -6,7 +6,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-0D0D0D.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10%2B-0D0D0D.svg" alt="Python 3.10+"></a>
   <a href="docker-compose.yml"><img src="https://img.shields.io/badge/Docker-Compose-0D0D0D.svg" alt="Docker Compose"></a>
-  <a href="https://pypi.org/project/mailaccess/"><img src="https://img.shields.io/static/v1?label=PyPI&message=0.17.6&color=8A1C2B&logo=pypi&logoColor=white" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/mailaccess/"><img src="https://img.shields.io/static/v1?label=PyPI&message=0.18.0&color=8A1C2B&logo=pypi&logoColor=white" alt="PyPI version"></a>
   <a href="https://pepy.tech/projects/mailaccess"><img src="https://img.shields.io/pepy/dt/mailaccess?color=8A1C2B&amp;label=downloads" alt="PyPI downloads"></a>
 </p>
 
@@ -29,8 +29,10 @@ mailaccess investigate you@example.com
 ```
 
 The CLI auto-starts and stops the backend for each investigation. Use
-`mailaccess serve` when you want a persistent server, or install
-`mailaccess[ml]` for optional spaCy-based name classification.
+`mailaccess serve` when you want a persistent server, install
+`mailaccess[ml]` for optional spaCy-based name classification, or
+`mailaccess[browser]` (then `playwright install chromium`) for the optional
+headless-browser [account-existence oracles](docs/account-existence-platforms.md#browser-tier-optional).
 
 Full install options (Docker, persistent server, self-hosting) in [docs/self-hosting.md](docs/self-hosting.md).
 
@@ -58,7 +60,7 @@ Pipeline, stdin, JSONL, and CI examples in [docs/integrations.md](docs/integrati
 - **Credential Risk Score:** separate 0-100 credential exposure band with top drivers and recommended next steps.
 - **Domain email harvesting:** `harvest-emails` discovers organization addresses across Common Crawl, GitHub, CT logs, registries, keyservers, dorks, employee pages, and patterns. *(Pro adds the decision-makers behind the domain.)*
 - **Company email patterns:** `find-email` turns a name plus an employer domain into one honestly-graded likely address, offline from a bundled 384K-domain pattern index. Microsoft 365 mailboxes are verified where the provider allows.
-- **5,000+ platform corpus:** a native username-platform engine over a MailAccess-verified corpus of 5,000+ platform definitions, with two-marker detection and zero runtime dependencies. Plus a native account-existence engine covering 250+ email-checkable services, and native Google-account intelligence.
+- **5,000+ platform corpus:** a native username-platform engine over a MailAccess-verified corpus of 5,000+ platform definitions, with two-marker detection and zero runtime dependencies. Plus a native account-existence engine covering **357 email-checkable services** — consumer apps, SaaS, and community forums, checked non-intrusively ([full platform list & methods](docs/account-existence-platforms.md)) — and native Google-account intelligence.
 - **Deep breach mode:** probes the highest-severity breach corpus for account-existence risk.
 - **6 export formats:** JSON, CSV, PDF, Markdown, STIX 2.1, and Maltego XML.
 
