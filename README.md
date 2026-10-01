@@ -19,6 +19,8 @@
 
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web, then get back a unified exposure score and structured findings you can export or pipe into Maltego.
 
+<a href="https://netlas.io"><img src="assets/sponsor-netlas.png" alt="Netlas.io — map any target's attack surface in seconds" width="100%"></a>
+
 Built for security researchers, OSINT analysts, and penetration testers operating under authorization. Read [DISCLAIMER.md](DISCLAIMER.md) before use.
 
 ## Install
