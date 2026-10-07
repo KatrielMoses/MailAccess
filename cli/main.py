@@ -3918,6 +3918,15 @@ async def _investigate_run(
                 out.print()
 
             out.print("[dim]Legend: ✓ confirmed  ~ low confidence  — skipped[/dim]")
+            _netlas_modules = {"netlas_email_footprint", "netlas_org_surface"}
+            _netlas_contributed = any(
+                r.get("module_name") in _netlas_modules
+                and str(r.get("status", "")).lower() not in ("skipped", "failed")
+                for r in rep.get("module_runs", [])
+            )
+            if _netlas_contributed:
+                from cli import partners
+                partners.show_netlas_credit(out)
             # RC8 (Output-Trust): advertise PDF only when weasyprint is actually
             # available; otherwise point at a format that will really produce a file.
             _save_fmt = "report.pdf" if _pdf_available() else "report.md"

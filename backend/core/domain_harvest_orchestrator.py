@@ -4298,7 +4298,7 @@ async def run_domain_harvest(
     # this and runs regardless of key.
     netlas_enabled = netlas_active(no_netlas=no_netlas) and not module_overrides
     if netlas_enabled and _enrichment_enabled:
-        netlas_enabled = await should_fetch_netlas(domain, scope=store_scope, refresh=refresh)
+        netlas_enabled = await should_fetch_netlas(domain, scope=store_scope, refresh=refresh or force)
 
     # Under F8 the native read-first scope is netlas-INDEPENDENT (== store_scope):
     # a keyed and a keyless run share one native snapshot, and the enrichment
