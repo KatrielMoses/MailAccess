@@ -552,6 +552,93 @@ def _apply_filters(
     )
 
 
+def print_netlas_notes(
+    result: Any,
+    console: Console,
+    *,
+    no_netlas: bool = False,
+) -> None:
+    """Netlas (BYOK) one-liners: a fallback/cap note, or the first-run hint.
+
+    Keyed runs get a dim note only when Netlas failed (we fell back to native)
+    or the subdomain cap was hit. Keyless runs get the setup hint ONCE per
+    machine, on stderr and only on an interactive terminal — never in piped or
+    subprocess output, so the harvest output itself is unchanged.
+    """
+    from backend.core.netlas_client import (
+        NETLAS_HINT_MARKER,
+        STATUS_OK,
+        STATUS_TRUNCATED,
+        netlas_hint_message,
+        netlas_run_note,
+    )
+
+    modules = getattr(result, "module_results", None) or {}
+    notes: list[str] = []
+    contributed = False
+    for name in ("subdomain_intel", "netlas_whois_emails", "netlas_cert", "netlas_responses"):
+        meta = (getattr(modules.get(name), "metadata", None) or {}).get("netlas")
+        note = netlas_run_note(meta)
+        if note and note not in notes:
+            notes.append(note)
+        if isinstance(meta, dict) and meta.get("status") in (STATUS_OK, STATUS_TRUNCATED):
+            contributed = True
+    if notes:
+        # One line: a shared failure (e.g. out of credits) reads once, not twice.
+        console.print(" ".join(notes), style="dim", markup=False)
+    if contributed:
+        # Honest credit: only when Netlas actually returned data this run.
+        from cli import partners
+
+        partners.show_netlas_credit(console)
+    if notes or contributed:
+        return
+    if (
+        no_netlas
+        or getattr(settings, "netlas_api_key", None)
+        or getattr(settings, "netlas_disabled", False)
+        or not sys.stderr.isatty()
+    ):
+        return
+    marker = Path(os.path.expanduser(NETLAS_HINT_MARKER))
+    if marker.exists():
+        return
+    with contextlib.suppress(OSError):
+        marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        marker.touch()
+    Console(stderr=True).print(netlas_hint_message(), style="dim", markup=False)
+
+
+def print_related_domains(result: Any, console: Console) -> None:
+    """Render the F5 ranked related-domains list (and any opt-in expansion)."""
+    meta = getattr(result, "metadata", None) or {}
+    related = meta.get("related_domains") or {}
+    domains = related.get("domains") or []
+    if domains:
+        console.print(
+            f"\n[bold cyan]RELATED DOMAINS[/bold cyan] "
+            f"[dim]({len(domains)} found via Netlas pivots — not harvested; "
+            f"use --expand-related to harvest)[/dim]"
+        )
+        for row in domains[:20]:
+            pivots = "+".join(sorted({e.get("pivot", "?") for e in row.get("evidence") or []}))
+            console.print(f"  {row['domain']:<36} score {row.get('score', 0):<3} [dim]{pivots}[/dim]")
+        if len(domains) > 20:
+            console.print(f"  [dim]+ {len(domains) - 20} more — full list in --export JSON[/dim]")
+    expanded = meta.get("related_harvests") or {}
+    if expanded.get("harvests"):
+        done = expanded.get("completed", 0)
+        console.print(
+            f"[bold cyan]EXPANDED[/bold cyan] [dim]{done} related domain(s) harvested"
+            + (f"; stopped early ({expanded['stopped_early']})" if expanded.get("stopped_early") else "")
+            + "[/dim]"
+        )
+        for h in expanded["harvests"]:
+            console.print(
+                f"  {h['domain']:<36} [dim]{h.get('status')} · {len(h.get('emails') or [])} lead(s)[/dim]"
+            )
+
+
 def run_harvest_emails(
     domain: str | None,
     no_verify: bool = False,
@@ -590,6 +677,10 @@ def run_harvest_emails(
     no_export: bool = False,
     no_extras: bool = False,
     mode: str | None = None,
+    no_netlas: bool = False,
+    expand_related: bool = False,
+    expand_related_max: int | None = None,
+    refresh: bool = False,
 ) -> int:
     """Run the domain email harvest and render / export results.
 
@@ -832,6 +923,10 @@ def run_harvest_emails(
             force=force,
             on_harvest_end=_on_harvest_end,
             mode=mode,
+            no_netlas=no_netlas,
+            expand_related=expand_related,
+            expand_related_max=expand_related_max,
+            refresh=refresh,
         )
 
     drive_error: BaseException | None = None
@@ -1104,6 +1199,8 @@ def run_harvest_emails(
             "[dim]One or more modules failed to connect via ScrapingAnt proxy. "
             "Run with --proxy-fallback-ok to allow direct fallback.[/dim]"
         )
+    print_netlas_notes(result, console, no_netlas=no_netlas)
+    print_related_domains(result, console)
 
     # ------------------------------------------------------------------
     # 7. Export (default JSON + supplementary + optional --export).

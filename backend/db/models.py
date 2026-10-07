@@ -262,6 +262,14 @@ class CrawlSnapshot(Base):
         String, nullable=False, default="security-investigation"
     )
     result_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # F8 — enrichment-blob markers. ``netlas_enriched`` is True when a keyed
+    # Netlas fetch (F1-F5) ran for this snapshot; ``netlas_fetched_at`` is the
+    # refresh clock (only Netlas blobs count toward the 30-day TTL). Native
+    # snapshots leave these at False / NULL.
+    netlas_enriched: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    netlas_fetched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )

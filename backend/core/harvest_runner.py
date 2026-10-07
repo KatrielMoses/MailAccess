@@ -137,6 +137,12 @@ MODULE_EMAIL_IDENTITY_ENRICHMENT = "email_identity_enrichment"
 MODULE_WORDPRESS_REST = "wordpress_rest"
 MODULE_SYNDICATION_FEED_SWEEPER = "syndication_feed_sweeper"
 MODULE_HUNTER = "hunter"
+# F2 — Netlas WHOIS contact emails; inline source, scheduled only when Netlas is on.
+MODULE_NETLAS_WHOIS = "netlas_whois_emails"
+# F3 — Netlas certificate emails + SANs; inline source, Netlas-on only.
+MODULE_NETLAS_CERT = "netlas_cert"
+# F4 — Netlas indexed HTTP responses + FTP banners; inline source, Netlas-on only.
+MODULE_NETLAS_RESPONSES = "netlas_responses"
 MODULE_HACKERTARGET = "hackertarget_hosts"
 MODULE_RIPE_STAT_ASN = "ripe_stat_asn"
 MODULE_SHODAN_INTERNETDB = "shodan_internetdb"
@@ -268,6 +274,8 @@ class WorkerContext:
     with_subdomains: bool = False
     subdomain_deep: bool = False
     subdomain_calibrate: bool = False
+    # BYOK Netlas, resolved once per run from ``netlas_client.netlas_active``.
+    netlas_enabled: bool = False
     context_vertical: tuple[str, ...] = ()
     progress_callback: Any | None = None
     log_callback: Any | None = None
@@ -288,6 +296,9 @@ class WorkerContext:
     # shared M365 oracle verification budget. ``default_factory`` gives each harvest
     # its own instance even though the context is frozen.
     pattern_run_state: PatternRunState = field(default_factory=PatternRunState)
+    # Per-run Netlas shared state — e.g. the ONE certificate fetch (F3) that
+    # both ``netlas_cert`` and ``subdomain_intel`` consume.
+    netlas_state: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.signal_pool.pattern_resolver = self.pattern_run_state.resolver
@@ -322,7 +333,9 @@ def _hydrate_subdomain_source_telemetry(ctx: WorkerContext) -> None:
         source: dict(details) for source, details in telemetry.items()
     }
     healthy = sum(
-        1 for details in telemetry.values() if details.get("status") == "ok"
+        1
+        for source, details in telemetry.items()
+        if source not in ("netlas", "netlas_cert") and details.get("status") == "ok"
     )
     metadata.setdefault(
         "passive_quorum",
@@ -457,6 +470,7 @@ async def run_adaptive_harvest(
     log_callback: Any | None = None,
     display_subscriber: Any | None = None,
     on_harvest_end: Any | None = None,
+    netlas_enabled: bool = False,
 ) -> Any:
     from .domain_harvest_orchestrator import (
         DomainHarvestResult,
@@ -542,6 +556,7 @@ async def run_adaptive_harvest(
         with_subdomains=with_subdomains,
         subdomain_deep=subdomain_deep,
         subdomain_calibrate=subdomain_calibrate,
+        netlas_enabled=bool(netlas_enabled),
         progress_callback=progress_callback,
         log_callback=log_callback,
         provider_detection_ready=asyncio.Event(),
@@ -1229,6 +1244,10 @@ async def run_adaptive_harvest(
             await signal_pool.close()
         with contextlib.suppress(Exception):
             await cache.aclose()
+        # A cert fetch still in flight when the harvest ends must not outlive it.
+        _cert_future = ctx.netlas_state.get("certs")
+        if _cert_future is not None and not _cert_future.done():
+            _cert_future.cancel()
         # --------------------------------------------------------------
         # Harvest-termination handler — the single unconditional export
         # trigger. It runs on EVERY exit path (normal completion, budget
@@ -1317,6 +1336,36 @@ async def _seed_scheduler(ctx: WorkerContext) -> None:
                 priority=priority,
                 track=seed_track,
                 source="legacy_module",
+            )
+        )
+    if ctx.netlas_enabled and MODULE_NETLAS_RESPONSES not in ctx.skip_modules:
+        await ctx.scheduler.submit(
+            WorkItem(
+                kind="run_module",
+                module_name=MODULE_NETLAS_RESPONSES,
+                priority=PRIORITY_HIGH_SIGNAL,
+                track=TRACK_OPPORTUNISTIC,
+                source="response",
+            )
+        )
+    if ctx.netlas_enabled and MODULE_NETLAS_CERT not in ctx.skip_modules:
+        await ctx.scheduler.submit(
+            WorkItem(
+                kind="run_module",
+                module_name=MODULE_NETLAS_CERT,
+                priority=PRIORITY_HIGH_SIGNAL,
+                track=TRACK_OPPORTUNISTIC,
+                source="cert",
+            )
+        )
+    if ctx.netlas_enabled and MODULE_NETLAS_WHOIS not in ctx.skip_modules:
+        await ctx.scheduler.submit(
+            WorkItem(
+                kind="run_module",
+                module_name=MODULE_NETLAS_WHOIS,
+                priority=PRIORITY_HIGH_SIGNAL,
+                track=TRACK_OPPORTUNISTIC,
+                source="whois",
             )
         )
     if getattr(ctx.settings, "hunter_io_api_key", None):
@@ -2587,9 +2636,22 @@ async def _run_module_instance(
         _employee_names_from_findings,
         _normalize_module_result,
         _run_hunter,
+        _run_netlas_cert,
+        _run_netlas_responses,
+        _run_netlas_whois,
         _run_pattern,
         _safe_phase12_run,
     )
+
+    if module_name == MODULE_NETLAS_WHOIS:
+        _name, result = await _run_netlas_whois(ctx.domain)
+        return _normalize_module_result(module_name, result)
+    if module_name == MODULE_NETLAS_RESPONSES:
+        _name, result = await _run_netlas_responses(ctx.domain)
+        return _normalize_module_result(module_name, result)
+    if module_name == MODULE_NETLAS_CERT:
+        _name, result = await _run_netlas_cert(ctx.domain, _netlas_cert_future(ctx))
+        return _normalize_module_result(module_name, result)
 
     if module_name == MODULE_HUNTER:
         _name, result = await _run_hunter(ctx.domain, ctx.settings.hunter_io_api_key)
@@ -2688,12 +2750,46 @@ async def _run_module_instance(
         context_vertical=ctx.context_vertical,
         scrape_session=ctx.stealth_session,
         source_telemetry=ctx.subdomain_source_telemetry,
+        netlas_enabled=ctx.netlas_enabled,
+        netlas_cert_fetch=(
+            (lambda: _netlas_cert_future(ctx))
+            if ctx.netlas_enabled and MODULE_NETLAS_CERT not in ctx.skip_modules
+            else None
+        ),
         progress_callback=(
             (lambda action: ctx.progress_callback(module_name, action))
             if ctx.progress_callback is not None else None
         ),
     )
     return _normalize_module_result(name, result)
+
+
+def _netlas_cert_future(ctx: WorkerContext) -> asyncio.Future[Any]:
+    """The run's ONE certificate fetch (F3), started on first use.
+
+    ``netlas_cert`` (emails, sister seeds) and ``subdomain_intel`` (SAN hosts)
+    both await this same future, so a harvest sends exactly one cert request
+    to Netlas' 3 req/min lane. Callers must ``asyncio.shield`` it so one
+    consumer's timeout never cancels the other's result.
+    """
+    future = ctx.netlas_state.get("certs")
+    if future is None:
+        from .company_discovery import _registrable_domain
+        from .netlas_client import fetch_certificates
+
+        future = asyncio.ensure_future(
+            fetch_certificates(
+                _registrable_domain(ctx.domain),
+                getattr(ctx.settings, "netlas_api_key", None),
+            )
+        )
+        ctx.netlas_state["certs"] = future
+    return future
+
+
+class _InlineSource:
+    """Placeholder instance for sources dispatched by name in
+    :func:`_run_module_instance` (they have no module class)."""
 
 
 def _get_module_instance(module_name: str, ctx: WorkerContext) -> Any:
@@ -2721,6 +2817,9 @@ def _get_module_instance(module_name: str, ctx: WorkerContext) -> Any:
         MODULE_HACKERTARGET: HackerTargetHostsModule,
         MODULE_RIPE_STAT_ASN: RIPEStatASNModule,
         MODULE_SHODAN_INTERNETDB: ShodanInternetDBModule,
+        MODULE_NETLAS_WHOIS: _InlineSource,
+        MODULE_NETLAS_CERT: _InlineSource,
+        MODULE_NETLAS_RESPONSES: _InlineSource,
     }
     
     from ..modules.email_identity_enrichment import EmailIdentityEnrichmentModule
@@ -2771,7 +2870,8 @@ async def _read_homepage_for_router(ctx: WorkerContext) -> str:
 def _write_to_signal_pool(result: WorkResult, signal_pool: AsyncSignalPool) -> None:
     source = result.item.module_name or result.item.source or result.item.kind
     for finding in result.findings or []:
-        _emit_finding(signal_pool, source, finding, "")
+        # A finding may name its own signal source (F2 WHOIS → "whois").
+        _emit_finding(signal_pool, str(finding.get("signal_source") or source), finding, "")
 
 
 def _emit_finding(

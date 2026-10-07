@@ -470,6 +470,41 @@ async def _run_passive_source(
         return source, set(), _passive_error_status(exc), detail
 
 
+#: Discovery-source label for Netlas-enumerated hosts (BYOK, F1). Deliberately
+#: NOT in DISCOVERY_SOURCE_NAMES: keyless runs must not grow a ``netlas`` row.
+NETLAS_SOURCE_NAME = "netlas"
+#: Hosts taken from certificate SANs (F3) — shares F1's Netlas subdomain cap.
+NETLAS_CERT_SOURCE_NAME = "netlas_cert"
+_NETLAS_SOURCES = (NETLAS_SOURCE_NAME, NETLAS_CERT_SOURCE_NAME)
+
+
+async def discover_netlas(domain: str) -> object:
+    """Enumerate ``*.{domain}`` via Netlas (1 count + 1 download, capped).
+
+    Returns a :class:`~backend.core.netlas_client.NetlasSubdomainResult`;
+    never raises. Callers gate on ``netlas_active`` before invoking.
+    """
+    from ..core.netlas_client import fetch_subdomains
+
+    return await fetch_subdomains(
+        domain,
+        getattr(settings, "netlas_api_key", None),
+        cap=int(getattr(settings, "netlas_subdomain_cap", 500)),
+    )
+
+
+def _netlas_metadata(outcome: object) -> dict[str, object]:
+    return {
+        "status": getattr(outcome, "status", "error"),
+        "count": len(getattr(outcome, "hosts", []) or []),
+        "total": getattr(outcome, "total", None),
+        "cap": getattr(outcome, "cap", 0),
+        "capped": bool(getattr(outcome, "capped", False)),
+        "calls": int(getattr(outcome, "calls", 0) or 0),
+        "error": getattr(outcome, "error", None),
+    }
+
+
 async def discover_subdomain_center(client: httpx.AsyncClient, domain: str) -> set[str]:
     # The data lives on the ``api.`` host and returns a JSON array of hostnames. The bare
     # ``subdomain.center/?domain=`` URL now serves the marketing site's HTML (0 hosts),
@@ -1165,6 +1200,7 @@ class SubdomainIntelModule(BaseModule):
         self._passive_finished_at: float | None = None
         self._passive_finished = False
         self._passive_termination = "not_started"
+        self._netlas_meta: dict[str, object] | None = None
 
     def partial_metadata(self) -> dict[str, object]:
         """Return failure-atomic source telemetry for cancellation paths."""
@@ -1197,6 +1233,9 @@ class SubdomainIntelModule(BaseModule):
             for source in DISCOVERY_SOURCE_NAMES
         }
         healthy = sum(1 for details in passive.values() if details.get("status") == "ok")
+        for source in _NETLAS_SOURCES:
+            if source in result.sources:
+                passive[source] = dict(result.sources[source])
         elapsed_end = self._passive_finished_at or asyncio.get_running_loop().time()
         elapsed = (
             max(0.0, elapsed_end - self._passive_started_at)
@@ -1222,6 +1261,9 @@ class SubdomainIntelModule(BaseModule):
         }
         if duration is not None:
             metadata["duration_seconds"] = duration
+        if self._netlas_meta is not None:
+            # Keep the cap / fallback outcome when the hard cap cancels the run.
+            metadata["netlas"] = dict(self._netlas_meta)
         return metadata
 
     def partial_findings(self) -> list[dict[str, object]]:
@@ -1261,6 +1303,8 @@ class SubdomainIntelModule(BaseModule):
         budget_seconds: float | None = None,
         progress_callback: object | None = None,
         source_telemetry: dict[str, dict[str, object]] | None = None,
+        netlas_enabled: bool = False,
+        netlas_cert_fetch: object | None = None,
     ) -> ModuleResult:
         domain = domain.strip().lower().rstrip(".")
         self._run_started_at = time.perf_counter()
@@ -1309,8 +1353,20 @@ class SubdomainIntelModule(BaseModule):
         own_client = client is None
         http = client or build_client(timeout=15.0, follow_redirects=True, max_redirects=2)
         wordlist = load_wordlist()
+        # Netlas (BYOK) runs alongside the native sources and merges into the
+        # same candidate set, so resolve → score → scrape → publish is unchanged.
+        netlas_task: asyncio.Task[object] | None = None
+        netlas_meta: dict[str, object] | None = None
+        # F3: the run's shared certificate fetch (same future netlas_cert uses).
+        self._netlas_cert_future = None
 
         try:
+            if netlas_enabled:
+                result.record_source(NETLAS_SOURCE_NAME, "in_progress", 0, "in_progress")
+                netlas_task = asyncio.create_task(discover_netlas(domain))
+                if callable(netlas_cert_fetch):
+                    result.record_source(NETLAS_CERT_SOURCE_NAME, "in_progress", 0, "in_progress")
+                    self._netlas_cert_future = netlas_cert_fetch()
             if callable(progress_callback):
                 progress_callback(f"Resolving {domain} passive sources...")
             passive_sources = [
@@ -1414,7 +1470,7 @@ class SubdomainIntelModule(BaseModule):
                 successful_sources = sum(
                     1
                     for source, source_result in result.sources.items()
-                    if source != "axfr"
+                    if source not in ("axfr", *_NETLAS_SOURCES)
                     and source_result.get("status") == "ok"
                 )
                 if successful_sources < 2:
@@ -1445,11 +1501,20 @@ class SubdomainIntelModule(BaseModule):
                             "brute_t2",
                         )
                         result.add(await discover_github(http, domain), "github")
+            if netlas_task is not None:
+                netlas_meta = await self._join_netlas(netlas_task, result, slice_budget)
+                netlas_task = None
         except asyncio.CancelledError:
             self._passive_termination = "killed"
+            if netlas_task is not None and not netlas_task.done():
+                netlas_task.cancel()
+                result.record_source(NETLAS_SOURCE_NAME, "killed", 0, "in_progress_at_timeout")
             raise
         except Exception as exc:
             result.errors.append(f"discovery: {exc}")
+        if netlas_task is not None:
+            # Discovery raised before the join; still harvest what Netlas found.
+            netlas_meta = await self._join_netlas(netlas_task, result, slice_budget)
         # Component 2: remove Tier 3 noise before any DNS work.
         filter_tier3(result.candidates, wordlist.get("tier3_exclude", []))
         try:
@@ -1558,7 +1623,7 @@ class SubdomainIntelModule(BaseModule):
         passive_result_sources = {
             source: details
             for source, details in result.sources.items()
-            if source != "axfr"
+            if source not in ("axfr", *_NETLAS_SOURCES)
         }
         passive_quorum_count = sum(
             1
@@ -1621,10 +1686,110 @@ class SubdomainIntelModule(BaseModule):
                 "hard_exceeded": slice_budget.hard_exceeded,
             },
         }
+        if netlas_meta is not None:
+            metadata["netlas"] = netlas_meta
         status = ModuleStatus.SUCCESS if findings else ModuleStatus.PARTIAL
         if own_client:
             await http.aclose()
         return ModuleResult(status=status, findings=findings, metadata=metadata, errors=result.errors[:20])
+
+    async def _join_netlas(
+        self,
+        task: asyncio.Task[object],
+        result: DiscoveryResult,
+        budget: SubdomainBudget,
+    ) -> dict[str, object]:
+        """Await F1 and merge its hosts (source="netlas"), then fold in F3 SANs."""
+        wall = min(
+            3 * float(getattr(settings, "netlas_timeout_seconds", 30.0) or 30.0),
+            max(1.0, budget.hard_remaining),
+        )
+        hosts: list[str] = []
+        try:
+            outcome = await asyncio.wait_for(task, timeout=wall)
+        except asyncio.TimeoutError:
+            result.record_source(NETLAS_SOURCE_NAME, "timeout", 0, "netlas wall")
+            meta: dict[str, object] = {
+                "status": "timeout", "count": 0, "calls": None, "error": "netlas wall"
+            }
+        except Exception as exc:  # noqa: BLE001 - client never raises; belt and braces
+            result.record_source(NETLAS_SOURCE_NAME, "error", 0, str(exc))
+            meta = {"status": "error", "count": 0, "calls": None, "error": str(exc)}
+        else:
+            meta = _netlas_metadata(outcome)
+            hosts = list(getattr(outcome, "hosts", []) or [])
+            status = str(meta["status"])
+            result.record_source(
+                NETLAS_SOURCE_NAME,
+                "ok" if status in {"ok", "empty"} else status,
+                len(hosts),
+                meta.get("error") if status not in {"ok", "empty"} else None,  # type: ignore[arg-type]
+            )
+            if hosts:
+                result.add(hosts, NETLAS_SOURCE_NAME)
+        # Keep the F1 outcome even if the hard cap fires during the cert wait.
+        self._netlas_meta = meta
+        await self._merge_cert_hosts(result, budget, meta, set(hosts))
+        self._netlas_meta = meta
+        return dict(meta)
+
+    async def _merge_cert_hosts(
+        self,
+        result: DiscoveryResult,
+        budget: SubdomainBudget,
+        meta: dict[str, object],
+        netlas_hosts: set[str],
+    ) -> None:
+        """Fold F3 certificate SAN hosts in under the SHARED Netlas cap.
+
+        F1 hosts fill the cap first; SAN hosts only take the remaining room
+        (deduped against F1), so certificates never add a second 500.
+        """
+        future = getattr(self, "_netlas_cert_future", None)
+        if future is None:
+            return
+        wall = min(
+            float(getattr(settings, "netlas_cert_timeout_seconds", 150.0) or 150.0) + 5.0,
+            max(1.0, budget.hard_remaining),
+        )
+        try:
+            outcome = await asyncio.wait_for(asyncio.shield(future), timeout=wall)
+        except asyncio.TimeoutError:
+            result.record_source(NETLAS_CERT_SOURCE_NAME, "timeout", 0, "netlas cert wall")
+            meta["cert"] = {"status": "timeout"}
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            result.record_source(NETLAS_CERT_SOURCE_NAME, "error", 0, str(exc))
+            meta["cert"] = {"status": "error", "error": str(exc)}
+            return
+        status = str(getattr(outcome, "status", "error"))
+        san_hosts = [h for h in (getattr(outcome, "in_scope_hosts", None) or [])]
+        cap = int(getattr(settings, "netlas_subdomain_cap", 500))
+        room = max(0, cap - len(netlas_hosts))
+        fresh = [h for h in san_hosts if h not in netlas_hosts]
+        taken, over = fresh[:room], fresh[room:]
+        # SANs already found by F1 keep both tags; new ones count against the cap.
+        overlap = [h for h in san_hosts if h in netlas_hosts]
+        if overlap:
+            result.add(overlap, NETLAS_CERT_SOURCE_NAME)
+        if taken:
+            result.add(taken, NETLAS_CERT_SOURCE_NAME)
+        result.record_source(
+            NETLAS_CERT_SOURCE_NAME,
+            "ok" if status in {"ok", "empty"} else status,
+            len(taken) + len(overlap),
+            getattr(outcome, "error", None) if status not in {"ok", "empty"} else None,
+        )
+        meta["cert"] = {
+            "status": status,
+            "san_hosts": len(san_hosts),
+            "added": len(taken),
+            "already_from_netlas": len(overlap),
+        }
+        if over:
+            meta["cert_hosts_over_cap"] = len(over)
 
 
 __all__ = [

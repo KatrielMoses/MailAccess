@@ -56,6 +56,14 @@ class InvestigateRequest(BaseModel):
     # (settings.product_mode). One of: security-investigation,
     # public-business-contact, org-authorized-verification.
     mode: str | None = None
+    # BYOK Netlas per-run opt-out (``--no-netlas``). Accepted now so the CLI
+    # contract is stable; investigate-path Netlas sources (F2+) gate on it via
+    # ``netlas_client.netlas_active(no_netlas=...)``.
+    no_netlas: bool = False
+    # F7 deep mode (``--org-surface-deep``): full subdomain enumeration.
+    org_surface_deep: bool = False
+    # F8 (``--refresh``): force a Netlas fetch past the 30-day store gate.
+    refresh: bool = False
 
 
 class InvestigateResponse(BaseModel):
@@ -112,6 +120,9 @@ async def start_investigation(
         enable_modules=body.enable_modules,
         budget_seconds=body.budget_seconds,
         mode=body.mode,
+        no_netlas=body.no_netlas,
+        org_surface_deep=body.org_surface_deep,
+        refresh=body.refresh,
     )
     if not cached and queue is not None:
         queue_registry.put(investigation_id, queue)

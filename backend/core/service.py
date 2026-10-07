@@ -367,6 +367,9 @@ class InvestigationService:
         enable_modules: list[str] | None = None,
         budget_seconds: float | None = None,
         mode: str | None = None,
+        no_netlas: bool = False,
+        org_surface_deep: bool = False,
+        refresh: bool = False,
     ) -> tuple[str, datetime, asyncio.Queue | None, bool]:
         """
         Persist a new Investigation (PENDING), launch the engine in the
@@ -375,7 +378,8 @@ class InvestigationService:
         When `enable_investigation_cache` is set and a COMPLETE investigation
         for the same email exists within the cache window, returns that
         investigation's id with `cached=True` and `queue=None` — no new
-        engine run is started. Pass `force=True` to bypass the cache.
+        engine run is started. Pass `force=True` (or `refresh=True`, the Netlas
+        ``--refresh`` flag, which must reach the engine) to bypass the cache.
 
         The caller is responsible for storing the queue in the registry so
         WebSocket handlers can consume it (skip when cached=True).
@@ -391,6 +395,7 @@ class InvestigationService:
         ).value
         if (
             not force
+            and not refresh
             and settings.enable_investigation_cache
             and module_names is None
             and not enable_modules
@@ -420,6 +425,9 @@ class InvestigationService:
             min_module_seconds=settings.investigation_budget_min_module_seconds,
             mode=mode,
             force=force,
+            no_netlas=no_netlas,
+            org_surface_deep=org_surface_deep,
+            refresh=refresh,
         )
         queue = await engine.investigate(email, investigation_id, module_names, enable_modules)
         return investigation_id, created_at, queue, False

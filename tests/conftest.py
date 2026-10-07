@@ -18,6 +18,7 @@ Why a conftest at all:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -41,6 +42,18 @@ os.environ.setdefault(
     "DATABASE_URL",
     f"sqlite+aiosqlite:///{Path(_HERMETIC_DB_DIR, 'test.db').as_posix()}",
 )
+
+# Hard guard: ``setdefault`` above lets an ambient ``DATABASE_URL`` (e.g. one left
+# in the shell from a live/replay run) win — which can silently point the whole
+# suite at the developer's real ``~/.mailaccess/mailaccess.db``. Refuse to run
+# against that DB rather than read/write it. A deliberate CI/test DB still wins.
+_REAL_DB = (Path.home() / ".mailaccess" / "mailaccess.db").resolve()
+_db_match = re.search(r"sqlite(?:\+\w+)?:///(.+)", os.environ["DATABASE_URL"])
+if _db_match and Path(_db_match.group(1)).expanduser().resolve() == _REAL_DB:
+    raise RuntimeError(
+        f"Refusing to run tests against the real database ({_REAL_DB}). "
+        "Unset DATABASE_URL (or point it at a test DB) and re-run."
+    )
 
 # Make the tests directory importable so we can pull in the shared
 # ``_fetch_fixtures`` module regardless of where pytest was invoked from.

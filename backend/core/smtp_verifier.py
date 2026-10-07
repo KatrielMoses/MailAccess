@@ -646,7 +646,7 @@ class _AsyncioSMTPTransport(_SMTPTransport):
         conn = self._connections.get(host)
         if conn is not None:
             reader, writer = conn
-            if writer.is_closing():
+            if writer.is_closing() or reader.at_eof():
                 self._connections.pop(host, None)
                 conn = None
         if conn is None:
@@ -660,9 +660,24 @@ class _AsyncioSMTPTransport(_SMTPTransport):
         if not command:
             return banner
 
-        writer.write((command + "\r\n").encode("utf-8", "replace"))
-        await writer.drain()
-        return await self._readall(reader)
+        try:
+            writer.write((command + "\r\n").encode("utf-8", "replace"))
+            await writer.drain()
+            reply = await self._readall(reader)
+        except Exception:
+            self._drop(host)
+            raise
+        # The server closes after QUIT but the writer does not report
+        # ``is_closing()`` on a remote EOF, so a cached session would hand the
+        # next probe an empty banner. Forget it so the next probe reconnects.
+        if command.strip().upper() == "QUIT":
+            self._drop(host)
+        return reply
+
+    def _drop(self, host: str) -> None:
+        conn = self._connections.pop(host, None)
+        if conn is not None:
+            conn[1].close()
 
     async def _open(
         self, host: str, port: int

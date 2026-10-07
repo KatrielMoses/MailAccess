@@ -69,6 +69,7 @@ def run_bulk_harvest_emails(
     resume: bool = True,
     tech_filters: tuple[str, ...] = (),
     console: Console | None = None,
+    no_netlas: bool = False,
 ) -> int:
     """Drive a bulk harvest run. Returns a process-style exit code."""
     if console is None:
@@ -126,6 +127,9 @@ def run_bulk_harvest_emails(
         "subdomain_deep": subdomain_deep,
         "subdomain_calibrate": subdomain_calibrate,
     }
+    if no_netlas:
+        # Only present when set, so keyless/default option dicts are unchanged.
+        options["no_netlas"] = True
 
     conc = max(1, int(concurrency or getattr(settings, "bulk_max_concurrent_domains", 3)))
     console.print(

@@ -121,6 +121,7 @@ def scope_signature(
     enable_pattern_oracle_verify: bool = True,
     pattern_oracle_max_verifications: int | None = None,
     company_pattern_index_version: str | None = None,
+    netlas: bool = False,
 ) -> str:
     """Canonical signature of the coverage-affecting run parameters.
 
@@ -171,6 +172,11 @@ def scope_signature(
             else None
         ),
     }
+    # BYOK Netlas widens subdomain coverage, so a Netlas crawl and a native crawl
+    # must not alias. Added only when on, so keyless signatures (and every
+    # existing cached snapshot) are byte-for-byte unchanged.
+    if netlas:
+        payload["netlas"] = True
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

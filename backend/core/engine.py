@@ -227,6 +227,9 @@ class InvestigationEngine:
         min_module_seconds: float = 2.0,
         mode: str | None = None,
         force: bool = False,
+        no_netlas: bool = False,
+        org_surface_deep: bool = False,
+        refresh: bool = False,
     ) -> None:
         self._timeout = timeout
         self._max_concurrency = max_concurrency
@@ -239,6 +242,11 @@ class InvestigationEngine:
         # Phase 2B — per-run product mode; None means fall back to the config
         # default (resolved in investigate()).
         self._mode = mode
+        # Per-run ``--no-netlas`` (investigate); applied to the Netlas context at
+        # the start of the run so F6/F7 modules honour it.
+        self._no_netlas = no_netlas
+        self._org_surface_deep = org_surface_deep
+        self._refresh = refresh
         self.status = InvestigationStatus.PENDING
 
     async def investigate(
@@ -258,6 +266,11 @@ class InvestigationEngine:
         async def _run_and_persist() -> None:
             current_email = canonical_email
             try:
+                from .enrichment_store import set_netlas_refresh
+                from .netlas_client import set_no_netlas, set_org_surface_deep
+                set_no_netlas(self._no_netlas)
+                set_org_surface_deep(self._org_surface_deep)
+                set_netlas_refresh(self._refresh)
                 self.status = InvestigationStatus.RUNNING
                 await self._set_status(investigation_id, InvestigationStatus.RUNNING)
 
@@ -600,6 +613,15 @@ class InvestigationEngine:
                         )
                     )
                     for finding_data in result.findings:
+                        # F8: a finding served from the enrichment store is part
+                        # of THIS run's output — the score counted it, so the
+                        # export/report (built from these rows) must show it, or
+                        # the score would have no visible evidence. It keeps its
+                        # ``served_from_store`` tag, and every enrichment-store
+                        # reader ignores tagged rows (they are output, not store
+                        # content), so serving never refreshes the 30-day clock or
+                        # duplicates into the union — and a no-key run adds nothing
+                        # to the store itself.
                         session.add(
                             Finding(
                                 investigation_id=investigation_id,

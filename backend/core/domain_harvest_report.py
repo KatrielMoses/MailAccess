@@ -131,8 +131,28 @@ def _build_subdomains(result: DomainHarvestResult) -> list[dict[str, Any]]:
                     continue
                 existing = values.get(item["subdomain"])
                 if existing is None or item.get("tier") is not None:
+                    if existing is not None:
+                        _carry_netlas_provenance(existing, item)
                     values[item["subdomain"]] = item
+                elif existing is not None:
+                    _carry_netlas_provenance(item, existing)
     return [values[key] for key in sorted(values)]
+
+
+def _carry_netlas_provenance(loser: dict[str, Any], winner: dict[str, Any]) -> None:
+    """Keep ``netlas`` provenance when two modules report the same host.
+
+    The merge keeps one row per host, which used to drop the other row's
+    ``discovery_method``. Union the methods only when Netlas is involved, so
+    keyless output (never tagged ``netlas``) is byte-for-byte unchanged.
+    """
+    def _methods(row: dict[str, Any]) -> list[str]:
+        value = row.get("discovery_method") or []
+        return [value] if isinstance(value, str) else list(value)
+
+    lost, kept = _methods(loser), _methods(winner)
+    if any(m.startswith("netlas") for m in lost + kept):
+        winner["discovery_method"] = sorted(set(lost) | set(kept))
 
 
 def _format_subdomain_panel(result: DomainHarvestResult) -> Panel | Text:
@@ -523,6 +543,9 @@ def _module_display_name(name: str) -> str:
         "gravatar_lookup": "Gravatar",
         "github_commits": "GitHub Commits",
         "breach_aggregator": "breach_aggregator",
+        "netlas_whois_emails": "WHOIS",
+        "netlas_cert": "Certificates",
+        "netlas_responses": "Netlas Responses",
     }
     return mapping.get(name, name.replace("_", " ").title())
 
@@ -1994,6 +2017,16 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
         # ecommerce / framework) as a filterable, domain-level export dimension.
         if export_metadata.get("technographics"):
             payload["technographics"] = export_metadata["technographics"]
+        # Netlas F2/F3/F5 run-level metadata (present only when Netlas was
+        # active). Each is additive and omitted entirely on keyless runs.
+        for key in (
+            "registrant_organization",
+            "related_domain_seeds",
+            "related_domains",
+            "related_harvests",
+        ):
+            if key in export_metadata:
+                payload[key] = export_metadata[key]
     return payload
 
 

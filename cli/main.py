@@ -107,6 +107,9 @@ def _render_banner() -> None:
         "[dim]Open-source OSINT email intelligence tool[/dim]\n"
         f"[dim]v{APP_VERSION} · pypi.org/project/mailaccess[/dim]"
     )
+    from cli import partners
+
+    partners.show_banner_footer(err_console)
 
 
 _RICH_LINK_RE = re.compile(r"\[/?link(?:=[^\]]*)?\]")
@@ -125,6 +128,7 @@ _API_KEYS: list[tuple[str, str, str]] = [
     ("SHODAN_API_KEY", "domain_intel", "shodan.io"),
     ("EMAILREP_API_KEY", "emailrep", "emailrep.io"),
     ("HUNTER_IO_API_KEY", "hunter_io", "hunter.io"),
+    ("NETLAS_API_KEY", "netlas", "netlas.io — subdomain enumeration (optional, BYOK)"),
     ("GOOGLE_CSE_API_KEY", "email_search_dork", "Google CSE (programableseach.google.com)"),
     ("GOOGLE_CSE_CX", "email_search_dork", "Google CSE Engine ID"),
     ("COMPANIES_HOUSE_API_KEY", "companies_house", "developer.company-information.service.gov.uk"),
@@ -320,6 +324,9 @@ def main_callback(
 
         console.print(f"mailaccess {APP_VERSION}")
         raise typer.Exit()
+    from cli import partners
+
+    partners.set_no_banner(no_banner)
     if sys.stderr.isatty() and not no_banner:
         _render_banner()
 
@@ -555,7 +562,11 @@ def _run_proxy_wizard() -> None:
         "  (referral bonus on first paid plan, also unlocks\n"
         "  free tier for low-volume use.)"
     )
+    from cli import partners
+
     console.print()
+    if partners.show_mango_proxy(console):
+        console.print()
     console.print("[dim]Press Enter to skip any field.[/dim]")
     console.print()
 
@@ -917,6 +928,118 @@ keys_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(keys_app)
+
+def _reload_settings() -> Any:
+    """Refresh the settings singleton so a just-written profile takes effect now.
+
+    Updates the existing object IN PLACE rather than reassigning it, so modules that
+    bound ``from ..config import settings`` at import time see the new values (and no
+    stale object leaks across an in-process reload).
+    """
+    import backend.config as _config
+
+    fresh = _config.Settings()
+    _config.settings.__dict__.update(fresh.__dict__)
+    return _config.settings
+
+
+netlas_app = typer.Typer(
+    name="netlas",
+    help="Configure the optional Netlas.io key (BYOK). Without a key nothing changes.",
+    invoke_without_command=True,
+    no_args_is_help=True,
+)
+app.add_typer(netlas_app)
+
+
+@netlas_app.command("set-key")
+def netlas_set_key(
+    key: str | None = typer.Argument(
+        None,
+        help="Your Netlas.io API key. Omit it to be prompted (hidden input), "
+        "or pass '-' to read it from stdin — keeps it out of shell history.",
+    ),
+) -> None:
+    """Save your Netlas.io API key to ~/.mailaccess/.env."""
+    if key == "-":
+        key = sys.stdin.readline()
+    elif key is None:
+        key = typer.prompt("Netlas API key", hide_input=True)
+    key = (key or "").strip()
+    if not key:
+        err_console.print("Netlas key is empty.", markup=False)
+        raise typer.Exit(2)
+    _set_env_key("NETLAS_API_KEY", key)
+    settings = _reload_settings()
+    console.print("[green]✓ NETLAS_API_KEY saved to ~/.mailaccess/.env[/green]")
+    if settings.netlas_disabled:
+        console.print(
+            "[yellow]Netlas is disabled — run `mailaccess netlas enable` to use it.[/yellow]"
+        )
+
+
+@netlas_app.command("test")
+def netlas_test() -> None:
+    """Check the saved Netlas key with one profile request (no search credits)."""
+    from backend.core.netlas_client import check_key, netlas_run_note
+
+    settings = _reload_settings()
+    if not settings.netlas_api_key:
+        console.print("[yellow]No Netlas key set — `mailaccess netlas set-key`.[/yellow]")
+        raise typer.Exit(1)
+    key = str(settings.netlas_api_key)
+    console.print(f"[dim]Testing key …{key[-4:]}[/dim]")
+    result = asyncio.run(check_key(key))
+    if result.status == "ok":
+        console.print("[green]✓ Netlas accepted the key.[/green]")
+        if settings.netlas_disabled:
+            console.print("[yellow]Netlas is disabled — `mailaccess netlas enable`.[/yellow]")
+        return
+    note = netlas_run_note({"status": result.status}) or f"Netlas check failed ({result.status})."
+    console.print(note.split(" — ")[0] + (f" ({result.error})" if result.error else ""), style="red", markup=False)
+    raise typer.Exit(1)
+
+
+@netlas_app.command("disable")
+def netlas_disable() -> None:
+    """Turn Netlas off (the key is kept; runs use native sources only)."""
+    _set_env_key("NETLAS_DISABLED", "true")
+    _reload_settings()
+    console.print("[green]✓ Netlas disabled — runs use native sources only.[/green]")
+
+
+@netlas_app.command("enable")
+def netlas_enable() -> None:
+    """Turn Netlas back on (needs a key — `mailaccess netlas set-key <KEY>`)."""
+    _set_env_key("NETLAS_DISABLED", "false")
+    settings = _reload_settings()
+    if settings.netlas_api_key:
+        console.print("[green]✓ Netlas enabled.[/green]")
+    else:
+        from backend.core.netlas_client import NETLAS_SIGNUP_URL
+
+        console.print(
+            "[yellow]Netlas enabled, but no key is set — get a free one at "
+            f"{NETLAS_SIGNUP_URL} then `mailaccess netlas set-key <KEY>`.[/yellow]"
+        )
+
+
+@netlas_app.command("status")
+def netlas_status() -> None:
+    """Show whether Netlas is configured and active."""
+    from backend.core.netlas_client import netlas_active
+
+    settings = _reload_settings()
+    table = Table(title="Netlas.io")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    key = str(settings.netlas_api_key or "")
+    table.add_row("api_key", f"[green]set[/green] (…{key[-4:]})" if key else "[dim]none[/dim]")
+    table.add_row("disabled", "yes" if settings.netlas_disabled else "no")
+    table.add_row("subdomain_cap", str(settings.netlas_subdomain_cap))
+    table.add_row("active", "[green]yes[/green]" if netlas_active() else "no")
+    console.print(table)
+
 
 from cli.platform_health import platform_health_app  # noqa: E402
 
@@ -1357,6 +1480,23 @@ def harvest_emails_command(
     no_subdomains: bool = typer.Option(
         False, "--no-subdomains", help="Disable subdomain intelligence, including passive sources."
     ),
+    no_netlas: bool = typer.Option(
+        False, "--no-netlas", help="Skip Netlas.io for this run even when a key is set."
+    ),
+    expand_related: bool = typer.Option(
+        False, "--expand-related",
+        help="Netlas: also harvest the top related domains discovered via org/"
+             "infra/analytics pivots (opt-in; multiplies credits + time).",
+    ),
+    expand_related_max: int = typer.Option(
+        5, "--expand-related-max",
+        help="With --expand-related, how many related domains to harvest (default 5).",
+    ),
+    refresh: bool = typer.Option(
+        False, "--refresh",
+        help="Force a fresh Netlas fetch past the 30-day enrichment-store gate "
+             "(needs a key; dim no-op without one). The store is still read either way.",
+    ),
     subdomain_calibrate: bool = typer.Option(
         False, "--subdomain-calibrate", help="Discover and score subdomains without scraping."
     ),
@@ -1451,6 +1591,14 @@ def harvest_emails_command(
     from cli import update_check
 
     update_check.enforce_or_exit("harvest-emails", err_console)
+    if refresh:
+        from backend.config import settings as _rs
+
+        if not getattr(_rs, "netlas_api_key", None):
+            err_console.print(
+                "--refresh has no effect without a Netlas key (store still read).",
+                style="dim", markup=False,
+            )
     if mode is not None and mode not in _PRODUCT_MODES:
         raise typer.BadParameter(f"--mode must be one of: {', '.join(_PRODUCT_MODES)}")
     # 0.17.0 — a paid MailAccess Pro key implies the lead-gen product (see
@@ -1491,6 +1639,16 @@ def harvest_emails_command(
         selected_profile = "t3"
     elif fast:
         selected_profile = "t4"
+
+    # Mango Proxy partner line, only in its moment: --use-proxies with no working
+    # proxy configured, or a bulk list harvest running without proxies.
+    from backend.config import settings as _proxy_settings
+    from cli import partners
+
+    if (use_proxies and not partners.proxy_configured(_proxy_settings)) or (
+        file is not None and not use_proxies
+    ):
+        partners.show_mango_proxy(err_console)
 
     # ------------------------------------------------------------------
     # Phase 5A — bulk / list harvest mode. When --file is given we fan the
@@ -1535,6 +1693,7 @@ def harvest_emails_command(
                 resume=not no_resume,
                 tech_filters=tuple(tech),
                 console=console,
+                no_netlas=no_netlas,
             )
         finally:
             _bulk_settings.harvest_timing_profile = _orig_profile
@@ -1596,6 +1755,10 @@ def harvest_emails_command(
                 no_export=no_export,
                 no_extras=no_extras,
                 mode=mode,
+                no_netlas=no_netlas,
+                expand_related=expand_related,
+                expand_related_max=expand_related_max,
+                refresh=refresh,
             )
         finally:
             settings.harvest_timing_profile = original_profile
@@ -1647,6 +1810,10 @@ def harvest_emails_command(
                 no_export=no_export,
                 no_extras=no_extras,
                 mode=mode,
+                no_netlas=no_netlas,
+                expand_related=expand_related,
+                expand_related_max=expand_related_max,
+                refresh=refresh,
             )
         finally:
             _settings.harvest_aggressive = original_aggressive
@@ -2747,6 +2914,9 @@ async def _investigate(
     proxy_fallback_ok: bool = False,
     budget: int | None = None,
     mode: str | None = None,
+    no_netlas: bool = False,
+    org_surface_deep: bool = False,
+    refresh: bool = False,
 ) -> int:
     base_url = get_backend_url()
     managed_proc = await _ensure_server_running(base_url, email)
@@ -2773,6 +2943,9 @@ async def _investigate(
             proxy_fallback_ok,
             budget,
             mode,
+            no_netlas=no_netlas,
+            org_surface_deep=org_surface_deep,
+            refresh=refresh,
         )
     finally:
         if managed_proc is not None:
@@ -2793,6 +2966,9 @@ async def _investigate_run(
     proxy_fallback_ok: bool = False,
     budget: int | None = None,
     mode: str | None = None,
+    no_netlas: bool = False,
+    org_surface_deep: bool = False,
+    refresh: bool = False,
 ) -> int:
     _apply_scrapingant_transport_override(scrapingant_transport_override)
     base_url = get_backend_url()
@@ -2823,6 +2999,12 @@ async def _investigate_run(
         payload["budget_seconds"] = budget
     if mode is not None:
         payload["mode"] = mode
+    if no_netlas:
+        payload["no_netlas"] = True
+    if org_surface_deep:
+        payload["org_surface_deep"] = True
+    if refresh:
+        payload["refresh"] = True
     if enable_modules_list:
         payload["enable_modules"] = enable_modules_list
         err_console.print(f"[dim]Opt-in modules enabled: {', '.join(enable_modules_list)}[/dim]")
@@ -4642,6 +4824,19 @@ def investigate(
             "org-authorized-verification. Default: server config (product_mode)."
         ),
     ),
+    no_netlas: bool = typer.Option(
+        False, "--no-netlas", help="Skip Netlas.io for this run even when a key is set."
+    ),
+    org_surface_deep: bool = typer.Option(
+        False, "--org-surface-deep",
+        help="Netlas: deep org attack-surface (full subdomain enumeration, ≤500); "
+             "credit-heavy. Light context runs by default on corporate domains.",
+    ),
+    refresh: bool = typer.Option(
+        False, "--refresh",
+        help="Force a fresh Netlas fetch past the 30-day enrichment-store gate "
+             "(needs a key). The store is read either way.",
+    ),
 ) -> None:
     """Run a full OSINT investigation against an email address.
     Exit codes: 0=completed 1=failed 2=invalid input 3=server unavailable"""
@@ -4658,6 +4853,12 @@ def investigate(
         raise typer.BadParameter("--proxy-type must be one of: residential, datacenter")
     if proxy_fallback_ok and not use_proxies:
         raise typer.BadParameter("--proxy-fallback-ok is only valid with --use-proxies")
+    if use_proxies:
+        from backend.config import settings as _proxy_settings
+        from cli import partners
+
+        if not partners.proxy_configured(_proxy_settings):
+            partners.show_mango_proxy(err_console)
 
     from backend.core.email_extraction import validate_email
 
@@ -4705,6 +4906,9 @@ def investigate(
                 proxy_fallback_ok,
                 budget,
                 mode,
+                no_netlas=no_netlas,
+                org_surface_deep=org_surface_deep,
+                refresh=refresh,
             )
         )
         if code > max_code:

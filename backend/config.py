@@ -769,6 +769,35 @@ class Settings(BaseSettings):
     hunter_domain_search_limit: int = 25
     hunter_verify_limit: int = 25
 
+    # Netlas.io (BYOK, F1+). The operator's own key; every Netlas feature checks
+    # the single ``netlas_client.netlas_active`` predicate (key set AND not
+    # ``netlas_disabled`` AND no per-run ``--no-netlas``). Without a key nothing
+    # changes and no Netlas call is made. ``netlas_subdomain_cap`` bounds the
+    # subdomains one harvest downloads so huge orgs can't drain credits.
+    netlas_api_key: str | None = None
+    netlas_disabled: bool = False
+    netlas_subdomain_cap: int = 500
+    netlas_timeout_seconds: float = 30.0
+    # F3 certificates: one download per run, bounded to this many documents.
+    # The cert lane is slow (~50s live even for tiny results), hence its own timeout.
+    netlas_cert_doc_cap: int = 1000
+    netlas_cert_timeout_seconds: float = 150.0
+    # F4 responses: the one domain-wide download is bounded to this many docs.
+    netlas_resp_cap: int = 2000
+    # F5 related-domain discovery: max ranked candidates returned (no harvest).
+    netlas_related_cap: int = 50
+    # F5 expansion (opt-in --expand-related): max related domains sub-harvested.
+    netlas_expand_related_max: int = 5
+    # F8 — engine-local Netlas enrichment store. Store reads are unconditional
+    # (key-independent); only the Netlas *fetch* is key- and TTL-gated. A keyed
+    # fetch re-runs only for a subject unseen within the refresh window.
+    enrichment_store_enabled: bool = True
+    netlas_refresh_ttl_days: int = 30
+    # F6: internal deadline for the 3-lookup email footprint. Sits ~5s below the
+    # module's 60s cap (policy ``_MODULE_DEFAULT_TIMEOUTS``) so a slow-Netlas run
+    # returns what it has (and writes its marker) instead of being killed empty.
+    netlas_footprint_deadline_seconds: float = 55.0
+
     # Phase 7A/7B — enrichment waterfall + BYO free-tier connector keys. All
     # keys are the OPERATOR's own (never ours); a connector skips itself when
     # its key is absent or its enable flag is off, so enrichment is inert by

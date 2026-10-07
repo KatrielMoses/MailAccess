@@ -69,6 +69,13 @@ _MODULE_WEIGHT_OVERRIDES: dict[str, int] = {
     "whois_lookup": 5,
     "dns_lookup": 5,
     "shodan": 5,
+    # F6 — public email footprint (where the address appears online). A
+    # social-tier exposure weight; capped below so many response mentions of
+    # one address can't dominate the score.
+    "netlas_email_footprint": 5,
+    # F7 - org posture is context around the employer, not the person, so it
+    # contributes only lightly (and only its CVE findings), hard-capped below.
+    "netlas_org_surface": 2,
 }
 _CONFIDENCE_MULTIPLIER: dict[str, float] = {
     "high": 1.0,
@@ -95,10 +102,16 @@ _MODULE_CAP: dict[str, int] = {
     "xposedornot": 45,
     "intelx_lookup": 50,
     "breach_aggregator": 50,
+    "netlas_email_footprint": 20,
+    "netlas_org_surface": 10,
 }
 _MODULE_DEFAULT_TIMEOUTS: dict[str, int] = {
     "breach_deep": 90,
     "github_commits": 90,
+    # F6 — Netlas call latency swings 0.4s→>10s under load and the certs lookup
+    # alone can take ~19s, so the 30s global cap truncated all three lookups. The
+    # internal deadline (``netlas_footprint_deadline_seconds``) sits 5s below this.
+    "netlas_email_footprint": 60,
 }
 _MODULE_TIMEOUT_FLOORS: dict[str, int] = {
     "account_discovery": 180,

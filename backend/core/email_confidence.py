@@ -127,6 +127,17 @@ SOURCE_WEIGHTS: dict[str, float] = {
     # Direct company-owned identity surfaces.  These are strong evidence
     # of publication, but are kept below cryptographic/developer evidence.
     "security_txt_contact": 0.75,
+    # F2 — a WHOIS registration contact (via Netlas). Public-source provenance,
+    # not a verified mailbox, and often stale: a moderate weight.
+    "whois_contact": 0.50,
+    # F3 — an email on a TLS certificate's subject / SAN (via Netlas). Public
+    # provenance, not mailbox verification (a server cert's E= field is not
+    # CA-validated, unlike ``ca_attested`` S/MIME evidence): moderate.
+    "cert_contact": 0.50,
+    # F4 — an email Netlas extracted from an indexed HTTP response / FTP banner.
+    # No new scoring: the same single-mention crawl tier as Common Crawl.
+    "netlas_response": 0.30,
+    "netlas_ftp_banner": 0.30,
     "structured_page": 0.70,
     "json_ld": 0.70,
     "microdata": 0.70,
@@ -228,6 +239,14 @@ SOURCE_CLASS: dict[str, str] = {
     "dehashed_breach": "breach",
     "snusbase_breach": "breach",
     "security_txt_contact": "direct",
+    # F2 — its own family: a registry record is independent evidence, not a
+    # company-page scrape.
+    "whois_contact": "registry",
+    "cert_contact": "certificate",
+    # One Netlas family for both protocols, so a single scan never counts twice;
+    # like Wayback vs Common Crawl, Netlas is its own crawler and corroborates CC.
+    "netlas_response": "scraping",
+    "netlas_ftp_banner": "scraping",
     "structured_page": "direct",
     "json_ld": "direct",
     "microdata": "direct",

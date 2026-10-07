@@ -206,6 +206,13 @@ _ALL_KNOWN_MODULES: frozenset[str] = frozenset(
         "npm_email",
         "opencorporates",
         "orcid_lookup",
+        # F6 — reverse email footprint (responses / certs / reverse-WHOIS via
+        # Netlas): lawful-public exposure data, like ``whois_lookup`` /
+        # ``security_txt`` → allowed in every mode.
+        "netlas_email_footprint",
+        # F7 - org attack-surface context (subdomains / panels / ports / CVEs
+        # via Netlas): lawful-public infrastructure data, allowed in every mode.
+        "netlas_org_surface",
         "outlook_autodiscover",
         "package_ecosystems",
         "pastebin_search",
@@ -240,6 +247,17 @@ _ALL_KNOWN_MODULES: frozenset[str] = frozenset(
         "xposedornot",
         # --- harvest-only additions (factory registry + tail) ---
         "hunter",
+        # F2 — Netlas WHOIS registration contacts: published registry records,
+        # the same lawful-public basis as ``whois_lookup`` / ``security_txt`` →
+        # in no blocked bucket, allowed in every mode.
+        "netlas_whois_emails",
+        # F3 — Netlas certificate subject/SAN emails: public certificate
+        # transparency-style data, like ``code_and_cert_email`` → allowed in
+        # every mode.
+        "netlas_cert",
+        # F4 — Netlas-indexed public web responses / FTP banners: the same
+        # lawful-public open-web basis as ``commoncrawl_email`` → every mode.
+        "netlas_responses",
         "xposed_or_not",
         "enterprise_net_intel",
         # --- Phase 5C: company discovery (segment -> domain list) ---

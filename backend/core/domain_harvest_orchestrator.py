@@ -3631,6 +3631,8 @@ async def _safe_phase12_run(
     scrape_session: Any | None = None,
     progress_callback: Any | None = None,
     source_telemetry: dict[str, dict[str, Any]] | None = None,
+    netlas_enabled: bool = False,
+    netlas_cert_fetch: Any | None = None,
 ) -> tuple[str, ModuleResult]:
     """Run a Phase 1+2 module with its optional kwargs.
 
@@ -3692,6 +3694,10 @@ async def _safe_phase12_run(
         kwargs["context_vertical"] = context_vertical
         kwargs["scrape_session"] = scrape_session
         kwargs["source_telemetry"] = source_telemetry
+        if netlas_enabled:
+            kwargs["netlas_enabled"] = True
+            if netlas_cert_fetch is not None:
+                kwargs["netlas_cert_fetch"] = netlas_cert_fetch
     accepted = _kwargs_accepted(module)
     filtered = kwargs if accepted is None else {k: v for k, v in kwargs.items() if k in accepted}
 
@@ -4099,6 +4105,11 @@ async def run_domain_harvest(
     force: bool = False,
     on_harvest_end: Any | None = None,
     mode: str | None = None,
+    no_netlas: bool = False,
+    expand_related: bool = False,
+    expand_related_max: int | None = None,
+    refresh: bool = False,
+    _related_discovery: bool = True,
 ) -> DomainHarvestResult:
     """Run all nine harvest modules in the recommended sequence.
 
@@ -4238,7 +4249,24 @@ async def run_domain_harvest(
         from .company_pattern_index import index_version as _cpi_index_version
 
         _cpi_version = _cpi_index_version()
-    request_scope = scope_signature(
+    # BYOK Netlas — the single routing predicate, resolved once per run and
+    # honoured by every Netlas source. F1 rides inside subdomain_intel, so
+    # ``--no-subdomains`` still switches subdomain enumeration off (Netlas
+    # augments, never bypasses it); F2 WHOIS is its own source and still runs.
+    # Injected-module runs are the deterministic test seam: never call Netlas.
+    from .netlas_client import netlas_active
+
+    from .enrichment_store import (
+        ENRICHMENT_SCOPE_KEY,
+        enrichment_scope,
+        load_harvest_blobs,
+        harvest_netlas_answered,
+        mark_blob_netlas_enriched,
+        merge_dedupe_harvest,
+        should_fetch_netlas,
+    )
+
+    _scope_kwargs = dict(
         mode=resolved_mode.value,
         with_subdomains=with_subdomains,
         subdomain_deep=subdomain_deep,
@@ -4258,6 +4286,34 @@ async def run_domain_harvest(
         ),
         company_pattern_index_version=_cpi_version,
     )
+    # F8 store scope is key-INDEPENDENT (``netlas`` stripped) so a keyless run
+    # can serve a keyed run's enrichment blobs.
+    _enrichment_enabled = bool(getattr(settings, "enrichment_store_enabled", True)) and not bool(
+        module_overrides
+    )
+    store_scope = enrichment_scope(_scope_kwargs) if _enrichment_enabled else None
+
+    # F8 fetch gate: a keyed run only calls Netlas for a subject unseen within the
+    # refresh TTL (or forced by --refresh). The STORE READ below is independent of
+    # this and runs regardless of key.
+    netlas_enabled = netlas_active(no_netlas=no_netlas) and not module_overrides
+    if netlas_enabled and _enrichment_enabled:
+        netlas_enabled = await should_fetch_netlas(domain, scope=store_scope, refresh=refresh)
+
+    # Under F8 the native read-first scope is netlas-INDEPENDENT (== store_scope):
+    # a keyed and a keyless run share one native snapshot, and the enrichment
+    # store serves its blobs to both. (Pre-F8 added ``netlas`` here to split them;
+    # F8's merge makes that split unnecessary and it destabilised the cache key
+    # because the TTL gate flips ``netlas_enabled`` between runs.)
+    request_scope = scope_signature(**_scope_kwargs)
+
+    async def _serve_with_store(served: DomainHarvestResult) -> DomainHarvestResult:
+        """Universal final step: merge the deduped union of all historical,
+        scope-compatible blobs into *served*, then attach the live Pro channel."""
+        if _enrichment_enabled:
+            blobs = await load_harvest_blobs(domain, scope=store_scope)
+            served = merge_dedupe_harvest(served, blobs)
+        return await _attach_pro_enrichment(served, domain, resolved_mode)
 
     # Phase 1D — read-first from the unified corpus DB (replaces the per-domain
     # JSON cache as the source of truth). Explicit module injection is the
@@ -4266,12 +4322,16 @@ async def run_domain_harvest(
     corpus_enabled = bool(getattr(settings, "harvest_cache_enabled", True)) and not bool(
         module_overrides
     )
-    if corpus_enabled and not force:
+    # ``--refresh`` forces a fresh Netlas fetch, which only happens inside the
+    # module pipeline — so it must also bypass the native read-first early-return
+    # (otherwise a cache hit would short-circuit before any fetch could run).
+    if corpus_enabled and not force and not refresh:
         cached = await read_fresh_crawl(domain, request_scope)
         if cached is not None:
-            # Pro enrichment is live per-query, so it must apply on cache hits too —
-            # the cached snapshot is native-only (corpus PII is never persisted).
-            return await _attach_pro_enrichment(cached, domain, resolved_mode)
+            # F8: even on a native cache-hit (no modules re-run, no Netlas fetch),
+            # the deduped union of all historical blobs is the universal final
+            # serve. Pro enrichment is live per-query and applied inside.
+            return await _serve_with_store(cached)
 
     # An injected-module run is a deterministic test/embedder seam. Do not
     # launch real network modules that were not explicitly supplied; that
@@ -4359,16 +4419,40 @@ async def run_domain_harvest(
         log_callback=log_callback,
         display_subscriber=display_subscriber,
         on_harvest_end=on_harvest_end,
+        netlas_enabled=netlas_enabled,
     )
     # Phase 2B — stamp the run's product mode onto the result (the harvest run
     # manifest) before write-back, so the corpus snapshot and the ledger record
     # the collection mode. ``resolved_mode`` was computed above with the gate.
     if isinstance(getattr(result, "metadata", None), dict):
         result.metadata["mode"] = resolved_mode.value
+        # F2 — the WHOIS registrant org is run metadata (the F5/F7 seed), never
+        # a lead. Stamped only when Netlas found one, so keyless runs are unchanged.
+        _whois = (getattr(result, "module_results", None) or {}).get("netlas_whois_emails")
+        _org = ((getattr(_whois, "metadata", None) or {}).get("registrant_organization")
+                if _whois is not None else None)
+        if _org:
+            result.metadata["registrant_organization"] = _org
+        # F3 — sister-domain SANs are F5 seeds (metadata only, never harvested).
+        _cert = (getattr(result, "module_results", None) or {}).get("netlas_cert")
+        _seeds = ((getattr(_cert, "metadata", None) or {}).get("related_domain_seeds")
+                  if _cert is not None else None)
+        if _seeds:
+            result.metadata["related_domain_seeds"] = list(_seeds)
         # R1 — persist the full scope signature so a later read-first can require
         # an exact scope match (mode + coverage envelope) before reusing this
         # snapshot, rather than serving it to any request for the same domain.
         result.metadata[SCOPE_SIGNATURE_KEY] = request_scope
+        # F8 — the key-independent enrichment scope, so a later keyless run can
+        # find and merge this blob (the native SCOPE_SIGNATURE_KEY carries netlas).
+        if store_scope is not None:
+            result.metadata[ENRICHMENT_SCOPE_KEY] = store_scope
+    # F5 (Layer 1) - related-domain discovery. Consumes the F2 org + F3 sister
+    # seeds just stamped above; bounded; harvests nothing. Persisted in the
+    # snapshot (not PII). Skipped under module injection and inside an expansion
+    # sub-harvest (``_related_discovery`` False) so it never recurses.
+    if netlas_enabled and _related_discovery and not module_overrides:
+        await _run_related_discovery(result, domain, no_netlas=no_netlas)
     if corpus_enabled:
         from .corpus_store import sanitize_for_persistence, write_back
 
@@ -4379,11 +4463,334 @@ async def run_domain_harvest(
         # renderer; export helpers use the native-only channel. write_back
         # re-sanitises defensively.
         await write_back(domain, sanitize_for_persistence(result))
-    # Attach the serving-only Pro corpus channel AFTER mode-stamping + native-only
-    # persistence, so the RETURNED result is fully finalized (mode + corpus_leads) for
-    # the live renderer. Canonical exports remain native-only. ``on_harvest_end``
-    # remains only the cancellation/partial fallback.
-    return await _attach_pro_enrichment(result, domain, resolved_mode)
+    # F8 — a keyed Netlas fetch actually ran this execution, so tag the snapshot
+    # just written as a Netlas-enrichment blob (starts its 30-day refresh clock).
+    # No-key / native-only runs skip this: they read the store but never write one.
+    # Only when Netlas actually answered (ok/empty, no failed source): a 402/429/
+    # network failure must not latch a 30-day "checked" marker.
+    if (
+        netlas_enabled
+        and _enrichment_enabled
+        and corpus_enabled
+        and harvest_netlas_answered(result)
+    ):
+        await mark_blob_netlas_enriched(domain, scope=store_scope)
+    # F5 (Layer 2) - opt-in expansion. OFF unless --expand-related. Re-harvests
+    # the top-N ranked related domains (recursion disabled, Netlas caps intact);
+    # a mid-expansion quota hit stops cleanly and keeps what was gathered.
+    if netlas_enabled and _related_discovery and expand_related and not module_overrides:
+        await _expand_related_domains(
+            result, resolved_mode, no_netlas=no_netlas, max_domains=expand_related_max,
+        )
+    # F8 universal final serve: the deduped union of all historical, scope-
+    # compatible blobs, then the live Pro channel (attached once, inside).
+    return await _serve_with_store(result)
+
+
+async def _run_related_discovery(
+    result: Any, domain: str, *, no_netlas: bool
+) -> None:
+    """Attach ``metadata['related_domains']`` (ranked, with pivot evidence)."""
+    from .company_discovery import _registrable_domain
+    from .netlas_client import fetch_related_domains
+
+    meta = getattr(result, "metadata", None)
+    if not isinstance(meta, dict):
+        return
+    seeds = {
+        "org": meta.get("registrant_organization"),
+        "cert_sans": meta.get("related_domain_seeds") or [],
+    }
+    try:
+        outcome = await fetch_related_domains(
+            _registrable_domain(domain), getattr(settings, "netlas_api_key", None),
+            seeds=seeds,
+        )
+    except Exception as exc:  # noqa: BLE001 - discovery never breaks a harvest
+        _LOG.warning("related-domain discovery failed for %s: %s", domain, exc)
+        return
+    meta["related_domains"] = {
+        "status": outcome.status,
+        "calls": outcome.calls,
+        "pivots": outcome.pivots,
+        "domains": [
+            {"domain": r.domain, "score": r.score, "evidence": r.evidence}
+            for r in outcome.related
+        ],
+    }
+
+
+async def _expand_related_domains(
+    result: Any, mode: Any, *, no_netlas: bool, max_domains: int | None
+) -> None:
+    """Re-harvest the top-N related domains; attach ``metadata['related_harvests']``."""
+    from .netlas_client import FAILURE_STATUSES
+
+    meta = getattr(result, "metadata", None)
+    if not isinstance(meta, dict):
+        return
+    ranked = (meta.get("related_domains") or {}).get("domains") or []
+    cap = int(max_domains if max_domains is not None
+              else getattr(settings, "netlas_expand_related_max", 5))
+    targets = ranked[: max(0, cap)]
+    harvests: list[dict[str, Any]] = []
+    stopped: str | None = None
+    for cand in targets:
+        rd = str(cand.get("domain") or "")
+        if not rd:
+            continue
+        try:
+            sub = await run_domain_harvest(
+                rd, mode=mode.value if hasattr(mode, "value") else mode,
+                no_netlas=no_netlas, _related_discovery=False, expand_related=False,
+                force=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            harvests.append({"domain": rd, "status": "error", "error": str(exc),
+                             "pivot_evidence": cand.get("evidence"), "emails": []})
+            continue
+        sub_meta = getattr(sub, "metadata", None) or {}
+        leads = [
+            {"email": e.email, "source": sorted(e.found_by_modules),
+             "confidence": e.confidence_label}
+            for e in (getattr(sub, "unique_emails", None) or [])
+        ]
+        harvests.append({
+            "domain": rd, "status": "ok",
+            "pivot_evidence": cand.get("evidence"), "score": cand.get("score"),
+            "related_domain": True, "emails": leads,
+        })
+        # A mid-expansion credit stop: record and halt cleanly.
+        netlas_blocks = [
+            (v or {}).get("netlas", {}).get("status")
+            for k, v in sub_meta.items()
+            if isinstance(v, dict) and isinstance(v.get("netlas"), dict)
+        ]
+        if any(st in FAILURE_STATUSES for st in netlas_blocks):
+            stopped = "netlas_quota_or_error"
+            break
+    meta["related_harvests"] = {
+        "requested": len(targets), "completed": len(harvests),
+        "stopped_early": stopped, "harvests": harvests,
+    }
+
+
+async def _run_netlas_responses(domain: str) -> tuple[str, ModuleResult]:
+    """F4 — emails from Netlas-indexed HTTP responses + FTP banners.
+
+    The Netlas analogue of the native open-web discovery: ONE domain-wide query
+    (1 count + at most 1 download bounded to ``netlas_resp_cap`` docs). Every
+    lead carries the URL it was published at (``source_url``) — provenance is
+    the point. Scored on the existing single-mention crawl tier (the same
+    weight as ``common_crawl_single``); no new scoring.
+    """
+    from .email_confidence import compute_confidence_breakdown, label_for_score
+    from .netlas_client import FAILURE_STATUSES, SOURCE_FTP_BANNER, fetch_response_emails
+
+    name = "netlas_responses"
+    outcome = await fetch_response_emails(domain, getattr(settings, "netlas_api_key", None))
+    metadata: dict[str, Any] = {
+        "domain": domain,
+        "netlas": {
+            "status": outcome.status,
+            "calls": outcome.calls,
+            "error": outcome.error,
+            "total": outcome.total,
+            "resp_cap": outcome.resp_cap,
+            "resp_capped": outcome.capped,
+        },
+        "docs_scanned": outcome.docs,
+        "emails": len({e.email for e in outcome.emails}),
+        "dropped": len(outcome.dropped),
+        "dropped_reasons": dict(outcome.dropped),
+    }
+    if outcome.status in FAILURE_STATUSES:
+        return name, ModuleResult(
+            status=ModuleStatus.PARTIAL,
+            errors=[f"netlas responses: {outcome.error or outcome.status}"],
+            metadata=metadata,
+        )
+    findings: list[dict[str, Any]] = []
+    for mention in outcome.emails:
+        source_type = (
+            "netlas_ftp_banner" if mention.source == SOURCE_FTP_BANNER else "netlas_response"
+        )
+        ci = compute_confidence_breakdown(
+            source_types=[source_type], is_smtp_verified=False, is_ca_attested=False
+        )
+        local, host = mention.email.rsplit("@", 1)
+        findings.append(
+            {
+                "platform": mention.source,
+                "profile_url": mention.source_url,
+                "username": local,
+                "confidence": label_for_score(ci.score).lower(),
+                "signal_source": mention.source,
+                "metadata": {
+                    "email": mention.email,
+                    "on_domain": host == domain or host.endswith("." + domain),
+                    "source_type": source_type,
+                    "provenance": "public_source",
+                    "source_url": mention.source_url,
+                    "source_urls": list(mention.urls),
+                    "on_target_host": mention.on_target_host,
+                    "last_seen_timestamp": mention.last_seen,
+                    "confidence_score": round(ci.score, 4),
+                    "confidence_breakdown": ci.breakdown,
+                },
+            }
+        )
+    return name, ModuleResult(
+        status=ModuleStatus.SUCCESS if findings else ModuleStatus.PARTIAL,
+        findings=findings,
+        metadata=metadata,
+    )
+
+
+async def _run_netlas_cert(domain: str, cert_future: Any) -> tuple[str, ModuleResult]:
+    """F3 — Netlas certificate emails (+ sister-domain seeds) as an inline source.
+
+    Awaits the run's single shared certificate fetch (``cert_future``, shielded
+    so this source's timeout never cancels the SAN hosts ``subdomain_intel`` is
+    waiting on). Subject / rfc822Name emails become ``source="cert"`` leads at a
+    moderate, public-source weight; sister registrable domains on non-shared
+    certs are recorded as F5 seeds only — never harvested here.
+    """
+    import asyncio as _asyncio
+
+    from .email_confidence import compute_confidence_breakdown, label_for_score
+    from .netlas_client import FAILURE_STATUSES
+
+    name = "netlas_cert"
+    outcome = await _asyncio.shield(cert_future)
+    netlas_meta = {
+        "status": outcome.status,
+        "calls": outcome.calls,
+        "error": outcome.error,
+        "docs": outcome.docs,
+        "doc_cap": outcome.doc_cap,
+        "docs_capped": outcome.capped,
+    }
+    metadata: dict[str, Any] = {
+        "domain": domain,
+        "netlas": netlas_meta,
+        "emails": len(outcome.emails),
+        "in_scope_san_hosts": len(outcome.in_scope_hosts),
+        "shared_certs_skipped_for_seeds": outcome.shared_certs,
+        "related_domain_seeds": [
+            {"domain": d, "certs": n} for d, n in outcome.related_domains.items()
+        ],
+        "dropped": len(outcome.dropped),
+        "dropped_reasons": dict(outcome.dropped),
+    }
+    if outcome.status in FAILURE_STATUSES:
+        return name, ModuleResult(
+            status=ModuleStatus.PARTIAL,
+            errors=[f"netlas certs: {outcome.error or outcome.status}"],
+            metadata=metadata,
+        )
+    ci = compute_confidence_breakdown(
+        source_types=["cert_contact"], is_smtp_verified=False, is_ca_attested=False
+    )
+    findings: list[dict[str, Any]] = []
+    for contact in outcome.emails:
+        local, host = contact.email.rsplit("@", 1)
+        findings.append(
+            {
+                "platform": "cert",
+                "profile_url": "",
+                "username": local,
+                "confidence": label_for_score(ci.score).lower(),
+                "signal_source": "cert",
+                "metadata": {
+                    "email": contact.email,
+                    "on_domain": host == domain or host.endswith("." + domain),
+                    "source_type": "cert_contact",
+                    "provenance": "public_source",
+                    "cert_fields": list(contact.fields),
+                    "cert_count": contact.certs,
+                    "last_seen_timestamp": contact.last_seen,
+                    "confidence_score": round(ci.score, 4),
+                    "confidence_breakdown": ci.breakdown,
+                },
+            }
+        )
+    return name, ModuleResult(
+        status=ModuleStatus.SUCCESS if findings else ModuleStatus.PARTIAL,
+        findings=findings,
+        metadata=metadata,
+    )
+
+
+async def _run_netlas_whois(domain: str) -> tuple[str, ModuleResult]:
+    """F2 — Netlas WHOIS contact emails as an inline harvest source.
+
+    Like :func:`_run_hunter`, not a BaseModule (that registry also feeds every
+    investigation). The caller only schedules this when the Netlas routing
+    predicate is on. Exactly one ``whois_domains`` call, for the registrable
+    apex — subdomains share the parent registration. Emails become
+    ``source="whois"`` leads at a moderate, public-source weight; the registrant
+    organization is metadata only (the F5/F7 seed — never acted on here).
+    """
+    from .company_discovery import _registrable_domain
+    from .email_confidence import compute_confidence_breakdown, label_for_score
+    from .netlas_client import FAILURE_STATUSES, fetch_whois
+
+    name = "netlas_whois_emails"
+    apex = _registrable_domain(domain)
+    outcome = await fetch_whois(apex, getattr(settings, "netlas_api_key", None))
+    netlas_meta = {"status": outcome.status, "calls": outcome.calls, "error": outcome.error}
+    metadata: dict[str, Any] = {
+        "domain": domain,
+        "whois_domain": apex,
+        "netlas": netlas_meta,
+        "registrant_organization": outcome.organization,
+        "emails": len(outcome.emails),
+        "dropped": len(outcome.dropped),
+        "dropped_reasons": dict(outcome.dropped),
+    }
+    if outcome.status in FAILURE_STATUSES:
+        return name, ModuleResult(
+            status=ModuleStatus.PARTIAL,
+            errors=[f"netlas whois: {outcome.error or outcome.status}"],
+            metadata=metadata,
+        )
+
+    findings: list[dict[str, Any]] = []
+    ci = compute_confidence_breakdown(
+        source_types=["whois_contact"], is_smtp_verified=False, is_ca_attested=False
+    )
+    # When Netlas last observed the record — drives freshness in aggregation.
+    record = outcome.record or {}
+    observed = str(record.get("@timestamp") or record.get("last_updated") or "") or None
+    for contact in outcome.emails:
+        local, host = contact.email.rsplit("@", 1)
+        findings.append(
+            {
+                "platform": "whois",
+                "profile_url": "",
+                "username": local,
+                "confidence": label_for_score(ci.score).lower(),
+                # Published under ``source="whois"`` in the signal pool.
+                "signal_source": "whois",
+                "metadata": {
+                    "email": contact.email,
+                    "on_domain": host == domain or host.endswith("." + domain),
+                    "source_type": "whois_contact",
+                    "provenance": "public_source",
+                    "whois_roles": list(contact.roles),
+                    "whois_domain": apex,
+                    "last_seen_timestamp": observed,
+                    "confidence_score": round(ci.score, 4),
+                    "confidence_breakdown": ci.breakdown,
+                },
+            }
+        )
+    return name, ModuleResult(
+        status=ModuleStatus.SUCCESS if findings else ModuleStatus.PARTIAL,
+        findings=findings,
+        metadata=metadata,
+    )
 
 
 async def _run_hunter(
