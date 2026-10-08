@@ -31,10 +31,11 @@ class Partner:
     # Named ANSI colour for 16-colour terminals, where Rich's nearest-match
     # downgrade of the hex can land on the wrong hue (amber → red).
     low_color: str
+    url_override: str = ""
 
     @property
     def url(self) -> str:
-        return f"https://{self.domain}"
+        return self.url_override or f"https://{self.domain}"
 
 
 NETLAS = Partner(
@@ -51,6 +52,7 @@ MANGO = Partner(
     domain="mangoproxy.com",
     color="#EF9F27",
     low_color="yellow",
+    url_override="https://mangoproxy.com/?utm_source=katrielmoses&utm_medium=partner&utm_campaign=katrielmoses_github",
 )
 
 _no_banner = False
