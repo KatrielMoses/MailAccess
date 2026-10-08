@@ -5,6 +5,7 @@ from .base import BaseModule, ModuleResult, ModuleStatus
 
 class HIBPModule(BaseModule):
     name = "hibp"
+    email_linked = True
     description = "Check if the email appears in known data breaches via the HIBP v3 API."
     requires_key = True
 

@@ -28,6 +28,7 @@ def _extract_email(obj: Any) -> str:
 
 class NpmDiscoveryModule(BaseModule):
     name = "npm_discovery"
+    email_linked = True
     description = "Find npm packages authored or maintained by the target email address."
     requires_key = False
 

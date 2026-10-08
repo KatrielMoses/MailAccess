@@ -48,6 +48,7 @@ def _hosting_kind(domain: str, mx_hosts: list[str]) -> str | None:
 
 class GoogleAccountIntelModule(BaseModule):
     name = "google_account_intel"
+    email_linked = True
     description = (
         "Native, unauthenticated Google-account intelligence: Gmail/Workspace account "
         "existence via MX/domain plus best-effort public GAIA profile (name, avatar). "

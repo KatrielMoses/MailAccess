@@ -9,6 +9,7 @@ _REPUTATION_CONFIDENCE = {"high": "high", "medium": "medium", "low": "low", "non
 
 class EmailRepModule(BaseModule):
     name = "emailrep"
+    email_linked = True
     description = "Query EmailRep.io for reputation score, risk flags, and linked profile data."
     requires_key = False  # Free tier works without a key; key raises rate limits
 

@@ -35,12 +35,17 @@ class BaseModule(ABC):
         name         – unique slug used in API responses and DB records
         description  – one-line human-readable purpose
         requires_key – True if the module will skip without an API key
+        email_linked – True if the module's lookup key is the email itself, so
+                       its findings are tied to that email (not inferred from a
+                       username/name/domain guess). Stamped onto every finding
+                       as ``email_linked`` unless the builder already set it.
     """
 
     name: str
     description: str
     requires_key: bool = False
     priority: int = 100
+    email_linked: bool = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -73,6 +78,10 @@ class BaseModule(ABC):
                 raise AssertionError(
                     f"Module returned {type(result).__name__} instead of ModuleResult"
                 )
+            default_linked = bool(getattr(self, "email_linked", False))
+            for finding in result.findings:
+                if isinstance(finding, dict):
+                    finding.setdefault("email_linked", default_linked)
             return result
 
         _wrapped_run.__mailaccess_wrapped__ = True  # type: ignore[attr-defined]

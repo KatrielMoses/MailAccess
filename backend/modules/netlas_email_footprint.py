@@ -38,6 +38,7 @@ from .base import BaseModule, ModuleResult, ModuleStatus
 
 class NetlasEmailFootprintModule(BaseModule):
     name = "netlas_email_footprint"
+    email_linked = True
     description = "Where an email appears online via Netlas (responses, certs, reverse-WHOIS)."
     requires_key = True
 

@@ -28,6 +28,7 @@ def _looks_like_hash(value: str) -> bool:
 
 class BreachDirectoryModule(BaseModule):
     name = "breachdirectory"
+    email_linked = True
     description = (
         "Search breach records via BreachDirectory (RapidAPI). "
         "Requires BREACHDIRECTORY_API_KEY."

@@ -59,6 +59,7 @@ def _finding(site: BreachSite, method: str) -> dict[str, Any]:
 
 class BreachDeepModule(BaseModule):
     name = "breach_deep"
+    email_linked = True
     description = "Probe account existence on the highest-severity breached websites from HIBP."
     requires_key = False
 

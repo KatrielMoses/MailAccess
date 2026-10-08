@@ -6,6 +6,7 @@ from .base import BaseModule, ModuleResult, ModuleStatus
 
 class EmailCredibilityModule(BaseModule):
     name = "email_credibility"
+    email_linked = True
     description = "Normalize the email, detect aliases and disposable domains, and assess credibility."
     requires_key = False
     priority = 0

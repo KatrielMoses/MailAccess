@@ -315,6 +315,7 @@ def _build_finding(
 
 class XposedOrNotModule(BaseModule):
     name = "xposedornot"
+    email_linked = True
     description = (
         "Check XposedOrNot's public breach corpus for direct breach hits and detailed analytics."
     )

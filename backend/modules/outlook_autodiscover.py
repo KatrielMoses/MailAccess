@@ -306,6 +306,7 @@ def reconcile_autodiscover(
 
 class OutlookAutodiscoverModule(BaseModule):
     name = "outlook_autodiscover"
+    email_linked = True
     description = (
         "Confirm a consumer Microsoft mailbox (@outlook.com / @hotmail.com / "
         "@live.com / @msn.com) via the unauthenticated Autodiscover v1 endpoint."

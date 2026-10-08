@@ -11,6 +11,7 @@ from .base import BaseModule, ModuleResult, ModuleStatus
 
 class SocialModule(BaseModule):
     name = "social"
+    email_linked = True
     description = "Check social platform account existence via YAML-defined probes."
     requires_key = False
 

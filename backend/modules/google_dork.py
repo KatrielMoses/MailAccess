@@ -36,6 +36,7 @@ def _infer_platform(url: str) -> str:
 
 class GoogleDorkModule(BaseModule):
     name = "google_dork"
+    email_linked = True
     description = "Run Google dork queries via SerpAPI to surface email mentions across LinkedIn, GitHub, Pastebin, and the open web."
     requires_key = True
 

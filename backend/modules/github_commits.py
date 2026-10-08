@@ -33,6 +33,7 @@ def _is_rate_limited(response: httpx.Response) -> bool:
 
 class GitHubCommitsModule(BaseModule):
     name = "github_commits"
+    email_linked = True
     description = (
         "Search GitHub commit history for direct author-email matches, related "
         "GitHub users, and deep profile extraction."

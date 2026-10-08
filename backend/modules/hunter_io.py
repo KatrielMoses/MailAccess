@@ -24,6 +24,7 @@ from .base import BaseModule, ModuleResult, ModuleStatus
 
 class HunterIoModule(BaseModule):
     name = "hunter_io"
+    email_linked = True
     description = "Verify email deliverability and find associated domain info via Hunter.io."
     requires_key = True
 

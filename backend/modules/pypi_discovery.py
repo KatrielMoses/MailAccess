@@ -25,6 +25,7 @@ def _emails_match(a: str, b: str) -> bool:
 
 class PyPIDiscoveryModule(BaseModule):
     name = "pypi_discovery"
+    email_linked = True
     description = "Find PyPI packages authored or maintained by the target email address."
     requires_key = False
 

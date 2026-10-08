@@ -82,6 +82,9 @@ def _write_cache(email: str, result: ModuleResult) -> None:
         _LOG.debug("account_discovery: cache write failed (%s)", exc)
 
 
+_PROFILE_KEYS = {"name", "username", "avatar", "bio", "location", "profile_url"}
+
+
 def _make_finding(record: dict[str, Any]) -> dict[str, Any]:
     domain = record.get("domain") or ""
     profile_url = f"https://{domain}" if domain else None
@@ -106,6 +109,18 @@ def _make_finding(record: dict[str, Any]) -> dict[str, Any]:
     # account. platform_dedup can still promote it to ``confirmed`` on dual-confirmation.
     meta.setdefault("verification", "unverified")
 
+    # Hoist profile fields from ``extras`` to top-level metadata so consumers can
+    # read ``metadata.name`` / ``metadata.avatar`` without knowing which site it came
+    # from. A new site only needs ``extract_fields`` in mailaccess_sites.json.
+    extras = meta.get("extras")
+    if isinstance(extras, dict):
+        for key in _PROFILE_KEYS & extras.keys():
+            if extras[key] not in (None, ""):
+                meta[key] = extras[key]
+        # Gravatar's extract_fields names the display name ``full_name``.
+        if "name" not in meta and extras.get("full_name"):
+            meta["name"] = extras["full_name"]
+
     return {
         "platform": record.get("name", "unknown"),
         "profile_url": profile_url,
@@ -113,11 +128,13 @@ def _make_finding(record: dict[str, Any]) -> dict[str, Any]:
         "confidence": "high",
         "verification": "unverified",
         "source": "account_discovery",
+        "email_linked": True,
     }
 
 
 class AccountDiscoveryModule(BaseModule):
     name = "account_discovery"
+    email_linked = True
     description = (
         "Probe 250+ platforms via MailAccess's native account-existence engine "
         "to detect account registration (no login attempt). "

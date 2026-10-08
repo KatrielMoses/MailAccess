@@ -16,6 +16,7 @@ _ABOUT_ME_MAX_LEN = 500
 
 class GravatarLookupModule(BaseModule):
     name = "gravatar_lookup"
+    email_linked = True
     description = (
         "Look up the target email's Gravatar profile for display name, bio, avatar, "
         "and linked social accounts."

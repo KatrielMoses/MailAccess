@@ -11,6 +11,7 @@ _HEADERS = {"User-Agent": "MailAccess OSINT Tool"}
 
 class HudsonRockModule(BaseModule):
     name = "hudson_rock"
+    email_linked = True
     description = (
         "Check if the email appears in infostealer credential logs via Hudson Rock Cavalier."
     )

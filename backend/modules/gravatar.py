@@ -31,6 +31,7 @@ def _identify_platform(url: str) -> str:
 
 class GravatarModule(BaseModule):
     name = "gravatar"
+    email_linked = True
     description = (
         "Deep Gravatar profile extraction: name, location, bio, verified accounts, linked URLs."
     )

@@ -22,6 +22,7 @@ _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z'`.-]+(?:\s+[A-Za-z][A-Za-z'`.-]+)+$")
 
 class PGPKeyserverModule(BaseModule):
     name = "pgp_keyserver"
+    email_linked = True
     description = "Look up public PGP keys and extract real names from key UIDs."
     requires_key = False
     default_enabled = True

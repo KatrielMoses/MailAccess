@@ -581,6 +581,7 @@ async def harvest_domain_emails(
 # ============================================================
 class WaybackModule(BaseModule):
     name = "wayback"
+    email_linked = True
     description = (
         "Search the Internet Archive Wayback Machine for historical public mentions "
         "of an email address."

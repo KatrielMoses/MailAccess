@@ -37,6 +37,7 @@ def _is_generic_source_label(name: str) -> bool:
 
 class LeakCheckModule(BaseModule):
     name = "leakcheck"
+    email_linked = True
     description = "Check LeakCheck's public API for direct email-to-breach associations."
     requires_key = False
 

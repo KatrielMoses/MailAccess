@@ -16,6 +16,7 @@ class ORCIDLookupModule(BaseModule):
     name = "orcid_lookup"
     description = "Search public ORCID records for researcher names and contact links."
     requires_key = False
+    email_linked = True
     default_enabled = True
 
     async def run(self, email: str) -> ModuleResult:

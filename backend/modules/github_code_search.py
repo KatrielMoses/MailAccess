@@ -35,6 +35,7 @@ def _is_noise_email(addr: str) -> bool:
 
 class GitHubCodeSearchModule(BaseModule):
     name = "github_code_search"
+    email_linked = True
     description = (
         "Search public GitHub code and gists for the target email and surface associates."
     )

@@ -48,6 +48,7 @@ def _media_label(media: int) -> str:
 
 class IntelxLookupModule(BaseModule):
     name = "intelx_lookup"
+    email_linked = True
     description = (
         "Email leak/paste/darknet correlation via IntelligenceX "
         "(https://intelx.io). Requires a free-tier API key — set INTELX_API_KEY "

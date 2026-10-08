@@ -730,6 +730,7 @@ class BreachAggregatorModule(BaseModule):
     """Post-primary breach aggregation module for the investigate pipeline."""
 
     name = "breach_aggregator"
+    email_linked = True
     description = (
         "Aggregates breach records for an email across Scylla.so, HIBP pastes, "
         "Dehashed and Snusbase. Password/hash existence is recorded as boolean "

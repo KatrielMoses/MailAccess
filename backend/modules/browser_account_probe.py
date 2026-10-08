@@ -23,6 +23,7 @@ _LOG = logging.getLogger(__name__)
 
 class BrowserAccountProbeModule(BaseModule):
     name = "browser_account_probe"
+    email_linked = True
     description = (
         "Headless-browser email-existence oracles (email-first login + "
         "forgot-password) for platforms with JS-only signals."

@@ -49,6 +49,7 @@ def _derive_platform(url: str, paste_id: str) -> tuple[str, str]:
 
 class PastebinSearchModule(BaseModule):
     name = "pastebin_search"
+    email_linked = True
     description = (
         "Search public paste sites (Pastebin, paste.ee, etc.) via psbdmp.ws for the target email."
     )
