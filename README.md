@@ -1,3 +1,11 @@
+<p align="right">
+  <sub>Built by <b>Katriel Moses</b>.</sub><br>
+  <sub>I post OSINT breakdowns and build logs,</sub><br>
+  <sub>and ship updates here.</sub><br>
+  <a href="https://x.com/delzynkatriel"><img src="https://img.shields.io/badge/@delzynkatriel-0D0D0D?style=flat&logo=x&logoColor=white&labelColor=555555" alt="X: @delzynkatriel"></a>
+  <a href="https://www.linkedin.com/in/katriel-moses"><img src="https://img.shields.io/badge/LinkedIn-%2Fin%2Fkatriel--moses-0D0D0D?style=flat" alt="LinkedIn: /in/katriel-moses"></a>
+</p>
+
 <p align="center">
   <img src="assets/terminal-banner.svg" alt="mailaccess" width="640">
 </p>
@@ -6,7 +14,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-0D0D0D.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10%2B-0D0D0D.svg" alt="Python 3.10+"></a>
   <a href="docker-compose.yml"><img src="https://img.shields.io/badge/Docker-Compose-0D0D0D.svg" alt="Docker Compose"></a>
-  <a href="https://pypi.org/project/mailaccess/"><img src="https://img.shields.io/static/v1?label=PyPI&message=0.18.1&color=8A1C2B&logo=pypi&logoColor=white" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/mailaccess/"><img src="https://img.shields.io/pypi/v/mailaccess?label=PyPI&color=8A1C2B&logo=pypi&logoColor=white" alt="PyPI version"></a>
   <a href="https://pepy.tech/projects/mailaccess"><img src="https://img.shields.io/pepy/dt/mailaccess?color=8A1C2B&amp;label=downloads" alt="PyPI downloads"></a>
 </p>
 
