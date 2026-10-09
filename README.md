@@ -1,7 +1,5 @@
 <p align="right">
-  <sub>Built by <b>Katriel Moses</b>.</sub><br>
-  <sub>I post OSINT breakdowns and build logs,</sub><br>
-  <sub>and ship updates here.</sub><br>
+  <sub>Let's connect</sub><br>
   <a href="https://x.com/delzynkatriel"><img src="https://img.shields.io/badge/@delzynkatriel-0D0D0D?style=flat&logo=x&logoColor=white&labelColor=555555" alt="X: @delzynkatriel"></a>
   <a href="https://www.linkedin.com/in/katriel-moses"><img src="https://img.shields.io/badge/LinkedIn-%2Fin%2Fkatriel--moses-0D0D0D?style=flat" alt="LinkedIn: /in/katriel-moses"></a>
 </p>
