@@ -27,6 +27,7 @@ Self-hostable OSINT platform for investigating email addresses. Fan out across b
 
 <a href="https://netlas.io"><img src="assets/sponsor-netlas.png" alt="Netlas.io — map any target's attack surface in seconds" width="100%"></a>
 <a href="https://mangoproxy.com/?utm_source=katrielmoses&utm_medium=partner&utm_campaign=katrielmoses_github"><img src="assets/sponsor-mango.png" alt="MangoProxy — residential IPs that keep big harvests clean" width="100%"></a>
+<a href="https://www.swiftproxy.net/?ref=MailAccess"><img src="assets/sponsor-swiftproxy.png" alt="Swiftproxy — reliable residential IPs for scalable email harvesting" width="100%"></a>
 
 Built for security researchers, OSINT analysts, and penetration testers operating under authorization. Read [DISCLAIMER.md](DISCLAIMER.md) before use.
 
