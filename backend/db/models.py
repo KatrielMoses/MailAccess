@@ -597,3 +597,14 @@ class ProKey(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
+
+
+class IpIntelCache(Base):
+    """Shared, key-independent cache of clean IP enrichment answers."""
+
+    __tablename__ = "ip_intel_cache"
+    ip: Mapped[str] = mapped_column(String, primary_key=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tier: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    empty: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

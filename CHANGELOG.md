@@ -1,5 +1,12 @@
 # Changelog
 
+### 0.18.6 (2026-10-13)
+
+- Add optional BYOK ipgeolocation.io enrichment for existing breach, domain and harvest IPs: location, owner, hosting/risk flags and abuse contact, with nulls for unavailable plan fields.
+- Share a 30-day IP cache across investigate and harvest, including empty answers and free-to-paid refresh. No key makes no API calls; cached data stays available.
+- Add `mailaccess ipgeo set-key|test|status|enable|disable`, `--no-ipgeo`, and partner placements. IP context has zero exposure weight.
+- `--refresh` now refreshes IP data too, including harvests that hit their time limit. A quota-exhausted key pauses for an hour and then retries instead of staying off until restart.
+
 ### 0.18.1 (2026-09-30)
 
 - Restore the pricing and corpus work that shipped in 0.17.7/0.17.8 but was

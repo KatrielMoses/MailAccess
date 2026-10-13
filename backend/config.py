@@ -774,6 +774,13 @@ class Settings(BaseSettings):
     # ``netlas_disabled`` AND no per-run ``--no-netlas``). Without a key nothing
     # changes and no Netlas call is made. ``netlas_subdomain_cap`` bounds the
     # subdomains one harvest downloads so huge orgs can't drain credits.
+    ipgeolocation_api_key: str | None = None
+    ipgeo_disabled: bool = False
+    ipgeo_investigate_ip_cap: int = 10
+    ipgeo_harvest_ip_cap: int = 50
+    ipgeo_timeout_seconds: float = 10.0
+    ipgeo_refresh_ttl_days: int = 30
+
     netlas_api_key: str | None = None
     netlas_disabled: bool = False
     netlas_subdomain_cap: int = 500

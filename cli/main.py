@@ -128,6 +128,10 @@ _API_KEYS: list[tuple[str, str, str]] = [
     ("SHODAN_API_KEY", "domain_intel", "shodan.io"),
     ("EMAILREP_API_KEY", "emailrep", "emailrep.io"),
     ("HUNTER_IO_API_KEY", "hunter_io", "hunter.io"),
+    (
+        "IPGEOLOCATION_API_KEY", "ipgeo",
+        "ipgeolocation.io — existing IP enrichment (optional, BYOK)",
+    ),
     ("NETLAS_API_KEY", "netlas", "netlas.io — subdomain enumeration (optional, BYOK)"),
     ("GOOGLE_CSE_API_KEY", "email_search_dork", "Google CSE (programableseach.google.com)"),
     ("GOOGLE_CSE_CX", "email_search_dork", "Google CSE Engine ID"),
@@ -1041,6 +1045,101 @@ def netlas_status() -> None:
     console.print(table)
 
 
+ipgeo_app = typer.Typer(
+    name="ipgeo",
+    help="Configure the optional ipgeolocation.io key (BYOK). Without a key nothing changes.",
+    invoke_without_command=True,
+    no_args_is_help=True,
+)
+app.add_typer(ipgeo_app)
+
+
+@ipgeo_app.command("set-key")
+def ipgeo_set_key(
+    key: str | None = typer.Argument(
+        None,
+        help="Your ipgeolocation.io API key. Omit it to be prompted (hidden input), "
+        "or pass '-' to read it from stdin — keeps it out of shell history.",
+    ),
+) -> None:
+    """Save your ipgeolocation.io API key to ~/.mailaccess/.env."""
+    if key == "-":
+        key = sys.stdin.readline()
+    elif key is None:
+        key = typer.prompt("ipgeolocation API key", hide_input=True)
+    key = (key or "").strip()
+    if not key:
+        err_console.print("ipgeolocation key is empty.", markup=False)
+        raise typer.Exit(2)
+    _set_env_key("IPGEOLOCATION_API_KEY", key)
+    settings = _reload_settings()
+    console.print("[green]✓ IPGEOLOCATION_API_KEY saved to ~/.mailaccess/.env[/green]")
+    if settings.ipgeo_disabled:
+        console.print(
+            "[yellow]ipgeolocation is disabled — run `mailaccess ipgeo enable` to use it.[/yellow]"
+        )
+
+
+@ipgeo_app.command("test")
+def ipgeo_test() -> None:
+    """Check plan tier and report credits charged for one IP lookup."""
+    from backend.core.ipgeo_client import check_key
+
+    settings = _reload_settings()
+    if not settings.ipgeolocation_api_key:
+        console.print("No ipgeolocation key set — `mailaccess ipgeo set-key`.", markup=False)
+        raise typer.Exit(1)
+    result = asyncio.run(check_key(str(settings.ipgeolocation_api_key)))
+    console.print(
+        f"Plan: {result['tier'] or 'unknown'} · Credits charged: {result['credits']:g}",
+        markup=False,
+    )
+    if not result["ok"]:
+        console.print("Lookup failed; check the key, quota and connection.", markup=False)
+        raise typer.Exit(1)
+
+
+@ipgeo_app.command("disable")
+def ipgeo_disable() -> None:
+    """Disable fresh IP lookups, retaining the key and cached answers."""
+    _set_env_key("IPGEO_DISABLED", "true")
+    _reload_settings()
+    console.print("[green]✓ Fresh IP lookups disabled; cached answers remain available.[/green]")
+
+
+@ipgeo_app.command("enable")
+def ipgeo_enable() -> None:
+    """Turn ipgeolocation back on (needs a key — `mailaccess ipgeo set-key <KEY>`)."""
+    _set_env_key("IPGEO_DISABLED", "false")
+    settings = _reload_settings()
+    if settings.ipgeolocation_api_key:
+        console.print("[green]✓ ipgeolocation enabled.[/green]")
+    else:
+        from backend.core.ipgeo_client import IPGEO_SIGNUP_URL
+
+        console.print(
+            "[yellow]ipgeolocation enabled, but no key is set — get a free one at "
+            f"{IPGEO_SIGNUP_URL} then `mailaccess ipgeo set-key <KEY>`.[/yellow]"
+        )
+
+
+@ipgeo_app.command("status")
+def ipgeo_status() -> None:
+    """Show whether ipgeolocation is configured and active."""
+    from backend.core.ipgeo_client import ipgeo_active
+
+    settings = _reload_settings()
+    table = Table(title="ipgeolocation.io")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    key = str(settings.ipgeolocation_api_key or "")
+    table.add_row("api_key", f"[green]set[/green] (…{key[-4:]})" if key else "[dim]none[/dim]")
+    table.add_row("disabled", "yes" if settings.ipgeo_disabled else "no")
+    table.add_row("harvest_ip_cap", str(settings.ipgeo_harvest_ip_cap))
+    table.add_row("active", "[green]yes[/green]" if ipgeo_active() else "no")
+    console.print(table)
+
+
 from cli.platform_health import platform_health_app  # noqa: E402
 
 app.add_typer(platform_health_app)
@@ -1483,6 +1582,9 @@ def harvest_emails_command(
     no_netlas: bool = typer.Option(
         False, "--no-netlas", help="Skip Netlas.io for this run even when a key is set."
     ),
+    no_ipgeo: bool = typer.Option(
+        False, "--no-ipgeo", help="Skip fresh ipgeolocation.io calls for this run."
+    ),
     expand_related: bool = typer.Option(
         False, "--expand-related",
         help="Netlas: also harvest the top related domains discovered via org/"
@@ -1494,7 +1596,7 @@ def harvest_emails_command(
     ),
     refresh: bool = typer.Option(
         False, "--refresh",
-        help="Force a fresh Netlas fetch past the 30-day enrichment-store gate "
+        help="Force fresh Netlas and ipgeolocation.io lookups past their 30-day caches "
              "(needs a key; dim no-op without one). The store is still read either way.",
     ),
     subdomain_calibrate: bool = typer.Option(
@@ -1694,6 +1796,7 @@ def harvest_emails_command(
                 tech_filters=tuple(tech),
                 console=console,
                 no_netlas=no_netlas,
+                no_ipgeo=no_ipgeo,
             )
         finally:
             _bulk_settings.harvest_timing_profile = _orig_profile
@@ -1756,6 +1859,7 @@ def harvest_emails_command(
                 no_extras=no_extras,
                 mode=mode,
                 no_netlas=no_netlas,
+                no_ipgeo=no_ipgeo,
                 expand_related=expand_related,
                 expand_related_max=expand_related_max,
                 refresh=refresh,
@@ -1811,6 +1915,7 @@ def harvest_emails_command(
                 no_extras=no_extras,
                 mode=mode,
                 no_netlas=no_netlas,
+                no_ipgeo=no_ipgeo,
                 expand_related=expand_related,
                 expand_related_max=expand_related_max,
                 refresh=refresh,
@@ -2747,6 +2852,42 @@ def _extract_finding_line(finding: dict[str, Any], default_name: str) -> tuple[s
         or default_name
     )
     platform = _platform_display_name(raw_platform)
+    if raw_platform == "ip_intel":
+        meta = finding.get("metadata") or {}
+        location = ", ".join(
+            str(meta[field]) for field in ("city", "region", "country") if meta.get(field)
+        )
+        parts = [str(meta.get("ip") or "")]
+        parts.extend(
+            str(value)
+            for value in (
+                location,
+                meta.get("company") or meta.get("org"),
+                meta.get("cloud_provider"),
+            )
+            if value
+        )
+        if meta.get("source_breach"):
+            parts.append(f"breach: {meta['source_breach']}")
+        if meta.get("threat_score") is not None:
+            parts.append(f"threat score: {meta['threat_score']}")
+        flags = [
+            label
+            for field, label in (
+                ("is_vpn", "VPN"),
+                ("is_proxy", "proxy"),
+                ("is_tor", "Tor"),
+                ("is_residential_proxy", "residential proxy"),
+                ("is_relay", "relay"),
+            )
+            if meta.get(field) is True
+        ]
+        parts.extend(flags)
+        if meta.get("abuse_email"):
+            parts.append(f"abuse: {meta['abuse_email']}")
+        if meta.get("from_cache"):
+            parts.append("cached")
+        return "IP intelligence", " · ".join(parts)
     url_like = (
         finding.get("url")
         or finding.get("profile_url")
@@ -2915,6 +3056,7 @@ async def _investigate(
     budget: int | None = None,
     mode: str | None = None,
     no_netlas: bool = False,
+    no_ipgeo: bool = False,
     org_surface_deep: bool = False,
     refresh: bool = False,
 ) -> int:
@@ -2944,6 +3086,7 @@ async def _investigate(
             budget,
             mode,
             no_netlas=no_netlas,
+            no_ipgeo=no_ipgeo,
             org_surface_deep=org_surface_deep,
             refresh=refresh,
         )
@@ -2967,6 +3110,7 @@ async def _investigate_run(
     budget: int | None = None,
     mode: str | None = None,
     no_netlas: bool = False,
+    no_ipgeo: bool = False,
     org_surface_deep: bool = False,
     refresh: bool = False,
 ) -> int:
@@ -3001,6 +3145,8 @@ async def _investigate_run(
         payload["mode"] = mode
     if no_netlas:
         payload["no_netlas"] = True
+    if no_ipgeo:
+        payload["no_ipgeo"] = True
     if org_surface_deep:
         payload["org_surface_deep"] = True
     if refresh:
@@ -3789,6 +3935,9 @@ async def _investigate_run(
                         ) == "account_discovery":
                             platform = platform.title()
                             detail_text = "[dim]email registration signal[/dim]"
+                        elif module_name == "ip_intel":
+                            symbol, style = "·", "cyan"
+                            detail_text = detail
                         elif module_name == "dns_lookup":
                             pt = str(finding.get("platform", ""))
                             if pt == "dns_mx" and meta.get("mx_provider"):
@@ -3927,6 +4076,8 @@ async def _investigate_run(
             if _netlas_contributed:
                 from cli import partners
                 partners.show_netlas_credit(out)
+            from cli import partners
+            partners.show_ipgeo_result(out, rep.get("findings", []), email=email)
             # RC8 (Output-Trust): advertise PDF only when weasyprint is actually
             # available; otherwise point at a format that will really produce a file.
             _save_fmt = "report.pdf" if _pdf_available() else "report.md"
@@ -4836,6 +4987,9 @@ def investigate(
     no_netlas: bool = typer.Option(
         False, "--no-netlas", help="Skip Netlas.io for this run even when a key is set."
     ),
+    no_ipgeo: bool = typer.Option(
+        False, "--no-ipgeo", help="Skip fresh ipgeolocation.io calls for this run."
+    ),
     org_surface_deep: bool = typer.Option(
         False, "--org-surface-deep",
         help="Netlas: deep org attack-surface (full subdomain enumeration, ≤500); "
@@ -4843,7 +4997,7 @@ def investigate(
     ),
     refresh: bool = typer.Option(
         False, "--refresh",
-        help="Force a fresh Netlas fetch past the 30-day enrichment-store gate "
+        help="Force fresh Netlas and ipgeolocation.io lookups past their 30-day caches "
              "(needs a key). The store is read either way.",
     ),
 ) -> None:
@@ -4916,6 +5070,7 @@ def investigate(
                 budget,
                 mode,
                 no_netlas=no_netlas,
+                no_ipgeo=no_ipgeo,
                 org_surface_deep=org_surface_deep,
                 refresh=refresh,
             )

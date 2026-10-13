@@ -42,6 +42,7 @@ _POST_PRIMARY_ONLY = frozenset(
         "marketplace_profile",
         "domain_cluster",
         "breach_aggregator",
+        "ip_intel",
     }
 )
 
@@ -63,6 +64,7 @@ _WEIGHT_SOCIAL = 5
 _WEIGHT_META = 2
 
 _MODULE_WEIGHT_OVERRIDES: dict[str, int] = {
+    "ip_intel": 0,
     "breach_deep": 18,
     "domain_harvester": 5,
     "domain_intel": 5,

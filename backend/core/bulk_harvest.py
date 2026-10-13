@@ -589,6 +589,9 @@ def _write_merged_export(
                 "emails": rows,  # evidence-preserving: full per-domain rows
             }
         )
+        infrastructure = payload.get("infrastructure") or {}
+        if any(row.get("tier") for row in infrastructure.get("ips", []) if isinstance(row, dict)):
+            per_domain[-1]["infrastructure"] = infrastructure
         if filters and not tech_match:
             # filtered out of the merged lead list (kept in per_domain for audit)
             continue

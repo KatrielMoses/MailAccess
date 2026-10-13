@@ -60,6 +60,7 @@ class InvestigateRequest(BaseModel):
     # contract is stable; investigate-path Netlas sources (F2+) gate on it via
     # ``netlas_client.netlas_active(no_netlas=...)``.
     no_netlas: bool = False
+    no_ipgeo: bool = False
     # F7 deep mode (``--org-surface-deep``): full subdomain enumeration.
     org_surface_deep: bool = False
     # F8 (``--refresh``): force a Netlas fetch past the 30-day store gate.
@@ -121,6 +122,7 @@ async def start_investigation(
         budget_seconds=body.budget_seconds,
         mode=body.mode,
         no_netlas=body.no_netlas,
+        no_ipgeo=body.no_ipgeo,
         org_surface_deep=body.org_surface_deep,
         refresh=body.refresh,
     )

@@ -557,6 +557,7 @@ def print_netlas_notes(
     console: Console,
     *,
     no_netlas: bool = False,
+    no_ipgeo: bool = False,
 ) -> None:
     """Netlas (BYOK) one-liners: a fallback/cap note, or the first-run hint.
 
@@ -678,6 +679,7 @@ def run_harvest_emails(
     no_extras: bool = False,
     mode: str | None = None,
     no_netlas: bool = False,
+    no_ipgeo: bool = False,
     expand_related: bool = False,
     expand_related_max: int | None = None,
     refresh: bool = False,
@@ -924,6 +926,7 @@ def run_harvest_emails(
             on_harvest_end=_on_harvest_end,
             mode=mode,
             no_netlas=no_netlas,
+            no_ipgeo=no_ipgeo,
             expand_related=expand_related,
             expand_related_max=expand_related_max,
             refresh=refresh,
@@ -1201,6 +1204,10 @@ def run_harvest_emails(
         )
     print_netlas_notes(result, console, no_netlas=no_netlas)
     print_related_domains(result, console)
+    from backend.core.domain_harvest_report import _build_infrastructure
+    from cli import partners
+
+    partners.show_ipgeo_result(console, [], infrastructure=_build_infrastructure(result))
 
     # ------------------------------------------------------------------
     # 7. Export (default JSON + supplementary + optional --export).

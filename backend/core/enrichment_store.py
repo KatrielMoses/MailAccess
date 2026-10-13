@@ -602,3 +602,113 @@ __all__ += [  # noqa: F821
     "serve_from_store",
     "merge_investigate",
 ]
+
+
+async def load_ip_intel(ips: list[str]) -> dict[str, dict]:
+    """Read cached IP answers regardless of key or corpus feature flags."""
+    try:
+        from sqlalchemy import select
+
+        from ..db.database import AsyncSessionLocal
+        from ..db.models import IpIntelCache
+
+        async with AsyncSessionLocal() as session:
+            rows = (
+                (await session.execute(select(IpIntelCache).where(IpIntelCache.ip.in_(ips))))
+                .scalars()
+                .all()
+            )
+            return {
+                row.ip: {
+                    "payload": dict(row.payload),
+                    "fetched_at": _aware(row.fetched_at),
+                    "tier": row.tier,
+                    "empty": row.empty,
+                }
+                for row in rows
+            }
+    except Exception:
+        logger.debug("IP intelligence cache read unavailable", exc_info=True)
+        return {}
+
+
+async def write_ip_intel(records: dict[str, dict]) -> None:
+    """Only callers with complete successful responses may write here."""
+    try:
+        from ..db.database import AsyncSessionLocal
+        from ..db.models import IpIntelCache
+        from .ipgeo_client import key_fingerprint
+
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                for ip, payload in records.items():
+                    empty = not any(
+                        value is not None
+                        for field, value in payload.items()
+                        if field not in {"ip", "tier", "fetched_at", "from_cache"}
+                    )
+                    await session.merge(
+                        IpIntelCache(
+                            ip=ip,
+                            fetched_at=datetime.fromisoformat(payload["fetched_at"]),
+                            tier=payload["tier"],
+                            payload={**payload, "_key_fingerprint": key_fingerprint()},
+                            empty=empty,
+                        )
+                    )
+    except Exception:
+        logger.debug("IP intelligence cache write unavailable", exc_info=True)
+
+
+async def enrich_ips(
+    ips, *, no_ipgeo: bool | None = None, refresh: bool = False
+) -> dict[str, dict]:
+    """Serve stored answers; fetch missing/expired/free-to-paid entries only."""
+    from .ipgeo_client import current_tier, ipgeo_active, key_fingerprint, lookup_many, public_ips
+
+    cleaned = public_ips(ips)
+    if not cleaned:
+        return {}
+    stored = await load_ip_intel(cleaned)
+    cutoff = _now() - timedelta(days=max(0, settings.ipgeo_refresh_ttl_days))
+    pending = [
+        ip
+        for ip in cleaned
+        if refresh
+        or ip not in stored
+        or stored[ip]["fetched_at"] < cutoff
+        or (
+            stored[ip]["tier"] == "free"
+            and (
+                current_tier() == "paid"
+                or (
+                    current_tier() is None
+                    and stored[ip]["payload"].get("_key_fingerprint") != key_fingerprint()
+                )
+            )
+        )
+    ]
+    records = {
+        ip: {
+            **{k: v for k, v in row["payload"].items() if not k.startswith("_")},
+            "from_cache": True,
+        }
+        for ip, row in stored.items()
+        if not row["empty"] and not refresh
+    }
+    if pending and ipgeo_active(no_ipgeo=no_ipgeo):
+        fresh = await lookup_many(pending, no_ipgeo=no_ipgeo)
+        # Each returned row is a complete, validated answer, so cache those.
+        # IPs missing from the response get no row (and no empty marker) and
+        # are retried on the next run.
+        if fresh:
+            await write_ip_intel(fresh)
+        for ip, payload in fresh.items():
+            records.pop(ip, None)
+            if any(
+                value is not None
+                for field, value in payload.items()
+                if field not in {"ip", "tier", "fetched_at", "from_cache"}
+            ):
+                records[ip] = payload
+    return records

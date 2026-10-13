@@ -377,6 +377,30 @@ class PhonePhase(InvestigationPhase):
         return collected
 
 
+class IpIntelPhase(InvestigationPhase):
+    name = "ip_intel"
+    dependencies = ("breach_aggregator", "phone_intel")
+
+    async def run(self, **kwargs: Any) -> dict[str, ModuleResult]:
+        from ..modules.ip_intel import IpIntelModule, collect_investigate_ips
+        from .enrichment_store import load_ip_intel
+        from .ipgeo_client import ipgeo_active
+
+        explicit = kwargs.get("explicit_modules")
+        if explicit is not None and self.name not in explicit:
+            return kwargs["collected"]
+        ips = collect_investigate_ips(kwargs["canonical_email"], kwargs["collected"])
+        # With neither key nor cache, don't add a module row to native output.
+        if not ips or (not ipgeo_active() and not await load_ip_intel(list(ips))):
+            return kwargs["collected"]
+        runner = _runner_kwargs(kwargs)
+        # The primary wall budget may be spent by discovery. This final,
+        # bounded enrichment phase still gets its normal module timeout.
+        runner["budget"] = None
+        await _run_and_record(IpIntelModule(), **runner, findings_input=kwargs["collected"])
+        return kwargs["collected"]
+
+
 def _runner_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {
         "email": kwargs["email"],
@@ -402,4 +426,5 @@ PHASE_DAG: tuple[InvestigationPhase, ...] = (
     DomainClusterPhase(),
     ProfilePhase(),
     PhonePhase(),
+    IpIntelPhase(),
 )

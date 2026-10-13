@@ -213,6 +213,7 @@ _ALL_KNOWN_MODULES: frozenset[str] = frozenset(
         # F7 - org attack-surface context (subdomains / panels / ports / CVEs
         # via Netlas): lawful-public infrastructure data, allowed in every mode.
         "netlas_org_surface",
+        "ip_intel",
         "outlook_autodiscover",
         "package_ecosystems",
         "pastebin_search",

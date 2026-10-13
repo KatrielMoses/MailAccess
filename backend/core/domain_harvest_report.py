@@ -230,7 +230,8 @@ def _build_infrastructure(result: DomainHarvestResult) -> dict[str, Any]:
     active_directory: dict[str, Any] | None = None
     unified_communications: dict[str, Any] | None = None
     m365_tenant: dict[str, Any] | None = None
-    for module_result in result.module_results.values():
+    ordered_results = sorted(result.module_results.items(), key=lambda pair: pair[0] == "ip_intel")
+    for _module_name, module_result in ordered_results:
         metadata = module_result.metadata or {}
         infrastructure = metadata.get("infrastructure")
         if not isinstance(infrastructure, dict):
@@ -255,11 +256,14 @@ def _build_infrastructure(result: DomainHarvestResult) -> dict[str, Any]:
                 continue
             key = str(row["ip"])
             existing = ip_rows.setdefault(key, {"ip": key})
+            unions = {field: sorted({*existing.get(field, []), *row.get(field, [])})
+                      for field in ("subdomains", "sources")} if _module_name == "ip_intel" else {}
             existing.update(row)
-            for field in ("subdomains", "sources"):
-                existing[field] = sorted(
-                    {*existing.get(field, []), *row.get(field, [])}
-                )
+            if unions:
+                existing.update(unions)
+            else:
+                for field in ("subdomains", "sources"):
+                    existing[field] = sorted({*existing.get(field, []), *row.get(field, [])})
         for row in asns:
             if not isinstance(row, dict):
                 continue
@@ -335,9 +339,41 @@ def _format_infrastructure_panel(infrastructure: dict[str, list[dict[str, Any]]]
             continue
         ports = ",".join(str(value) for value in shodan.get("ports", [])) or "none"
         vulns = ",".join(str(value) for value in shodan.get("vulns", [])[:3]) or "none"
-        asn = f"AS{record.get('asn')}" if record.get("asn") else "ASN unknown"
-        lines.append(
-            f"  {record.get('ip')} · {asn} · Ports: {ports} · Vulns: {vulns}\n"
+        asn = (
+            f"AS{str(record.get('asn')).removeprefix('AS')}" if record.get("asn") else "ASN unknown"
+        )
+        lines.append(f"  {record.get('ip')} · {asn} · Ports: {ports} · Vulns: {vulns}\n")
+    enriched = [row for row in ips if isinstance(row, dict) and row.get("tier")]
+    if enriched:
+        table = Table(box=None, expand=True)
+        for column in ("IP", "Location", "Provider / company", "Cloud", "Abuse"):
+            table.add_column(column)
+        for row in enriched:
+            table.add_row(
+                str(row["ip"]),
+                ", ".join(
+                    str(row[field]) for field in ("city", "region", "country") if row.get(field)
+                )
+                or "—",
+                str(row.get("company") or row.get("org") or "—"),
+                str(
+                    row.get("cloud_provider")
+                    or (
+                        "yes"
+                        if row.get("is_cloud")
+                        else "no"
+                        if row.get("is_cloud") is False
+                        else "—"
+                    )
+                ),
+                str(row.get("abuse_email") or "—"),
+            )
+        from rich.console import Group
+
+        return Panel(
+            Group(lines, table),
+            title=f"INFRASTRUCTURE ({len(ips)} IPs · {len(asns)} ASNs)",
+            border_style="cyan",
         )
     if not asns:
         lines.append("  No ASN data resolved.\n", style="dim")

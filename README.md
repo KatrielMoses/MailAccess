@@ -116,7 +116,9 @@ Silence the check with `MAILACCESS_NO_UPDATE_CHECK=1`. Prefer email? [Get releas
 
 ## Modules
 
-75 modules over a 5,300+ platform corpus. Investigations probe a bounded, evidence-first wave of the highest-signal platforms (~700 vetted by default) rather than the whole corpus. Full module reference in [docs/modules.md](docs/modules.md).
+76 modules over a 5,300+ platform corpus. Investigations probe a bounded, evidence-first wave of the highest-signal platforms (~700 vetted by default) rather than the whole corpus. Full module reference in [docs/modules.md](docs/modules.md).
+
+- `ip_intel`: enrich already-collected IPs with location, owner, risk flags and abuse contact using an optional ipgeolocation.io key. Configure with `mailaccess ipgeo set-key`; `--no-ipgeo` skips fresh calls and `--refresh` bypasses the 30-day cache. Free plans supply location and ASN; paid plans add company, security and abuse data.
 
 ## API Keys
 

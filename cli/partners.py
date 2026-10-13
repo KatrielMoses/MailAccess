@@ -55,6 +55,14 @@ MANGO = Partner(
     url_override="https://mangoproxy.com/?utm_source=katrielmoses&utm_medium=partner&utm_campaign=katrielmoses_github",
 )
 
+IPGEO = Partner(
+    name="ipgeolocation.io",
+    tagline="location, owner and risk context for IPs",
+    domain="ipgeolocation.io",
+    color="#51BFA5",
+    low_color="green",
+)
+
 _no_banner = False
 _shown_surfaces: set[str] = set()
 
@@ -88,14 +96,10 @@ def _name_color(partner: Partner, console: Console | None) -> str:
     return partner.color
 
 
-def render_line(
-    partner: Partner, *, plain: bool = False, console: Console | None = None
-) -> Text:
+def render_line(partner: Partner, *, plain: bool = False, console: Console | None = None) -> Text:
     """Build the one-liner; *plain* drops every style and the hyperlink."""
     if plain:
-        return Text(
-            f"Partner · {partner.name} - {partner.tagline} → {partner.domain}"
-        )
+        return Text(f"Partner · {partner.name} - {partner.tagline} → {partner.domain}")
     line = Text()
     line.append("Partner · ", style="dim")
     line.append(partner.name, style=Style(color=_name_color(partner, console), bold=True))
@@ -118,7 +122,10 @@ def show(partner: Partner, console: Console, *, surface: str) -> bool:
 
 
 def _banner_partner_line(
-    partner: Partner, *, plain: bool, console: Console | None,
+    partner: Partner,
+    *,
+    plain: bool,
+    console: Console | None,
 ) -> Text:
     """One partner row for the banner panel — name is the link, no trailing URL."""
     if plain:
@@ -152,6 +159,8 @@ def show_banner_footer(console: Console) -> None:
     body.append_text(_banner_partner_line(NETLAS, plain=plain, console=console))
     body.append("\n")
     body.append_text(_banner_partner_line(MANGO, plain=plain, console=console))
+    body.append("\n")
+    body.append_text(_banner_partner_line(IPGEO, plain=plain, console=console))
 
     if plain:
         console.print(Panel(body, expand=False, padding=(0, 1)), highlight=False)
@@ -173,9 +182,7 @@ def show_netlas_credit(console: Console) -> bool:
         return False
     _shown_surfaces.add("netlas-credit")
     if _no_color():
-        console.print(
-            Text(f"✓ enriched by Netlas.io → {NETLAS.domain}"), highlight=False
-        )
+        console.print(Text(f"✓ enriched by Netlas.io → {NETLAS.domain}"), highlight=False)
         return True
     line = Text()
     line.append("✓ enriched by ", style="dim")
@@ -209,3 +216,55 @@ def _reset_for_tests() -> None:
     global _no_banner
     _no_banner = False
     _shown_surfaces.clear()
+
+
+def show_ipgeo_result(
+    console: Console,
+    findings: list,
+    *,
+    infrastructure: dict | None = None,
+    email: str | None = None,
+) -> bool:
+    """Disclosed result credit or keyless nudge, with the shared placement rules."""
+    if not placements_enabled(console):
+        return False
+    from backend.config import settings
+    from backend.core.ipgeo_client import public_ips
+
+    rows = (infrastructure or {}).get("ips", [])
+    data = [f.get("data", f) for f in findings if isinstance(f, dict)]
+    contributed = any(row.get("tier") for row in rows) or any(
+        f.get("platform") == "ip_intel" for f in data
+    )
+    if contributed:
+        if "ipgeo-credit" in _shown_surfaces:
+            return False
+        _shown_surfaces.add("ipgeo-credit")
+        line = Text("✓ enriched by ipgeolocation.io → ipgeolocation.io")
+        if not _no_color():
+            line.stylize(Style(color=_name_color(IPGEO, console), link=IPGEO.url))
+        console.print(line, highlight=False)
+        return True
+    if settings.ipgeolocation_api_key:
+        return False
+    from backend.modules.domain_intel import _FREE_PROVIDERS
+
+    free_provider = bool(email and email.rsplit("@", 1)[-1].lower() in _FREE_PROVIDERS)
+    raw = [row.get("ip") for row in rows]
+    for finding in data:
+        if free_provider and finding.get("platform") == "dns_a":
+            continue
+        meta = finding.get("metadata") or {}
+        raw.append(meta.get("ip_address") or meta.get("ip"))
+        raw.extend(
+            row.get("ip_address") or row.get("ip")
+            for row in meta.get("breach_data", [])
+            if isinstance(row, dict)
+        )
+    count = len(public_ips(raw))
+    if not count:
+        return False
+    console.print(
+        Text(f"{count} IPs found, add an ipgeolocation key to locate them."), highlight=False
+    )
+    return True

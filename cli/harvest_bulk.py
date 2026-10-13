@@ -70,6 +70,7 @@ def run_bulk_harvest_emails(
     tech_filters: tuple[str, ...] = (),
     console: Console | None = None,
     no_netlas: bool = False,
+    no_ipgeo: bool = False,
 ) -> int:
     """Drive a bulk harvest run. Returns a process-style exit code."""
     if console is None:
@@ -127,6 +128,8 @@ def run_bulk_harvest_emails(
         "subdomain_deep": subdomain_deep,
         "subdomain_calibrate": subdomain_calibrate,
     }
+    if no_ipgeo:
+        options["no_ipgeo"] = True
     if no_netlas:
         # Only present when set, so keyless/default option dicts are unchanged.
         options["no_netlas"] = True
@@ -198,6 +201,15 @@ def run_bulk_harvest_emails(
         settings.ml_name_classifier = original_ml_pref
 
     _render_summary(report, console)
+    from cli import partners
+
+    ips = {}
+    for outcome in report.outcomes:
+        infrastructure = (outcome.payload or {}).get("infrastructure") or {}
+        for row in infrastructure.get("ips", []):
+            if isinstance(row, dict) and row.get("ip"):
+                ips[str(row["ip"])] = row
+    partners.show_ipgeo_result(console, [], infrastructure={"ips": list(ips.values())})
     counts = report.counts
     # Non-zero only if every domain failed (a partial batch is still a success).
     if counts.get("failed", 0) == counts.get("total", 0) and counts.get("total", 0) > 0:

@@ -471,6 +471,8 @@ async def run_adaptive_harvest(
     display_subscriber: Any | None = None,
     on_harvest_end: Any | None = None,
     netlas_enabled: bool = False,
+    no_ipgeo: bool = False,
+    ipgeo_refresh: bool = False,
 ) -> Any:
     from .domain_harvest_orchestrator import (
         DomainHarvestResult,
@@ -870,6 +872,11 @@ async def run_adaptive_harvest(
                     tail.setdefault("enrichment", {})[module_name] = "completed"
                 except Exception as exc:  # noqa: BLE001
                     tail.setdefault("enrichment", {})[module_name] = f"failed: {exc}"
+
+            # Shared IP cache reads are unconditional, fresh calls are BYOK.
+            if not ctx.module_overrides and "ip_intel" not in ctx.skip_modules:
+                await enrich_harvest_ip_intel(module_results, no_ipgeo=no_ipgeo,
+                                              refresh=ipgeo_refresh)
 
             # Enterprise Network Intelligence (Phase 2). Domain-level and
             # provider-agnostic; runs once per domain in the same enrichment
@@ -3223,3 +3230,42 @@ __all__ = [
     "_track1_loop",
     "_track2_loop",
 ]
+
+
+def collect_harvest_ips(module_results: dict) -> list[str]:
+    """Existing infrastructure first, then distinct resolved subdomain IPs."""
+    from .ipgeo_client import public_ips
+
+    raw = []
+    for name, result in module_results.items():
+        if name == "ip_intel":
+            continue
+        meta = result.metadata or {}
+        infra = meta.get("infrastructure") or {}
+        raw.extend(row.get("ip") for row in infra.get("ips", []) if isinstance(row, dict))
+    for result in module_results.values():
+        meta = result.metadata or {}
+        for subdomain in [*(meta.get("subdomains", []) or []), *(result.findings or [])]:
+            if isinstance(subdomain, dict):
+                raw.extend(subdomain.get("resolved_ips") or [])
+    return public_ips(raw)[: max(0, settings.ipgeo_harvest_ip_cap)]
+
+
+async def enrich_harvest_ip_intel(
+    module_results: dict, *, no_ipgeo: bool = False, refresh: bool = False
+) -> None:
+    from .enrichment_store import enrich_ips
+
+    ips = collect_harvest_ips(module_results)
+    records = await enrich_ips(ips, no_ipgeo=no_ipgeo, refresh=refresh)
+    module_results.pop("ip_intel", None)
+    if records:
+        module_results["ip_intel"] = ModuleResult(
+            ModuleStatus.SUCCESS,
+            metadata={
+                "infrastructure": {
+                    "ips": [{**data, "sources": ["ipgeolocation.io"]} for data in records.values()],
+                    "asns": [],
+                }
+            },
+        )

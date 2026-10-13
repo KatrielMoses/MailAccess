@@ -368,6 +368,7 @@ class InvestigationService:
         budget_seconds: float | None = None,
         mode: str | None = None,
         no_netlas: bool = False,
+        no_ipgeo: bool = False,
         org_surface_deep: bool = False,
         refresh: bool = False,
     ) -> tuple[str, datetime, asyncio.Queue | None, bool]:
@@ -387,6 +388,7 @@ class InvestigationService:
         from .product_mode import normalize_mode
 
         canonical_email = normalize_email_address(email).canonical_email
+        cached_results = None
         # Resolve the effective mode exactly as the engine does (per-run override
         # else the server default) so the cache key matches the mode actually
         # persisted on a completed investigation.
@@ -400,11 +402,54 @@ class InvestigationService:
             and module_names is None
             and not enable_modules
         ):
-            recent = await self._find_recent_complete(
-                email, canonical_email, mode=resolved_mode
-            )
+            recent = await self._find_recent_complete(email, canonical_email, mode=resolved_mode)
             if recent is not None:
-                return recent.id, recent.created_at, None, True
+                from ..modules.base import ModuleResult, ModuleStatus
+                from ..modules.ip_intel import collect_investigate_ips
+                from .enrichment_store import load_ip_intel
+                from .ipgeo_client import ipgeo_active
+
+                # A key newly added after a native cache hit must still reach
+                # the final IP phase. The same applies to shared cached IP data
+                # acquired by another run. Cold keyless cache behavior is intact.
+                prior = (
+                    await self._session.execute(
+                        select(Finding.module_name, Finding.data).where(
+                            Finding.investigation_id == recent.id
+                        )
+                    )
+                ).all()
+                runs = (
+                    (
+                        await self._session.execute(
+                            select(ModuleRun).where(ModuleRun.investigation_id == recent.id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                collected = {
+                    run.module_name: ModuleResult(
+                        ModuleStatus(run.status),
+                        metadata=run.run_metadata or {},
+                        errors=run.errors or [],
+                    )
+                    for run in runs
+                    if run.module_name != "ip_intel"
+                }
+                for module_name, data in prior:
+                    if module_name == "ip_intel":
+                        continue
+                    collected.setdefault(
+                        module_name, ModuleResult(ModuleStatus.SUCCESS)
+                    ).findings.append(data)
+                ips = collect_investigate_ips(canonical_email, collected)
+                has_ip_enrichment = bool(ips) and (
+                    ipgeo_active(no_ipgeo=no_ipgeo) or bool(await load_ip_intel(list(ips)))
+                )
+                if not has_ip_enrichment:
+                    return recent.id, recent.created_at, None, True
+                cached_results = collected
 
         inv = Investigation(
             email=email,
@@ -426,8 +471,10 @@ class InvestigationService:
             mode=mode,
             force=force,
             no_netlas=no_netlas,
+            no_ipgeo=no_ipgeo,
             org_surface_deep=org_surface_deep,
             refresh=refresh,
+            cached_results=cached_results,
         )
         queue = await engine.investigate(email, investigation_id, module_names, enable_modules)
         return investigation_id, created_at, queue, False

@@ -4106,6 +4106,7 @@ async def run_domain_harvest(
     on_harvest_end: Any | None = None,
     mode: str | None = None,
     no_netlas: bool = False,
+    no_ipgeo: bool = False,
     expand_related: bool = False,
     expand_related_max: int | None = None,
     refresh: bool = False,
@@ -4307,12 +4308,22 @@ async def run_domain_harvest(
     # because the TTL gate flips ``netlas_enabled`` between runs.)
     request_scope = scope_signature(**_scope_kwargs)
 
-    async def _serve_with_store(served: DomainHarvestResult) -> DomainHarvestResult:
+    async def _serve_with_store(
+        served: DomainHarvestResult, *, ipgeo_already_run: bool = False
+    ) -> DomainHarvestResult:
         """Universal final step: merge the deduped union of all historical,
         scope-compatible blobs into *served*, then attach the live Pro channel."""
         if _enrichment_enabled:
             blobs = await load_harvest_blobs(domain, scope=store_scope)
             served = merge_dedupe_harvest(served, blobs)
+        if (
+            not module_overrides
+            and "ip_intel" not in (skip_modules or ())
+            and not ipgeo_already_run
+        ):
+            from .harvest_runner import enrich_harvest_ip_intel
+            await enrich_harvest_ip_intel(served.module_results, no_ipgeo=no_ipgeo,
+                                          refresh=refresh)
         return await _attach_pro_enrichment(served, domain, resolved_mode)
 
     # Phase 1D — read-first from the unified corpus DB (replaces the per-domain
@@ -4420,6 +4431,8 @@ async def run_domain_harvest(
         display_subscriber=display_subscriber,
         on_harvest_end=on_harvest_end,
         netlas_enabled=netlas_enabled,
+        no_ipgeo=no_ipgeo,
+        ipgeo_refresh=refresh,
     )
     # Phase 2B — stamp the run's product mode onto the result (the harvest run
     # manifest) before write-back, so the corpus snapshot and the ledger record
@@ -4480,11 +4493,12 @@ async def run_domain_harvest(
     # a mid-expansion quota hit stops cleanly and keeps what was gathered.
     if netlas_enabled and _related_discovery and expand_related and not module_overrides:
         await _expand_related_domains(
-            result, resolved_mode, no_netlas=no_netlas, max_domains=expand_related_max,
+            result, resolved_mode, no_netlas=no_netlas, no_ipgeo=no_ipgeo,
+            max_domains=expand_related_max,
         )
     # F8 universal final serve: the deduped union of all historical, scope-
     # compatible blobs, then the live Pro channel (attached once, inside).
-    return await _serve_with_store(result)
+    return await _serve_with_store(result, ipgeo_already_run="ip_intel" in result.module_results)
 
 
 async def _run_related_discovery(
@@ -4521,7 +4535,7 @@ async def _run_related_discovery(
 
 
 async def _expand_related_domains(
-    result: Any, mode: Any, *, no_netlas: bool, max_domains: int | None
+    result: Any, mode: Any, *, no_netlas: bool, no_ipgeo: bool = False, max_domains: int | None
 ) -> None:
     """Re-harvest the top-N related domains; attach ``metadata['related_harvests']``."""
     from .netlas_client import FAILURE_STATUSES
@@ -4542,7 +4556,8 @@ async def _expand_related_domains(
         try:
             sub = await run_domain_harvest(
                 rd, mode=mode.value if hasattr(mode, "value") else mode,
-                no_netlas=no_netlas, _related_discovery=False, expand_related=False,
+                no_netlas=no_netlas, no_ipgeo=no_ipgeo,
+                _related_discovery=False, expand_related=False,
                 force=True,
             )
         except Exception as exc:  # noqa: BLE001

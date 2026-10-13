@@ -228,8 +228,10 @@ class InvestigationEngine:
         mode: str | None = None,
         force: bool = False,
         no_netlas: bool = False,
+        no_ipgeo: bool = False,
         org_surface_deep: bool = False,
         refresh: bool = False,
+        cached_results: dict[str, ModuleResult] | None = None,
     ) -> None:
         self._timeout = timeout
         self._max_concurrency = max_concurrency
@@ -245,8 +247,10 @@ class InvestigationEngine:
         # Per-run ``--no-netlas`` (investigate); applied to the Netlas context at
         # the start of the run so F6/F7 modules honour it.
         self._no_netlas = no_netlas
+        self._no_ipgeo = no_ipgeo
         self._org_surface_deep = org_surface_deep
         self._refresh = refresh
+        self._cached_results = cached_results
         self.status = InvestigationStatus.PENDING
 
     async def investigate(
@@ -260,7 +264,7 @@ class InvestigationEngine:
         canonical_email = normalized.canonical_email
         queue: asyncio.Queue[QueueEvent | None] = asyncio.Queue()
         semaphore = asyncio.Semaphore(self._max_concurrency)
-        collected: dict[str, ModuleResult] = {}
+        collected: dict[str, ModuleResult] = deepcopy(self._cached_results or {})
         started_at = datetime.now(timezone.utc)
 
         async def _run_and_persist() -> None:
@@ -269,6 +273,8 @@ class InvestigationEngine:
                 from .enrichment_store import set_netlas_refresh
                 from .netlas_client import set_no_netlas, set_org_surface_deep
                 set_no_netlas(self._no_netlas)
+                from .ipgeo_client import set_no_ipgeo
+                set_no_ipgeo(self._no_ipgeo)
                 set_org_surface_deep(self._org_surface_deep)
                 set_netlas_refresh(self._refresh)
                 self.status = InvestigationStatus.RUNNING
@@ -332,7 +338,7 @@ class InvestigationEngine:
                 except Exception:
                     is_role_system = False
                 domain_resolves = True
-                if domain:
+                if domain and self._cached_results is None:
                     try:
                         from .mx_resolver import MxStatus, resolve_mx_typed
 
@@ -366,6 +372,10 @@ class InvestigationEngine:
                     )
                 try:
                     for phase in PHASE_DAG:
+                        # Native cache hits keep their original evidence. Only
+                        # IP enrichment is refreshed, with no discovery rerun.
+                        if self._cached_results is not None and phase.name != "ip_intel":
+                            continue
                         await phase.run(
                             investigation_id=investigation_id,
                             email=email,
