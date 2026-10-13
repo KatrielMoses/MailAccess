@@ -49,6 +49,7 @@ On Linux, [OTinstaller](https://github.com/OSINTVerseHQ/OTinstaller) can also in
 
 ```bash
 pipx install otinstaller
+otinstaller init
 otinstaller install mailaccess
 otinstaller run mailaccess -- you@example.com
 ```
