@@ -26,7 +26,7 @@
 Self-hostable OSINT platform for investigating email addresses. Fan out across breach databases, social networks, DNS records, and the open web, then get back a unified exposure score and structured findings you can export or pipe into Maltego.
 
 <a href="https://netlas.io"><img src="assets/sponsor-netlas.png" alt="Netlas.io — map any target's attack surface in seconds" width="100%"></a>
-<a href="https://ipgeolocation.io/?utm_source=github&utm_medium=referral&utm_campaign=mailaccess"><img src="assets/sponsor-ipgeolocation.png" alt="ipgeolocation.io — IP geolocation and threat intel for every IP" width="100%"></a>
+<a href="https://ipgeolocation.io/?utm_source=github&utm_medium=referral&utm_campaign=mailaccess"><img src="assets/sponsor-ipgeolocation-io.png" alt="ipgeolocation.io — IP geolocation and threat intel for every IP" width="100%"></a>
 <a href="https://mangoproxy.com/?utm_source=katrielmoses&utm_medium=partner&utm_campaign=katrielmoses_github"><img src="assets/sponsor-mango.png" alt="MangoProxy — residential IPs that keep big harvests clean" width="100%"></a>
 <a href="https://www.swiftproxy.net/?ref=MailAccess"><img src="assets/sponsor-swiftproxy.png" alt="Swiftproxy — reliable residential IPs for scalable email harvesting" width="100%"></a>
 
