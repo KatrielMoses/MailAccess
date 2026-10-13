@@ -45,6 +45,14 @@ headless-browser [account-existence oracles](docs/account-existence-platforms.md
 
 Full install options (Docker, persistent server, self-hosting) in [docs/self-hosting.md](docs/self-hosting.md).
 
+On Linux, [OTinstaller](https://github.com/OSINTVerseHQ/OTinstaller) can also install mailaccess into its own virtualenv. It is a third-party tool manager, so please report problems with it [on the OTinstaller tracker](https://github.com/OSINTVerseHQ/OTinstaller/issues). It runs `investigate` for you, so pass the address directly:
+
+```bash
+pipx install otinstaller
+otinstaller install mailaccess
+otinstaller run mailaccess -- you@example.com
+```
+
 ## Quick Start
 
 ```bash
