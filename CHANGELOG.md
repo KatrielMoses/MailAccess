@@ -1,5 +1,11 @@
 # Changelog
 
+### 0.18.7 (2026-10-14)
+
+- CLI partner lines (banner and proxy prompts) now come from a sponsor feed at `mailaccess.pro/api/cli/sponsors` instead of being built into the package, so partners can be added, rotated or retired without a release. The feed is cached for its `ttl_seconds` (6 hours today), entries carry start and end dates, and a slow or unreachable feed only means no partner lines.
+- Feed content is treated as untrusted: control characters are stripped, text is length-capped, links must be https and colours are validated. The "Partner ·" disclosure is fixed in the CLI.
+- Opt out with `--no-banner` or `MAILACCESS_NO_SPONSORS=1`. Integration credits ("enriched by Netlas.io / ipgeolocation.io") are unchanged.
+
 ### 0.18.6 (2026-10-13)
 
 - Add optional BYOK ipgeolocation.io enrichment for existing breach, domain and harvest IPs: location, owner, hosting/risk flags and abuse contact, with nulls for unavailable plan fields.

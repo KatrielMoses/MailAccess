@@ -569,7 +569,7 @@ def _run_proxy_wizard() -> None:
     from cli import partners
 
     console.print()
-    if partners.show_mango_proxy(console):
+    if partners.show_proxy_sponsor(console):
         console.print()
     console.print("[dim]Press Enter to skip any field.[/dim]")
     console.print()
@@ -1750,7 +1750,7 @@ def harvest_emails_command(
     if (use_proxies and not partners.proxy_configured(_proxy_settings)) or (
         file is not None and not use_proxies
     ):
-        partners.show_mango_proxy(err_console)
+        partners.show_proxy_sponsor(err_console)
 
     # ------------------------------------------------------------------
     # Phase 5A — bulk / list harvest mode. When --file is given we fan the
@@ -5021,7 +5021,7 @@ def investigate(
         from cli import partners
 
         if not partners.proxy_configured(_proxy_settings):
-            partners.show_mango_proxy(err_console)
+            partners.show_proxy_sponsor(err_console)
 
     from backend.core.email_extraction import validate_email
 

@@ -38,6 +38,8 @@ class Partner:
         return self.url_override or f"https://{self.domain}"
 
 
+# Integration credits only ("enriched by ..."). Paid placements (banner, proxy
+# prompts) come from the remote sponsor feed in cli/sponsor_feed.py.
 NETLAS = Partner(
     name="Netlas",
     tagline="internet-wide recon data we lean on",
@@ -45,16 +47,6 @@ NETLAS = Partner(
     color="#5BA4F5",
     low_color="bright_blue",
 )
-# Amber placeholder until Mango Proxy supplies a brand hex.
-MANGO = Partner(
-    name="Mango Proxy",
-    tagline="residential IPs that keep big harvests clean",
-    domain="mangoproxy.com",
-    color="#EF9F27",
-    low_color="yellow",
-    url_override="https://mangoproxy.com/?utm_source=katrielmoses&utm_medium=partner&utm_campaign=katrielmoses_github",
-)
-
 IPGEO = Partner(
     name="ipgeolocation.io",
     tagline="location, owner and risk context for IPs",
@@ -150,17 +142,19 @@ def show_banner_footer(console: Console) -> None:
     if "banner:sponsors" in _shown_surfaces or not placements_enabled(console):
         return
     _shown_surfaces.add("banner:sponsors")
-    _shown_surfaces.add("banner:netlas")
-    _shown_surfaces.add("banner:mango")
+    from cli import sponsor_feed
+
+    sponsors = sponsor_feed.for_surface("cli.banner")
+    if not sponsors:
+        return
 
     plain = _no_color()
 
     body = Text()
-    body.append_text(_banner_partner_line(NETLAS, plain=plain, console=console))
-    body.append("\n")
-    body.append_text(_banner_partner_line(MANGO, plain=plain, console=console))
-    body.append("\n")
-    body.append_text(_banner_partner_line(IPGEO, plain=plain, console=console))
+    for index, sponsor in enumerate(sponsors):
+        if index:
+            body.append("\n")
+        body.append_text(_banner_partner_line(sponsor, plain=plain, console=console))
 
     if plain:
         console.print(Panel(body, expand=False, padding=(0, 1)), highlight=False)
@@ -207,9 +201,14 @@ def proxy_configured(settings: object) -> bool:
     )
 
 
-def show_mango_proxy(console: Console) -> bool:
-    """Contextual Mango line — proxy wizard, unconfigured --use-proxies, big runs."""
-    return show(MANGO, console, surface="proxy:mango")
+def show_proxy_sponsor(console: Console) -> bool:
+    """Contextual proxy-partner line — proxy wizard, unconfigured --use-proxies, big runs."""
+    if "proxy:sponsor" in _shown_surfaces or not placements_enabled(console):
+        return False
+    from cli import sponsor_feed
+
+    sponsors = sponsor_feed.for_surface("cli.proxy")
+    return bool(sponsors) and show(sponsors[0], console, surface="proxy:sponsor")
 
 
 def _reset_for_tests() -> None:
