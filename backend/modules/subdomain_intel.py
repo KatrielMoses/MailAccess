@@ -80,6 +80,8 @@ class DiscoveryResult:
     addresses: dict[str, set[str]] = field(default_factory=dict)
     root_content_hash: str | None = None
     sources: dict[str, dict[str, object]] = field(default_factory=dict)
+    # host -> {first_seen, last_seen, inactive_from}; only WhoisFreaks supplies dates.
+    dates: dict[str, dict[str, str | None]] = field(default_factory=dict)
     telemetry_sink: dict[str, dict[str, object]] | None = None
 
     def add(self, hosts: set[str] | list[str], source: str) -> None:
@@ -502,6 +504,41 @@ def _netlas_metadata(outcome: object) -> dict[str, object]:
         "capped": bool(getattr(outcome, "capped", False)),
         "calls": int(getattr(outcome, "calls", 0) or 0),
         "error": getattr(outcome, "error", None),
+    }
+
+
+#: Discovery-source label for WhoisFreaks (BYOK). Like Netlas it is NOT in
+#: DISCOVERY_SOURCE_NAMES, so keyless runs never grow a ``whoisfreaks`` row.
+WHOISFREAKS_SOURCE_NAME = "whoisfreaks"
+#: Wall clock for the keyed fetch (the plan allows 3 calls a minute).
+WHOISFREAKS_WALL_SECONDS = 75.0
+
+
+async def discover_whoisfreaks(
+    domain: str, *, refresh: bool = False, no_whoisfreaks: bool = False, deadline: float | None = None
+) -> tuple[dict[str, dict[str, str | None]], dict[str, object]]:
+    """Active subdomains with first/last-seen dates (cache-first, never raises)."""
+    from ..core.whoisfreaks_data import lookup, subdomain_dates
+
+    try:
+        found = await lookup(
+            "subdomains",
+            domain,
+            max_pages=max(1, int(getattr(settings, "whoisfreaks_subdomain_pages", 2))),
+            refresh=refresh,
+            deadline=deadline,
+            no_whoisfreaks=no_whoisfreaks,
+        )
+    except Exception:  # noqa: BLE001 - discovery never raises into the harvest
+        return {}, {"status": "error", "count": 0, "total": None}
+    dates = subdomain_dates(found.rows, domain)
+    status = "ok" if found.complete else "partial"
+    return dates, {
+        "status": status,
+        "count": len(dates),
+        "total": found.total,
+        "fetched": found.fetched,
+        "from_cache": found.from_cache,
     }
 
 
@@ -1305,6 +1342,9 @@ class SubdomainIntelModule(BaseModule):
         source_telemetry: dict[str, dict[str, object]] | None = None,
         netlas_enabled: bool = False,
         netlas_cert_fetch: object | None = None,
+        whoisfreaks_enabled: bool = False,
+        whoisfreaks_refresh: bool = False,
+        no_whoisfreaks: bool = False,
     ) -> ModuleResult:
         domain = domain.strip().lower().rstrip(".")
         self._run_started_at = time.perf_counter()
@@ -1359,8 +1399,22 @@ class SubdomainIntelModule(BaseModule):
         netlas_meta: dict[str, object] | None = None
         # F3: the run's shared certificate fetch (same future netlas_cert uses).
         self._netlas_cert_future = None
+        # WhoisFreaks (BYOK) dated subdomains merge the same way, under their own wall.
+        wf_task: asyncio.Task[object] | None = None
+        wf_meta: dict[str, object] | None = None
 
         try:
+            if whoisfreaks_enabled:
+                result.record_source(WHOISFREAKS_SOURCE_NAME, "in_progress", 0, "in_progress")
+                wf_task = asyncio.create_task(
+                    discover_whoisfreaks(
+                        domain,
+                        refresh=whoisfreaks_refresh,
+                        no_whoisfreaks=no_whoisfreaks,
+                        deadline=time.monotonic()
+                        + max(1.0, min(slice_budget.hard_remaining, WHOISFREAKS_WALL_SECONDS)),
+                    )
+                )
             if netlas_enabled:
                 result.record_source(NETLAS_SOURCE_NAME, "in_progress", 0, "in_progress")
                 netlas_task = asyncio.create_task(discover_netlas(domain))
@@ -1470,7 +1524,7 @@ class SubdomainIntelModule(BaseModule):
                 successful_sources = sum(
                     1
                     for source, source_result in result.sources.items()
-                    if source not in ("axfr", *_NETLAS_SOURCES)
+                    if source not in ("axfr", *_NETLAS_SOURCES, WHOISFREAKS_SOURCE_NAME)
                     and source_result.get("status") == "ok"
                 )
                 if successful_sources < 2:
@@ -1504,7 +1558,13 @@ class SubdomainIntelModule(BaseModule):
             if netlas_task is not None:
                 netlas_meta = await self._join_netlas(netlas_task, result, slice_budget)
                 netlas_task = None
+            if wf_task is not None:
+                wf_meta = await self._join_whoisfreaks(wf_task, result, slice_budget)
+                wf_task = None
         except asyncio.CancelledError:
+            if wf_task is not None and not wf_task.done():
+                wf_task.cancel()
+                result.record_source(WHOISFREAKS_SOURCE_NAME, "killed", 0, "in_progress_at_timeout")
             self._passive_termination = "killed"
             if netlas_task is not None and not netlas_task.done():
                 netlas_task.cancel()
@@ -1515,6 +1575,8 @@ class SubdomainIntelModule(BaseModule):
         if netlas_task is not None:
             # Discovery raised before the join; still harvest what Netlas found.
             netlas_meta = await self._join_netlas(netlas_task, result, slice_budget)
+        if wf_task is not None:
+            wf_meta = await self._join_whoisfreaks(wf_task, result, slice_budget)
         # Component 2: remove Tier 3 noise before any DNS work.
         filter_tier3(result.candidates, wordlist.get("tier3_exclude", []))
         try:
@@ -1577,6 +1639,8 @@ class SubdomainIntelModule(BaseModule):
                 "resolved_ips": sorted(result.addresses.get(host, set())),
                 **scores.get(host, {"score": 0.0, "tier": "SKIP", "is_staging": is_staging_hostname(host), "evidence": ["probe_failed"]}),
                 "scraped": scraped.get(host, []),
+                # Dates only when WhoisFreaks knows the host, so keyless output is unchanged.
+                **{k: v for k, v in (result.dates.get(host) or {}).items() if v},
             }
             for host in sorted(result.hosts)
         ]
@@ -1688,10 +1752,42 @@ class SubdomainIntelModule(BaseModule):
         }
         if netlas_meta is not None:
             metadata["netlas"] = netlas_meta
+        if wf_meta is not None:
+            metadata["whoisfreaks"] = wf_meta
         status = ModuleStatus.SUCCESS if findings else ModuleStatus.PARTIAL
         if own_client:
             await http.aclose()
         return ModuleResult(status=status, findings=findings, metadata=metadata, errors=result.errors[:20])
+
+    async def _join_whoisfreaks(
+        self,
+        task: asyncio.Task[object],
+        result: DiscoveryResult,
+        budget: SubdomainBudget,
+    ) -> dict[str, object]:
+        """Await the dated-subdomain fetch; merge hosts (source="whoisfreaks") and dates."""
+        wall = max(1.0, min(WHOISFREAKS_WALL_SECONDS + 5.0, budget.hard_remaining))
+        try:
+            dates, meta = await asyncio.wait_for(task, timeout=wall)  # type: ignore[misc]
+        except asyncio.TimeoutError:
+            result.record_source(WHOISFREAKS_SOURCE_NAME, "timeout", 0, "whoisfreaks wall")
+            return {"status": "timeout", "count": 0}
+        except Exception:  # noqa: BLE001 - never include exception text (the URL carries a key)
+            result.record_source(WHOISFREAKS_SOURCE_NAME, "error", 0, "request failed")
+            return {"status": "error", "count": 0}
+        status = str(meta.get("status"))
+        result.record_source(
+            WHOISFREAKS_SOURCE_NAME,
+            "ok" if status == "ok" else status,
+            len(dates),
+            None,
+        )
+        result.add(list(dates), WHOISFREAKS_SOURCE_NAME)
+        for host, stamp in dates.items():
+            normalized = normalize_hostname(host, result.domain)
+            if normalized:
+                result.dates[normalized] = stamp
+        return dict(meta)
 
     async def _join_netlas(
         self,

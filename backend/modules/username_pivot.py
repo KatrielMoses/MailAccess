@@ -5,6 +5,8 @@ import re
 from typing import Any
 
 from ..config import settings
+from ..core import run_events
+from ..core.evidence import evidence_label
 from ..core.http_client import build_client
 from ..core.probe_detector import probe_platform, username_matches_regex
 from ..core.username_sites import load_username_sites
@@ -46,9 +48,17 @@ def _slug_variants(display_name: str) -> list[str]:
     return out
 
 
-def _collect_usernames(email: str, collected: dict[str, Any]) -> list[str]:
+def _collect_usernames(
+    email: str,
+    collected: dict[str, Any],
+    origins: dict[str, dict[str, Any]] | None = None,
+) -> list[str]:
+    """Candidate usernames to pivot. ``origins`` (optional) is filled with where each
+    came from: the module, the finding, and whether that finding was itself only a
+    username match, so every pivot hit can say what it was derived from."""
     candidates: list[str] = []
     seen: set[str] = set()
+    current: dict[str, Any] = {"module": "email", "finding_id": None, "username_match": False}
 
     def _add(value: str) -> None:
         u = value.strip().lower()
@@ -57,16 +67,23 @@ def _collect_usernames(email: str, collected: dict[str, Any]) -> list[str]:
         if u not in seen:
             seen.add(u)
             candidates.append(u)
+            if origins is not None:
+                origins[u] = dict(current)
 
     if "@" in email:
         _add(email.split("@", 1)[0])
 
-    for result in collected.values():
+    for module_name, result in collected.items():
         if not hasattr(result, "findings"):
             continue
         for finding in result.findings:
             if not isinstance(finding, dict):
                 continue
+            current = {
+                "module": module_name,
+                "finding_id": finding.get("finding_id"),
+                "username_match": evidence_label(finding, module_name) == "username_match",
+            }
             payloads: list[dict[str, Any]] = [finding]
             meta = finding.get("metadata")
             if isinstance(meta, dict):
@@ -134,7 +151,8 @@ class UsernamePivotModule(BaseModule):
                 errors=["Set ENABLE_USERNAME_PIVOT=true to run this module"],
             )
 
-        usernames = _collect_usernames(email, collected)
+        origins: dict[str, dict[str, Any]] = {}
+        usernames = _collect_usernames(email, collected, origins)
         if not usernames:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,
@@ -162,7 +180,20 @@ class UsernamePivotModule(BaseModule):
         hits = 0
         misses = 0
         inconclusive = 0
+        progress_total = sum(
+            1
+            for username in usernames
+            for _name, defn in selected
+            if username_matches_regex(defn, username)
+        )
 
+        async def _probe(client: Any, name: str, defn: dict[str, Any], username: str):
+            outcome = await probe_platform(client, sem, name, defn, username, timeout=6.0)
+            run_events.module_progress("username_pivot", checked + progress_seen[0], progress_total)
+            progress_seen[0] += 1
+            return outcome
+
+        progress_seen = [0]
         async with build_client(timeout=6.0, follow_redirects=True) as client:
             for username in usernames:
                 queue = [
@@ -170,10 +201,8 @@ class UsernamePivotModule(BaseModule):
                     for name, defn in selected
                     if username_matches_regex(defn, username)
                 ]
-                tasks = [
-                    probe_platform(client, sem, name, defn, username, timeout=6.0)
-                    for name, defn in queue
-                ]
+                progress_seen[0] = 0
+                tasks = [_probe(client, name, defn, username) for name, defn in queue]
                 results = await asyncio.gather(*tasks)
                 checked += len(queue)
 
@@ -210,6 +239,13 @@ class UsernamePivotModule(BaseModule):
                             # dual-confirm) is what promotes it.
                             "verification": "unverified",
                             "speculative": True,
+                            # Provenance: where the pivoted username came from, and
+                            # whether that source was itself only a username match.
+                            "derived_from_module": origins.get(username, {}).get("module"),
+                            "derived_from_finding": origins.get(username, {}).get("finding_id"),
+                            "derived_from_username_match": bool(
+                                origins.get(username, {}).get("username_match")
+                            ),
                         },
                         "confidence": "low",
                     }

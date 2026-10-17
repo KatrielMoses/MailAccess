@@ -132,6 +132,10 @@ _API_KEYS: list[tuple[str, str, str]] = [
         "IPGEOLOCATION_API_KEY", "ipgeo",
         "ipgeolocation.io — existing IP enrichment (optional, BYOK)",
     ),
+    (
+        "WHOISFREAKS_API_KEY", "whoisfreaks",
+        "whoisfreaks.com — WHOIS history and reverse WHOIS (optional, BYOK)",
+    ),
     ("NETLAS_API_KEY", "netlas", "netlas.io — subdomain enumeration (optional, BYOK)"),
     ("GOOGLE_CSE_API_KEY", "email_search_dork", "Google CSE (programableseach.google.com)"),
     ("GOOGLE_CSE_CX", "email_search_dork", "Google CSE Engine ID"),
@@ -1140,6 +1144,105 @@ def ipgeo_status() -> None:
     console.print(table)
 
 
+whoisfreaks_app = typer.Typer(
+    name="whoisfreaks",
+    help="Configure the optional WhoisFreaks key (BYOK): WHOIS history, reverse WHOIS, "
+    "dated subdomains. Without a key nothing changes.",
+    invoke_without_command=True,
+    no_args_is_help=True,
+)
+app.add_typer(whoisfreaks_app)
+
+
+@whoisfreaks_app.command("set-key")
+def whoisfreaks_set_key(
+    key: str | None = typer.Argument(
+        None,
+        help="Your WhoisFreaks API key. Omit it to be prompted (hidden input), "
+        "or pass '-' to read it from stdin — keeps it out of shell history.",
+    ),
+) -> None:
+    """Save your WhoisFreaks API key to ~/.mailaccess/.env."""
+    if key == "-":
+        key = sys.stdin.readline()
+    elif key is None:
+        key = typer.prompt("WhoisFreaks API key", hide_input=True)
+    key = (key or "").strip()
+    if not key:
+        err_console.print("WhoisFreaks key is empty.", markup=False)
+        raise typer.Exit(2)
+    _set_env_key("WHOISFREAKS_API_KEY", key)
+    settings = _reload_settings()
+    console.print("[green]✓ WHOISFREAKS_API_KEY saved to ~/.mailaccess/.env[/green]")
+    if settings.whoisfreaks_disabled:
+        console.print(
+            "[yellow]WhoisFreaks is disabled — run `mailaccess whoisfreaks enable` to use it.[/yellow]"
+        )
+
+
+@whoisfreaks_app.command("test")
+def whoisfreaks_test() -> None:
+    """Check the key with one free call (the usage endpoint; no credits spent)."""
+    from backend.core.whoisfreaks_client import check_key
+
+    settings = _reload_settings()
+    if not settings.whoisfreaks_api_key:
+        console.print("No WhoisFreaks key set — `mailaccess whoisfreaks set-key`.", markup=False)
+        raise typer.Exit(1)
+    result = asyncio.run(check_key(str(settings.whoisfreaks_api_key)))
+    if not result["ok"]:
+        console.print("Check failed; verify the key, credits and connection.", markup=False)
+        raise typer.Exit(1)
+    console.print(f"✓ Key accepted · {result['remaining']:,} credits remaining", markup=False)
+
+
+@whoisfreaks_app.command("disable")
+def whoisfreaks_disable() -> None:
+    """Disable fresh WhoisFreaks calls, retaining the key and cached answers."""
+    _set_env_key("WHOISFREAKS_DISABLED", "true")
+    _reload_settings()
+    console.print("[green]✓ Fresh WhoisFreaks calls disabled; cached answers remain available.[/green]")
+
+
+@whoisfreaks_app.command("enable")
+def whoisfreaks_enable() -> None:
+    """Turn WhoisFreaks back on (needs a key — `mailaccess whoisfreaks set-key <KEY>`)."""
+    _set_env_key("WHOISFREAKS_DISABLED", "false")
+    settings = _reload_settings()
+    if settings.whoisfreaks_api_key:
+        console.print("[green]✓ WhoisFreaks enabled.[/green]")
+    else:
+        from backend.core.whoisfreaks_client import WHOISFREAKS_SIGNUP_URL
+
+        console.print(
+            "[yellow]WhoisFreaks enabled, but no key is set — get one at "
+            f"{WHOISFREAKS_SIGNUP_URL} then `mailaccess whoisfreaks set-key <KEY>`.[/yellow]"
+        )
+
+
+@whoisfreaks_app.command("status")
+def whoisfreaks_status() -> None:
+    """Show whether WhoisFreaks is active and the credits left on the key."""
+    from backend.core.whoisfreaks_client import usage, whoisfreaks_active
+
+    settings = _reload_settings()
+    table = Table(title="WhoisFreaks")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    key = str(settings.whoisfreaks_api_key or "")
+    table.add_row("api_key", f"[green]set[/green] (…{key[-4:]})" if key else "[dim]none[/dim]")
+    table.add_row("disabled", "yes" if settings.whoisfreaks_disabled else "no")
+    table.add_row("active", "[green]yes[/green]" if whoisfreaks_active() else "no")
+    if key:
+        # Free endpoint; the response echoes the key, which usage() strips.
+        info = asyncio.run(usage(key))
+        table.add_row(
+            "credits_remaining",
+            f"{info['remaining']:,} of {info['total_credits']:,}" if info else "[dim]unavailable[/dim]",
+        )
+    console.print(table)
+
+
 from cli.platform_health import platform_health_app  # noqa: E402
 
 app.add_typer(platform_health_app)
@@ -1585,6 +1688,9 @@ def harvest_emails_command(
     no_ipgeo: bool = typer.Option(
         False, "--no-ipgeo", help="Skip fresh ipgeolocation.io calls for this run."
     ),
+    no_whoisfreaks: bool = typer.Option(
+        False, "--no-whoisfreaks", help="Skip WhoisFreaks calls for this run even when a key is set."
+    ),
     expand_related: bool = typer.Option(
         False, "--expand-related",
         help="Netlas: also harvest the top related domains discovered via org/"
@@ -1596,7 +1702,7 @@ def harvest_emails_command(
     ),
     refresh: bool = typer.Option(
         False, "--refresh",
-        help="Force fresh Netlas and ipgeolocation.io lookups past their 30-day caches "
+        help="Force fresh Netlas, ipgeolocation.io and WhoisFreaks lookups past their 30-day caches "
              "(needs a key; dim no-op without one). The store is still read either way.",
     ),
     subdomain_calibrate: bool = typer.Option(
@@ -1623,6 +1729,14 @@ def harvest_emails_command(
         help=(
             "0.12.7: skip writing the default JSON export and the "
             "live log.  Overrides the HARVEST_AUTO_EXPORT setting."
+        ),
+    ),
+    events_jsonl: str | None = typer.Option(
+        None,
+        "--events-jsonl",
+        help=(
+            "Write the run's events (started, module start/progress/done, findings, "
+            "done) to PATH, one JSON object per line, flushed as they happen."
         ),
     ),
     no_extras: bool = typer.Option(
@@ -1797,6 +1911,7 @@ def harvest_emails_command(
                 console=console,
                 no_netlas=no_netlas,
                 no_ipgeo=no_ipgeo,
+                no_whoisfreaks=no_whoisfreaks,
             )
         finally:
             _bulk_settings.harvest_timing_profile = _orig_profile
@@ -1856,10 +1971,12 @@ def harvest_emails_command(
                 clear_cache=clear_cache,
                 clear_all_cache=clear_all_cache,
                 no_export=no_export,
+                events_jsonl=events_jsonl,
                 no_extras=no_extras,
                 mode=mode,
                 no_netlas=no_netlas,
                 no_ipgeo=no_ipgeo,
+                no_whoisfreaks=no_whoisfreaks,
                 expand_related=expand_related,
                 expand_related_max=expand_related_max,
                 refresh=refresh,
@@ -1912,10 +2029,12 @@ def harvest_emails_command(
                 clear_cache=clear_cache,
                 clear_all_cache=clear_all_cache,
                 no_export=no_export,
+                events_jsonl=events_jsonl,
                 no_extras=no_extras,
                 mode=mode,
                 no_netlas=no_netlas,
                 no_ipgeo=no_ipgeo,
+                no_whoisfreaks=no_whoisfreaks,
                 expand_related=expand_related,
                 expand_related_max=expand_related_max,
                 refresh=refresh,
@@ -3057,6 +3176,7 @@ async def _investigate(
     mode: str | None = None,
     no_netlas: bool = False,
     no_ipgeo: bool = False,
+    no_whoisfreaks: bool = False,
     org_surface_deep: bool = False,
     refresh: bool = False,
 ) -> int:
@@ -3087,6 +3207,7 @@ async def _investigate(
             mode,
             no_netlas=no_netlas,
             no_ipgeo=no_ipgeo,
+            no_whoisfreaks=no_whoisfreaks,
             org_surface_deep=org_surface_deep,
             refresh=refresh,
         )
@@ -3111,6 +3232,7 @@ async def _investigate_run(
     mode: str | None = None,
     no_netlas: bool = False,
     no_ipgeo: bool = False,
+    no_whoisfreaks: bool = False,
     org_surface_deep: bool = False,
     refresh: bool = False,
 ) -> int:
@@ -3147,6 +3269,8 @@ async def _investigate_run(
         payload["no_netlas"] = True
     if no_ipgeo:
         payload["no_ipgeo"] = True
+    if no_whoisfreaks:
+        payload["no_whoisfreaks"] = True
     if org_surface_deep:
         payload["org_surface_deep"] = True
     if refresh:
@@ -3312,6 +3436,9 @@ async def _investigate_run(
                 color = get_status_color(mod_status)
                 duration = _format_duration(run)
                 _progress_table.add_row(mod_name, f"[{color}]{mod_status.upper()}[/]", duration)
+                # One dim line under a running module: what the engine is doing.
+                if str(mod_status).lower() == "running" and run.get("technique"):
+                    _progress_table.add_row(f"[dim]  {run['technique']}[/dim]", "", "")
             return _progress_table
 
         def _get_email_discovery_findings(rep: dict[str, Any]) -> list[dict[str, Any]]:
@@ -4067,17 +4194,23 @@ async def _investigate_run(
                 out.print()
 
             out.print("[dim]Legend: ✓ confirmed  ~ low confidence  — skipped[/dim]")
-            _netlas_modules = {"netlas_email_footprint", "netlas_org_surface"}
-            _netlas_contributed = any(
-                r.get("module_name") in _netlas_modules
-                and str(r.get("status", "")).lower() not in ("skipped", "failed")
-                for r in rep.get("module_runs", [])
-            )
-            if _netlas_contributed:
-                from cli import partners
-                partners.show_netlas_credit(out)
             from cli import partners
-            partners.show_ipgeo_result(out, rep.get("findings", []), email=email)
+            _runs = rep.get("module_runs", [])
+            if partners.provider_contributed("netlas", _runs):
+                partners.show_netlas_credit(out)
+            if not no_ipgeo:  # a provider that is off for this run is not mentioned
+                partners.show_ipgeo_result(out, rep.get("findings", []), email=email)
+            if not no_whoisfreaks:
+                from backend.config import settings as _wf_settings
+                from backend.modules.domain_intel import _FREE_PROVIDERS
+
+                _own_domain = email.rsplit("@", 1)[-1].lower()
+                partners.show_whoisfreaks_result(
+                    out,
+                    contributed=partners.provider_contributed("whoisfreaks", _runs),
+                    keyed=bool(_wf_settings.whoisfreaks_api_key),
+                    domain=None if _own_domain in _FREE_PROVIDERS else _own_domain,
+                )
             # RC8 (Output-Trust): advertise PDF only when weasyprint is actually
             # available; otherwise point at a format that will really produce a file.
             _save_fmt = "report.pdf" if _pdf_available() else "report.md"
@@ -4138,10 +4271,13 @@ async def _investigate_run(
                             ev_type = event.get("type")
                             if ev_type == "module_start":
                                 mod = event.get("module", "unknown")
+                                from backend.core.techniques import technique_line
+
                                 _ws_modules[mod] = {
                                     "module_name": mod,
                                     "status": "running",
                                     "started_at": event.get("timestamp"),
+                                    "technique": technique_line(mod),
                                 }
                             elif ev_type in ("module_result", "module_error"):
                                 mod = event.get("module", "unknown")
@@ -4155,6 +4291,17 @@ async def _investigate_run(
                                 # breach findings only appear once, with the richest metadata.
                             elif ev_type == "investigation_complete":
                                 status = "complete"
+                            elif ev_type == "investigation_failed":
+                                status = "failed"
+                                err_console.print(
+                                    f"[red]Investigation failed: "
+                                    f"{event.get('error') or 'unknown error'}[/red]"
+                                )
+                                with contextlib.suppress(Exception):
+                                    resp = await client.get(f"/api/report/{inv_id}", timeout=30)
+                                    resp.raise_for_status()
+                                    report_data = resp.json()
+                                break
                             if _ws_modules and _live:
                                 _live.update(
                                     update_progress_table(
@@ -4990,6 +5137,9 @@ def investigate(
     no_ipgeo: bool = typer.Option(
         False, "--no-ipgeo", help="Skip fresh ipgeolocation.io calls for this run."
     ),
+    no_whoisfreaks: bool = typer.Option(
+        False, "--no-whoisfreaks", help="Skip WhoisFreaks calls for this run even when a key is set."
+    ),
     org_surface_deep: bool = typer.Option(
         False, "--org-surface-deep",
         help="Netlas: deep org attack-surface (full subdomain enumeration, ≤500); "
@@ -4997,7 +5147,7 @@ def investigate(
     ),
     refresh: bool = typer.Option(
         False, "--refresh",
-        help="Force fresh Netlas and ipgeolocation.io lookups past their 30-day caches "
+        help="Force fresh Netlas, ipgeolocation.io and WhoisFreaks lookups past their 30-day caches "
              "(needs a key). The store is read either way.",
     ),
 ) -> None:
@@ -5071,6 +5221,7 @@ def investigate(
                 mode,
                 no_netlas=no_netlas,
                 no_ipgeo=no_ipgeo,
+                no_whoisfreaks=no_whoisfreaks,
                 org_surface_deep=org_surface_deep,
                 refresh=refresh,
             )

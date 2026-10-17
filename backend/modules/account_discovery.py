@@ -10,6 +10,7 @@ from typing import Any
 
 from ..config import settings
 from ..core.account_probe import default_health_key, probe_site
+from ..core import run_events
 from ..core.http_client import build_client
 from ..core.mailaccess_sites_loader import load_mailaccess_sites
 from ..core.phone_extractor import mask_phone
@@ -108,6 +109,10 @@ def _make_finding(record: dict[str, Any]) -> dict[str, Any]:
     # graph / name candidates) and the CLI render treat it as a lead, not a confirmed
     # account. platform_dedup can still promote it to ``confirmed`` on dual-confirmation.
     meta.setdefault("verification", "unverified")
+    # How the site answered (register / login / password-recovery ...): the evidence
+    # label uses it to tell a registration check from a sign-in or reset probe.
+    if record.get("method"):
+        meta["flow"] = record["method"]
 
     # Hoist profile fields from ``extras`` to top-level metadata so consumers can
     # read ``metadata.name`` / ``metadata.avatar`` without knowing which site it came
@@ -125,7 +130,10 @@ def _make_finding(record: dict[str, Any]) -> dict[str, Any]:
         "platform": record.get("name", "unknown"),
         "profile_url": profile_url,
         "metadata": meta,
-        "confidence": "high",
+        # One registration/sign-in check is a single signal: "possible" -> medium.
+        # evidence.refresh_label raises it to "high" only when a second independent
+        # signal confirms the account; it is never "high" while unverified.
+        "confidence": "medium",
         "verification": "unverified",
         "source": "account_discovery",
         "email_linked": True,
@@ -189,8 +197,18 @@ class AccountDiscoveryModule(BaseModule):
         skipped_health = 0
 
         sem = asyncio.Semaphore(_CONCURRENCY)
+        progress_done = 0
+        progress_total = len(probeable)
 
         async def _run_one(defn: dict[str, Any], client: Any) -> dict[str, Any] | None:
+            try:
+                return await _probe_one(defn, client)
+            finally:
+                nonlocal progress_done
+                progress_done += 1
+                run_events.module_progress("account_discovery", progress_done, progress_total)
+
+        async def _probe_one(defn: dict[str, Any], client: Any) -> dict[str, Any] | None:
             nonlocal skipped_health
             health_key = default_health_key(defn)
             if health is not None:

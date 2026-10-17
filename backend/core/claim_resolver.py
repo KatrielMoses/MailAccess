@@ -285,6 +285,7 @@ async def gather_observations(
     *,
     mode: str | None = None,
     as_of: Any | None = None,
+    allowed_providers: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch ledger observations for a subject as resolution-ready dicts.
 
@@ -296,6 +297,9 @@ async def gather_observations(
       (cross-mode evidence isolation);
     * ``as_of`` — restrict to observations that already existed at the report's
       run time (a later run's facts can't retroactively appear);
+    * ``allowed_providers`` — when given, drop observations derived from a paid
+      provider that is not in the set (it was off for the run being reported), so an
+      earlier keyed run cannot leak provider facts into a later run where it is off;
     * always drop observations whose retention has expired.
     """
     from datetime import datetime, timezone
@@ -310,6 +314,10 @@ async def gather_observations(
             conditions.append(Observation.mode == str(mode))
         if as_of is not None:
             conditions.append(Observation.created_at <= as_of)
+        if allowed_providers is not None:
+            conditions.append(
+                or_(Observation.provider.is_(None), Observation.provider.in_(sorted(allowed_providers)))
+            )
         now = datetime.now(timezone.utc)
         conditions.append(
             or_(Observation.expires_at.is_(None), Observation.expires_at > now)
@@ -361,6 +369,7 @@ async def resolve_report_fields(
     *,
     mode: str | None = None,
     as_of: Any | None = None,
+    allowed_providers: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Resolve the standard report fields for a subject from the ledger.
 
@@ -376,7 +385,8 @@ async def resolve_report_fields(
     result: dict[str, dict[str, Any]] = {}
     try:
         observations = await gather_observations(
-            subject, session=session, mode=mode, as_of=as_of
+            subject, session=session, mode=mode, as_of=as_of,
+            allowed_providers=allowed_providers,
         )
     except Exception:
         logger.exception("Field-provenance gather failed for %s", subject)

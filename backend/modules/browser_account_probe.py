@@ -16,6 +16,7 @@ import logging
 from typing import Any
 
 from ..config import settings
+from ..core.evidence import normalise_verification
 from .base import BaseModule, ModuleResult, ModuleStatus
 
 _LOG = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ class BrowserAccountProbeModule(BaseModule):
         allow_intrusive = bool(
             getattr(settings, "enable_forgot_password_probes", False)
         )
-        oracles = [o for o in ORACLES if allow_intrusive or not o.intrusive]
+        oracles = [o for o in ORACLES if not o.disabled and (allow_intrusive or not o.intrusive)]
         # The 131 XenForo login-error oracles are heavy (one browser page each), so
         # they're opt-in — enable for a thorough sweep that beats Cloudflare.
         if getattr(settings, "enable_browser_xenforo", False):
@@ -53,7 +54,8 @@ class BrowserAccountProbeModule(BaseModule):
                                 errors=["No browser oracles enabled"])
 
         try:
-            results = await probe_all(email, oracles)
+            calibration: dict[str, Any] = {}
+            results = await probe_all(email, oracles, report=calibration)
         except RuntimeError as exc:
             # Playwright / browser not installed — skip, don't fail.
             return ModuleResult(status=ModuleStatus.SKIPPED, errors=[str(exc)])
@@ -70,7 +72,7 @@ class BrowserAccountProbeModule(BaseModule):
                 confirmed += 1
                 if o.intrusive:
                     intrusive_emails_sent += 1
-                findings.append({
+                findings.append(normalise_verification({
                     "platform": o.domain,
                     "url": o.url,
                     # A browser oracle is a single, uncorroborated signal — surface
@@ -79,7 +81,7 @@ class BrowserAccountProbeModule(BaseModule):
                     "verification": "unverified",
                     "metadata": {"flow": o.flow, "method": "browser-oracle",
                                  "intrusive": o.intrusive},
-                })
+                }))
             elif verdict == "not_exists":
                 not_found += 1
             elif verdict == "error":
@@ -113,6 +115,8 @@ class BrowserAccountProbeModule(BaseModule):
                 "errored": errored,
                 "intrusive_emails_sent": intrusive_emails_sent,
                 "engine": "browser-oracle/1.0",
+                # 'exists' answers withheld because a random address got the same answer
+                "withheld_non_discriminating": calibration.get("withheld", []),
             },
             errors=errors,
         )

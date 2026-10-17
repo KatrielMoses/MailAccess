@@ -781,6 +781,23 @@ class Settings(BaseSettings):
     ipgeo_timeout_seconds: float = 10.0
     ipgeo_refresh_ttl_days: int = 30
 
+    # WhoisFreaks (BYOK): WHOIS history, reverse WHOIS, dated subdomains.
+    # Without a key nothing changes and no call is made.
+    whoisfreaks_api_key: str | None = None
+    whoisfreaks_disabled: bool = False
+    whoisfreaks_refresh_ttl_days: int = 30
+    whoisfreaks_timeout_seconds: float = 20.0
+    whoisfreaks_history_pages: int = 1
+    whoisfreaks_reverse_pages: int = 1
+    whoisfreaks_reverse_seeds: int = 2
+    whoisfreaks_subdomain_pages: int = 2
+    # Redacted WHOIS: probe up to N sibling TLDs for a real registrant company, then
+    # broad-search multi-word company names (filtered back to the same core name).
+    whoisfreaks_sibling_lookups: int = 3
+    whoisfreaks_variant_search: bool = True
+    # Own deadline for the post-harvest reverse-WHOIS step (3 calls/min plan limit).
+    whoisfreaks_harvest_deadline_seconds: float = 90.0
+
     netlas_api_key: str | None = None
     netlas_disabled: bool = False
     netlas_subdomain_cap: int = 500

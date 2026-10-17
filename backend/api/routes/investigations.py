@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 import traceback
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +14,7 @@ from ...core.service import InvestigationService, enrich_report
 from ...core.suppression import SuppressionUnavailable
 from ...db.database import get_db
 from ...exporters import EXPORTERS
+from ...core import run_events
 from .. import queue_registry
 
 router = APIRouter()
@@ -61,6 +64,7 @@ class InvestigateRequest(BaseModel):
     # ``netlas_client.netlas_active(no_netlas=...)``.
     no_netlas: bool = False
     no_ipgeo: bool = False
+    no_whoisfreaks: bool = False
     # F7 deep mode (``--org-surface-deep``): full subdomain enumeration.
     org_surface_deep: bool = False
     # F8 (``--refresh``): force a Netlas fetch past the 30-day store gate.
@@ -123,6 +127,7 @@ async def start_investigation(
         mode=body.mode,
         no_netlas=body.no_netlas,
         no_ipgeo=body.no_ipgeo,
+        no_whoisfreaks=body.no_whoisfreaks,
         org_surface_deep=body.org_surface_deep,
         refresh=body.refresh,
     )
@@ -135,6 +140,139 @@ async def start_investigation(
         status="complete" if cached else "pending",
         created_at=created_at.isoformat(),
         cached=cached,
+    )
+
+
+SSE_HEARTBEAT_SECONDS = 15.0
+_DB_POLL_SECONDS = 0.5
+# Events that carry finding content; withheld for a suppressed subject.
+_FINDING_EVENTS = frozenset({"finding", "finding_updated", "edge_added"})
+
+
+def wire_event(event: dict) -> dict:
+    """The contract's wire shape: the event's own fields at the top level plus ``seq``
+    and ``ts``. No ``payload`` wrapper; the type is on the ``event:`` line."""
+    return {"seq": event["seq"], "ts": event["ts"], **event["payload"]}
+
+
+def _sse_message(event: dict) -> str:
+    body = json.dumps(wire_event(event), separators=(",", ":"))
+    return f"id: {event['seq']}\nevent: {event['type']}\ndata: {body}\n\n"
+
+
+async def _saved_events(investigation_id: str, since: int) -> list[dict]:
+    from sqlalchemy import select
+
+    from ...db.database import AsyncSessionLocal
+    from ...db.models import RunEvent
+
+    async with AsyncSessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(RunEvent)
+                .where(RunEvent.investigation_id == investigation_id, RunEvent.seq > since)
+                .order_by(RunEvent.seq)
+            )
+        ).scalars().all()
+    return [{"seq": r.seq, "ts": r.ts, "type": r.type, "payload": r.payload} for r in rows]
+
+
+async def _events_from_log(investigation_id: str, since: int):
+    """Replay saved events, then follow them: from the live emitter when this process
+    owns the run, else by polling the saved log. Yields ``None`` as a heartbeat tick."""
+    emitter = run_events.get(investigation_id)
+    if emitter is not None:
+        async for event in emitter.follow(since, heartbeat=SSE_HEARTBEAT_SECONDS):
+            yield event
+        return
+    from ...db.database import AsyncSessionLocal
+    from ...db.models import Investigation, InvestigationStatus
+
+    last_beat = time.monotonic()
+    cursor = since
+    while True:
+        batch = await _saved_events(investigation_id, cursor)
+        for event in batch:
+            cursor = event["seq"]
+            yield event
+            if event["type"] == "run_done":
+                return
+        if not batch:
+            async with AsyncSessionLocal() as db:
+                inv = await db.get(Investigation, investigation_id)
+            if inv is None or inv.status in (
+                InvestigationStatus.COMPLETE,
+                InvestigationStatus.FAILED,
+            ):
+                # Finished with nothing (more) to replay, e.g. a run saved before
+                # the event log existed: close rather than hang.
+                tail = await _saved_events(investigation_id, cursor)
+                if not tail:
+                    return
+                continue
+            # The run may now live in this process (registered after the first check).
+            emitter = run_events.get(investigation_id)
+            if emitter is not None:
+                async for event in emitter.follow(cursor, heartbeat=SSE_HEARTBEAT_SECONDS):
+                    yield event
+                return
+            await asyncio.sleep(_DB_POLL_SECONDS)
+        if time.monotonic() - last_beat >= SSE_HEARTBEAT_SECONDS:
+            last_beat = time.monotonic()
+            yield None
+
+
+@router.get("/investigations/{investigation_id}/events")
+async def stream_investigation_events(
+    investigation_id: str,
+    request: Request,
+    since: int = Query(0, ge=0),
+    session: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """Server-sent events for one run: replay every saved event with ``seq > since``,
+    then follow live until ``run_done``. Each message carries ``id: <seq>`` so a
+    client resumes with ``Last-Event-ID``. Works after the run finished (full
+    replay) and for any number of viewers. A heartbeat comment goes out every 15 s."""
+    from ...core.suppression import load_index, subject_suppressed
+    from ...db.models import Investigation
+
+    inv = await session.get(Investigation, investigation_id)
+    if inv is None:
+        raise HTTPException(status_code=404, detail="Investigation not found")
+    header = request.headers.get("last-event-id")
+    if header and header.strip().isdigit():
+        since = max(since, int(header.strip()))
+    # R2 (S1) — a suppressed subject's findings never stream; fail closed.
+    # The store can be momentarily busy while a run is writing (SQLite): retry a few
+    # times before failing closed, so a viewer is not refused by a transient lock.
+    index = None
+    for attempt in range(4):
+        try:
+            index = await load_index()
+            break
+        except SuppressionUnavailable as exc:
+            if attempt == 3:
+                raise _SUPPRESSION_UNAVAILABLE from exc
+            await asyncio.sleep(0.25 * (attempt + 1))
+    subject = inv.canonical_email or inv.email
+    withhold = bool(subject) and subject_suppressed(index, email=subject)
+
+    async def generate():
+        yield ": stream open\n\n"
+        async for event in _events_from_log(investigation_id, since):
+            if event is None:
+                yield ": hb\n\n"
+                continue
+            if withhold and event["type"] in _FINDING_EVENTS:
+                continue
+            yield _sse_message(event)
+            if event["type"] == "run_done":
+                return
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -166,11 +304,16 @@ async def get_report(
             # R12 (S1) — scope provenance to THIS run's mode and run time so a
             # later or different-mode run can't leak a name/title into it.
             as_of = _parse_iso(enriched.get("completed_at"))
+            # Provider facts count only when that provider was ON for THIS run.
+            from ...core.capabilities import allowed_providers_for_run
+
+            allowed = await allowed_providers_for_run(investigation_id, session=session)
             provenance = await resolve_report_fields(
                 str(subject),
                 session=session,
                 mode=enriched.get("mode"),
                 as_of=as_of,
+                allowed_providers=allowed,
             )
             if provenance:
                 # R2 — provenance is attached AFTER redaction, so redact it too.

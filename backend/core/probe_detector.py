@@ -184,18 +184,27 @@ def is_confirmed_account_hit(finding: dict[str, Any]) -> bool:
     this so the same false positive cannot leak into one surface after being kept out
     of another (Output-Trust M1/M2). A hit qualifies only when:
 
-    * it was corroborated (``metadata.verification == "confirmed"`` — platform_dedup
-      promotes a dual-confirmed hit), OR
+    * its evidence label is ``confirmed`` (two independent signal types tied to the
+      email, see evidence.py), OR
     * it is not speculative/unverified (RC1 caps a raw ``username_platforms`` localpart
       guess to ``verification: unverified`` / ``confidence: low``) AND its URL is
       user-discriminating — NOT a bare domain / search page. ``account_discovery`` emits
       a bare ``https://<domain>`` profile_url for every hit, so an uncorroborated one
       (Femometer/Mastodon-style FP) is correctly rejected here.
     """
+    from .evidence import evidence_label, infer_module, is_identity_claim
+
+    # The single label rule decides first: a username match is never an owned account
+    # and ``confirmed`` means two independent signals tied to the email.
+    if not is_identity_claim(infer_module(finding), finding):
+        return False  # a record read directly (DNS, WHOIS...) is not an account
+    label = evidence_label(finding)
+    if label == "username_match":
+        return False
+    if label == "confirmed":
+        return True
     meta = finding.get("metadata") if isinstance(finding.get("metadata"), dict) else {}
     verification = str((meta or {}).get("verification") or "").lower()
-    if verification == "confirmed":
-        return True
     if verification == "unverified" or bool((meta or {}).get("speculative")):
         return False
     if str(finding.get("confidence") or "").lower() == "low":

@@ -667,7 +667,8 @@ async def enrich_ips(
     from .ipgeo_client import current_tier, ipgeo_active, key_fingerprint, lookup_many, public_ips
 
     cleaned = public_ips(ips)
-    if not cleaned:
+    # Off (no key, disabled, or --no-ipgeo) is fully off: no lookups and no cached rows.
+    if not cleaned or not ipgeo_active(no_ipgeo=no_ipgeo):
         return {}
     stored = await load_ip_intel(cleaned)
     cutoff = _now() - timedelta(days=max(0, settings.ipgeo_refresh_ttl_days))
@@ -712,3 +713,69 @@ async def enrich_ips(
             ):
                 records[ip] = payload
     return records
+
+
+def whoisfreaks_query_key(kind: str, query: str) -> str:
+    """Normalise a cache query: lower-case domains/emails, trimmed company names."""
+    value = " ".join(str(query or "").split())
+    if kind == "reverse_company":
+        return value
+    value = value.lower()
+    return value.rstrip(".") if kind in ("history", "subdomains") else value
+
+
+async def load_whoisfreaks_page(kind: str, query: str, page: int) -> dict | None:
+    """Read one cached WhoisFreaks page regardless of key or flags."""
+    try:
+        from sqlalchemy import select
+
+        from ..db.database import AsyncSessionLocal
+        from ..db.models import WhoisFreaksCache
+
+        async with AsyncSessionLocal() as session:
+            row = (
+                await session.execute(
+                    select(WhoisFreaksCache).where(
+                        WhoisFreaksCache.kind == kind,
+                        WhoisFreaksCache.query == whoisfreaks_query_key(kind, query),
+                        WhoisFreaksCache.page == page,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return {
+                "payload": dict(row.payload or {}),
+                "fetched_at": _aware(row.fetched_at),
+                "empty": bool(row.empty),
+            }
+    except Exception:
+        logger.debug("WhoisFreaks cache read unavailable", exc_info=True)
+        return None
+
+
+async def write_whoisfreaks_page(kind: str, query: str, page: int, payload: dict, empty: bool) -> None:
+    """Only clean answers (data or a clean 404/403 empty) may be written."""
+    try:
+        from ..db.database import AsyncSessionLocal
+        from ..db.models import WhoisFreaksCache
+
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                await session.merge(
+                    WhoisFreaksCache(
+                        kind=kind,
+                        query=whoisfreaks_query_key(kind, query),
+                        page=page,
+                        fetched_at=_now(),
+                        payload=payload,
+                        empty=empty,
+                    )
+                )
+    except Exception:
+        logger.debug("WhoisFreaks cache write unavailable", exc_info=True)
+
+
+async def has_whoisfreaks_cache(kind: str, query: str) -> bool:
+    """True when page 1 of this lookup is cached (fresh or not)."""
+    return await load_whoisfreaks_page(kind, query, 1) is not None

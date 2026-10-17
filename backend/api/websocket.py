@@ -15,7 +15,7 @@ from ..core.suppression import (
 )
 from ..db.database import AsyncSessionLocal
 from ..db.models import Investigation, InvestigationStatus
-from . import queue_registry
+from ..core import run_events
 
 router = APIRouter()
 
@@ -145,26 +145,25 @@ async def ws_investigate(investigation_id: str, websocket: WebSocket) -> None:
 
     await websocket.accept()
 
-    # The queue is registered before the HTTP 202 response is sent, but poll
+    # The run's emitter is registered before the HTTP 202 response is sent, but poll
     # briefly in case of any scheduling delay (e.g. server under load).
-    queue = None
+    emitter = None
     for _ in range(20):  # up to 10 s (20 × 0.5 s)
-        queue = queue_registry.pop(investigation_id)
-        if queue is not None:
+        emitter = run_events.get(investigation_id)
+        if emitter is not None:
             break
         await asyncio.sleep(0.5)
 
-    if queue is None:
+    if emitter is None:
         await websocket.send_json(
-            {"type": "error", "error": "investigation not found or already streaming"}
+            {"type": "error", "error": "investigation not found or already finished"}
         )
         await websocket.close(code=1008)
         return
 
+    # Every viewer reads the same recorded stream from the start (no one-viewer limit).
     try:
-        while True:
-            item: QueueEvent | None = await queue.get()
-
+        async for item in emitter.follow_legacy():
             if item is None:
                 # Sentinel: the engine finished — but it fires on BOTH the success and
                 # failure paths, so it carries no outcome. Read the PERSISTED status
@@ -199,12 +198,4 @@ async def ws_investigate(investigation_id: str, websocket: WebSocket) -> None:
                 )
 
     except WebSocketDisconnect:
-        # Drain the queue so the engine's background task isn't blocked.
-        asyncio.create_task(_drain_silently(queue))
-
-
-async def _drain_silently(queue: asyncio.Queue) -> None:
-    while True:
-        item = await queue.get()
-        if item is None:
-            break
+        return

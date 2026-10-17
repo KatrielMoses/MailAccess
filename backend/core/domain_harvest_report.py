@@ -143,16 +143,20 @@ def _carry_netlas_provenance(loser: dict[str, Any], winner: dict[str, Any]) -> N
     """Keep ``netlas`` provenance when two modules report the same host.
 
     The merge keeps one row per host, which used to drop the other row's
-    ``discovery_method``. Union the methods only when Netlas is involved, so
-    keyless output (never tagged ``netlas``) is byte-for-byte unchanged.
+    ``discovery_method``. Union the methods only when Netlas or WhoisFreaks is
+    involved, so keyless output (never tagged by either) is byte-for-byte unchanged.
     """
     def _methods(row: dict[str, Any]) -> list[str]:
         value = row.get("discovery_method") or []
         return [value] if isinstance(value, str) else list(value)
 
     lost, kept = _methods(loser), _methods(winner)
-    if any(m.startswith("netlas") for m in lost + kept):
+    if any(m.startswith(("netlas", "whoisfreaks")) for m in lost + kept):
         winner["discovery_method"] = sorted(set(lost) | set(kept))
+    # WhoisFreaks dates ride on whichever row wins the merge.
+    for key in ("first_seen", "last_seen", "inactive_from"):
+        if loser.get(key) and not winner.get(key):
+            winner[key] = loser[key]
 
 
 def _format_subdomain_panel(result: DomainHarvestResult) -> Panel | Text:
@@ -189,6 +193,8 @@ def _format_subdomain_panel(result: DomainHarvestResult) -> Panel | Text:
         status = "scraped" if item.get("scraped") else "noted"
         if tier == "INFRA":
             status = "skipped"
+        if item.get("first_seen"):
+            status += f" · first seen {str(item['first_seen'])[:10]}"
         text.append(
             f"  {tier:<6} {host:<32} {float(item.get('score') or 0.0):.2f} [{status}]\n",
             style="dim" if tier in {"LOW", "SKIP"} else None,
@@ -580,6 +586,7 @@ def _module_display_name(name: str) -> str:
         "github_commits": "GitHub Commits",
         "breach_aggregator": "breach_aggregator",
         "netlas_whois_emails": "WHOIS",
+        "whoisfreaks_history": "WHOIS history",
         "netlas_cert": "Certificates",
         "netlas_responses": "Netlas Responses",
     }

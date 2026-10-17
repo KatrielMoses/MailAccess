@@ -101,7 +101,7 @@ New modules available in 0.4.0: `breach_deep`, `email_discovery`, `wayback`, `gi
 }
 ```
 
-Connect to `WS /ws/investigate/{id}` immediately after to stream results in real time. The internal queue is discarded after 5 minutes if no WebSocket consumer connects.
+Connect to `WS /ws/investigate/{id}` immediately after to stream results in real time. The live stream is kept for 5 minutes after a run ends; the saved event log (`GET /api/investigations/{id}/events`) is kept for the report retention.
 
 ---
 
@@ -141,6 +141,10 @@ Paginated list of past investigations, newest first.
 `status` values: `pending`, `running`, `complete`, `failed`.
 
 ---
+
+### `GET /api/capabilities`
+
+Which paid providers this engine can use: `{"providers": {"ipgeolocation": true, "whoisfreaks": false, "netlas": true}}`. Booleans only, never key values, fragments or quota. `true` means the key is set and the provider is not switched off. A provider that is `false` appears nowhere in a run (events, report, graph, exports, module list), and a run with `no_ipgeo` / `no_whoisfreaks` set treats that provider the same way: no calls, no credits, no cached data.
 
 ### `GET /api/report/{id}`
 
@@ -448,15 +452,45 @@ The server pushes one JSON frame per module event, then a final `investigation_c
 
 Risk level thresholds: `low` (0–20), `medium` (21–50), `high` (51–80), `critical` (81–100).
 
-**Error frame** — sent and socket closed if the investigation ID is not found or the queue has already been consumed:
+**Error frame** — sent and socket closed if the investigation ID is not known or the run's live stream is no longer kept (use the event log below instead):
 ```json
 {
   "type": "error",
-  "error": "investigation not found or already streaming"
+  "error": "investigation not found or already finished"
 }
 ```
 
-If the client disconnects mid-stream, the server drains the internal queue silently so the engine's background task is not blocked.
+Any number of clients can connect to the same run; each receives the full stream from the start. A failed run ends with `{"type": "investigation_failed", "error": "..."}`.
+
+### `GET /api/investigations/{id}/events?since=N`
+
+The run's saved event log as server-sent events ("show your work"). Same API-key auth as the rest of `/api`. It replays every saved event with `seq > N` (default 0), then follows the run live until `run_done`, then closes. It works after the run has finished (full replay) and for any number of viewers. Each message sets `id: <seq>`, so a reconnecting client resumes with the `Last-Event-ID` header. A `: keep-alive` comment goes out every 15 seconds.
+
+```
+id: 12
+event: finding
+data: {"seq":12,"ts":"2026-10-17T09:30:01.512Z","finding_id":3,"module":"account_discovery",...}
+```
+
+`seq` is per run, gap-free from 1. `ts` is UTC with milliseconds. `data` is the event's own fields at the top level plus `seq` and `ts`: there is no `payload` wrapper, and the event type is only on the `event:` line. A `: hb` comment goes out every 15 seconds. Payloads are small: a platform hit is one event, never a whole module result. The full contract, shared with the website, is [dev/SHOW-YOUR-WORK-EVENTS.md](../dev/SHOW-YOUR-WORK-EVENTS.md).
+
+| event | data (besides `seq`, `ts`) |
+|---|---|
+| `run_started` | `{mode, planned_modules: [{module, phase, technique_id}], total_sources, unavailable: [{module, reason}]}` (first event, before any module starts) |
+| `phase_start` / `phase_end` | `{phase, modules}` / `{phase, duration_ms}` |
+| `module_start` | `{module, phase, technique_id, technique}` (always sent, including modules skipped for budget) |
+| `module_progress` | `{module, checked, total}` (at most 4 per second per module) |
+| `finding` | `{finding_id, module, kind, title, value, url, label, trace}` |
+| `finding_updated` | `{finding_id, label, trace}` (after dedup or corroboration changes a label) |
+| `edge_added` | `{source: {id, type, label}, target: {...}, type, reason, finding_id}` |
+| `module_done` | `{module, status, findings_count, duration_ms, skipped_reason}`; `status` is `success`, `empty`, `partial`, `failed` or `skipped`; `skipped_reason` is `budget`, `no_key`, `disabled` or `null` |
+| `run_done` | `{status, sources_checked, total_sources, findings, exposure_score}` (a failed run adds `error`) |
+
+`total_sources` counts only the checks that will run; checks that cannot (no key, disabled, nothing to read for this address) are listed in `run_started.unavailable` and are not part of "N of M". `sources_checked` counts checks that finished as `success`, `empty`, `partial` or `failed`. Node types are `email`, `username`, `account`, `name`, `domain`, `breach` and `phone`. `kind` is one of `account`, `username_match`, `name`, `domain`, `breach`, `email`, `phone`, `other`.
+
+`label` answers one question, whether a finding is linked to this person: `username_match` (the username exists on a site, never that this person owns it), `possible` (one signal tied to the email) or `confirmed` (two independent signal types). Records read directly (DNS, WHOIS, the address check) are `null`: they get no badge and their `trace.reason` states what was read. Every finding's `trace` is `{technique_id, technique, signal, derived_from, corroborated_by, independent_signals, reason}`, and the reason names the real site or record. Traces never contain keys, tokens or raw responses. The same `trace` and `label` are saved on each finding in the report (`data.trace`, `data.label`).
+
+`mailaccess harvest-emails --events-jsonl PATH` writes the same events (a harvest streams value-less `candidate` events while it runs and emits `finding` events only from its final result, with `run_done` counts equal to the export; see the event contract) for a harvest, one JSON object per line: the same top-level fields plus `type` (an edge's own `type` is written as `edge_type`).
 
 ---
 

@@ -119,7 +119,7 @@ def test_platform_dedup_merges_enumeration_and_pivot_by_domain() -> None:
     stats = deduplicate_platform_findings(results)
 
     assert dedup_key("https://www.github.com/katriel") == "github.com"
-    assert stats["dual_confirmed"] == 1
+    assert stats["dual_confirmed"] == 0  # two username-derived sources: merged, not promoted
     # username_platforms outranks the pivot, so it keeps the merged finding.
     assert len(results["username_platforms"].findings) == 1
     assert results["username_pivot"].findings == []

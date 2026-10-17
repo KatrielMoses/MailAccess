@@ -27,14 +27,17 @@ QUOTA_RETRY_SECONDS = 3600
 class _RedactKey(logging.Filter):
     """httpx logs request URLs at INFO; query credentials must stay private."""
 
+    def __init__(self, prefix: str = BASE_URL) -> None:
+        super().__init__()
+        self._prefix = prefix
+
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.args, tuple):
             record.args = tuple(self._redact(value) for value in record.args)
         return True
 
-    @staticmethod
-    def _redact(value):
-        if isinstance(value, (str, httpx.URL)) and str(value).startswith(BASE_URL):
+    def _redact(self, value):
+        if isinstance(value, (str, httpx.URL)) and str(value).startswith(self._prefix):
             url = httpx.URL(value)
             if "apiKey" in url.params:
                 return str(url.copy_set_param("apiKey", "REDACTED"))

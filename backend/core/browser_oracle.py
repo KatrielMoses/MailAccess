@@ -37,6 +37,9 @@ class BrowserOracle:
     exists_markers: tuple[str, ...] = ()
     not_exists_markers: tuple[str, ...] = ()
     intrusive: bool = False  # True => submitting emails the subject
+    # Non-empty => never run, and the text says why: the site shows the same page for
+    # any address, so its answer cannot tell an account from no account.
+    disabled: str = ""
 
 
 # Signup/registration routing seen when an email-first flow rejects an unknown
@@ -51,15 +54,23 @@ _SIGNUP_MARKERS = (
 # Oracle catalogue (from verified research; URLs + response markers). Add more
 # here as they're confirmed — data only, no code changes needed.
 # ---------------------------------------------------------------------------
+NO_LEAK = (
+    "shows the same sign-in page for any address (fired 'exists' on a random address "
+    "at mailaccess.pro on 2026-10-17), so it cannot tell an account from no account"
+)
+
 ORACLES: list[BrowserOracle] = [
     # --- email-first login (NON-intrusive: no email sent) ---
-    BrowserOracle("paypal", "paypal.com", "https://www.paypal.com/signin", "email_first"),
-    BrowserOracle("docusign", "docusign.com", "https://account.docusign.com/", "email_first"),
+    BrowserOracle("paypal", "paypal.com", "https://www.paypal.com/signin", "email_first",
+                  disabled=NO_LEAK),
+    BrowserOracle("docusign", "docusign.com", "https://account.docusign.com/", "email_first",
+                  disabled=NO_LEAK),
     BrowserOracle("gemini", "gemini.com", "https://exchange.gemini.com/signin", "email_first",
-                  exists_markers=("welcome",)),
+                  exists_markers=("welcome",), disabled=NO_LEAK),
     BrowserOracle("box", "box.com", "https://account.box.com/login", "email_first",
-                  exists_markers=("not you?",)),
-    BrowserOracle("docker", "docker.com", "https://login.docker.com/u/login/identifier", "email_first"),
+                  exists_markers=("not you?",), disabled=NO_LEAK),
+    BrowserOracle("docker", "docker.com", "https://login.docker.com/u/login/identifier", "email_first",
+                  disabled=NO_LEAK),
     BrowserOracle("surveymonkey", "surveymonkey.com", "https://www.surveymonkey.com/user/sign-in/", "email_first"),
     BrowserOracle("twitter", "twitter.com", "https://x.com/i/flow/login", "email_first",
                   exists_markers=("where should we send",)),
@@ -69,7 +80,7 @@ ORACLES: list[BrowserOracle] = [
     BrowserOracle("komoot", "komoot.com", "https://www.komoot.com/login", "email_first",
                   not_exists_markers=("first time here",)),
     BrowserOracle("vivino", "vivino.com", "https://www.vivino.com/users/sign_in", "email_first",
-                  not_exists_markers=("create a profile",)),
+                  not_exists_markers=("create a profile",), disabled=NO_LEAK),
     BrowserOracle("calendly", "calendly.com", "https://calendly.com/login", "email_first",
                   not_exists_markers=("an account doesn't exist",)),
     BrowserOracle("coursera", "coursera.org", "https://www.coursera.org/login", "email_first"),
@@ -80,7 +91,7 @@ ORACLES: list[BrowserOracle] = [
     BrowserOracle("pcloud", "pcloud.com", "https://www.pcloud.com/", "email_first",
                   not_exists_markers=("sign up",)),
     BrowserOracle("subscribestar", "subscribestar.adult", "https://subscribestar.adult/login", "email_first",
-                  exists_markers=("back to previous step",)),
+                  exists_markers=("back to previous step",), disabled=NO_LEAK),
     BrowserOracle("nextdoor", "nextdoor.com", "https://nextdoor.com/login/", "email_first"),
 
     # --- forgot-password oracle (INTRUSIVE: emails the subject) ---
@@ -214,10 +225,35 @@ async def run_oracle(page: Any, oracle: BrowserOracle, email: str,
     return "inconclusive"
 
 
+def control_email_for(email: str) -> str:
+    """A random address at the same domain, certain to have no account."""
+    import secrets
+
+    domain = email.rsplit("@", 1)[-1]
+    return f"zz{secrets.token_hex(6)}@{domain}"
+
+
+def apply_control(verdict: str, control_verdict: str) -> str:
+    """An 'exists' only counts if a random address does NOT also get 'exists'.
+
+    When the control gets the same answer the site is not telling accounts from
+    non-accounts, so the hit is withheld (``inconclusive``)."""
+    if verdict == "exists" and control_verdict == "exists":
+        return "inconclusive"
+    return verdict
+
+
 async def probe_all(email: str, oracles: list[BrowserOracle], *,
                     concurrency: int = 4, headless: bool = True,
-                    per_oracle_timeout_ms: int = 15000) -> dict[str, str]:
+                    per_oracle_timeout_ms: int = 15000,
+                    control: bool = True,
+                    report: dict[str, Any] | None = None) -> dict[str, str]:
     """Run the given oracles in a headless browser. Returns {domain: verdict}.
+
+    Disabled oracles are skipped. With ``control`` every non-intrusive 'exists' is
+    re-checked against a random address at the same domain; if that also reads
+    'exists' the hit is withheld. ``report`` (optional) receives
+    ``{"withheld": [domain, ...]}``.
 
     Best-effort: if Playwright (or its browser) isn't installed, raises
     ``RuntimeError`` so the caller can SKIP gracefully.
@@ -261,6 +297,31 @@ async def probe_all(email: str, oracles: list[BrowserOracle], *,
                 finally:
                     await context.close()
 
+        oracles = [o for o in oracles if not o.disabled]
         await asyncio.gather(*(_one(o) for o in oracles), return_exceptions=True)
+
+        withheld: list[str] = []
+        if control:
+            ctl_email = control_email_for(email)
+
+            async def _control(oracle: BrowserOracle) -> None:
+                async with sem:
+                    context = await browser.new_context()
+                    page = await context.new_page()
+                    try:
+                        ctl = await run_oracle(page, oracle, ctl_email, per_oracle_timeout_ms)
+                    except Exception:  # noqa: BLE001
+                        ctl = "error"
+                    finally:
+                        await context.close()
+                    final = apply_control(results[oracle.domain], ctl)
+                    if final != results[oracle.domain]:
+                        withheld.append(oracle.domain)
+                    results[oracle.domain] = final
+
+            hits = [o for o in oracles if results.get(o.domain) == "exists" and not o.intrusive]
+            await asyncio.gather(*(_control(o) for o in hits), return_exceptions=True)
+        if report is not None:
+            report["withheld"] = withheld
         await browser.close()
     return results

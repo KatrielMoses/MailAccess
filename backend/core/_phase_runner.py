@@ -134,7 +134,11 @@ async def run_one_module(
     accepts_keyword_args = any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in run_params.values()
     )
-    sink: list[dict[str, Any]] = []
+    from .run_stream import make_sink
+
+    # With a live run, the sink also announces each hit the moment the module
+    # appends it (a plain list otherwise).
+    sink: list[dict[str, Any]] = make_sink(mod.name, canonical_email or email)
     sink_kwargs: dict[str, Any] = {"sink": sink} if "sink" in run_params else {}
 
     def _partial_from_sink(base_errors: list[str], extra_meta: dict[str, Any]) -> ModuleResult:

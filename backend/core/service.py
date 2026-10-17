@@ -369,6 +369,7 @@ class InvestigationService:
         mode: str | None = None,
         no_netlas: bool = False,
         no_ipgeo: bool = False,
+        no_whoisfreaks: bool = False,
         org_surface_deep: bool = False,
         refresh: bool = False,
     ) -> tuple[str, datetime, asyncio.Queue | None, bool]:
@@ -406,8 +407,8 @@ class InvestigationService:
             if recent is not None:
                 from ..modules.base import ModuleResult, ModuleStatus
                 from ..modules.ip_intel import collect_investigate_ips
-                from .enrichment_store import load_ip_intel
                 from .ipgeo_client import ipgeo_active
+                from .whoisfreaks_client import whoisfreaks_active
 
                 # A key newly added after a native cache hit must still reach
                 # the final IP phase. The same applies to shared cached IP data
@@ -428,6 +429,17 @@ class InvestigationService:
                     .scalars()
                     .all()
                 )
+                # A provider that is off for this run (no key, disabled, or the per-run
+                # flag) is fully off: a stored run that already holds its data is not
+                # reused, or that data would leak into this run's report.
+                off_modules = set()
+                if not ipgeo_active(no_ipgeo=no_ipgeo):
+                    off_modules.add("ip_intel")
+                if not whoisfreaks_active(no_whoisfreaks=no_whoisfreaks):
+                    off_modules.add("whoisfreaks_intel")
+                if any(run.module_name in off_modules for run in runs):
+                    recent = None
+            if recent is not None:
                 collected = {
                     run.module_name: ModuleResult(
                         ModuleStatus(run.status),
@@ -435,19 +447,18 @@ class InvestigationService:
                         errors=run.errors or [],
                     )
                     for run in runs
-                    if run.module_name != "ip_intel"
+                    if run.module_name not in ("ip_intel", "whoisfreaks_intel")
                 }
                 for module_name, data in prior:
-                    if module_name == "ip_intel":
+                    if module_name in ("ip_intel", "whoisfreaks_intel"):
                         continue
                     collected.setdefault(
                         module_name, ModuleResult(ModuleStatus.SUCCESS)
                     ).findings.append(data)
                 ips = collect_investigate_ips(canonical_email, collected)
-                has_ip_enrichment = bool(ips) and (
-                    ipgeo_active(no_ipgeo=no_ipgeo) or bool(await load_ip_intel(list(ips)))
-                )
-                if not has_ip_enrichment:
+                has_ip_enrichment = bool(ips) and ipgeo_active(no_ipgeo=no_ipgeo)
+                has_wf_enrichment = whoisfreaks_active(no_whoisfreaks=no_whoisfreaks)
+                if not has_ip_enrichment and not has_wf_enrichment:
                     return recent.id, recent.created_at, None, True
                 cached_results = collected
 
@@ -472,6 +483,7 @@ class InvestigationService:
             force=force,
             no_netlas=no_netlas,
             no_ipgeo=no_ipgeo,
+            no_whoisfreaks=no_whoisfreaks,
             org_surface_deep=org_surface_deep,
             refresh=refresh,
             cached_results=cached_results,
@@ -601,6 +613,11 @@ class InvestigationService:
         if exists is None:
             return False
 
+        from ..db.models import RunEvent
+
+        await self._session.execute(
+            delete(RunEvent).where(RunEvent.investigation_id == investigation_id)
+        )
         await self._session.execute(
             delete(Finding).where(Finding.investigation_id == investigation_id)
         )

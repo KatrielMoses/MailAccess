@@ -51,21 +51,35 @@ async def _run_and_record(
     default_timeout = _MODULE_DEFAULT_TIMEOUTS.get(
         mod.name, config.module_timeout_seconds
     )
+    from . import run_stream
+
     async with semaphore:
-        result = await run_one_module(
-            mod,
-            email,
-            default_timeout=default_timeout,
-            overrides=config.module_timeout_overrides,
-            explicit_module=explicit_module,
-            queue=queue,
-            canonical_email=canonical_email if use_canonical_email else None,
-            collected=findings_input,
-            budget=budget,
-            mode=mode,
-            force=force,
-        )
+        run_stream.module_started(mod.name)
+        try:
+            result = await run_one_module(
+                mod,
+                email,
+                default_timeout=default_timeout,
+                overrides=config.module_timeout_overrides,
+                explicit_module=explicit_module,
+                queue=queue,
+                canonical_email=canonical_email if use_canonical_email else None,
+                collected=findings_input,
+                budget=budget,
+                mode=mode,
+                force=force,
+            )
+        except BaseException as exc:
+            # A module that raises still gets its "done" event, so a viewer never
+            # waits on a module that is already over.
+            run_stream.module_finished(
+                mod.name,
+                ModuleResult(status=ModuleStatus.FAILED, errors=[str(exc)[:200]]),
+                canonical_email,
+            )
+            raise
     collected[mod.name] = result
+    run_stream.module_finished(mod.name, result, canonical_email)
     await queue.put(_event_result(mod.name, result))
     return mod.name, result
 
@@ -348,6 +362,9 @@ class PhonePhase(InvestigationPhase):
                 hint_timeout = float(config.module_timeout_seconds)
                 if budget is not None:
                     hint_timeout = budget.cap(hint_timeout)
+                from . import run_stream
+
+                run_stream.module_started(messaging.name, followup=True)
                 try:
                     extra = await asyncio.wait_for(
                         messaging.run(
@@ -356,6 +373,9 @@ class PhonePhase(InvestigationPhase):
                             collected=collected,
                         ),
                         timeout=hint_timeout,
+                    )
+                    run_stream.module_finished(
+                        messaging.name, extra, kwargs["canonical_email"]
                     )
                     if extra.findings:
                         previous = collected.get(messaging.name)
@@ -373,6 +393,11 @@ class PhonePhase(InvestigationPhase):
                         else:
                             collected[messaging.name] = extra
                 except Exception:
+                    run_stream.module_finished(
+                        messaging.name,
+                        ModuleResult(status=ModuleStatus.FAILED, errors=["follow-up failed"]),
+                        kwargs["canonical_email"],
+                    )
                     logger.debug("messaging_hints phone follow-up failed", exc_info=True)
         return collected
 
@@ -383,21 +408,44 @@ class IpIntelPhase(InvestigationPhase):
 
     async def run(self, **kwargs: Any) -> dict[str, ModuleResult]:
         from ..modules.ip_intel import IpIntelModule, collect_investigate_ips
-        from .enrichment_store import load_ip_intel
         from .ipgeo_client import ipgeo_active
 
         explicit = kwargs.get("explicit_modules")
         if explicit is not None and self.name not in explicit:
             return kwargs["collected"]
         ips = collect_investigate_ips(kwargs["canonical_email"], kwargs["collected"])
-        # With neither key nor cache, don't add a module row to native output.
-        if not ips or (not ipgeo_active() and not await load_ip_intel(list(ips))):
+        # Off (no key, disabled, or --no-ipgeo) means fully off: no call and no cached data.
+        if not ips or not ipgeo_active():
             return kwargs["collected"]
         runner = _runner_kwargs(kwargs)
         # The primary wall budget may be spent by discovery. This final,
         # bounded enrichment phase still gets its normal module timeout.
         runner["budget"] = None
         await _run_and_record(IpIntelModule(), **runner, findings_input=kwargs["collected"])
+        return kwargs["collected"]
+
+
+class WhoisFreaksPhase(InvestigationPhase):
+    name = "whoisfreaks_intel"
+    dependencies = ("ip_intel",)
+
+    async def run(self, **kwargs: Any) -> dict[str, ModuleResult]:
+        from ..modules.whoisfreaks_intel import WhoisFreaksIntelModule
+        from .whoisfreaks_client import whoisfreaks_active
+
+        explicit = kwargs.get("explicit_modules")
+        if explicit is not None and self.name not in explicit:
+            return kwargs["collected"]
+        # Off (no key, disabled, or --no-whoisfreaks) means fully off: no call, no cache.
+        if not whoisfreaks_active():
+            return kwargs["collected"]
+        runner = _runner_kwargs(kwargs)
+        # Like ip_intel: a bounded final enrichment that keeps its own timeout
+        # even when discovery spent the primary budget.
+        runner["budget"] = None
+        await _run_and_record(
+            WhoisFreaksIntelModule(), **runner, findings_input=kwargs["collected"]
+        )
         return kwargs["collected"]
 
 
@@ -427,4 +475,122 @@ PHASE_DAG: tuple[InvestigationPhase, ...] = (
     ProfilePhase(),
     PhonePhase(),
     IpIntelPhase(),
+    WhoisFreaksPhase(),
 )
+
+
+_KEY_SETTINGS: dict[str, tuple[str, ...]] = {
+    "hibp": ("hibp_api_key", "haveibeenpwned_api_key"),
+    "breachdirectory": ("breachdirectory_api_key",),
+    "hunter_io": ("hunter_io_api_key",),
+    "shodan": ("shodan_api_key",),
+    "intelx_lookup": ("intelx_api_key",),
+    "google_dork": ("serpapi_key",),
+}
+# Domain modules that have nothing to read when the address is on a free provider
+# (gmail.com, outlook.com...): there is no company domain behind it.
+_COMPANY_DOMAIN_MODULES = frozenset(
+    {
+        "companies_house", "domain_intel", "netlas_org_surface", "opencorporates",
+        "ransomware_intel", "sec_edgar", "whois_lookup", "domain_harvester",
+        "github_domain_commits", "github_org_members", "subdomain_intel",
+    }
+)
+_NETLAS_MODULES = frozenset({"netlas_email_footprint", "netlas_org_surface"})
+_MS_CONSUMER_DOMAINS = frozenset({"outlook.com", "hotmail.com", "live.com", "msn.com"})
+
+
+def unavailable_reason(
+    module: str,
+    config: Any,
+    email: str,
+    explicit: set[str] | None,
+    enable: set[str],
+) -> str | None:
+    """``no_key`` | ``disabled`` when a module cannot run in this run, else None."""
+    if explicit is not None and module in explicit:
+        return None  # asked for by name: it will at least be attempted
+    keys = _KEY_SETTINGS.get(module)
+    if keys and not any(getattr(config, k, None) for k in keys):
+        return "no_key"
+    if module in _NETLAS_MODULES:
+        from .netlas_client import netlas_active
+
+        if not netlas_active():
+            return "no_key"
+    flag = getattr(config, f"enable_{module}", None)
+    if flag is False and module not in enable:
+        return "disabled"
+    domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
+    from ..modules.domain_intel import _FREE_PROVIDERS
+
+    if module in _COMPANY_DOMAIN_MODULES and domain in _FREE_PROVIDERS:
+        return "disabled"
+    if module == "outlook_autodiscover" and domain not in _MS_CONSUMER_DOMAINS:
+        return "disabled"
+    return None
+
+
+def plan_modules(
+    config: Any,
+    explicit_modules: set[str] | None,
+    enable_modules: set[str] | None,
+    mode: str,
+    *,
+    only_phases: set[str] | None = None,
+    email: str = "",
+) -> tuple[list[tuple[str, str]], list[dict[str, str]]]:
+    """``(planned, unavailable)`` for ``run_started``.
+
+    ``planned`` is the ``(phase, module)`` pairs that will actually run, which is what
+    "checked N of M sources" counts. Modules that cannot run (no key, disabled, nothing
+    to read for this address) go to ``unavailable`` as ``{module, reason}``. Modules
+    decided only at run time (ip_intel, whoisfreaks_intel) announce themselves with
+    their ``module_start``.
+    """
+    from ..config import opt_in_active
+    from ..modules import get_all_modules
+    from .capabilities import provider_module_enabled
+    from .product_mode import is_module_allowed
+
+    enable = enable_modules or set()
+    planned: list[tuple[str, str]] = []
+    unavailable: list[dict[str, str]] = []
+
+    def add(phase: str, *names: str) -> None:
+        if only_phases is not None and phase not in only_phases:
+            return
+        for name in names:
+            if not provider_module_enabled(name):
+                continue  # a provider that is off is omitted: not planned, not "unavailable"
+            reason = unavailable_reason(name, config, email, explicit_modules, enable)
+            if reason:
+                unavailable.append({"module": name, "reason": reason})
+            else:
+                planned.append((phase, name))
+
+    add("email_credibility", "email_credibility")
+    classes = [
+        cls
+        for cls in get_all_modules()
+        if (explicit_modules is None or cls.name in explicit_modules)
+        and cls.name not in _POST_PRIMARY_ONLY
+        and cls.name not in {"emailrep", "email_credibility"}
+        and (cls.name != "press_intel" or cls.name in enable)
+        and is_module_allowed(cls.name, mode)
+    ]
+    classes.sort(key=lambda cls: (getattr(cls, "priority", 100), cls.name))
+    add("primary", *[cls.name for cls in classes])
+    add("breach_aggregator", "breach_aggregator")
+    if config.enable_username_pivot:
+        add("username_pivot", "username_pivot")
+    if config.enable_permutation_discovery:
+        add("permutation_discovery", "permutation_discovery")
+    if opt_in_active("enable_email_discovery", config.enable_email_discovery):
+        add("email_discovery", "email_discovery")
+    add("alternate_email", "alternate_email")
+    add("domain_cluster", "domain_cluster")
+    add("profile", "twitter_profile", "linkedin_serp", "marketplace_profile")
+    if config.enable_phone_intel:
+        add("phone_intel", "phone_intel")
+    return planned, unavailable

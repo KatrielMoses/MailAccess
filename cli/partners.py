@@ -55,6 +55,43 @@ IPGEO = Partner(
     low_color="green",
 )
 
+WHOISFREAKS = Partner(
+    name="WhoisFreaks",
+    tagline="WHOIS history and reverse WHOIS we lean on",
+    domain="whoisfreaks.com",
+    color="#F5A524",
+    low_color="yellow",
+)
+
+# Which modules count as "this provider contributed", per surface. The result
+# footers read this table instead of hard-coding provider names at each call site.
+# ``statuses_excluded`` lists investigate module-run statuses that do NOT count.
+PROVIDER_MODULES: dict[str, dict[str, object]] = {
+    "netlas": {
+        "investigate": frozenset({"netlas_email_footprint", "netlas_org_surface"}),
+        "harvest": ("subdomain_intel", "netlas_whois_emails", "netlas_cert", "netlas_responses"),
+        "statuses_excluded": ("skipped", "failed"),
+    },
+    "whoisfreaks": {
+        "investigate": frozenset({"whoisfreaks_intel"}),
+        "harvest": ("whoisfreaks_history", "subdomain_intel", "whoisfreaks_subdomains"),
+        "statuses_excluded": ("skipped", "failed", "success_empty"),
+    },
+}
+
+
+def provider_contributed(provider: str, module_runs: list) -> bool:
+    """True when one of *provider*'s investigate modules ran and returned data."""
+    spec = PROVIDER_MODULES[provider]
+    names = spec["investigate"]
+    excluded = spec["statuses_excluded"]
+    return any(
+        run.get("module_name") in names and str(run.get("status", "")).lower() not in excluded
+        for run in module_runs
+        if isinstance(run, dict)
+    )
+
+
 _no_banner = False
 _shown_surfaces: set[str] = set()
 
@@ -183,6 +220,43 @@ def show_netlas_credit(console: Console) -> bool:
     line.append("Netlas.io", style=Style(color=_name_color(NETLAS, console)))
     line.append(f" → {NETLAS.domain}", style=Style(dim=True, link=NETLAS.url))
     console.print(line, highlight=False)
+    return True
+
+
+def show_whoisfreaks_credit(console: Console) -> bool:
+    """Result footer for a run WhoisFreaks actually contributed to."""
+    if "whoisfreaks-credit" in _shown_surfaces or not placements_enabled(console):
+        return False
+    _shown_surfaces.add("whoisfreaks-credit")
+    line = Text("✓ enriched by WhoisFreaks → whoisfreaks.com")
+    if not _no_color():
+        line.stylize(Style(color=_name_color(WHOISFREAKS, console), link=WHOISFREAKS.url))
+    console.print(line, highlight=False)
+    return True
+
+
+def show_whoisfreaks_result(
+    console: Console, *, contributed: bool, keyed: bool, domain: str | None
+) -> bool:
+    """Credit when WhoisFreaks contributed; a keyless nudge only for a real domain.
+
+    *domain* is the target's own (non-webmail) domain, or ``None`` when there is
+    none, so a run that couldn't have used WHOIS history stays silent.
+    """
+    if contributed:
+        return show_whoisfreaks_credit(console)
+    if keyed or not domain or "whoisfreaks-nudge" in _shown_surfaces:
+        return False
+    if not placements_enabled(console):
+        return False
+    _shown_surfaces.add("whoisfreaks-nudge")
+    console.print(
+        Text(
+            f"Past owners and other domains registered by {domain}'s owner need a "
+            "WhoisFreaks key: mailaccess whoisfreaks set-key"
+        ),
+        highlight=False,
+    )
     return True
 
 

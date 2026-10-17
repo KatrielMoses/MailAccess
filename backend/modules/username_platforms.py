@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from ..config import settings
+from ..core import run_events
 from ..core.demotion_log import env_var_key_for
 from ..core.demotion_log import log_event as log_demotion_event
 from ..core.http_client import build_client
@@ -415,13 +416,22 @@ class UsernamePlatformsModule(BaseModule):
             if sink is not None:
                 sink.append(finding)
 
+        probes_total = len(wave1_queue) + (len(wave2_queue) if include_wave2 else 0)
+        probes_done = 0
+
+        def _tick() -> None:
+            nonlocal probes_done
+            probes_done += 1
+            run_events.module_progress("username_platforms", probes_done, probes_total)
+
         async with build_client(timeout=12.0) as client:
             wave1 = await self._run_wave(
-                client, wave1_queue, wave=1, health=health, on_hit=_emit_hit
+                client, wave1_queue, wave=1, health=health, on_hit=_emit_hit, on_progress=_tick
             )
             wave2 = (
                 await self._run_wave(
-                    client, wave2_queue, wave=2, health=health, on_hit=_emit_hit
+                    client, wave2_queue, wave=2, health=health, on_hit=_emit_hit,
+                    on_progress=_tick,
                 )
                 if include_wave2
                 else []
@@ -501,6 +511,7 @@ class UsernamePlatformsModule(BaseModule):
         wave: int,
         health: PlatformHealthDB,
         on_hit: Any = None,
+        on_progress: Any = None,
     ) -> list[tuple[str, dict[str, Any], str, str, str | None, dict[str, str] | None, int]]:
         sem = asyncio.Semaphore(_WAVE1_CONCURRENCY if wave == 1 else _WAVE2_CONCURRENCY)
         # R10 (S4): measure latency POST-semaphore. probe_platform acquires its
@@ -553,6 +564,8 @@ class UsernamePlatformsModule(BaseModule):
                 results.append((name, defn, username, outcome, detail, profile, wave))
                 if outcome == "hit" and detail and on_hit is not None:
                     on_hit(name, defn, username, detail, profile, wave)
+                if on_progress is not None:
+                    on_progress()
         finally:
             for task in tasks:
                 if not task.done():

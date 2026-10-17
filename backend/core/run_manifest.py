@@ -58,7 +58,8 @@ async def _corpus_version() -> str | None:
 
 
 def manifest_dict(
-    *, run_id: str, pipeline: str, mode: str, seed: str | None = None
+    *, run_id: str, pipeline: str, mode: str, seed: str | None = None,
+    providers: dict | None = None,
 ) -> dict:
     """The manifest as a plain dict (no DB) — used for the export watermark."""
     return {
@@ -75,7 +76,9 @@ def manifest_dict(
     }
 
 
-async def read_run_manifest(run_id: str, session: object | None = None) -> dict | None:
+async def read_run_manifest(
+    run_id: str, session: object | None = None, *, include_providers: bool = False
+) -> dict | None:
     """R12 (S1) — the RECORDED manifest for a run, as a watermark dict.
 
     The export watermark must reflect the run that actually produced the report
@@ -106,6 +109,9 @@ async def read_run_manifest(run_id: str, session: object | None = None) -> dict 
             "source_policy": row.source_policy or row.mode,
             "corpus_version": row.corpus_version,
             "seed": row.seed or row.run_id,
+            # Internal only: a report or export must not name a provider that was off,
+            # so the public watermark omits it. None for runs recorded before 0017.
+            **({"providers": row.providers} if include_providers else {}),
             # The run's own record time — NOT wall-clock now.
             "generated_at": row.created_at.isoformat()
             if isinstance(row.created_at, datetime)
@@ -125,11 +131,17 @@ async def read_run_manifest(run_id: str, session: object | None = None) -> dict 
 
 
 async def record_run_manifest(
-    *, run_id: str, pipeline: str, mode: str, seed: str | None = None
+    *, run_id: str, pipeline: str, mode: str, seed: str | None = None,
+    providers: dict | None = None,
 ) -> dict:
     """Persist the run manifest and audit the collection. Guarded — a manifest
     failure never breaks the run that produced the result."""
-    data = manifest_dict(run_id=run_id, pipeline=pipeline, mode=mode, seed=seed)
+    if providers is None:
+        # The run's own context flags (investigate runs this inside the run's task).
+        from .capabilities import active_providers
+
+        providers = active_providers()
+    data = manifest_dict(run_id=run_id, pipeline=pipeline, mode=mode, seed=seed, providers=providers)
     try:
         await init_db()
         corpus_version = await _corpus_version()
@@ -147,6 +159,7 @@ async def record_run_manifest(
                         source_policy=mode,
                         corpus_version=corpus_version,
                         seed=data["seed"],
+                        providers=providers,
                     )
                 )
         await audit_log.append(

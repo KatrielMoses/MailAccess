@@ -101,6 +101,13 @@ test_*.py
 !tests/test_avatar_hasher.py
 !tests/test_avatar_clusters.py
 !tests/test_identity_graph.py
+!tests/test_evidence_labels.py
+!tests/test_run_events.py
+!tests/test_run_events_storage.py
+!tests/test_provider_capabilities.py
+!tests/test_provider_scope.py
+!tests/test_harvest_candidates.py
+!tests/test_home_isolation.py
 !tests/test_bio_similarity.py
 !tests/test_bio_clusters.py
 !tests/test_rate_limiter.py

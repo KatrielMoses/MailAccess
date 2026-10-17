@@ -43,6 +43,7 @@ _POST_PRIMARY_ONLY = frozenset(
         "domain_cluster",
         "breach_aggregator",
         "ip_intel",
+        "whoisfreaks_intel",
     }
 )
 
@@ -65,6 +66,7 @@ _WEIGHT_META = 2
 
 _MODULE_WEIGHT_OVERRIDES: dict[str, int] = {
     "ip_intel": 0,
+    "whoisfreaks_intel": 0,
     "breach_deep": 18,
     "domain_harvester": 5,
     "domain_intel": 5,
@@ -106,6 +108,7 @@ _MODULE_CAP: dict[str, int] = {
     "breach_aggregator": 50,
     "netlas_email_footprint": 20,
     "netlas_org_surface": 10,
+    "whoisfreaks_intel": 5,
 }
 _MODULE_DEFAULT_TIMEOUTS: dict[str, int] = {
     "breach_deep": 90,
@@ -114,6 +117,7 @@ _MODULE_DEFAULT_TIMEOUTS: dict[str, int] = {
     # alone can take ~19s, so the 30s global cap truncated all three lookups. The
     # internal deadline (``netlas_footprint_deadline_seconds``) sits 5s below this.
     "netlas_email_footprint": 60,
+    "whoisfreaks_intel": 60,
 }
 _MODULE_TIMEOUT_FLOORS: dict[str, int] = {
     "account_discovery": 180,

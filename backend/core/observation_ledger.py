@@ -74,6 +74,44 @@ _SOURCE_URL_KEYS = ("source_url", "profile_url", "url", "html_url", "link", "pag
 _CLAIM_KEY_KEYS = ("email", "profile_url", "url", "username", "platform", "value", "handle")
 
 
+_PROVIDER_BY_METHOD = {
+    "ip_intel": "ipgeolocation",
+    "whoisfreaks_intel": "whoisfreaks",
+    "whoisfreaks_history": "whoisfreaks",
+    "whoisfreaks_subdomains": "whoisfreaks",
+}
+
+
+def provider_for(extraction_method: str, claim: Any = None) -> str | None:
+    """The paid provider an observation is derived from, or None.
+
+    By extraction method (the provider's own modules), then by what the claim itself
+    says: a WhoisFreaks-dated host, an ``ipgeolocation.io`` IP row, a WhoisFreaks
+    related-domain pivot. Stable: the same inputs always give the same answer."""
+    method = str(extraction_method or "")
+    if method in _PROVIDER_BY_METHOD:
+        return _PROVIDER_BY_METHOD[method]
+    if method.startswith("whoisfreaks"):
+        return "whoisfreaks"
+    if not isinstance(claim, dict):
+        return None
+    meta = claim.get("metadata") if isinstance(claim.get("metadata"), dict) else {}
+    source = str(claim.get("source_type") or claim.get("source") or meta.get("source") or "").lower()
+    if source.startswith("ipgeolocation"):
+        return "ipgeolocation"
+    if source.startswith("whoisfreaks"):
+        return "whoisfreaks"
+    if "ipgeolocation.io" in (claim.get("sources") or []):
+        return "ipgeolocation"
+    if "whoisfreaks" in (claim.get("discovery_method") or []):
+        return "whoisfreaks"
+    if str(claim.get("pivot") or meta.get("pivot") or "") in ("whois_company", "whois_email"):
+        return "whoisfreaks"
+    if str(claim.get("platform") or "").startswith("whoisfreaks_"):
+        return "whoisfreaks"
+    return None
+
+
 def module_version(module_name: str, obj: Any | None = None) -> str:
     """A module's version — its declared ``version`` attr, else the package version."""
     version = getattr(obj, "version", None) if obj is not None else None
@@ -216,6 +254,7 @@ def build_observation(
             raw_payload=raw_payload,
         ),
         "mode": mode,
+        "provider": provider_for(extraction_method, claim),
         # Phase 2C — the lawful basis of this observation, derived from its
         # collection mode (the dispatch gate ensures only mode-appropriate
         # sources ran). Security stays "unreviewed"; 2D's eligibility reads this.

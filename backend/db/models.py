@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
@@ -180,6 +181,10 @@ class Observation(Base):
     expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # The paid provider this fact came from ("ipgeolocation" / "whoisfreaks"), or None.
+    # Reads across runs drop a provider's rows when it was off for the run being
+    # reported, so an earlier keyed run can never leak into a later keyless one.
+    provider: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     # Ledger write time (distinct from capture_time).
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
@@ -466,6 +471,9 @@ class RunManifest(Base):
     source_policy: Mapped[str | None] = mapped_column(String, nullable=True)
     corpus_version: Mapped[str | None] = mapped_column(String, nullable=True)
     seed: Mapped[str | None] = mapped_column(String, nullable=True)
+    # {"ipgeolocation": bool, "whoisfreaks": bool, "netlas": bool}: what was ACTIVE for
+    # this run (key set, not disabled, not opted out). None on runs recorded before 0017.
+    providers: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
@@ -608,3 +616,33 @@ class IpIntelCache(Base):
     tier: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     empty: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class WhoisFreaksCache(Base):
+    """Key-independent cache of clean WhoisFreaks answers, one row per page."""
+
+    __tablename__ = "whoisfreaks_cache"
+    kind: Mapped[str] = mapped_column(String, primary_key=True)
+    query: Mapped[str] = mapped_column(String, primary_key=True)
+    page: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    empty: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class RunEvent(Base):
+    """One saved live-run event ("show your work"). ``seq`` is per run, gap-free
+    from 1, so a viewer can replay from any point and resume by ``Last-Event-ID``."""
+
+    __tablename__ = "run_events"
+    __table_args__ = (
+        UniqueConstraint("investigation_id", "seq", name="uq_run_events_seq"),
+        Index("ix_run_events_investigation_seq", "investigation_id", "seq"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    investigation_id: Mapped[str] = mapped_column(String, nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    ts: Mapped[str] = mapped_column(String, nullable=False)
+    type: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)

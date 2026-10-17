@@ -214,6 +214,7 @@ _ALL_KNOWN_MODULES: frozenset[str] = frozenset(
         # via Netlas): lawful-public infrastructure data, allowed in every mode.
         "netlas_org_surface",
         "ip_intel",
+        "whoisfreaks_intel",
         "outlook_autodiscover",
         "package_ecosystems",
         "pastebin_search",
@@ -252,6 +253,9 @@ _ALL_KNOWN_MODULES: frozenset[str] = frozenset(
         # the same lawful-public basis as ``whois_lookup`` / ``security_txt`` →
         # in no blocked bucket, allowed in every mode.
         "netlas_whois_emails",
+        # WhoisFreaks WHOIS history (harvest): the same published-registry basis
+        # as the Netlas WHOIS source -> allowed in every mode.
+        "whoisfreaks_history",
         # F3 — Netlas certificate subject/SAN emails: public certificate
         # transparency-style data, like ``code_and_cert_email`` → allowed in
         # every mode.

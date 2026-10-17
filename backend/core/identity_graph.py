@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
+from .evidence import evidence_label, is_identity_claim, site_name
+from .evidence import kind_for as evidence_kind_for
+
 _USERNAME_KEYS = frozenset({"username", "login", "user", "handle", "matched_username"})
 _DISPLAY_KEYS = frozenset({"display_name", "name", "full_name", "real_name"})
 
@@ -31,6 +34,19 @@ _BREACH_MODULES = frozenset({
     "xposedornot",
 })
 _MAX_COMPLETE_CLUSTER_SIZE = 25
+_EDGE_REASONS = {
+    "same_platform_group": "Found on this site or domain for this email.",
+    "shared_username": "The same username appears on both.",
+    "shared_display_name": "The same display name appears on both.",
+    "shared_photo": "The same profile photo appears on both.",
+    "same_avatar": "The profile pictures look the same.",
+    "same_bio": "The profile bios are nearly identical.",
+    "same_signup_window": "The accounts were created within days of each other.",
+    "shared_infrastructure": "The sites share a registrar and network range.",
+    "breach_confirmed": "A breach record ties this email to the site.",
+    "username_match": "The username exists on this site (a username match, not an owned account).",
+    "derived_username": "The username is the local part of the email.",
+}
 
 
 def _node_id(node_type: str, value: str) -> str:
@@ -87,6 +103,8 @@ class IdentityGraph:
         init=False,
         repr=False,
     )
+    # Per-finding context stamped onto every edge: {module, finding_id, reason}.
+    _ctx: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def _ensure_node(
         self,
@@ -118,6 +136,11 @@ class IdentityGraph:
         if key in self._edge_keys:
             return
         self._edge_keys.add(key)
+        meta.setdefault("module", self._ctx.get("module") or "identity_graph")
+        meta.setdefault("finding_id", self._ctx.get("finding_id"))
+        meta.setdefault(
+            "reason", self._ctx.get("reason") or _EDGE_REASONS.get(edge_type, "Linked by the identity graph.")
+        )
         self.edges.append(GraphEdge(source=source, target=target, type=edge_type, metadata=meta))
 
     def _add_cluster_edges(
@@ -204,126 +227,11 @@ class IdentityGraph:
         temporal_pairs: list[tuple[str, Any]] = []
 
         for module_name, finding in flat:
-            if not isinstance(finding, dict):
-                continue
-            # RC1 (Output-Trust): an UNVERIFIED speculative account hit (a localpart
-            # guess fired at hundreds of sites) must NOT be fused into the subject's
-            # identity graph — that is exactly what merged dozens of unrelated people
-            # into one "identity". Only corroborated/verified accounts contribute
-            # graph nodes; the raw hits still live in the findings list for the
-            # analyst, just not as asserted identity.
-            _meta = finding.get("metadata")
-            if isinstance(_meta, dict) and _meta.get("verification") == "unverified":
-                continue
-            # RC3 (Output-Trust): domain-infrastructure contacts (WHOIS/RDAP
-            # registrar / abuse phone) are NOT the subject's identity — never fuse
-            # them into the person's graph.
-            if isinstance(_meta, dict) and (
-                _meta.get("is_infrastructure") or _meta.get("not_personal_pii")
-            ):
-                continue
-            platform = str(finding.get("platform") or module_name or "unknown")
-            platform_nid = graph._ensure_node(
-                "platform",
-                platform,
-                label=platform,
-                metadata={"module": module_name},
+            graph._ingest(
+                module_name, finding, email,
+                attr_index, platform_nodes, avatar_pairs, bio_pairs, temporal_pairs,
             )
-            platform_nodes.append(platform_nid)
-
-            if email:
-                graph._add_edge(
-                    graph._ensure_node("email", email), platform_nid, "same_platform_group"
-                )
-
-            payloads = [finding]
-            meta = finding.get("metadata")
-            if isinstance(meta, dict):
-                payloads.append(meta)
-
-            username: str | None = None
-            display_name: str | None = None
-            photo_url: str | None = None
-            domain: str | None = None
-
-            for payload in payloads:
-                if not isinstance(payload, dict):
-                    continue
-                for key in _USERNAME_KEYS:
-                    val = payload.get(key)
-                    if isinstance(val, str) and val.strip():
-                        username = val.strip()
-                for key in _DISPLAY_KEYS:
-                    val = payload.get(key)
-                    if isinstance(val, str) and val.strip():
-                        candidate_name = val.strip()
-                        # RC2 (Output-Trust): a display name carrying page-chrome /
-                        # marketing tokens ("Security Verification", "Upload Image")
-                        # is never a real identity — don't seed it as a name node.
-                        if _is_chrome_name(candidate_name):
-                            continue
-                        display_name = candidate_name
-                for key in _PHOTO_KEYS:
-                    val = payload.get(key)
-                    if isinstance(val, str) and val.strip().startswith("http"):
-                        photo_url = val.strip()
-                for key in ("domain", "breach_domain"):
-                    val = payload.get(key)
-                    if isinstance(val, str) and val.strip():
-                        domain = val.strip()
-
-            profile_url = finding.get("profile_url") or finding.get("url")
-            if isinstance(profile_url, str) and profile_url.startswith("http"):
-                parsed = urlparse(profile_url)
-                if parsed.netloc and not domain:
-                    domain = parsed.netloc.lstrip("www.")
-
-            if username:
-                graph._link_shared("username", username, platform_nid, "shared_username")
-                attr_index.setdefault(("username", username.lower()), []).append(platform_nid)
-            if display_name:
-                graph._link_shared(
-                    "display_name", display_name, platform_nid, "shared_display_name"
-                )
-                attr_index.setdefault(("display_name", display_name.lower()), []).append(
-                    platform_nid
-                )
-            if photo_url:
-                graph._link_shared("photo_url", photo_url, platform_nid, "shared_photo")
-                attr_index.setdefault(("photo_url", photo_url), []).append(platform_nid)
-                avatar_pairs.append((platform, photo_url))
-            if domain:
-                dom_nid = graph._ensure_node("domain", domain)
-                graph._add_edge(platform_nid, dom_nid, "same_platform_group")
-
-            phone = None
-            for key in ("phone_number", "phone_hint", "phone"):
-                val = (meta or {}).get(key) if isinstance(meta, dict) else None
-                if isinstance(val, str) and val:
-                    phone = val
-            if phone:
-                phone_nid = graph._ensure_node("phone", phone, metadata={"masked": True})
-                graph._add_edge(platform_nid, phone_nid, "same_platform_group")
-
-            bio_text = None
-            for key in ("bio", "description", "about"):
-                val = (meta or {}).get(key) if isinstance(meta, dict) else None
-                if isinstance(val, str) and val.strip():
-                    bio_text = val.strip()
-                    break
-            if bio_text:
-                bio_pairs.append((platform, bio_text))
-
-            temporal_pairs.append((platform, finding))
-
-            if module_name in _BREACH_MODULES or finding.get("severity") in ("critical", "high"):
-                if email:
-                    graph._add_edge(
-                        graph._ensure_node("email", email),
-                        platform_nid,
-                        "breach_confirmed",
-                        module=module_name,
-                    )
+        graph._ctx = {}
 
         # Platform-to-attribute edges above already connect platforms through
         # the shared attribute node.  A second pairwise platform clique is
@@ -448,6 +356,186 @@ class IdentityGraph:
         graph._score_nodes()
         graph._identify_clusters()
         return graph
+
+    def _ingest(
+        self,
+        module_name: str,
+        finding: Any,
+        email: str,
+        attr_index: dict[tuple[str, str], list[str]],
+        platform_nodes: list[str],
+        avatar_pairs: list[tuple[str, str]],
+        bio_pairs: list[tuple[str, str]],
+        temporal_pairs: list[tuple[str, Any]],
+    ) -> None:
+        """Add one finding's nodes and edges (shared by ``build`` and the live stream)."""
+        if not isinstance(finding, dict):
+            return
+        trace = finding.get("trace") if isinstance(finding.get("trace"), dict) else {}
+        self._ctx = {
+            "module": module_name,
+            "finding_id": finding.get("finding_id"),
+            "reason": trace.get("reason"),
+        }
+        # Only ``possible`` and ``confirmed`` findings can join the graph as accounts. A
+        # username match (a localpart guess found on a site) is NOT an owned account:
+        # it appears only as a ``username -> site`` edge labelled "username match".
+        # The label comes from the single rule in evidence.py.
+        _meta = finding.get("metadata")
+        # Records read directly (DNS, WHOIS, the address check, hosts, infrastructure)
+        # are facts about a domain, not accounts: they never become graph nodes.
+        if not is_identity_claim(module_name, finding):
+            return
+        label = evidence_label(finding, module_name)
+        if label == "username_match":
+            self._ingest_username_match(module_name, finding, email)
+            return
+        # A single uncorroborated lead (``possible``, e.g. one registration check or a
+        # browser probe) joins the graph as an account: the label, not the old
+        # ``verification`` flag, says how sure we are. Username matches never get here.
+        # RC3 (Output-Trust): domain-infrastructure contacts (WHOIS/RDAP
+        # registrar / abuse phone) are NOT the subject's identity — never fuse
+        # them into the person's graph.
+        if isinstance(_meta, dict) and (
+            _meta.get("is_infrastructure") or _meta.get("not_personal_pii")
+        ):
+            return
+        platform = str(finding.get("platform") or module_name or "unknown")
+        platform_nid = self._ensure_node(
+            "platform",
+            platform,
+            label=site_name(finding, module_name),
+            metadata={
+                "module": module_name,
+                "kind": evidence_kind_for(module_name, finding, label),
+            },
+        )
+        platform_nodes.append(platform_nid)
+
+        if email:
+            self._add_edge(
+                self._ensure_node("email", email), platform_nid, "same_platform_group"
+            )
+
+        payloads = [finding]
+        meta = finding.get("metadata")
+        if isinstance(meta, dict):
+            payloads.append(meta)
+
+        username: str | None = None
+        display_name: str | None = None
+        photo_url: str | None = None
+        domain: str | None = None
+
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            for key in _USERNAME_KEYS:
+                val = payload.get(key)
+                if isinstance(val, str) and val.strip():
+                    username = val.strip()
+            for key in _DISPLAY_KEYS:
+                val = payload.get(key)
+                if isinstance(val, str) and val.strip():
+                    candidate_name = val.strip()
+                    # RC2 (Output-Trust): a display name carrying page-chrome /
+                    # marketing tokens ("Security Verification", "Upload Image")
+                    # is never a real identity — don't seed it as a name node.
+                    if _is_chrome_name(candidate_name):
+                        continue
+                    display_name = candidate_name
+            for key in _PHOTO_KEYS:
+                val = payload.get(key)
+                if isinstance(val, str) and val.strip().startswith("http"):
+                    photo_url = val.strip()
+            for key in ("domain", "breach_domain"):
+                val = payload.get(key)
+                if isinstance(val, str) and val.strip():
+                    domain = val.strip()
+
+        profile_url = finding.get("profile_url") or finding.get("url")
+        if isinstance(profile_url, str) and profile_url.startswith("http"):
+            parsed = urlparse(profile_url)
+            if parsed.netloc and not domain:
+                domain = parsed.netloc.lstrip("www.")
+
+        if username:
+            self._link_shared("username", username, platform_nid, "shared_username")
+            attr_index.setdefault(("username", username.lower()), []).append(platform_nid)
+        if display_name:
+            self._link_shared(
+                "display_name", display_name, platform_nid, "shared_display_name"
+            )
+            attr_index.setdefault(("display_name", display_name.lower()), []).append(
+                platform_nid
+            )
+        if photo_url:
+            self._link_shared("photo_url", photo_url, platform_nid, "shared_photo")
+            attr_index.setdefault(("photo_url", photo_url), []).append(platform_nid)
+            avatar_pairs.append((platform, photo_url))
+        if domain:
+            dom_nid = self._ensure_node("domain", domain)
+            self._add_edge(platform_nid, dom_nid, "same_platform_group")
+
+        phone = None
+        for key in ("phone_number", "phone_hint", "phone"):
+            val = (meta or {}).get(key) if isinstance(meta, dict) else None
+            if isinstance(val, str) and val:
+                phone = val
+        if phone:
+            phone_nid = self._ensure_node("phone", phone, metadata={"masked": True})
+            self._add_edge(platform_nid, phone_nid, "same_platform_group")
+
+        bio_text = None
+        for key in ("bio", "description", "about"):
+            val = (meta or {}).get(key) if isinstance(meta, dict) else None
+            if isinstance(val, str) and val.strip():
+                bio_text = val.strip()
+                break
+        if bio_text:
+            bio_pairs.append((platform, bio_text))
+
+        temporal_pairs.append((platform, finding))
+
+        if module_name in _BREACH_MODULES or finding.get("severity") in ("critical", "high"):
+            if email:
+                self._add_edge(
+                    self._ensure_node("email", email),
+                    platform_nid,
+                    "breach_confirmed",
+                    module=module_name,
+                )
+
+    def _ingest_username_match(self, module_name: str, finding: dict[str, Any], email: str) -> None:
+        """A username match is a ``username -> site`` edge, never an account node."""
+        from .evidence import host_key
+
+        meta = finding.get("metadata") if isinstance(finding.get("metadata"), dict) else {}
+        username = str(
+            finding.get("username") or meta.get("matched_username") or meta.get("username") or ""
+        ).strip()
+        site = host_key(finding) or str(finding.get("platform") or "").strip()
+        if not username or not site:
+            return
+        username = username.split("@", 1)[0] if module_name == "fediverse_discovery" else username
+        user_nid = self._ensure_node("username", username)
+        site_nid = self._ensure_node("site", site, label=site_name(finding, module_name))
+        localpart = email.split("@", 1)[0].lower() if "@" in email else ""
+        if email and username.lower() == localpart:
+            self._add_edge(self._ensure_node("email", email), user_nid, "derived_username")
+        self._add_edge(user_nid, site_nid, "username_match")
+
+    @classmethod
+    def edges_for_finding(
+        cls, email: str, module_name: str, finding: dict[str, Any]
+    ) -> tuple[dict[str, GraphNode], list[GraphEdge]]:
+        """The nodes/edges ONE finding contributes, for the live stream. Uses the same
+        ingestion as ``build`` so live edges match the final graph."""
+        scratch = cls()
+        if email:
+            scratch._ensure_node("email", email, label=email)
+        scratch._ingest(module_name, finding, email, {}, [], [], [], [])
+        return scratch.nodes, scratch.edges
 
     def _score_nodes(self) -> None:
         degree: dict[str, int] = {nid: 0 for nid in self.nodes}

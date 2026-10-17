@@ -12,6 +12,8 @@ from sqlalchemy import update
 from ..db.database import AsyncSessionLocal
 from ..db.models import Finding, Investigation, InvestigationStatus, ModuleRun
 from ..modules.base import ModuleResult, ModuleStatus
+from . import evidence, run_events, run_stream
+from .capabilities import provider_module_enabled
 from .breach_normalizer import collapse_breach_findings
 from .credential_risk import assess_credential_risk_from_results
 from .defenders_brief import defenders_brief_to_dict, generate_defenders_brief
@@ -124,8 +126,11 @@ def _build_graph(
         )
         # Store the full to_dict() output so shadow_findings + clusters
         # survive persistence.  The /graph endpoint extracts just
-        # nodes/links for D3 rendering.
-        return graph.to_dict()
+        # nodes/links for D3 rendering. ``cluster_confidence`` rides along so
+        # the score behind each cluster is saved, not recomputed.
+        data = graph.to_dict()
+        data["cluster_confidence"] = graph.cluster_confidence()
+        return data
     except Exception:
         return None
 
@@ -229,6 +234,7 @@ class InvestigationEngine:
         force: bool = False,
         no_netlas: bool = False,
         no_ipgeo: bool = False,
+        no_whoisfreaks: bool = False,
         org_surface_deep: bool = False,
         refresh: bool = False,
         cached_results: dict[str, ModuleResult] | None = None,
@@ -248,6 +254,7 @@ class InvestigationEngine:
         # the start of the run so F6/F7 modules honour it.
         self._no_netlas = no_netlas
         self._no_ipgeo = no_ipgeo
+        self._no_whoisfreaks = no_whoisfreaks
         self._org_surface_deep = org_surface_deep
         self._refresh = refresh
         self._cached_results = cached_results
@@ -262,23 +269,33 @@ class InvestigationEngine:
     ) -> asyncio.Queue[QueueEvent | None]:
         normalized = normalize_email_address(email)
         canonical_email = normalized.canonical_email
-        queue: asyncio.Queue[QueueEvent | None] = asyncio.Queue()
+        emitter = run_events.create(investigation_id)
+        queue: asyncio.Queue[QueueEvent | None] = run_events.FanoutQueue(emitter)
         semaphore = asyncio.Semaphore(self._max_concurrency)
         collected: dict[str, ModuleResult] = deepcopy(self._cached_results or {})
         started_at = datetime.now(timezone.utc)
 
         async def _run_and_persist() -> None:
             current_email = canonical_email
+            events_token = run_events.set_current(emitter)
+            run_done_sent = False
+            run_error: str | None = None
             try:
                 from .enrichment_store import set_netlas_refresh
                 from .netlas_client import set_no_netlas, set_org_surface_deep
                 set_no_netlas(self._no_netlas)
                 from .ipgeo_client import set_no_ipgeo
                 set_no_ipgeo(self._no_ipgeo)
+                from .whoisfreaks_client import set_no_whoisfreaks
+                set_no_whoisfreaks(self._no_whoisfreaks)
                 set_org_surface_deep(self._org_surface_deep)
                 set_netlas_refresh(self._refresh)
                 self.status = InvestigationStatus.RUNNING
-                await self._set_status(investigation_id, InvestigationStatus.RUNNING)
+                # What is active for THIS run (key set, not disabled, not opted out):
+                # recorded in the manifest so later reads can drop off-provider facts.
+                from .capabilities import active_providers
+
+                run_providers = active_providers()
 
                 from ..config import (
                     reset_run_opt_in_flags,
@@ -312,6 +329,38 @@ class InvestigationEngine:
                 effective_modules = module_names
                 if effective_modules is None and config.investigation_fast_modules:
                     effective_modules = list(config.investigation_fast_modules)
+
+                # First event of the run: sent before any module starts (and before
+                # the status write and DNS gate), so a viewer sees activity at once.
+                from .phases import plan_modules
+                from .techniques import technique_id as _technique_id
+
+                plan, unavailable = plan_modules(
+                    config,
+                    set(effective_modules) if effective_modules is not None else None,
+                    set(enable_modules) if enable_modules is not None else None,
+                    resolved_mode.value,
+                    only_phases=(
+                        {"ip_intel", "whoisfreaks_intel"}
+                        if self._cached_results is not None
+                        else None
+                    ),
+                    email=current_email,
+                )
+                emitter.planned_total = len(plan)
+                emitter.emit(
+                    "run_started",
+                    {
+                        "mode": resolved_mode.value,
+                        "planned_modules": [
+                            {"module": m, "phase": ph, "technique_id": _technique_id(m)}
+                            for ph, m in plan
+                        ],
+                        "total_sources": len(plan),
+                        "unavailable": unavailable,
+                    },
+                )
+                await self._set_status(investigation_id, InvestigationStatus.RUNNING)
 
                 # L1 — publish this run's opt-in flags task-locally instead of
                 # mutating the shared `config` singleton across phase awaits, so
@@ -374,8 +423,24 @@ class InvestigationEngine:
                     for phase in PHASE_DAG:
                         # Native cache hits keep their original evidence. Only
                         # IP enrichment is refreshed, with no discovery rerun.
-                        if self._cached_results is not None and phase.name != "ip_intel":
+                        if self._cached_results is not None and phase.name not in (
+                            "ip_intel",
+                            "whoisfreaks_intel",
+                        ):
                             continue
+                        # A provider phase that is off (no key, disabled, or the per-run
+                        # flag) is not announced at all.
+                        announce = provider_module_enabled(phase.name)
+                        emitter.phase = phase.name
+                        if announce:
+                            emitter.emit(
+                                "phase_start",
+                                {
+                                    "phase": phase.name,
+                                    "modules": [m for ph, m in plan if ph == phase.name],
+                                },
+                            )
+                        _phase_t0 = asyncio.get_running_loop().time()
                         await phase.run(
                             investigation_id=investigation_id,
                             email=email,
@@ -396,6 +461,16 @@ class InvestigationEngine:
                             mode=resolved_mode.value,
                             force=self._force,
                         )
+                        if announce:
+                            emitter.emit(
+                                "phase_end",
+                                {
+                                    "phase": phase.name,
+                                    "duration_ms": int(
+                                        (asyncio.get_running_loop().time() - _phase_t0) * 1000
+                                    ),
+                                },
+                            )
                         if phase.name == "email_credibility":
                             credibility = collected.get("email_credibility")
                             if credibility:
@@ -414,12 +489,21 @@ class InvestigationEngine:
                         "confirmed_name": name_result.confirmed_name,
                         "name_confidence": name_result.name_confidence,
                     }
+                    # Every finding gets its trace + label, and findings about the same
+                    # site that rest on different signal types are linked, BEFORE the
+                    # graph is built (the graph filters on the label).
+                    evidence.annotate_results(collected, current_email)
                     graph_data = await _build_graph_with_timeout(
                         current_email, collected, name_consensus=name_consensus
                     )
                     final = _prepare_results(collected)
+                    # Dedup/promotion may have changed labels: recompute, then tell
+                    # live viewers so the stream ends matching the saved report.
+                    evidence.annotate_results(final, current_email)
+                    run_stream.finalize(emitter, final, graph_data, current_email)
                     self.status = InvestigationStatus.COMPLETE
-                    await self._persist(
+                    self._module_times = emitter.module_times
+                    exposure_score = await self._persist(
                         investigation_id,
                         final,
                         started_at,
@@ -428,6 +512,19 @@ class InvestigationEngine:
                         graph_data,
                         mode=resolved_mode.value,
                     )
+                    emitter.emit(
+                        "run_done",
+                        {
+                            "status": "complete",
+                            "sources_checked": len(emitter.modules_checked),
+                            "total_sources": max(
+                                len(plan), len(emitter.modules_checked | set(m for _, m in plan))
+                            ),
+                            "findings": emitter.finding_count,
+                            "exposure_score": exposure_score,
+                        },
+                    )
+                    run_done_sent = True
                     # Phase 1C — dual-write the canonical evidence ledger. Runs
                     # after _persist in its own transaction so a ledger failure
                     # can never roll back or otherwise disturb the findings.
@@ -443,6 +540,7 @@ class InvestigationEngine:
                             run_id=investigation_id,
                             pipeline="investigate",
                             mode=resolved_mode.value,
+                            providers=run_providers,
                         )
                     except Exception:
                         logger.exception("run manifest skipped for %s", investigation_id)
@@ -450,7 +548,8 @@ class InvestigationEngine:
                 finally:
                     reset_run_opt_in_flags(opt_in_token)
                     reset_target_gate(gate_token)
-            except Exception:
+            except Exception as exc:
+                run_error = str(exc)[:200]
                 logger.exception("Investigation %s failed", investigation_id)
                 self.status = InvestigationStatus.FAILED
                 try:
@@ -462,7 +561,24 @@ class InvestigationEngine:
                         "Failed to persist failed status for %s", investigation_id
                     )
             finally:
+                if not run_done_sent:
+                    emitter.emit(
+                        "run_done",
+                        {
+                            "status": "failed",
+                            "sources_checked": len(emitter.modules_checked),
+                            "total_sources": emitter.planned_total,
+                            "findings": emitter.finding_count,
+                            "exposure_score": None,
+                            "error": run_error or "investigation failed",
+                        },
+                    )
+                # Events are on disk before the finish sentinel goes out, so a viewer
+                # that connects the moment the run ends replays every event.
+                await emitter.flush()
                 await queue.put(None)
+                await emitter.close()
+                run_events.reset_current(events_token)
 
         asyncio.create_task(_run_and_persist())
         return queue
@@ -553,7 +669,7 @@ class InvestigationEngine:
         original_email: str,
         graph_data: dict | None = None,
         mode: str = "security-investigation",
-    ) -> None:
+    ) -> int:
         now = datetime.now(timezone.utc)
         safe_collected = {
             name: _normalize_module_result(name, result)
@@ -611,6 +727,10 @@ class InvestigationEngine:
                     .values(**values)
                 )
                 for module_name, result in safe_collected.items():
+                    # Real per-module timing when the run recorded it; the run
+                    # start / save time only for results that never ran here
+                    # (e.g. served from a cached run).
+                    times = (getattr(self, "_module_times", None) or {}).get(module_name, {})
                     session.add(
                         ModuleRun(
                             investigation_id=investigation_id,
@@ -618,8 +738,8 @@ class InvestigationEngine:
                             status=result.status.value,
                             run_metadata=result.metadata or None,
                             errors=result.errors or None,
-                            started_at=started_at,
-                            finished_at=now,
+                            started_at=times.get("started_at", started_at),
+                            finished_at=times.get("finished_at", now),
                         )
                     )
                     for finding_data in result.findings:
@@ -639,3 +759,4 @@ class InvestigationEngine:
                                 data=finding_data,
                             )
                         )
+        return score

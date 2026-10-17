@@ -141,6 +141,9 @@ MODULE_HUNTER = "hunter"
 MODULE_NETLAS_WHOIS = "netlas_whois_emails"
 # F3 — Netlas certificate emails + SANs; inline source, Netlas-on only.
 MODULE_NETLAS_CERT = "netlas_cert"
+# WhoisFreaks — historical WHOIS contacts of the target; inline source, scheduled
+# only when WhoisFreaks is active or has cached answers for the domain.
+MODULE_WHOISFREAKS_HISTORY = "whoisfreaks_history"
 # F4 — Netlas indexed HTTP responses + FTP banners; inline source, Netlas-on only.
 MODULE_NETLAS_RESPONSES = "netlas_responses"
 MODULE_HACKERTARGET = "hackertarget_hosts"
@@ -276,6 +279,10 @@ class WorkerContext:
     subdomain_calibrate: bool = False
     # BYOK Netlas, resolved once per run from ``netlas_client.netlas_active``.
     netlas_enabled: bool = False
+    # WhoisFreaks (BYOK) — resolved once per run; ``refresh`` is the run's --refresh.
+    whoisfreaks_enabled: bool = False
+    whoisfreaks_refresh: bool = False
+    no_whoisfreaks: bool = False
     context_vertical: tuple[str, ...] = ()
     progress_callback: Any | None = None
     log_callback: Any | None = None
@@ -473,6 +480,9 @@ async def run_adaptive_harvest(
     netlas_enabled: bool = False,
     no_ipgeo: bool = False,
     ipgeo_refresh: bool = False,
+    whoisfreaks_enabled: bool = False,
+    whoisfreaks_refresh: bool = False,
+    no_whoisfreaks: bool = False,
 ) -> Any:
     from .domain_harvest_orchestrator import (
         DomainHarvestResult,
@@ -559,6 +569,9 @@ async def run_adaptive_harvest(
         subdomain_deep=subdomain_deep,
         subdomain_calibrate=subdomain_calibrate,
         netlas_enabled=bool(netlas_enabled),
+        whoisfreaks_enabled=bool(whoisfreaks_enabled),
+        whoisfreaks_refresh=bool(whoisfreaks_refresh),
+        no_whoisfreaks=bool(no_whoisfreaks),
         progress_callback=progress_callback,
         log_callback=log_callback,
         provider_detection_ready=asyncio.Event(),
@@ -1286,6 +1299,31 @@ async def run_adaptive_harvest(
                 logger.warning("Harvest-end export trigger failed: %s", exc)
 
 
+def planned_harvest_modules(
+    skip_modules: frozenset[str] | set[str] | tuple[str, ...] = (),
+    *,
+    netlas: bool = False,
+    whoisfreaks: bool = False,
+    hunter: bool = False,
+) -> list[str]:
+    """The module list a harvest really schedules (same rules as ``_seed_scheduler``),
+    so progress counts match the run instead of a hardcoded list."""
+    skip = set(skip_modules)
+    names = list(_seed_priorities(True))
+    if netlas:
+        names += [MODULE_NETLAS_RESPONSES, MODULE_NETLAS_CERT, MODULE_NETLAS_WHOIS]
+    if whoisfreaks:
+        names.append(MODULE_WHOISFREAKS_HISTORY)
+    if hunter:
+        names.append(MODULE_HUNTER)
+    names.append("security_txt")
+    out: list[str] = []
+    for name in names:
+        if name not in skip and name not in out:
+            out.append(name)
+    return out
+
+
 async def _seed_scheduler(ctx: WorkerContext) -> None:
     homepage = await _read_homepage_for_router(ctx)
     router_result = IndustryVocabularyRouter().route(homepage)
@@ -1373,6 +1411,16 @@ async def _seed_scheduler(ctx: WorkerContext) -> None:
                 priority=PRIORITY_HIGH_SIGNAL,
                 track=TRACK_OPPORTUNISTIC,
                 source="whois",
+            )
+        )
+    if getattr(ctx, "whoisfreaks_enabled", False) and MODULE_WHOISFREAKS_HISTORY not in ctx.skip_modules:
+        await ctx.scheduler.submit(
+            WorkItem(
+                kind="run_module",
+                module_name=MODULE_WHOISFREAKS_HISTORY,
+                priority=PRIORITY_HIGH_SIGNAL,
+                track=TRACK_OPPORTUNISTIC,
+                source="whois_history",
             )
         )
     if getattr(ctx.settings, "hunter_io_api_key", None):
@@ -2647,9 +2695,18 @@ async def _run_module_instance(
         _run_netlas_responses,
         _run_netlas_whois,
         _run_pattern,
+        _run_whoisfreaks_history,
         _safe_phase12_run,
     )
 
+    if module_name == MODULE_WHOISFREAKS_HISTORY:
+        _name, result = await _run_whoisfreaks_history(
+            ctx.domain,
+            refresh=ctx.whoisfreaks_refresh,
+            no_whoisfreaks=ctx.no_whoisfreaks,
+            deadline=time.monotonic() + max(0.0, ctx.budget.remaining()),
+        )
+        return _normalize_module_result(module_name, result)
     if module_name == MODULE_NETLAS_WHOIS:
         _name, result = await _run_netlas_whois(ctx.domain)
         return _normalize_module_result(module_name, result)
@@ -2758,6 +2815,11 @@ async def _run_module_instance(
         scrape_session=ctx.stealth_session,
         source_telemetry=ctx.subdomain_source_telemetry,
         netlas_enabled=ctx.netlas_enabled,
+        whoisfreaks_enabled=ctx.whoisfreaks_enabled,
+        # The run's own early prefetch owns --refresh for dated hosts; refreshing
+        # here too would buy the same pages twice.
+        whoisfreaks_refresh=False,
+        no_whoisfreaks=ctx.no_whoisfreaks,
         netlas_cert_fetch=(
             (lambda: _netlas_cert_future(ctx))
             if ctx.netlas_enabled and MODULE_NETLAS_CERT not in ctx.skip_modules
@@ -2825,6 +2887,7 @@ def _get_module_instance(module_name: str, ctx: WorkerContext) -> Any:
         MODULE_RIPE_STAT_ASN: RIPEStatASNModule,
         MODULE_SHODAN_INTERNETDB: ShodanInternetDBModule,
         MODULE_NETLAS_WHOIS: _InlineSource,
+        MODULE_WHOISFREAKS_HISTORY: _InlineSource,
         MODULE_NETLAS_CERT: _InlineSource,
         MODULE_NETLAS_RESPONSES: _InlineSource,
     }

@@ -92,16 +92,39 @@ def to_prov(observations: list[Any], *, run_manifest: dict | None = None) -> dic
     return doc
 
 
-async def prov_for_subject(subject: str, *, run_manifest: dict | None = None) -> dict:
-    """Gather a subject's ledger observations and serialize them to PROV-JSON."""
+async def prov_for_subject(
+    subject: str,
+    *,
+    run_manifest: dict | None = None,
+    allowed_providers: set[str] | None = None,
+) -> dict:
+    """Gather a subject's ledger observations and serialize them to PROV-JSON.
+
+    ``allowed_providers`` drops observations derived from a paid provider that was off
+    for the run being exported. When omitted it comes from the manifest's recorded
+    ``providers`` (older manifests without it: the providers that produced data in
+    that run's own findings); with neither, nothing is filtered."""
     from sqlalchemy import select
 
     from ..db.database import AsyncSessionLocal, init_db
     from ..db.models import Observation
 
     await init_db()
+    if allowed_providers is None and run_manifest and run_manifest.get("run_id"):
+        from ..core.capabilities import FILTERED_PROVIDERS, allowed_providers_for_run
+
+        recorded = run_manifest.get("providers")
+        if isinstance(recorded, dict):
+            allowed_providers = {p for p in FILTERED_PROVIDERS if recorded.get(p)}
+        else:
+            allowed_providers = await allowed_providers_for_run(str(run_manifest["run_id"]))
     async with AsyncSessionLocal() as session:
-        rows = (
-            await session.execute(select(Observation).where(Observation.subject == subject))
-        ).scalars().all()
+        conditions = [Observation.subject == subject]
+        if allowed_providers is not None:
+            from sqlalchemy import or_
+
+            conditions.append(
+                or_(Observation.provider.is_(None), Observation.provider.in_(sorted(allowed_providers)))
+            )
+        rows = (await session.execute(select(Observation).where(*conditions))).scalars().all()
     return to_prov(rows, run_manifest=run_manifest)

@@ -558,6 +558,7 @@ def print_netlas_notes(
     *,
     no_netlas: bool = False,
     no_ipgeo: bool = False,
+    no_whoisfreaks: bool = False,
 ) -> None:
     """Netlas (BYOK) one-liners: a fallback/cap note, or the first-run hint.
 
@@ -577,7 +578,9 @@ def print_netlas_notes(
     modules = getattr(result, "module_results", None) or {}
     notes: list[str] = []
     contributed = False
-    for name in ("subdomain_intel", "netlas_whois_emails", "netlas_cert", "netlas_responses"):
+    from cli import partners as _partners
+
+    for name in _partners.PROVIDER_MODULES["netlas"]["harvest"]:
         meta = (getattr(modules.get(name), "metadata", None) or {}).get("netlas")
         note = netlas_run_note(meta)
         if note and note not in notes:
@@ -610,6 +613,45 @@ def print_netlas_notes(
     Console(stderr=True).print(netlas_hint_message(), style="dim", markup=False)
 
 
+def whoisfreaks_harvest_contributed(result: Any) -> bool:
+    """True when WhoisFreaks returned data this harvest (history, dates or related)."""
+    from cli import partners
+
+    modules = getattr(result, "module_results", None) or {}
+    for name in partners.PROVIDER_MODULES["whoisfreaks"]["harvest"]:
+        meta = (getattr(modules.get(name), "metadata", None) or {}).get("whoisfreaks")
+        if isinstance(meta, dict) and meta.get("count"):
+            return True
+    related = (getattr(result, "metadata", None) or {}).get("related_domains") or {}
+    return any(
+        e.get("pivot") in ("whois_company", "whois_email")
+        for row in related.get("domains") or []
+        for e in row.get("evidence") or []
+    )
+
+
+def print_whoisfreaks_notes(result: Any, console: Console, *, domain: str | None = None) -> None:
+    """WhoisFreaks (BYOK) credit line, or a keyless nudge when it would have helped."""
+    from cli import partners
+
+    partners.show_whoisfreaks_result(
+        console,
+        contributed=whoisfreaks_harvest_contributed(result),
+        keyed=bool(getattr(settings, "whoisfreaks_api_key", None)),
+        domain=domain,
+    )
+
+
+def _related_providers(domains: list) -> str:
+    """"Netlas", "WhoisFreaks" or "Netlas + WhoisFreaks" from the pivots that matched."""
+    pivots = {e.get("pivot") for row in domains for e in row.get("evidence") or []}
+    wf = bool(pivots & {"whois_company", "whois_email"})
+    netlas = bool(pivots - {"whois_company", "whois_email"})
+    if wf and netlas:
+        return "Netlas + WhoisFreaks"
+    return "WhoisFreaks" if wf else "Netlas"
+
+
 def print_related_domains(result: Any, console: Console) -> None:
     """Render the F5 ranked related-domains list (and any opt-in expansion)."""
     meta = getattr(result, "metadata", None) or {}
@@ -618,7 +660,7 @@ def print_related_domains(result: Any, console: Console) -> None:
     if domains:
         console.print(
             f"\n[bold cyan]RELATED DOMAINS[/bold cyan] "
-            f"[dim]({len(domains)} found via Netlas pivots — not harvested; "
+            f"[dim]({len(domains)} found via {_related_providers(domains)} pivots — not harvested; "
             f"use --expand-related to harvest)[/dim]"
         )
         for row in domains[:20]:
@@ -680,9 +722,11 @@ def run_harvest_emails(
     mode: str | None = None,
     no_netlas: bool = False,
     no_ipgeo: bool = False,
+    no_whoisfreaks: bool = False,
     expand_related: bool = False,
     expand_related_max: int | None = None,
     refresh: bool = False,
+    events_jsonl: str | None = None,
 ) -> int:
     """Run the domain email harvest and render / export results.
 
@@ -820,12 +864,17 @@ def run_harvest_emails(
     # (npm_email, pypi_email, pgp_domain_email) sit alongside the
     # existing Phase 1 sources and run concurrently.
     # ------------------------------------------------------------------
-    module_names = [
-        "commoncrawl_email", "code_and_cert_email", "email_search_dork",
-        "employee_name_discovery", "npm_email", "pypi_email",
-        "pgp_domain_email", "github_domain_commits", "pattern_and_verify",
-        "subdomain_intel", "persona_email_pivot",
-    ]
+    # The harvest's REAL module list (same rules the scheduler uses), not a fixed one.
+    from backend.core.harvest_runner import planned_harvest_modules
+    from backend.core.netlas_client import netlas_active
+    from backend.core.whoisfreaks_client import whoisfreaks_active
+
+    module_names = planned_harvest_modules(
+        set(skip_modules) | ({"subdomain_intel"} if no_subdomains else set()),
+        netlas=netlas_active(no_netlas=no_netlas),
+        whoisfreaks=whoisfreaks_active(no_whoisfreaks=no_whoisfreaks),
+        hunter=bool(getattr(settings, "hunter_io_api_key", None)),
+    )
     started = time.monotonic()
     timestamp = timestamp_slug()
     live_log = results_paths(cleaned_domain, timestamp)["live_log"]
@@ -851,6 +900,25 @@ def run_harvest_emails(
         console.print(f"[dim]Live log: {live_log}[/dim]")
     effective_skip_modules = tuple(skip_modules) + (("subdomain_intel",) if no_subdomains else ())
 
+    harvest_events = None
+    if events_jsonl:
+        from backend.core.harvest_events import HarvestEvents
+
+        harvest_events = HarvestEvents(
+            events_jsonl, cleaned_domain, module_names, mode or str(getattr(settings, "product_mode", ""))
+        )
+        console.print(f"[dim]Events: {events_jsonl}[/dim]")
+
+    def _progress(module: str, action: str) -> None:
+        display.progress(module, action)
+        if harvest_events is not None:
+            harvest_events.progress(module, action)
+
+    def _signal(signal: Any) -> None:
+        display.signal(signal)
+        if harvest_events is not None:
+            harvest_events.signal(signal)
+
     def _on_module_complete(
         name: str, status: str, errors: list[str] | None = None
     ) -> None:
@@ -867,6 +935,8 @@ def run_harvest_emails(
         proxy connection failure.
         """
         display.complete(name, status, errors)
+        if harvest_events is not None:
+            harvest_events.complete(name, status, errors)
 
     # Harvest-termination handler wiring. The runner fires this exactly
     # once on EVERY termination path (normal completion, budget timeout,
@@ -919,14 +989,15 @@ def run_harvest_emails(
             with_subdomains=with_subdomains,
             subdomain_deep=subdomain_deep,
             subdomain_calibrate=subdomain_calibrate,
-            progress_callback=display.progress,
+            progress_callback=_progress,
             log_callback=display.log_event,
-            display_subscriber=display.signal,
+            display_subscriber=_signal,
             force=force,
             on_harvest_end=_on_harvest_end,
             mode=mode,
             no_netlas=no_netlas,
             no_ipgeo=no_ipgeo,
+            no_whoisfreaks=no_whoisfreaks,
             expand_related=expand_related,
             expand_related_max=expand_related_max,
             refresh=refresh,
@@ -963,6 +1034,19 @@ def run_harvest_emails(
         # The run did not return (stage exception or soft kill). Use the
         # termination handler's snapshot of the in-memory context.
         result = termination_snapshot.get("result")
+
+    if harvest_events is not None:
+        # The live stream ends with the FINAL result: one finding per exported email,
+        # name and subdomain (same values, same order), then run_done with its counts.
+        run_status = "complete" if drive_error is None and result is not None else "failed"
+        exported = None
+        if result is not None:
+            with contextlib.suppress(Exception):
+                exported = format_harvest_json_export(result)
+        if exported is None:
+            harvest_events.finish(run_status)
+        else:
+            harvest_events.finalize(exported, run_status)
 
     if result is None:
         # No harvest context ever existed — nothing to export.
@@ -1002,9 +1086,14 @@ def run_harvest_emails(
             from backend.core.run_manifest import record_run_manifest
 
             _mode = str((result.metadata or {}).get("mode") or "security-investigation")
+            from backend.core.capabilities import providers_for_flags
+
             asyncio.run(
                 record_run_manifest(
-                    run_id=cleaned_domain, pipeline="harvest", mode=_mode
+                    run_id=cleaned_domain, pipeline="harvest", mode=_mode,
+                    providers=providers_for_flags(
+                        no_ipgeo=no_ipgeo, no_whoisfreaks=no_whoisfreaks, no_netlas=no_netlas
+                    ),
                 )
             )
 
@@ -1203,11 +1292,14 @@ def run_harvest_emails(
             "Run with --proxy-fallback-ok to allow direct fallback.[/dim]"
         )
     print_netlas_notes(result, console, no_netlas=no_netlas)
+    if not no_whoisfreaks:
+        print_whoisfreaks_notes(result, console, domain=getattr(result, "domain", None) or domain)
     print_related_domains(result, console)
     from backend.core.domain_harvest_report import _build_infrastructure
     from cli import partners
 
-    partners.show_ipgeo_result(console, [], infrastructure=_build_infrastructure(result))
+    if not no_ipgeo:
+        partners.show_ipgeo_result(console, [], infrastructure=_build_infrastructure(result))
 
     # ------------------------------------------------------------------
     # 7. Export (default JSON + supplementary + optional --export).

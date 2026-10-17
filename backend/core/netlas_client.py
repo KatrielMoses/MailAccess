@@ -587,43 +587,15 @@ _WHOIS_DOMAINS_URL = f"{NETLAS_BASE_URL}/api/whois_domains/"
 #: own abuse desk.
 WHOIS_CONTACT_ROLES = ("registrant", "administrative", "technical", "billing")
 
-_EMAIL_RE = re.compile(r"^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
-
-#: Privacy-proxy / redaction services. Matched on the email's domain or any
-#: parent of it (``contact.whoisguard.com`` → ``whoisguard.com``).
-WHOIS_PROXY_DOMAINS = frozenset(
-    {
-        "whoisguard.com",
-        "withheldforprivacy.com",
-        "privacyprotect.org",
-        "domainsbyproxy.com",
-        "contactprivacy.com",
-        "privacyguardian.org",
-        "whoisprivacyprotect.com",
-        "whoisprivacycorp.com",
-        "domainprivacygroup.com",
-        "perfectprivacy.com",
-        "privacy.link",
-        "whoisproxy.com",
-        "registrarsafe.com",
-        "identity-protect.org",
-        "anonymize.com",
-        "proxy.dreamhost.com",
-        "protecteddomainservices.com",
-        "whoisprotection.cc",
-        "privatewho.is",
-        "redacted.com",
-    }
+from .whois_filters import (  # noqa: E402,F401
+    _EMAIL_RE,
+    _OFF_TARGET_DOMAIN_MARKERS,
+    _REDACTION_RE,
+    _REGISTRAR_LOCALPARTS,
+    WHOIS_PROXY_DOMAINS,
+    _domain_and_parents,
+    whois_junk_reason,
 )
-#: Redaction tokens in any local part (a plain ``gdpr@`` / ``privacy@`` on the
-#: target is a real data-protection mailbox and is kept).
-_REDACTION_RE = re.compile(
-    r"redact|withheld|masked|not[._-]?disclosed|data[._-]?protected|"
-    r"whois[._-]?(?:privacy|guard|proxy|protect)|privacy[._-]?(?:protect|proxy|service)"
-)
-_OFF_TARGET_DOMAIN_MARKERS = re.compile(r"privacy|proxy|redact|withheld|anonymi[sz]")
-#: Registrar boilerplate desks — dropped unless on the target domain itself.
-_REGISTRAR_LOCALPARTS = frozenset({"abuse", "noc", "hostmaster", "domains", "domain", "whois"})
 
 
 @dataclass
@@ -646,11 +618,6 @@ class NetlasWhoisResult:
     record: dict[str, Any] | None = None
 
 
-def _domain_and_parents(domain: str) -> list[str]:
-    parts = domain.split(".")
-    return [".".join(parts[i:]) for i in range(len(parts) - 1)]
-
-
 def _registrar_domains(record: dict[str, Any]) -> set[str]:
     registrar = record.get("registrar")
     out: set[str] = set()
@@ -666,39 +633,6 @@ def _registrar_domains(record: dict[str, Any]) -> set[str]:
     if "." in host:
         out.add(host)
     return out
-
-
-def whois_junk_reason(
-    email: str, domain: str, *, registrar_domains: set[str] | frozenset[str] = frozenset()
-) -> str | None:
-    """Why *email* is privacy-proxy / registrar boilerplate (``None`` = keep).
-
-    Addresses on the target *domain* itself are only dropped for explicit
-    redaction tokens — a real ``abuse@target`` or ``privacy@target`` is a
-    genuine role mailbox, not registrar noise.
-    """
-    from .disposable_domains import is_disposable_domain
-
-    value = str(email or "").strip().lower()
-    if not _EMAIL_RE.match(value):
-        return "not_an_email"
-    local, host = value.rsplit("@", 1)
-    on_target = host == domain or host.endswith("." + domain)
-    if _REDACTION_RE.search(local):
-        return "redacted"
-    if on_target:
-        return None
-    if any(parent in WHOIS_PROXY_DOMAINS for parent in _domain_and_parents(host)):
-        return "privacy_proxy"
-    if _OFF_TARGET_DOMAIN_MARKERS.search(host):
-        return "privacy_proxy"
-    if any(parent in registrar_domains for parent in _domain_and_parents(host)):
-        return "registrar"
-    if local in _REGISTRAR_LOCALPARTS:
-        return "registrar"
-    if is_disposable_domain(host):
-        return "disposable"
-    return None
 
 
 def extract_whois_contacts(record: dict[str, Any] | None, domain: str) -> NetlasWhoisResult:
@@ -1336,6 +1270,9 @@ _RESPONSES_DOWNLOAD_URL_F5 = _RESPONSES_DOWNLOAD_URL
 #: Pivot strengths (higher = stronger evidence the domain is the same org).
 PIVOT_STRENGTH = {
     "whois_org": 3,
+    # WhoisFreaks reverse WHOIS (exact company / registrant email).
+    "whois_company": 3,
+    "whois_email": 3,
     "analytics_google": 3,
     "analytics_facebook": 3,
     "cert_san": 3,

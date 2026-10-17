@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from ...core.capabilities import provider_capabilities, provider_module_enabled
 from ...modules import get_all_modules
 
 router = APIRouter()
@@ -23,4 +24,14 @@ async def list_modules() -> list[ModuleInfo]:
             requires_key=m.requires_key,
         )
         for m in get_all_modules()
+        if provider_module_enabled(m.name)  # a provider that is off appears nowhere
     ]
+
+
+capabilities_router = APIRouter()
+
+
+@capabilities_router.get("/capabilities")
+async def capabilities() -> dict:
+    """Which paid providers this engine can use. Booleans only: no key material."""
+    return {"providers": provider_capabilities()}

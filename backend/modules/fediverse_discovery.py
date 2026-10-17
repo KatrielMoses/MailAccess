@@ -77,8 +77,12 @@ async def _probe_instance(
         "platform": f"mastodon:{instance}",
         "profile_url": self_link,
         "username": f"{localpart}@{instance}",
+        # A WebFinger hit for the email's local part is a username guess, not proof of
+        # ownership: unverified, and a username match in the label.
         "confidence": "medium",
         "metadata": {
+            "verification": "unverified",
+            "speculative": True,
             "source": "fediverse_webfinger",
             "instance": instance,
             "localpart": localpart,

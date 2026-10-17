@@ -42,6 +42,8 @@ MODULE_SOURCE_TAGS: dict[str, str] = {
     "github_code_search": "github",
     "pastebin_search": "pastebin",
     "gravatar_lookup": "gravatar",
+    # The tag the fediverse module writes into ``metadata.source``.
+    "fediverse_webfinger": "fediverse",
 }
 
 # The unified username-platform sweep is the single enumeration source; a platform
@@ -122,11 +124,35 @@ def _normalize_source(finding: dict[str, Any], module_name: str) -> list[str]:
     return [MODULE_SOURCE_TAGS.get(normalized_module, normalized_module)]
 
 
-def _is_dual_confirmed(sources: set[str]) -> bool:
+# Source tag -> independent signal type. Username-derived sources (the sweep, the
+# pivot, Fediverse local-part guesses) are all the same thing — a username found on a
+# site — so they contribute NO independent signal and never confirm each other.
+_SOURCE_SIGNAL: dict[str, str | None] = {
+    "username_platforms": None,
+    "pivot": None,
+    "fediverse": None,
+    "github": "public_commit_or_key",
+    "pastebin": "breach_record",
+    "gravatar": "gravatar",
+}
+
+
+def independent_signal_count(sources: set[str]) -> int:
+    """Distinct independent signal types among ``sources`` (username-derived = 0)."""
+    return len({_SOURCE_SIGNAL.get(s, f"other:{s}") for s in sources} - {None})
+
+
+def _should_merge(sources: set[str]) -> bool:
+    """Same account seen by an enumeration source plus a derivative one: one finding."""
     enumeration_sources = sources & ENUMERATION_SOURCES
     if len(enumeration_sources) >= 2:
         return True
     return bool(enumeration_sources and sources & DERIVATIVE_SOURCES)
+
+
+def _is_dual_confirmed(sources: set[str]) -> bool:
+    """Dual confirmation = at least two INDEPENDENT signal types (evidence.py)."""
+    return independent_signal_count(sources) >= 2
 
 
 def deduplicate_platform_findings(results: dict[str, ModuleResult]) -> dict[str, int]:
@@ -167,10 +193,12 @@ def deduplicate_platform_findings(results: dict[str, ModuleResult]) -> dict[str,
                 len(sources),
                 sorted(sources),
             )
-        if not _is_dual_confirmed(sources):
+        if not _should_merge(sources):
             continue
 
-        dual_confirmed += 1
+        promoted = _is_dual_confirmed(sources)
+        if promoted:
+            dual_confirmed += 1
         rows = sorted(
             rows,
             key=lambda item: (
@@ -182,8 +210,11 @@ def deduplicate_platform_findings(results: dict[str, ModuleResult]) -> dict[str,
         keep_module, keep_index, keep_finding = rows[0]
         alternate_urls = []
         merged_warnings: list[str] = []
+        merged_ids: list[int] = []
         for module_name, index, finding in rows[1:]:
             remove.add((module_name, index))
+            if isinstance(finding.get("finding_id"), int):
+                merged_ids.append(finding["finding_id"])
             url = finding.get("profile_url")
             if isinstance(url, str) and url and url != keep_finding.get("profile_url"):
                 alternate_urls.append(url)
@@ -199,16 +230,17 @@ def deduplicate_platform_findings(results: dict[str, ModuleResult]) -> dict[str,
             if isinstance(keep_finding.get("metadata"), dict)
             else {}
         )
-        metadata["dual_confirmed"] = True
-        # RC1 (Output-Trust): dual confirmation is INDEPENDENT corroboration — the
-        # account is no longer a bare speculative localpart guess. Promote its
-        # verification so downstream consumers (graph/brief/score) may treat it as
-        # a real account. An open false-positive caveat still blocks the confidence
-        # promotion below (handled by ``all_warnings``).
-        metadata["verification"] = "confirmed"
-        metadata["speculative"] = False
+        metadata["dual_confirmed"] = promoted
+        # Only INDEPENDENT corroboration (two signal types tied to the email) promotes
+        # an account. Several username-derived sources agreeing is still just a
+        # username match: it stays unverified and low confidence.
+        if promoted:
+            metadata["verification"] = "confirmed"
+            metadata["speculative"] = False
         if alternate_urls:
             metadata["alternate_urls"] = sorted(set(alternate_urls))
+        if merged_ids:
+            metadata["merged_finding_ids"] = sorted(merged_ids)
         # Union all fp_warnings across the merged observations so a low-confidence
         # caveat on any observation survives the merge.
         existing_warnings = metadata.get("fp_warnings")
@@ -223,7 +255,7 @@ def deduplicate_platform_findings(results: dict[str, ModuleResult]) -> dict[str,
         # Dual-confirmation raises confidence to "high" only when no unresolved
         # false-positive warning is outstanding; an open caveat (common username,
         # disposable domain, …) must not be overridden by corroboration alone.
-        if not all_warnings:
+        if promoted and not all_warnings:
             keep_finding["confidence"] = "high"
         remove.discard((keep_module, keep_index))
 

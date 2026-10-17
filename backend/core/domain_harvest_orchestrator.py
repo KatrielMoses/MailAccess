@@ -3633,6 +3633,9 @@ async def _safe_phase12_run(
     source_telemetry: dict[str, dict[str, Any]] | None = None,
     netlas_enabled: bool = False,
     netlas_cert_fetch: Any | None = None,
+    whoisfreaks_enabled: bool = False,
+    whoisfreaks_refresh: bool = False,
+    no_whoisfreaks: bool = False,
 ) -> tuple[str, ModuleResult]:
     """Run a Phase 1+2 module with its optional kwargs.
 
@@ -3698,6 +3701,10 @@ async def _safe_phase12_run(
             kwargs["netlas_enabled"] = True
             if netlas_cert_fetch is not None:
                 kwargs["netlas_cert_fetch"] = netlas_cert_fetch
+        if whoisfreaks_enabled:
+            kwargs["whoisfreaks_enabled"] = True
+            kwargs["whoisfreaks_refresh"] = whoisfreaks_refresh
+            kwargs["no_whoisfreaks"] = no_whoisfreaks
     accepted = _kwargs_accepted(module)
     filtered = kwargs if accepted is None else {k: v for k, v in kwargs.items() if k in accepted}
 
@@ -4107,6 +4114,7 @@ async def run_domain_harvest(
     mode: str | None = None,
     no_netlas: bool = False,
     no_ipgeo: bool = False,
+    no_whoisfreaks: bool = False,
     expand_related: bool = False,
     expand_related_max: int | None = None,
     refresh: bool = False,
@@ -4301,6 +4309,24 @@ async def run_domain_harvest(
     if netlas_enabled and _enrichment_enabled:
         netlas_enabled = await should_fetch_netlas(domain, scope=store_scope, refresh=refresh or force)
 
+    # WhoisFreaks (BYOK): on when a key is active, or when earlier keyed runs left
+    # cached answers for this domain (reads are served from the cache without a
+    # key). Its own 30-day page cache makes repeats free, so no store gate here.
+    from .ipgeo_client import ipgeo_active as _ipgeo_active
+    from .whoisfreaks_client import whoisfreaks_active
+
+    whoisfreaks_keyed = whoisfreaks_active(no_whoisfreaks=no_whoisfreaks) and not module_overrides
+    whoisfreaks_attempts = 0
+    if refresh:
+        from .whoisfreaks_data import begin_refresh_scope
+
+        begin_refresh_scope()  # every WhoisFreaks step of this run shares one "bought" set
+    # The subdomain sweep switch (``--no-subdomains`` / blocked mode) also gates the
+    # WhoisFreaks host pass; the full effective skip set is only built later.
+    effective_skip_modules_for_wf = {str(n) for n in (skip_modules or ())}
+    # No key means no WhoisFreaks anywhere: cached answers are not served keyless.
+    whoisfreaks_enabled = whoisfreaks_keyed
+
     # Under F8 the native read-first scope is netlas-INDEPENDENT (== store_scope):
     # a keyed and a keyless run share one native snapshot, and the enrichment
     # store serves its blobs to both. (Pre-F8 added ``netlas`` here to split them;
@@ -4313,6 +4339,12 @@ async def run_domain_harvest(
     ) -> DomainHarvestResult:
         """Universal final step: merge the deduped union of all historical,
         scope-compatible blobs into *served*, then attach the live Pro channel."""
+        # WhoisFreaks dated hosts: every path (complete, partial_timeout, native
+        # cache hit, fallback) ends here, and the pass reads the cache only.
+        if whoisfreaks_keyed:
+            await _attach_whoisfreaks_subdomains(
+                served, domain, skip_modules=effective_skip_modules_for_wf
+            )
         if _enrichment_enabled:
             blobs = await load_harvest_blobs(domain, scope=store_scope)
             served = merge_dedupe_harvest(served, blobs)
@@ -4338,6 +4370,25 @@ async def run_domain_harvest(
     # (otherwise a cache hit would short-circuit before any fetch could run).
     if corpus_enabled and not force and not refresh:
         cached = await read_fresh_crawl(domain, request_scope)
+        # A snapshot taken before a key was added carries no WhoisFreaks marker;
+        # a keyed run re-runs so history, dates and related domains can land.
+        # A partial marker (rate limit / deadline) earns up to two more attempts.
+        if cached is not None and whoisfreaks_keyed:
+            marker = (getattr(cached, "metadata", None) or {}).get("whoisfreaks")
+            if marker is None or (
+                marker.get("status") == "partial" and int(marker.get("attempts") or 1) < 3
+            ):
+                whoisfreaks_attempts = int((marker or {}).get("attempts") or 0)
+                cached = None
+        # A snapshot that already holds data from a provider that is off for this run
+        # (no key or --no-ipgeo / --no-whoisfreaks) is not served: it would leak that
+        # provider's data. The run proceeds fresh, without the provider.
+        if cached is not None and _holds_provider_data(
+            cached,
+            ipgeo=not _ipgeo_active(no_ipgeo=no_ipgeo),
+            whoisfreaks=not whoisfreaks_active(no_whoisfreaks=no_whoisfreaks),
+        ):
+            cached = None
         if cached is not None:
             # F8: even on a native cache-hit (no modules re-run, no Netlas fetch),
             # the deduped union of all historical blobs is the universal final
@@ -4406,34 +4457,51 @@ async def run_domain_harvest(
     #  forbid it — was applied above, before the read-first, so the scope
     #  signature reflects it.)
 
-    result = await run_adaptive_harvest(
-        domain=domain,
-        timeout_seconds=total,
-        enable_smtp=enable_smtp,
-        enable_m365=enable_m365,
-        enable_yahoo=enable_yahoo,
-        use_proxies=use_proxies,
-        aggressive=aggressive,
-        timing_profile=profile,
-        module_overrides=module_overrides,
-        on_module_complete=on_module_complete,
-        dork_lite_mode=dork_lite_mode,
-        cc_max_records=cc_max_records,
-        cc_max_collections=cc_max_collections,
-        proxy_fallback_ok=proxy_fallback_ok,
-        enable_email_identity_enrichment=enable_email_identity_enrichment,
-        skip_modules=tuple(sorted(effective_skip_modules)),
-        with_subdomains=with_subdomains,
-        subdomain_deep=subdomain_deep,
-        subdomain_calibrate=subdomain_calibrate,
-        progress_callback=progress_callback,
-        log_callback=log_callback,
-        display_subscriber=display_subscriber,
-        on_harvest_end=on_harvest_end,
-        netlas_enabled=netlas_enabled,
-        no_ipgeo=no_ipgeo,
-        ipgeo_refresh=refresh,
-    )
+    # Dated hosts are fetched on their own task from the start: a subdomain_intel
+    # that is cancelled at the time limit must not take the fetch with it.
+    wf_prefetch: asyncio.Task | None = None
+    if whoisfreaks_keyed and not (_SUBDOMAIN_SKIP_NAMES & set(effective_skip_modules)):
+        wf_prefetch = asyncio.ensure_future(
+            _prefetch_whoisfreaks_subdomains(
+                domain, refresh=refresh, no_whoisfreaks=no_whoisfreaks
+            )
+        )
+    try:
+        result = await run_adaptive_harvest(
+            domain=domain,
+            timeout_seconds=total,
+            enable_smtp=enable_smtp,
+            enable_m365=enable_m365,
+            enable_yahoo=enable_yahoo,
+            use_proxies=use_proxies,
+            aggressive=aggressive,
+            timing_profile=profile,
+            module_overrides=module_overrides,
+            on_module_complete=on_module_complete,
+            dork_lite_mode=dork_lite_mode,
+            cc_max_records=cc_max_records,
+            cc_max_collections=cc_max_collections,
+            proxy_fallback_ok=proxy_fallback_ok,
+            enable_email_identity_enrichment=enable_email_identity_enrichment,
+            skip_modules=tuple(sorted(effective_skip_modules)),
+            with_subdomains=with_subdomains,
+            subdomain_deep=subdomain_deep,
+            subdomain_calibrate=subdomain_calibrate,
+            progress_callback=progress_callback,
+            log_callback=log_callback,
+            display_subscriber=display_subscriber,
+            on_harvest_end=on_harvest_end,
+            netlas_enabled=netlas_enabled,
+            no_ipgeo=no_ipgeo,
+            ipgeo_refresh=refresh,
+            whoisfreaks_enabled=whoisfreaks_enabled,
+            whoisfreaks_refresh=refresh,
+            no_whoisfreaks=no_whoisfreaks,
+        )
+    finally:
+        if wf_prefetch is not None:
+            # Let a nearly-done fetch land in the cache; it is never cancelled.
+            await asyncio.wait({wf_prefetch}, timeout=5.0)
     # Phase 2B — stamp the run's product mode onto the result (the harvest run
     # manifest) before write-back, so the corpus snapshot and the ledger record
     # the collection mode. ``resolved_mode`` was computed above with the gate.
@@ -4464,8 +4532,17 @@ async def run_domain_harvest(
     # seeds just stamped above; bounded; harvests nothing. Persisted in the
     # snapshot (not PII). Skipped under module injection and inside an expansion
     # sub-harvest (``_related_discovery`` False) so it never recurses.
-    if netlas_enabled and _related_discovery and not module_overrides:
-        await _run_related_discovery(result, domain, no_netlas=no_netlas)
+    if (netlas_enabled or whoisfreaks_enabled) and _related_discovery and not module_overrides:
+        await _run_related_discovery(
+            result,
+            domain,
+            no_netlas=no_netlas,
+            netlas_enabled=netlas_enabled,
+            whoisfreaks_enabled=whoisfreaks_enabled,
+            no_whoisfreaks=no_whoisfreaks,
+            refresh=refresh,
+            attempts=whoisfreaks_attempts + 1,
+        )
     if corpus_enabled:
         from .corpus_store import sanitize_for_persistence, write_back
 
@@ -4491,51 +4568,200 @@ async def run_domain_harvest(
     # F5 (Layer 2) - opt-in expansion. OFF unless --expand-related. Re-harvests
     # the top-N ranked related domains (recursion disabled, Netlas caps intact);
     # a mid-expansion quota hit stops cleanly and keeps what was gathered.
-    if netlas_enabled and _related_discovery and expand_related and not module_overrides:
+    if (
+        (netlas_enabled or whoisfreaks_enabled)
+        and _related_discovery
+        and expand_related
+        and not module_overrides
+    ):
         await _expand_related_domains(
             result, resolved_mode, no_netlas=no_netlas, no_ipgeo=no_ipgeo,
-            max_domains=expand_related_max,
+            no_whoisfreaks=no_whoisfreaks, max_domains=expand_related_max,
         )
     # F8 universal final serve: the deduped union of all historical, scope-
     # compatible blobs, then the live Pro channel (attached once, inside).
     return await _serve_with_store(result, ipgeo_already_run="ip_intel" in result.module_results)
 
 
-async def _run_related_discovery(
-    result: Any, domain: str, *, no_netlas: bool
-) -> None:
-    """Attach ``metadata['related_domains']`` (ranked, with pivot evidence)."""
+async def _whoisfreaks_related(
+    result: Any,
+    domain: str,
+    *,
+    refresh: bool,
+    no_whoisfreaks: bool,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any], dict[str, Any]]:
+    """Reverse-WHOIS related-domain evidence, seeded from free WHOIS and history.
+
+    Runs under its own deadline; anything unanswered in time is skipped (and not
+    cached as empty), so the next run completes it.
+    """
     from .company_discovery import _registrable_domain
-    from .netlas_client import fetch_related_domains
+    from .whoisfreaks_data import (
+        lookup,
+        related_candidates,
+        reverse_seeds,
+        sibling_company_seeds,
+        wf_deadline,
+    )
+
+    apex = _registrable_domain(domain)
+    deadline = wf_deadline(float(getattr(settings, "whoisfreaks_harvest_deadline_seconds", 90.0)))
+    hist = await lookup(
+        "history",
+        apex,
+        max_pages=max(1, int(settings.whoisfreaks_history_pages)),
+        refresh=refresh,  # a refresh buys each page once per run (see begin_refresh_scope)
+        deadline=deadline,
+        no_whoisfreaks=no_whoisfreaks,
+    )
+    free_org: str | None = None
+    try:
+        from ..modules.domain_intel import _sync_whois
+
+        record = await asyncio.wait_for(asyncio.to_thread(_sync_whois, apex), timeout=10.0)
+        free_org = (record or {}).get("registrant_org")
+    except Exception:  # noqa: BLE001 - free WHOIS is a best-effort seed
+        _LOG.debug("free WHOIS seed unavailable for %s", apex, exc_info=True)
+    meta = getattr(result, "metadata", None) or {}
+    seeds = reverse_seeds(
+        apex,
+        free_org=free_org,
+        history_rows=hist.rows,
+        extra_orgs=[meta.get("registrant_organization")],
+        cap=int(settings.whoisfreaks_reverse_seeds),
+    )
+    via: dict[str, str] = {}
+    cap = int(settings.whoisfreaks_reverse_seeds)
+    all_company_seeds = reverse_seeds(
+        apex,
+        free_org=free_org,
+        history_rows=hist.rows,
+        extra_orgs=[meta.get("registrant_organization")],
+        cap=10_000,
+    )
+    if not any(kind == "company" for kind, _ in all_company_seeds):
+        # Every source is redacted (or silent): ask live WHOIS of sibling TLDs, whose
+        # records are often not redacted, for a real registrant company.
+        via = await sibling_company_seeds(
+            apex, refresh=refresh, deadline=deadline, no_whoisfreaks=no_whoisfreaks
+        )
+        seeds = ([("company", company) for company in via] + seeds)[: max(0, cap)]
+    evidence, pivots, telemetry = await related_candidates(
+        apex, seeds, via=via, refresh=refresh, deadline=deadline, no_whoisfreaks=no_whoisfreaks
+    )
+    telemetry["complete"] = telemetry["complete"] and hist.complete
+    telemetry["seeds"] = len(seeds)
+    return evidence, pivots, telemetry
+
+
+def _related_rank_key(row: dict[str, Any]) -> tuple:
+    """Most pivots first (score is pivots x strength), then confirmed owner, then oldest.
+
+    Oldest registration first puts real product and acquisition domains ahead of
+    recent typo-protection registrations; the domain name is the final tie-break.
+    Rows with no WhoisFreaks dates (Netlas-only) fall through to the domain name,
+    so their order is unchanged.
+    """
+    evidence = row.get("evidence") or []
+    confirmed = any(e.get("owner_confirmed") for e in evidence)
+    created = min((str(e["created"]) for e in evidence if e.get("created")), default="9999")
+    return (-row["score"], not confirmed, created, row["domain"])
+
+
+async def _run_related_discovery(
+    result: Any,
+    domain: str,
+    *,
+    no_netlas: bool,
+    netlas_enabled: bool = True,
+    whoisfreaks_enabled: bool = False,
+    no_whoisfreaks: bool = False,
+    refresh: bool = False,
+    attempts: int = 1,
+) -> None:
+    """Attach ``metadata['related_domains']`` (ranked, with pivot evidence).
+
+    Netlas and WhoisFreaks pivots are merged: a domain both providers find keeps
+    the evidence (and score) of each.
+    """
+    from .company_discovery import _registrable_domain
+    from .netlas_client import PIVOT_STRENGTH, fetch_related_domains
 
     meta = getattr(result, "metadata", None)
     if not isinstance(meta, dict):
         return
-    seeds = {
-        "org": meta.get("registrant_organization"),
-        "cert_sans": meta.get("related_domain_seeds") or [],
-    }
-    try:
-        outcome = await fetch_related_domains(
-            _registrable_domain(domain), getattr(settings, "netlas_api_key", None),
-            seeds=seeds,
-        )
-    except Exception as exc:  # noqa: BLE001 - discovery never breaks a harvest
-        _LOG.warning("related-domain discovery failed for %s: %s", domain, exc)
-        return
+    rows: dict[str, dict[str, Any]] = {}
+    pivots: dict[str, Any] = {}
+    calls = 0
+    status = "empty"
+    if netlas_enabled:
+        seeds = {
+            "org": meta.get("registrant_organization"),
+            "cert_sans": meta.get("related_domain_seeds") or [],
+        }
+        try:
+            outcome = await fetch_related_domains(
+                _registrable_domain(domain), getattr(settings, "netlas_api_key", None),
+                seeds=seeds,
+            )
+        except Exception as exc:  # noqa: BLE001 - discovery never breaks a harvest
+            _LOG.warning("related-domain discovery failed for %s: %s", domain, exc)
+            outcome = None
+            if not whoisfreaks_enabled:
+                return
+        if outcome is not None:
+            status, calls, pivots = outcome.status, outcome.calls, dict(outcome.pivots)
+            for r in outcome.related:
+                rows[r.domain] = {"domain": r.domain, "score": r.score, "evidence": list(r.evidence)}
+    if whoisfreaks_enabled:
+        try:
+            evidence, wf_pivots, telemetry = await _whoisfreaks_related(
+                result, domain, refresh=refresh, no_whoisfreaks=no_whoisfreaks
+            )
+        except Exception:  # noqa: BLE001 - discovery never breaks a harvest
+            _LOG.warning("WhoisFreaks related-domain discovery failed", exc_info=False)
+            evidence, wf_pivots, telemetry = {}, {}, {"complete": False, "fetched": 0}
+        pivots.update(wf_pivots)
+        for host, entries in evidence.items():
+            row = rows.setdefault(host, {"domain": host, "score": 0, "evidence": []})
+            for entry in entries:
+                if not any(
+                    e.get("pivot") == entry["pivot"]
+                    and all(e.get(k) == v for k, v in entry.items())
+                    for e in row["evidence"]
+                ):
+                    row["evidence"].append(entry)
+                    row["score"] += PIVOT_STRENGTH.get(entry["pivot"], 1)
+        calls += int(telemetry.get("fetched") or 0)
+        meta["whoisfreaks"] = {
+            "status": "ok" if telemetry.get("complete") else "partial",
+            "seeds": telemetry.get("seeds", 0),
+            "fetched": telemetry.get("fetched", 0),
+            "attempts": attempts,
+        }
+        if not netlas_enabled:
+            status = "ok" if evidence else "empty"
+    limit = int(getattr(settings, "netlas_related_cap", 50))
+    ranked = sorted(rows.values(), key=_related_rank_key)[: max(0, limit)]
     meta["related_domains"] = {
-        "status": outcome.status,
-        "calls": outcome.calls,
-        "pivots": outcome.pivots,
+        "status": status,
+        "calls": calls,
+        "pivots": pivots,
         "domains": [
-            {"domain": r.domain, "score": r.score, "evidence": r.evidence}
-            for r in outcome.related
+            {"domain": r["domain"], "score": r["score"], "evidence": r["evidence"]}
+            for r in ranked
         ],
     }
 
 
 async def _expand_related_domains(
-    result: Any, mode: Any, *, no_netlas: bool, no_ipgeo: bool = False, max_domains: int | None
+    result: Any,
+    mode: Any,
+    *,
+    no_netlas: bool,
+    no_ipgeo: bool = False,
+    no_whoisfreaks: bool = False,
+    max_domains: int | None,
 ) -> None:
     """Re-harvest the top-N related domains; attach ``metadata['related_harvests']``."""
     from .netlas_client import FAILURE_STATUSES
@@ -4557,6 +4783,7 @@ async def _expand_related_domains(
             sub = await run_domain_harvest(
                 rd, mode=mode.value if hasattr(mode, "value") else mode,
                 no_netlas=no_netlas, no_ipgeo=no_ipgeo,
+                no_whoisfreaks=no_whoisfreaks,
                 _related_discovery=False, expand_related=False,
                 force=True,
             )
@@ -4806,6 +5033,198 @@ async def _run_netlas_whois(domain: str) -> tuple[str, ModuleResult]:
         findings=findings,
         metadata=metadata,
     )
+
+
+#: ``--skip`` names that switch the subdomain sweep (and so the WhoisFreaks host pass) off.
+_SUBDOMAIN_SKIP_NAMES = frozenset({"subdomain_intel", "subdomain_surface"})
+
+
+def _holds_provider_data(result: Any, *, ipgeo: bool, whoisfreaks: bool) -> bool:
+    """True when a stored harvest holds data from a provider that is off for this run."""
+    modules = getattr(result, "module_results", None) or {}
+    meta = getattr(result, "metadata", None) or {}
+    if ipgeo and "ip_intel" in modules:
+        return True
+    if not whoisfreaks:
+        return False
+    if any(str(name).startswith("whoisfreaks") for name in modules) or meta.get("whoisfreaks"):
+        return True
+    related = (meta.get("related_domains") or {}).get("domains") or []
+    if any(
+        e.get("pivot") in ("whois_company", "whois_email")
+        for row in related
+        for e in (row.get("evidence") or [])
+    ):
+        return True
+    for res in modules.values():
+        for finding in getattr(res, "findings", None) or []:
+            if isinstance(finding, dict) and (
+                "whoisfreaks" in (finding.get("discovery_method") or [])
+                or finding.get("first_seen")
+                or finding.get("inactive_from")
+            ):
+                return True
+    return False
+
+
+async def _attach_whoisfreaks_subdomains(
+    served: Any, domain: str, *, skip_modules: set[str] | frozenset[str] = frozenset()
+) -> None:
+    """Final pass: dates on known subdomain records, WhoisFreaks-only hosts appended.
+
+    Reads ``whoisfreaks_cache`` only (no credits, no key needed). New hosts are
+    not resolved or scored here; they carry ``discovery_method: ["whoisfreaks"]``.
+    """
+    if _SUBDOMAIN_SKIP_NAMES & set(skip_modules):
+        return
+    results = getattr(served, "module_results", None)
+    if not isinstance(results, dict):
+        return
+    try:
+        from .company_discovery import _registrable_domain
+        from .whoisfreaks_data import apply_subdomain_dates, cached_subdomain_dates
+
+        apex = _registrable_domain(domain)
+        dates = await cached_subdomain_dates(apex)
+        if not dates:
+            return
+        known, _dated = apply_subdomain_dates(
+            {
+                name: list(getattr(res, "findings", None) or [])
+                for name, res in results.items()
+                if name != "whoisfreaks_subdomains"
+            },
+            dates,
+        )
+        # Same Tier-3 noise filter the native sweep applies before any DNS work.
+        from ..modules.subdomain_intel import filter_tier3, load_wordlist
+
+        fresh_hosts = {host: set() for host in dates if host not in known}
+        filter_tier3(fresh_hosts, load_wordlist().get("tier3_exclude", []))
+        extra = [
+            {
+                "subdomain": host,
+                "discovery_method": ["whoisfreaks"],
+                **{k: v for k, v in stamp.items() if v},
+            }
+            for host, stamp in sorted(dates.items())
+            if host in fresh_hosts
+        ]
+        results.pop("whoisfreaks_subdomains", None)
+        if extra:
+            results["whoisfreaks_subdomains"] = ModuleResult(
+                status=ModuleStatus.SUCCESS,
+                findings=extra,
+                metadata={
+                    "domain": domain,
+                    "whoisfreaks": {"status": "ok", "count": len(extra), "from_cache": True},
+                },
+            )
+    except Exception:  # noqa: BLE001 - enrichment never breaks a harvest
+        _LOG.debug("WhoisFreaks subdomain pass unavailable", exc_info=True)
+
+
+async def _prefetch_whoisfreaks_subdomains(
+    domain: str, *, refresh: bool, no_whoisfreaks: bool
+) -> None:
+    """Fill the cache with dated hosts at harvest start, independent of subdomain_intel."""
+    from .company_discovery import _registrable_domain
+    from .whoisfreaks_data import lookup, wf_deadline
+
+    try:
+        await lookup(
+            "subdomains",
+            _registrable_domain(domain),
+            max_pages=max(1, int(settings.whoisfreaks_subdomain_pages)),
+            refresh=refresh,
+            deadline=wf_deadline(75.0),
+            no_whoisfreaks=no_whoisfreaks,
+        )
+    except Exception:  # noqa: BLE001
+        _LOG.debug("WhoisFreaks subdomain prefetch failed", exc_info=True)
+
+
+async def _run_whoisfreaks_history(
+    domain: str,
+    *,
+    refresh: bool = False,
+    no_whoisfreaks: bool = False,
+    deadline: float | None = None,
+) -> tuple[str, ModuleResult]:
+    """WhoisFreaks WHOIS history as an inline harvest source.
+
+    Each real contact on the target's own domain becomes a ``whois_history``
+    lead carrying its first/last-seen dates. Off-domain registrant addresses are
+    not leads: the related-domain step takes them as reverse-WHOIS seeds from the
+    same (cached) history. Registrar, privacy-proxy and redacted values are
+    dropped by the shared WHOIS filter.
+    """
+    from .company_discovery import _registrable_domain
+    from .email_confidence import compute_confidence_breakdown, label_for_score
+    from .whoisfreaks_data import history_contacts, is_on_domain, lookup
+
+    name = "whoisfreaks_history"
+    apex = _registrable_domain(domain)
+    found = await lookup(
+        "history",
+        apex,
+        max_pages=max(1, int(settings.whoisfreaks_history_pages)),
+        refresh=refresh,
+        deadline=deadline,
+        no_whoisfreaks=no_whoisfreaks,
+    )
+    contacts = history_contacts(found.rows, apex)
+    metadata: dict[str, Any] = {
+        "domain": domain,
+        "whois_domain": apex,
+        "whoisfreaks": {
+            "status": "ok" if found.complete else "incomplete",
+            "fetched": found.fetched,
+            "from_cache": found.from_cache,
+            "count": len(contacts),
+        },
+        "snapshots": len(found.rows),
+        "contacts": len(contacts),
+    }
+    ci = compute_confidence_breakdown(
+        source_types=["whois_history"], is_smtp_verified=False, is_ca_attested=False
+    )
+    findings: list[dict[str, Any]] = []
+    for contact in contacts:
+        if not is_on_domain(contact["email"], domain):
+            continue
+        local = contact["email"].rsplit("@", 1)[0]
+        findings.append(
+            {
+                "platform": "whois",
+                "profile_url": "",
+                "username": local,
+                "confidence": label_for_score(ci.score).lower(),
+                "signal_source": "whois_history",
+                "metadata": {
+                    "email": contact["email"],
+                    "on_domain": True,
+                    "source_type": "whois_history",
+                    "provenance": "public_source",
+                    "whois_roles": list(contact["roles"]),
+                    "whois_domain": apex,
+                    "first_seen": contact["first_seen"],
+                    "last_seen": contact["last_seen"],
+                    "historical": True,
+                    "first_seen_timestamp": contact["first_seen"],
+                    "last_seen_timestamp": contact["last_seen"],
+                    "confidence_score": round(ci.score, 4),
+                    "confidence_breakdown": ci.breakdown,
+                },
+            }
+        )
+    if findings:
+        status = ModuleStatus.SUCCESS
+    else:
+        status = ModuleStatus.SUCCESS if found.complete and found.pages else ModuleStatus.PARTIAL
+        if not found.complete:
+            metadata["skip_reason"] = "not_answered"
+    return name, ModuleResult(status=status, findings=findings, metadata=metadata)
 
 
 async def _run_hunter(

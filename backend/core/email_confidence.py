@@ -130,6 +130,9 @@ SOURCE_WEIGHTS: dict[str, float] = {
     # F2 — a WHOIS registration contact (via Netlas). Public-source provenance,
     # not a verified mailbox, and often stale: a moderate weight.
     "whois_contact": 0.50,
+    # WhoisFreaks — a contact from a historical WHOIS snapshot (often pre-redaction,
+    # so the address may be long gone): weaker than a current registry record.
+    "whois_history": 0.40,
     # F3 — an email on a TLS certificate's subject / SAN (via Netlas). Public
     # provenance, not mailbox verification (a server cert's E= field is not
     # CA-validated, unlike ``ca_attested`` S/MIME evidence): moderate.
@@ -242,6 +245,7 @@ SOURCE_CLASS: dict[str, str] = {
     # F2 — its own family: a registry record is independent evidence, not a
     # company-page scrape.
     "whois_contact": "registry",
+    "whois_history": "registry",
     "cert_contact": "certificate",
     # One Netlas family for both protocols, so a single scan never counts twice;
     # like Wayback vs Common Crawl, Netlas is its own crawler and corroborates CC.

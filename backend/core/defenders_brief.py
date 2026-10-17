@@ -470,7 +470,11 @@ def _finding_candidates(
         ))
 
     if breaches and not any(_SEVERITY_ORDER.get(c["finding"].severity, 0) > 1 for c in candidates):
-        most_recent = max((_breach_date(_payload(row)) for row in breaches), default=None)
+        # Undated breach rows are skipped: comparing None with None crashed the whole run.
+        most_recent = max(
+            (d for d in (_breach_date(_payload(row)) for row in breaches) if d is not None),
+            default=None,
+        )
         if most_recent and (datetime.now(timezone.utc).date() - most_recent).days > 1826:
             candidates.append(_candidate(
                 8,
@@ -573,7 +577,8 @@ def _risk_summary(
         return f"{risk_level} - Confirmed identity ({name_consensus.confirmed_name}) is publicly linked to this email across {len(name_consensus.name_sources or []) or 1} sources."
     breaches = _breach_rows(rows)
     if breaches:
-        recent = timeline.most_recent_date or str(max((_breach_date(_payload(row)) for row in breaches), default=""))
+        dated = [d for d in (_breach_date(_payload(row)) for row in breaches) if d is not None]
+        recent = timeline.most_recent_date or (str(max(dated)) if dated else "")
         return f"{risk_level} - Breach exposure detected; most recent evidence dates to {recent or 'an unknown date'}."
     if top_findings:
         return f"{risk_level} - {top_findings[0].detail}"
