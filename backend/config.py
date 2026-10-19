@@ -798,6 +798,20 @@ class Settings(BaseSettings):
     # Own deadline for the post-harvest reverse-WHOIS step (3 calls/min plan limit).
     whoisfreaks_harvest_deadline_seconds: float = 90.0
 
+    # MailAccess Index (our private index of emails on the public web, built from
+    # Common Crawl and GH Archive). The ``own_index`` harvest source exists only
+    # when BOTH the URL and the key are set; otherwise nothing changes and no
+    # call is made. Per-run opt-out: ``--no-own-index``.
+    mailaccess_index_url: str | None = None
+    mailaccess_index_key: str | None = None
+    own_index_disabled: bool = False
+    own_index_timeout_seconds: float = 10.0  # per HTTP request
+    own_index_budget_seconds: float = 30.0  # whole module, all pages
+    own_index_page_limit: int = 500
+    own_index_max_emails: int = 2000
+    # Results last seen longer ago than this are labelled "older source".
+    own_index_older_source_months: int = 24
+
     netlas_api_key: str | None = None
     netlas_disabled: bool = False
     netlas_subdomain_cap: int = 500

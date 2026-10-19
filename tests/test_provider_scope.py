@@ -171,7 +171,7 @@ async def test_a_keyed_run_still_shows_its_own_provider_facts(env) -> None:
         providers = {o.provider for o in (await db.execute(select(Observation))).scalars()}
         manifest = (await db.execute(select(RunManifest).where(RunManifest.run_id == run))).scalar_one()
     assert {"whoisfreaks", "ipgeolocation"} <= providers
-    assert manifest.providers == {"ipgeolocation": True, "whoisfreaks": True, "netlas": False}
+    assert manifest.providers == {"ipgeolocation": True, "whoisfreaks": True, "netlas": False, "own_index": False}
 
 
 async def test_keyed_then_keyless_run_reports_no_provider_fact_anywhere(env, monkeypatch) -> None:

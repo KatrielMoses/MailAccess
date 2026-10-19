@@ -256,6 +256,10 @@ _ALL_KNOWN_MODULES: frozenset[str] = frozenset(
         # WhoisFreaks WHOIS history (harvest): the same published-registry basis
         # as the Netlas WHOIS source -> allowed in every mode.
         "whoisfreaks_history",
+        # MailAccess Index: emails already published on the public web (our own
+        # index of Common Crawl + GH Archive) -> the same lawful-public open-web
+        # basis as ``commoncrawl_email`` -> allowed in every mode.
+        "own_index",
         # F3 — Netlas certificate subject/SAN emails: public certificate
         # transparency-style data, like ``code_and_cert_email`` → allowed in
         # every mode.

@@ -737,6 +737,7 @@ def run_harvest_emails(
     expand_related_max: int | None = None,
     refresh: bool = False,
     events_jsonl: str | None = None,
+    no_own_index: bool = False,
 ) -> int:
     """Run the domain email harvest and render / export results.
 
@@ -877,6 +878,7 @@ def run_harvest_emails(
     # The harvest's REAL module list (same rules the scheduler uses), not a fixed one.
     from backend.core.harvest_runner import planned_harvest_modules
     from backend.core.netlas_client import netlas_active
+    from backend.core.own_index_client import own_index_active
     from backend.core.whoisfreaks_client import whoisfreaks_active
 
     module_names = planned_harvest_modules(
@@ -884,6 +886,7 @@ def run_harvest_emails(
         netlas=netlas_active(no_netlas=no_netlas),
         whoisfreaks=whoisfreaks_active(no_whoisfreaks=no_whoisfreaks),
         hunter=bool(getattr(settings, "hunter_io_api_key", None)),
+        own_index=own_index_active(no_own_index=no_own_index),
     )
     started = time.monotonic()
     timestamp = timestamp_slug()
@@ -1008,6 +1011,7 @@ def run_harvest_emails(
             no_netlas=no_netlas,
             no_ipgeo=no_ipgeo,
             no_whoisfreaks=no_whoisfreaks,
+            no_own_index=no_own_index,
             expand_related=expand_related,
             expand_related_max=expand_related_max,
             refresh=refresh,
@@ -1170,7 +1174,8 @@ def run_harvest_emails(
                 record_run_manifest(
                     run_id=cleaned_domain, pipeline="harvest", mode=_mode,
                     providers=providers_for_flags(
-                        no_ipgeo=no_ipgeo, no_whoisfreaks=no_whoisfreaks, no_netlas=no_netlas
+                        no_ipgeo=no_ipgeo, no_whoisfreaks=no_whoisfreaks, no_netlas=no_netlas,
+                        no_own_index=no_own_index,
                     ),
                 )
             )

@@ -12,16 +12,19 @@ PROVIDER_OF_MODULE = {"ip_intel": "ipgeolocation", "whoisfreaks_intel": "whoisfr
 
 
 def provider_capabilities() -> dict[str, bool]:
-    """``{"ipgeolocation": bool, "whoisfreaks": bool, "netlas": bool}`` for this engine
-    (key set and not persistently disabled; a per-run opt-out is not considered)."""
+    """``{"ipgeolocation": bool, "whoisfreaks": bool, "netlas": bool, "own_index": bool}``
+    for this engine (key set and not persistently disabled; a per-run opt-out is not
+    considered). ``own_index`` (the MailAccess Index) needs BOTH its URL and key."""
     from .ipgeo_client import ipgeo_active
     from .netlas_client import netlas_active
+    from .own_index_client import own_index_active
     from .whoisfreaks_client import whoisfreaks_active
 
     return {
         "ipgeolocation": bool(ipgeo_active(no_ipgeo=False)),
         "whoisfreaks": bool(whoisfreaks_active(no_whoisfreaks=False)),
         "netlas": bool(netlas_active(no_netlas=False)),
+        "own_index": bool(own_index_active(no_own_index=False)),
     }
 
 
@@ -42,27 +45,35 @@ def active_providers() -> dict[str, bool]:
     per-run (reads the run's context flags). Recorded in the run manifest."""
     from .ipgeo_client import ipgeo_active
     from .netlas_client import netlas_active
+    from .own_index_client import own_index_active
     from .whoisfreaks_client import whoisfreaks_active
 
     return {
         "ipgeolocation": bool(ipgeo_active()),
         "whoisfreaks": bool(whoisfreaks_active()),
         "netlas": bool(netlas_active()),
+        "own_index": bool(own_index_active()),
     }
 
 
 def providers_for_flags(
-    *, no_ipgeo: bool = False, no_whoisfreaks: bool = False, no_netlas: bool = False
+    *,
+    no_ipgeo: bool = False,
+    no_whoisfreaks: bool = False,
+    no_netlas: bool = False,
+    no_own_index: bool = False,
 ) -> dict[str, bool]:
     """Active providers for a run given explicit per-run flags (harvest passes them)."""
     from .ipgeo_client import ipgeo_active
     from .netlas_client import netlas_active
+    from .own_index_client import own_index_active
     from .whoisfreaks_client import whoisfreaks_active
 
     return {
         "ipgeolocation": bool(ipgeo_active(no_ipgeo=no_ipgeo)),
         "whoisfreaks": bool(whoisfreaks_active(no_whoisfreaks=no_whoisfreaks)),
         "netlas": bool(netlas_active(no_netlas=no_netlas)),
+        "own_index": bool(own_index_active(no_own_index=no_own_index)),
     }
 
 

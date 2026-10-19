@@ -104,6 +104,10 @@ TECHNIQUES: dict[str, tuple[str, str]] = {
     "public_surface_sweeper": ("public_pages", "Reading this domain's contact and support pages."),
     "syndication_feed_sweeper": ("public_pages", "Reading this domain's RSS and Atom feeds for authors."),
     "security_txt": ("public_pages", "Reading this domain's security.txt for contact emails."),
+    # The harvest's seeded homepage fetch (WorkItem source "homepage").
+    "homepage": ("public_pages", "Reading this domain's homepage for emails and names."),
+    # MailAccess Index: our own index of emails on the public web (CC + GH Archive).
+    "own_index": ("own_index", "Looking up our own index of the public web."),
     "press_intel": ("press_search", "Searching press releases for contacts at this domain."),
     "sec_edgar": ("company_filings", "Searching SEC filings for contacts at this domain."),
     "code_and_cert_email": ("code_and_certificates", "Searching public code and TLS certificates for emails."),

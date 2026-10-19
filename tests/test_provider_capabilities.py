@@ -81,10 +81,10 @@ async def _capabilities() -> httpx.Response:
     "ip_key,wf_key,netlas_key,expected",
     [
         (IPGEO_KEY, WF_KEY, "netlas-secret-key-1122334455",
-         {"ipgeolocation": True, "whoisfreaks": True, "netlas": True}),
-        (None, WF_KEY, None, {"ipgeolocation": False, "whoisfreaks": True, "netlas": False}),
-        (IPGEO_KEY, None, None, {"ipgeolocation": True, "whoisfreaks": False, "netlas": False}),
-        (None, None, None, {"ipgeolocation": False, "whoisfreaks": False, "netlas": False}),
+         {"ipgeolocation": True, "whoisfreaks": True, "netlas": True, "own_index": False}),
+        (None, WF_KEY, None, {"ipgeolocation": False, "whoisfreaks": True, "netlas": False, "own_index": False}),
+        (IPGEO_KEY, None, None, {"ipgeolocation": True, "whoisfreaks": False, "netlas": False, "own_index": False}),
+        (None, None, None, {"ipgeolocation": False, "whoisfreaks": False, "netlas": False, "own_index": False}),
     ],
 )
 async def test_capabilities_are_booleans_per_key_with_no_key_material(

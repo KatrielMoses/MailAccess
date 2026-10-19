@@ -147,6 +147,9 @@ MODULE_NETLAS_CERT = "netlas_cert"
 MODULE_WHOISFREAKS_HISTORY = "whoisfreaks_history"
 # F4 — Netlas indexed HTTP responses + FTP banners; inline source, Netlas-on only.
 MODULE_NETLAS_RESPONSES = "netlas_responses"
+# MailAccess Index (our own index of the public web); inline source, runs FIRST
+# and only when MAILACCESS_INDEX_URL + MAILACCESS_INDEX_KEY are set.
+MODULE_OWN_INDEX = "own_index"
 MODULE_HACKERTARGET = "hackertarget_hosts"
 MODULE_RIPE_STAT_ASN = "ripe_stat_asn"
 MODULE_SHODAN_INTERNETDB = "shodan_internetdb"
@@ -289,6 +292,8 @@ class WorkerContext:
     whoisfreaks_enabled: bool = False
     whoisfreaks_refresh: bool = False
     no_whoisfreaks: bool = False
+    # MailAccess Index — resolved once per run (configured and not --no-own-index).
+    own_index_enabled: bool = False
     context_vertical: tuple[str, ...] = ()
     progress_callback: Any | None = None
     log_callback: Any | None = None
@@ -315,6 +320,12 @@ class WorkerContext:
     # Modules in flight right now: name -> (module instance, perf_counter start).
     # Read at the harvest deadline to report (and abandon) what was still running.
     running_modules: dict[str, Any] = field(default_factory=dict)
+    # Emails the MailAccess Index returned this run (0 = none / error / off).
+    own_index_hits_box: list[int] = field(default_factory=lambda: [0])
+
+    @property
+    def own_index_hits(self) -> int:
+        return self.own_index_hits_box[0]
 
     def __post_init__(self) -> None:
         self.signal_pool.pattern_resolver = self.pattern_run_state.resolver
@@ -496,6 +507,7 @@ async def run_adaptive_harvest(
     whoisfreaks_enabled: bool = False,
     whoisfreaks_refresh: bool = False,
     no_whoisfreaks: bool = False,
+    own_index_enabled: bool = False,
     on_context_ready: Any | None = None,
 ) -> Any:
     """Run one adaptive harvest under a HARD ``timeout_seconds`` deadline.
@@ -593,6 +605,7 @@ async def run_adaptive_harvest(
         whoisfreaks_enabled=bool(whoisfreaks_enabled),
         whoisfreaks_refresh=bool(whoisfreaks_refresh),
         no_whoisfreaks=bool(no_whoisfreaks),
+        own_index_enabled=bool(own_index_enabled),
         progress_callback=progress_callback,
         log_callback=log_callback,
         provider_detection_ready=asyncio.Event(),
@@ -674,6 +687,12 @@ async def run_adaptive_harvest(
                 email, source, metadata, enrichment_seen
             )
         )
+
+    # MailAccess Index runs FIRST, before any discovery track starts, so its
+    # emails feed the shared dedup and its yield decides whether the live Common
+    # Crawl module runs at all. Bounded by its own 30 s budget and the harvest's.
+    if ctx.own_index_enabled and MODULE_OWN_INDEX not in ctx.skip_modules:
+        await _run_own_index_first(ctx)
 
     timed_out = False
 
@@ -976,7 +995,7 @@ async def run_adaptive_harvest(
             started_iso=started_iso,
             timeout_seconds=timeout_seconds,
             timed_out=True,
-            still_running=sorted(set(still_running) | set(ctx.running_modules)),
+            still_running=sorted(set(still_running) | set(_running_of(ctx))),
         )
 
     if on_context_ready is not None:
@@ -994,7 +1013,9 @@ async def run_adaptive_harvest(
             # ``--timeout 300``.
             tracks_task = asyncio.ensure_future(_run_tracks(ctx))
             try:
-                done, _ = await asyncio.wait({tracks_task}, timeout=timeout_seconds)
+                done, _ = await asyncio.wait(
+                    {tracks_task}, timeout=max(0.0, budget.remaining())
+                )
             except asyncio.CancelledError:
                 tracks_task.cancel()
                 raise
@@ -1004,7 +1025,7 @@ async def run_adaptive_harvest(
                 timed_out = True
                 budget.mark_exhausted()
                 # Named before the cancel, while they are still in flight.
-                still_running = sorted(ctx.running_modules)
+                still_running = sorted(_running_of(ctx))
                 logger.info("Budget exhausted - returning partial results")
                 await wait_hard(tracks_task, 0.0, grace=CANCEL_GRACE_SECONDS)
         except asyncio.CancelledError:
@@ -1070,11 +1091,10 @@ async def run_adaptive_harvest(
             shadow_profiles: list[dict[str, Any]] = []
             # The tail has its own VERIFICATION_TAIL_SECONDS deadline; the hard
             # wrapper only guarantees a stuck step inside it cannot outlive it.
-            _ok, tail = await wait_hard(
-                _run_verification_tail(identity_clusters),
-                VERIFICATION_TAIL_SECONDS + 1.0,
-                grace=0.5,
-            )
+            async def _tail() -> dict[str, Any]:
+                return await _run_verification_tail(identity_clusters)
+
+            _ok, tail = await wait_hard(_tail(), VERIFICATION_TAIL_SECONDS + 1.0, grace=0.5)
             tail = tail or {"tail_status": "partial_timeout"}
             smtp_validation = tail.get("smtp_email_verification", {})
             unique_emails = _aggregate(
@@ -1410,11 +1430,12 @@ def planned_harvest_modules(
     netlas: bool = False,
     whoisfreaks: bool = False,
     hunter: bool = False,
+    own_index: bool = False,
 ) -> list[str]:
     """The module list a harvest really schedules (same rules as ``_seed_scheduler``),
     so progress counts match the run instead of a hardcoded list."""
     skip = set(skip_modules)
-    names = list(_seed_priorities(True))
+    names = ([MODULE_OWN_INDEX] if own_index else []) + list(_seed_priorities(True))
     if netlas:
         names += [MODULE_NETLAS_RESPONSES, MODULE_NETLAS_CERT, MODULE_NETLAS_WHOIS]
     if whoisfreaks:
@@ -1726,6 +1747,21 @@ async def _execute_item(item: WorkItem, ctx: WorkerContext) -> WorkResult:
                 findings=[],
                 new_items=[],
                 errors=["skipped by runtime policy"],
+                duration_seconds=0.0,
+            )
+        # MailAccess Index had results: the live Common Crawl lookup is skipped
+        # for this run (the index is built from the same crawls).
+        own_hits = int(getattr(ctx, "own_index_hits", 0) or 0)
+        if item.module_name == MODULE_COMMONCRAWL and own_hits > 0:
+            skip_result = _own_index_cc_skip_result(ctx)
+            _record_module_result(ctx, item.module_name, skip_result)
+            _emit_module_complete(ctx, item.module_name, skip_result)
+            return WorkResult(
+                item=item,
+                success=True,
+                findings=[],
+                new_items=[],
+                errors=["skipped: own index had results"],
                 duration_seconds=0.0,
             )
         # Phase 5B — CC-first best-effort fallback. When cc_first and the cheap
@@ -2066,6 +2102,58 @@ def _module_partial(module: Any) -> dict[str, Any]:
     return {"findings": findings, "metadata": metadata}
 
 
+OWN_INDEX_CC_SKIP_REASON = "own_index_had_results"
+
+
+def _own_index_cc_skip_result(ctx: WorkerContext) -> ModuleResult:
+    return ModuleResult(
+        status=ModuleStatus.SKIPPED,
+        metadata={
+            "domain": ctx.domain,
+            "skip_reason": OWN_INDEX_CC_SKIP_REASON,
+            "skip_note": "skipped: own index had results",
+            "own_index_emails": ctx.own_index_hits,
+        },
+    )
+
+
+async def _run_own_index_first(ctx: WorkerContext) -> None:
+    """Run the MailAccess Index lookup before discovery; never raises."""
+    budget_s = max(0.1, float(getattr(ctx.settings, "own_index_budget_seconds", 30.0) or 30.0))
+    soft = max(0.1, min(budget_s, ctx.budget.remaining()))
+    try:
+        findings, _new = await _run_module_core(
+            MODULE_OWN_INDEX, ctx, soft_timeout=soft, outer_timeout=True
+        )
+    except Exception as exc:  # noqa: BLE001 - an index failure is "no results"
+        logger.info("own_index failed: %s", exc)
+        findings = []
+    hits = sum(
+        1 for f in findings
+        if isinstance(f, dict) and isinstance(f.get("metadata"), dict)
+        and (f.get("metadata") or {}).get("email")
+    )
+    ctx.own_index_hits_box[0] = hits
+    if hits > 0 and MODULE_COMMONCRAWL not in ctx.skip_modules:
+        # Record the skip now (the seeded CC item is answered from this when the
+        # track pulls it), so the trace shows why CC did not run.
+        if ctx.module_results is not None:
+            ctx.module_results[MODULE_COMMONCRAWL] = _own_index_cc_skip_result(ctx)
+        if ctx.log_callback is not None:
+            with contextlib.suppress(Exception):
+                ctx.log_callback(
+                    "MODULE",
+                    f"commoncrawl_email skipped: own index had results ({hits} emails)",
+                )
+
+
+def _running_of(ctx: Any) -> dict[str, Any]:
+    """The context's in-flight module registry (a throwaway dict for test doubles
+    and older embedders whose context has none)."""
+    running = getattr(ctx, "running_modules", None)
+    return running if isinstance(running, dict) else {}
+
+
 def _abandon_running_modules(ctx: WorkerContext) -> list[str]:
     """At the hard deadline: name every module still in flight and record it.
 
@@ -2074,7 +2162,7 @@ def _abandon_running_modules(ctx: WorkerContext) -> list[str]:
     PARTIAL result here carrying whatever it streamed so far, so the export shows
     it was cut off by the timeout instead of silently missing.
     """
-    running = dict(ctx.running_modules)
+    running = dict(_running_of(ctx))
     names = sorted(running)
     for name, entry in running.items():
         module, started = entry if isinstance(entry, tuple) else (entry, None)
@@ -2119,7 +2207,7 @@ async def _run_module_core(
     if ctx.progress_callback is not None:
         ctx.progress_callback(module_name, "Starting module...")
     result: ModuleResult | None = None
-    ctx.running_modules[module_name] = (module, started)
+    _running_of(ctx)[module_name] = (module, started)
     try:
         instance = _run_module_instance(module_name, module, ctx, soft_timeout)
         if outer_timeout:
@@ -2169,7 +2257,7 @@ async def _run_module_core(
             )
         raise
     finally:
-        ctx.running_modules.pop(module_name, None)
+        _running_of(ctx).pop(module_name, None)
         if result is not None:
             result.metadata.setdefault(
                 "duration_seconds", round(time.perf_counter() - started, 3)
@@ -2260,7 +2348,7 @@ async def _run_subdomain_intel_with_hard_cap(
             ctx.module_results[MODULE_SUBDOMAIN_INTEL] = result
         return result
 
-    ctx.running_modules.setdefault(MODULE_SUBDOMAIN_INTEL, (None, started))
+    _running_of(ctx).setdefault(MODULE_SUBDOMAIN_INTEL, (None, started))
     try:
         done, _ = await asyncio.wait({subdomain_task}, timeout=hard_cap)
         if subdomain_task in done:
@@ -2284,7 +2372,7 @@ async def _run_subdomain_intel_with_hard_cap(
         write_duration()
         raise
     finally:
-        ctx.running_modules.pop(MODULE_SUBDOMAIN_INTEL, None)
+        _running_of(ctx).pop(MODULE_SUBDOMAIN_INTEL, None)
 
 
 async def _run_module_with_payload(
@@ -2327,7 +2415,7 @@ async def _run_module_with_payload(
                 kwargs["progress_callback"] = (
                     lambda action: ctx.progress_callback(module_name, action)
                 )
-        ctx.running_modules[module_name] = (module, started)
+        _running_of(ctx)[module_name] = (module, started)
         finished, result = await wait_hard(
             run_with_payload(payload, **kwargs),
             soft_timeout,
@@ -2352,7 +2440,7 @@ async def _run_module_with_payload(
         )
         raise
     finally:
-        ctx.running_modules.pop(module_name, None)
+        _running_of(ctx).pop(module_name, None)
         if result is not None:
             result.metadata.setdefault(
                 "duration_seconds", round(time.perf_counter() - started, 3)
@@ -2857,6 +2945,14 @@ async def _run_module_instance(
         _safe_phase12_run,
     )
 
+    if module_name == MODULE_OWN_INDEX:
+        from .domain_harvest_orchestrator import _run_own_index
+
+        _name, result = await _run_own_index(
+            ctx.domain,
+            deadline=time.monotonic() + max(0.0, min(soft_timeout, ctx.budget.remaining())),
+        )
+        return _normalize_module_result(module_name, result)
     if module_name == MODULE_WHOISFREAKS_HISTORY:
         _name, result = await _run_whoisfreaks_history(
             ctx.domain,
@@ -3046,6 +3142,7 @@ def _get_module_instance(module_name: str, ctx: WorkerContext) -> Any:
         MODULE_SHODAN_INTERNETDB: ShodanInternetDBModule,
         MODULE_NETLAS_WHOIS: _InlineSource,
         MODULE_WHOISFREAKS_HISTORY: _InlineSource,
+        MODULE_OWN_INDEX: _InlineSource,
         MODULE_NETLAS_CERT: _InlineSource,
         MODULE_NETLAS_RESPONSES: _InlineSource,
     }
@@ -3160,6 +3257,11 @@ def _emit_module_complete(
 ) -> None:
     status_value = result.status.value if hasattr(result.status, "value") else str(result.status)
     errors = list(result.errors or [])
+    _meta = getattr(result, "metadata", None) or {}
+    if not errors and isinstance(_meta, dict) and _meta.get("skip_note"):
+        # A deliberate skip (e.g. "skipped: own index had results") is reported to
+        # the live view / event stream, but is not a run error.
+        errors = [str(_meta["skip_note"])]
     # 0.12.7: persist a per-source health row so the `mailaccess
     # doctor` command can surface success rate + average duration
     # over the last 24h.  Done BEFORE invoking the callback so a

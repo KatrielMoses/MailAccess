@@ -589,6 +589,7 @@ def _module_display_name(name: str) -> str:
         "whoisfreaks_history": "WHOIS history",
         "netlas_cert": "Certificates",
         "netlas_responses": "Netlas Responses",
+        "own_index": "Own index",
     }
     return mapping.get(name, name.replace("_", " ").title())
 
@@ -731,6 +732,34 @@ def _is_unverified_permutation(entry: HarvestedEmail) -> bool:
         if meta.get("verification_status") == "unverified":
             return True
     return False
+
+
+def own_index_summary(entry: HarvestedEmail) -> dict[str, Any] | None:
+    """The MailAccess Index trace for an email, or None when the index did not
+    return it (always None on runs where the index is off)."""
+    for ev in entry.evidence or []:
+        if not isinstance(ev, dict) or ev.get("module") != "own_index":
+            continue
+        meta = ev.get("metadata") or {}
+        if not isinstance(meta, dict):
+            continue
+        trace = meta.get("trace") if isinstance(meta.get("trace"), dict) else {}
+        labels = [label for label in (trace.get("label"),) if label]
+        if meta.get("automated"):
+            labels.append("automated")
+        return {
+            "signal": trace.get("signal"),
+            "source_url": meta.get("source_url"),
+            "first_seen": meta.get("first_seen"),
+            "last_seen": meta.get("last_seen"),
+            "source_count": meta.get("source_count"),
+            "crawls": meta.get("crawls") or [],
+            "kind": meta.get("index_kind"),
+            "automated": bool(meta.get("automated")),
+            "older_source": bool(meta.get("older_source")),
+            "labels": labels,
+        }
+    return None
 
 
 def _subaddress_annotations(entry: HarvestedEmail) -> list[str]:
@@ -1177,6 +1206,11 @@ def _format_emails_block(
         if entry.is_role:
             text.append("  ")
             text.append("[ROLE]", style="yellow")
+        _own = own_index_summary(entry)
+        if _own and _own["labels"]:
+            text.append("  ")
+            # Parentheses, not brackets: the block is printed as Rich markup.
+            text.append("(" + ", ".join(_own["labels"]) + ")", style="yellow")
         if entry.first_seen_timestamp or entry.last_seen_timestamp:
             text.append("  ")
             first = _format_timestamp(entry.first_seen_timestamp)
@@ -1896,6 +1930,9 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
                 "aggregated_source_urls": entry.aggregated_source_urls,
                 "subaddress_variants": entry.subaddress_variants,
                 "subaddress_annotations": _subaddress_annotations(entry),
+                # MailAccess Index trace (where / when it was seen, "older source"
+                # label). Only present on rows the index returned.
+                **({"own_index": _own} if (_own := own_index_summary(entry)) else {}),
                 # MUST-FIX S4: full per-email confidence breakdown.
                 # Either the module-provided breakdown (rich — captures
                 # freshness + multiplier math + source_types) or a

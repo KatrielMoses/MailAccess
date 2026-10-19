@@ -65,6 +65,8 @@ class InvestigateRequest(BaseModel):
     no_netlas: bool = False
     no_ipgeo: bool = False
     no_whoisfreaks: bool = False
+    # MailAccess Index per-run opt-out (``--no-own-index``): fully off for the run.
+    no_own_index: bool = False
     # F7 deep mode (``--org-surface-deep``): full subdomain enumeration.
     org_surface_deep: bool = False
     # F8 (``--refresh``): force a Netlas fetch past the 30-day store gate.
@@ -128,6 +130,7 @@ async def start_investigation(
         no_netlas=body.no_netlas,
         no_ipgeo=body.no_ipgeo,
         no_whoisfreaks=body.no_whoisfreaks,
+        no_own_index=body.no_own_index,
         org_surface_deep=body.org_surface_deep,
         refresh=body.refresh,
     )

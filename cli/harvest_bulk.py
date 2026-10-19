@@ -72,6 +72,7 @@ def run_bulk_harvest_emails(
     no_netlas: bool = False,
     no_ipgeo: bool = False,
     no_whoisfreaks: bool = False,
+    no_own_index: bool = False,
 ) -> int:
     """Drive a bulk harvest run. Returns a process-style exit code."""
     if console is None:
@@ -133,6 +134,8 @@ def run_bulk_harvest_emails(
         options["no_ipgeo"] = True
     if no_whoisfreaks:
         options["no_whoisfreaks"] = True
+    if no_own_index:
+        options["no_own_index"] = True
     if no_netlas:
         # Only present when set, so keyless/default option dicts are unchanged.
         options["no_netlas"] = True

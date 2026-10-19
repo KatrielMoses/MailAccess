@@ -372,6 +372,7 @@ class InvestigationService:
         no_whoisfreaks: bool = False,
         org_surface_deep: bool = False,
         refresh: bool = False,
+        no_own_index: bool = False,
     ) -> tuple[str, datetime, asyncio.Queue | None, bool]:
         """
         Persist a new Investigation (PENDING), launch the engine in the
@@ -484,6 +485,7 @@ class InvestigationService:
             no_netlas=no_netlas,
             no_ipgeo=no_ipgeo,
             no_whoisfreaks=no_whoisfreaks,
+            no_own_index=no_own_index,
             org_surface_deep=org_surface_deep,
             refresh=refresh,
             cached_results=cached_results,

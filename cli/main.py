@@ -1691,6 +1691,10 @@ def harvest_emails_command(
     no_whoisfreaks: bool = typer.Option(
         False, "--no-whoisfreaks", help="Skip WhoisFreaks calls for this run even when a key is set."
     ),
+    no_own_index: bool = typer.Option(
+        False, "--no-own-index",
+        help="Skip the MailAccess Index (our own index of the public web) for this run.",
+    ),
     expand_related: bool = typer.Option(
         False, "--expand-related",
         help="Netlas: also harvest the top related domains discovered via org/"
@@ -1912,6 +1916,7 @@ def harvest_emails_command(
                 no_netlas=no_netlas,
                 no_ipgeo=no_ipgeo,
                 no_whoisfreaks=no_whoisfreaks,
+                no_own_index=no_own_index,
             )
         finally:
             _bulk_settings.harvest_timing_profile = _orig_profile
@@ -1977,6 +1982,7 @@ def harvest_emails_command(
                 no_netlas=no_netlas,
                 no_ipgeo=no_ipgeo,
                 no_whoisfreaks=no_whoisfreaks,
+                no_own_index=no_own_index,
                 expand_related=expand_related,
                 expand_related_max=expand_related_max,
                 refresh=refresh,
@@ -2035,6 +2041,7 @@ def harvest_emails_command(
                 no_netlas=no_netlas,
                 no_ipgeo=no_ipgeo,
                 no_whoisfreaks=no_whoisfreaks,
+                no_own_index=no_own_index,
                 expand_related=expand_related,
                 expand_related_max=expand_related_max,
                 refresh=refresh,

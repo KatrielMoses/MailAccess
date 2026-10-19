@@ -238,6 +238,7 @@ class InvestigationEngine:
         org_surface_deep: bool = False,
         refresh: bool = False,
         cached_results: dict[str, ModuleResult] | None = None,
+        no_own_index: bool = False,
     ) -> None:
         self._timeout = timeout
         self._max_concurrency = max_concurrency
@@ -255,6 +256,7 @@ class InvestigationEngine:
         self._no_netlas = no_netlas
         self._no_ipgeo = no_ipgeo
         self._no_whoisfreaks = no_whoisfreaks
+        self._no_own_index = no_own_index
         self._org_surface_deep = org_surface_deep
         self._refresh = refresh
         self._cached_results = cached_results
@@ -288,6 +290,8 @@ class InvestigationEngine:
                 set_no_ipgeo(self._no_ipgeo)
                 from .whoisfreaks_client import set_no_whoisfreaks
                 set_no_whoisfreaks(self._no_whoisfreaks)
+                from .own_index_client import set_no_own_index
+                set_no_own_index(self._no_own_index)
                 set_org_surface_deep(self._org_surface_deep)
                 set_netlas_refresh(self._refresh)
                 self.status = InvestigationStatus.RUNNING

@@ -51,6 +51,7 @@ from .domain_harvest_report import (
     _extract_discovered_names,
     _sanitised_export_emails,
     format_harvest_json_export,
+    own_index_summary,
     serialise_harvest_for_export,
 )
 
@@ -358,10 +359,34 @@ def _build_markdown_report(result: Any) -> str:
         lines.append("|-------|--------|------------|")
         for entry in confirmed + likely:
             source = entry.found_by_modules[0] if entry.found_by_modules else "—"
+            own = own_index_summary(entry)
+            if own and own["labels"]:
+                source += " (" + ", ".join(own["labels"]) + ")"
             lines.append(f"| {entry.email} | {source} | {entry.confidence_label} |")
     else:
         lines.append("_No HIGH-confidence personal emails found._")
     lines.append("")
+
+    # MailAccess Index rows (only when the index ran and returned something).
+    own_rows = [
+        (entry, own)
+        for entry in _sanitised_export_emails(result.unique_emails)
+        if (own := own_index_summary(entry))
+    ]
+    if own_rows:
+        lines.append("## From our own index of the public web")
+        lines.append("| Email | Where | Last seen | Sources | Note |")
+        lines.append("|-------|-------|-----------|---------|------|")
+        for entry, own in own_rows[:200]:
+            where = (own.get("signal") or "—").replace("|", "\\|")
+            last = str(own.get("last_seen") or "—")[:10]
+            note = ", ".join(own["labels"]) or "—"
+            lines.append(
+                f"| {entry.email} | {where} | {last} | {own.get('source_count') or 0} | {note} |"
+            )
+        if len(own_rows) > 200:
+            lines.append(f"_…and {len(own_rows) - 200} more in the JSON export._")
+        lines.append("")
 
     # Employee names table
     lines.append("## Employee Names")

@@ -4124,6 +4124,7 @@ async def run_domain_harvest(
     expand_related: bool = False,
     expand_related_max: int | None = None,
     refresh: bool = False,
+    no_own_index: bool = False,
     on_context_ready: Any | None = None,
     _related_discovery: bool = True,
 ) -> DomainHarvestResult:
@@ -4333,6 +4334,11 @@ async def run_domain_harvest(
     effective_skip_modules_for_wf = {str(n) for n in (skip_modules or ())}
     # No key means no WhoisFreaks anywhere: cached answers are not served keyless.
     whoisfreaks_enabled = whoisfreaks_keyed
+    # MailAccess Index: on only when URL + key are set and not --no-own-index.
+    # Off means fully off: no calls, no events, and no index rows from cache.
+    from .own_index_client import holds_own_index_data, own_index_active, strip_own_index_blobs
+
+    own_index_enabled = own_index_active(no_own_index=no_own_index)
 
     # Under F8 the native read-first scope is netlas-INDEPENDENT (== store_scope):
     # a keyed and a keyless run share one native snapshot, and the enrichment
@@ -4354,6 +4360,8 @@ async def run_domain_harvest(
             )
         if _enrichment_enabled:
             blobs = await load_harvest_blobs(domain, scope=store_scope)
+            if not own_index_enabled:
+                blobs = strip_own_index_blobs(blobs)
             served = merge_dedupe_harvest(served, blobs)
         if (
             not module_overrides
@@ -4395,6 +4403,10 @@ async def run_domain_harvest(
             ipgeo=not _ipgeo_active(no_ipgeo=no_ipgeo),
             whoisfreaks=not whoisfreaks_active(no_whoisfreaks=no_whoisfreaks),
         ):
+            cached = None
+        # Same rule for the MailAccess Index: a snapshot with index rows is not
+        # served when it is off; one taken without it re-runs when it is on.
+        if cached is not None and (holds_own_index_data(cached) != own_index_enabled):
             cached = None
         if cached is not None:
             # F8: even on a native cache-hit (no modules re-run, no Netlas fetch),
@@ -4505,6 +4517,7 @@ async def run_domain_harvest(
             whoisfreaks_refresh=refresh,
             no_whoisfreaks=no_whoisfreaks,
             **({"on_context_ready": on_context_ready} if on_context_ready is not None else {}),
+            **({"own_index_enabled": True} if own_index_enabled else {}),
         )
     finally:
         if wf_prefetch is not None:
@@ -4585,6 +4598,7 @@ async def run_domain_harvest(
         await _expand_related_domains(
             result, resolved_mode, no_netlas=no_netlas, no_ipgeo=no_ipgeo,
             no_whoisfreaks=no_whoisfreaks, max_domains=expand_related_max,
+            no_own_index=no_own_index,
         )
     # F8 universal final serve: the deduped union of all historical, scope-
     # compatible blobs, then the live Pro channel (attached once, inside).
@@ -4770,6 +4784,7 @@ async def _expand_related_domains(
     no_ipgeo: bool = False,
     no_whoisfreaks: bool = False,
     max_domains: int | None,
+    no_own_index: bool = False,
 ) -> None:
     """Re-harvest the top-N related domains; attach ``metadata['related_harvests']``."""
     from .netlas_client import FAILURE_STATUSES
@@ -4792,6 +4807,7 @@ async def _expand_related_domains(
                 rd, mode=mode.value if hasattr(mode, "value") else mode,
                 no_netlas=no_netlas, no_ipgeo=no_ipgeo,
                 no_whoisfreaks=no_whoisfreaks,
+                no_own_index=no_own_index,
                 _related_discovery=False, expand_related=False,
                 force=True,
             )
@@ -5233,6 +5249,63 @@ async def _run_whoisfreaks_history(
         if not found.complete:
             metadata["skip_reason"] = "not_answered"
     return name, ModuleResult(status=status, findings=findings, metadata=metadata)
+
+
+async def _run_own_index(
+    domain: str,
+    *,
+    deadline: float | None = None,
+) -> tuple[str, ModuleResult]:
+    """The MailAccess Index (our own index of the public web) as an inline source.
+
+    One paginated lookup of every email the index holds for the domain (capped at
+    ``own_index_max_emails``). Every finding carries a trace: where it was found
+    (the newest source), first/last seen, how many sources, and an "older source"
+    label when it was last seen more than ``own_index_older_source_months`` ago.
+    Automated addresses are kept and marked. Any error is "no results".
+    """
+    import time
+
+    from .own_index_client import OwnIndexClient, build_finding
+
+    name = "own_index"
+    budget = max(0.1, float(getattr(settings, "own_index_budget_seconds", 30.0)))
+    own_deadline = time.monotonic() + budget
+    deadline = own_deadline if deadline is None else min(deadline, own_deadline)
+    client = OwnIndexClient()
+    answer = await client.domain_emails(domain, deadline=deadline)
+    findings: list[dict[str, Any]] = []
+    for row in answer.emails:
+        finding = build_finding(row, domain)
+        if finding is not None:
+            findings.append(finding)
+    metadata: dict[str, Any] = {
+        "domain": domain,
+        "own_index": {
+            "status": answer.status,
+            "build_id": answer.build_id,
+            "total": answer.total,
+            "returned": len(findings),
+            "pages": answer.pages,
+            "truncated": answer.truncated,
+            "calls": client.calls,
+            **({"error": answer.error} if answer.error else {}),
+        },
+        "older_source_count": sum(
+            1 for f in findings if (f.get("metadata") or {}).get("older_source")
+        ),
+        "automated_count": sum(1 for f in findings if (f.get("metadata") or {}).get("automated")),
+    }
+    errors: list[str] = []
+    if answer.status in ("error", "skipped"):
+        status = ModuleStatus.FAILED if answer.status == "error" else ModuleStatus.SKIPPED
+        metadata["skip_reason"] = f"own_index_{answer.error or answer.status}"
+        errors.append(f"own index unavailable: {answer.error or answer.status}")
+    elif findings:
+        status = ModuleStatus.PARTIAL if answer.truncated and answer.error else ModuleStatus.SUCCESS
+    else:
+        status = ModuleStatus.SUCCESS_EMPTY
+    return name, ModuleResult(status=status, findings=findings, metadata=metadata, errors=errors)
 
 
 async def _run_hunter(

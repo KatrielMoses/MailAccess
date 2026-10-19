@@ -89,7 +89,10 @@ class HarvestEvents:
         text = " ".join(str(e) for e in (errors or [])).lower()
         reason = None
         if norm == "skipped":
-            reason = "budget" if "budget" in text else "no_key" if "key" in text else "disabled"
+            if "own index had results" in text:
+                reason = "own_index_had_results"
+            else:
+                reason = "budget" if "budget" in text else "no_key" if "key" in text else "disabled"
         self.emitter.emit(
             "module_done",
             {
@@ -132,7 +135,18 @@ class HarvestEvents:
                 self.emitter.emit("candidate", {"module": key[0], "kind": key[1], "count": count})
 
     # ------------------------------------------------------------ final result
-    def _emit_final(self, module: str, kind: str, value: str, reason: str, signal: str) -> None:
+    def _emit_final(
+        self,
+        module: str,
+        kind: str,
+        value: str,
+        reason: str,
+        signal: str,
+        *,
+        url: str | None = None,
+        label: str | None = None,
+        extra_trace: dict[str, Any] | None = None,
+    ) -> None:
         self._finding_id += 1
         tech_id, tech_line = technique_for(module)
         self.emitter.emit(
@@ -143,8 +157,8 @@ class HarvestEvents:
                 "kind": kind,
                 "title": value,
                 "value": value,
-                "url": None,
-                "label": None,
+                "url": url,
+                "label": label,
                 "trace": {
                     "technique_id": tech_id,
                     "technique": tech_line,
@@ -153,6 +167,7 @@ class HarvestEvents:
                     "corroborated_by": [],
                     "independent_signals": 0,
                     "reason": reason[:159],
+                    **(extra_trace or {}),
                 },
             },
         )
@@ -173,9 +188,31 @@ class HarvestEvents:
             module = mods[0] if mods else "harvest"
             where = ", ".join(m.replace("_", " ") for m in mods[:3]) or "the harvest"
             label = str(row.get("confidence_label") or "").lower()
+            reason = (
+                f"Found by {where} for {self.domain}"
+                + (f" ({label} confidence)." if label else ".")
+            )
+            own = row.get("own_index") if isinstance(row.get("own_index"), dict) else None
+            if own:
+                # MailAccess Index trace: where and when it was seen.
+                labels = [str(x) for x in (own.get("labels") or []) if x]
+                self._emit_final(
+                    "own_index", "email", str(row["email"]),
+                    reason,
+                    str(own.get("signal") or "Found in our own index of the public web"),
+                    url=own.get("source_url"),
+                    label=labels[0] if labels else None,
+                    extra_trace={
+                        "first_seen": own.get("first_seen"),
+                        "last_seen": own.get("last_seen"),
+                        "source_count": own.get("source_count"),
+                        "labels": labels,
+                    },
+                )
+                continue
             self._emit_final(
                 module, "email", str(row["email"]),
-                f"Found by {where} for {self.domain}" + (f" ({label} confidence)." if label else "."),
+                reason,
                 f"{where} returned this email address and it passed the final filter.",
             )
         for row in names:
