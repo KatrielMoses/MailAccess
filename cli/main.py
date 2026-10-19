@@ -2041,6 +2041,15 @@ def harvest_emails_command(
             )
         finally:
             _settings.harvest_aggressive = original_aggressive
+    from cli import harvest_emails as _harvest_cli
+
+    if _harvest_cli.LAST_RUN_TIMED_OUT:
+        # Hard timeout: work abandoned at the deadline (e.g. a blocking call in a
+        # worker thread) must not keep the process alive. Output is already
+        # written; exit now if such threads remain after a short grace.
+        from backend.core.hard_deadline import exit_if_stragglers
+
+        exit_if_stragglers(exit_code)
     if exit_code != 0:
         raise typer.Exit(exit_code)
 

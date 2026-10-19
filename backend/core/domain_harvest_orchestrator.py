@@ -3746,9 +3746,15 @@ async def _run_with_soft_timeout(
         soft_timeout = budget.soft_timeout_for_module()
     if soft_timeout is None:
         return await awaitable
+    from .hard_deadline import CANCEL_GRACE_SECONDS, wait_hard
+
     task = asyncio.create_task(awaitable)
     try:
-        return await asyncio.wait_for(task, timeout=soft_timeout)
+        # Hard: a module that ignores the cancellation is abandoned, not awaited.
+        finished, value = await wait_hard(task, soft_timeout, grace=CANCEL_GRACE_SECONDS)
+        if finished:
+            return value
+        raise asyncio.TimeoutError
     except asyncio.TimeoutError:
         _LOG.warning(
             "Module %s exceeded soft timeout %.1fs - returning empty result",
@@ -4118,6 +4124,7 @@ async def run_domain_harvest(
     expand_related: bool = False,
     expand_related_max: int | None = None,
     refresh: bool = False,
+    on_context_ready: Any | None = None,
     _related_discovery: bool = True,
 ) -> DomainHarvestResult:
     """Run all nine harvest modules in the recommended sequence.
@@ -4497,6 +4504,7 @@ async def run_domain_harvest(
             whoisfreaks_enabled=whoisfreaks_enabled,
             whoisfreaks_refresh=refresh,
             no_whoisfreaks=no_whoisfreaks,
+            **({"on_context_ready": on_context_ready} if on_context_ready is not None else {}),
         )
     finally:
         if wf_prefetch is not None:

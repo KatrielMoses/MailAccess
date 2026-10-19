@@ -33,13 +33,22 @@ DOMAIN_REGEX = re.compile(
 # Obfuscation patterns.  The shorter / case-sensitive versions (``AT``,
 # ``DOT``) are applied only when the surrounding text contains an
 # email-shaped skeleton (handled in ``_deobfuscate``).
-_AT_BRACKET_RE = re.compile(r"\s*\[\s*at\s*\]\s*")
-_AT_PAREN_RE = re.compile(r"\s*\(\s*at\s*\)\s*")
-_DOT_BRACKET_RE = re.compile(r"\s*\[\s*dot\s*\]\s*")
-_DOT_PAREN_RE = re.compile(r"\s*\(\s*dot\s*\)\s*")
+# Each pattern may only START a match at the beginning of a whitespace run
+# (``(?<!\s)``). Without that anchor the leading ``\s*`` / ``\s+`` is retried
+# from every position inside a long whitespace run, which is quadratic: the
+# spryker.com homepage (10 MB, one 8.4M-character run of whitespace) kept a
+# single ``re.sub`` busy for hours while holding the GIL on the event loop, so
+# no harvest deadline could fire. The anchored forms match exactly the same
+# spans: a leftmost match always began at the start of its whitespace run, and
+# the optional group keeps the empty-prefix match right after a previous
+# substitution consumed the run (``a [at] [dot] b``).
+_AT_BRACKET_RE = re.compile(r"(?:(?<!\s)\s*)?\[\s*at\s*\]\s*")
+_AT_PAREN_RE = re.compile(r"(?:(?<!\s)\s*)?\(\s*at\s*\)\s*")
+_DOT_BRACKET_RE = re.compile(r"(?:(?<!\s)\s*)?\[\s*dot\s*\]\s*")
+_DOT_PAREN_RE = re.compile(r"(?:(?<!\s)\s*)?\(\s*dot\s*\)\s*")
 
-_AT_UPPER_RE = re.compile(r"\s+AT\s+")
-_DOT_UPPER_RE = re.compile(r"\s+DOT\s+")
+_AT_UPPER_RE = re.compile(r"(?<!\s)\s+AT\s+")
+_DOT_UPPER_RE = re.compile(r"(?<!\s)\s+DOT\s+")
 _UNDERSCORE_RE = re.compile(r"\s*_\s*")
 
 # MUST-FIX M6: pre-processor for ``mailto:foo@bar.com`` and

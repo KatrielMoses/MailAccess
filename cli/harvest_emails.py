@@ -115,6 +115,16 @@ def _pro_wrong_mode_hint(mode: str | None, key: str | None) -> str | None:
     )
 
 
+# Hard-timeout backstops (see run_harvest_emails). The watchdog fires this long
+# after the harvest budget when the event loop is blocked; the C-level last
+# resort fires LAST_RESORT_EXTRA_SECONDS after that.
+STALL_GRACE_SECONDS = 120.0
+LAST_RESORT_EXTRA_SECONDS = 60.0
+# Set when the last run hit its timeout; the CLI command then exits without
+# waiting for abandoned threads (hard_deadline.exit_if_stragglers).
+LAST_RUN_TIMED_OUT = False
+
+
 def _resolve_export_path(export: str) -> Path:
     p = Path(export)
     if p.is_absolute():
@@ -1001,7 +1011,73 @@ def run_harvest_emails(
             expand_related=expand_related,
             expand_related_max=expand_related_max,
             refresh=refresh,
+            on_context_ready=_on_context_ready,
         )
+
+    # ---- Hard timeout backstops ------------------------------------------
+    # The runner enforces --timeout itself (cancel at the deadline, abandon
+    # stragglers, export what was found). These two only matter when the event
+    # loop is BLOCKED by synchronous code, so no asyncio deadline can fire:
+    #   1. a watchdog thread exports the live snapshot and exits (code 0);
+    #   2. if a single C call holds the GIL even for that, faulthandler's
+    #      C-level timer dumps the stacks and exits (code 1).
+    from backend.core import hard_deadline
+    from backend.core.time_budget import budget_for_profile
+
+    live_snapshot: dict[str, Any] = {}
+
+    def _on_context_ready(snapshot_fn: Any) -> None:
+        live_snapshot["fn"] = snapshot_fn
+
+    harvest_budget = float(
+        timeout_seconds
+        or budget_for_profile(getattr(settings, "harvest_timing_profile", "t2"))
+    )
+    stall_after = harvest_budget + STALL_GRACE_SECONDS
+    if expand_related:
+        # Related-domain sub-harvests each get the same budget after the main one.
+        stall_after *= 1 + max(0, int(expand_related_max or 5))
+
+    def _on_stall() -> None:
+        snapshot = None
+        fn = live_snapshot.get("fn")
+        if fn is not None:
+            try:
+                snapshot = fn()
+            except Exception:  # noqa: BLE001 - fall back to the end-hook snapshot
+                snapshot = None
+        if snapshot is None:
+            snapshot = termination_snapshot.get("result")
+        if snapshot is not None:
+            meta = getattr(snapshot, "metadata", None)
+            if isinstance(meta, dict):
+                meta.setdefault("harvest_status", "partial_timeout")
+                meta["timed_out"] = True
+                meta["hard_timeout"] = True
+                meta["stall_watchdog"] = True
+            with contextlib.suppress(Exception):
+                _on_harvest_end(snapshot)
+            if harvest_events is not None:
+                with contextlib.suppress(Exception):
+                    harvest_events.finalize(format_harvest_json_export(snapshot), "complete")
+        with contextlib.suppress(Exception):
+            display.log_event(
+                "TIMEOUT",
+                f"harvest still running {int(stall_after)}s after start; "
+                "partial results exported, exiting",
+            )
+        written = termination_snapshot.get("written")
+        target = extra_export_path or getattr(written, "main_json", None)
+        where = f" Partial results: {target}" if target else ""
+        with contextlib.suppress(Exception):
+            sys.stderr.write(
+                f"\nHarvest blocked past its {int(harvest_budget)}s timeout; "
+                f"exported partial results and exiting.{where}\n"
+            )
+        hard_deadline.hard_exit(0)
+
+    watchdog = hard_deadline.StallWatchdog(stall_after, _on_stall).start()
+    hard_deadline.arm_last_resort(stall_after + LAST_RESORT_EXTRA_SECONDS)
 
     drive_error: BaseException | None = None
     result: Any | None = None
@@ -1013,7 +1089,7 @@ def run_harvest_emails(
                 refresh_per_second=4,
                 transient=True,
             ):
-                result = asyncio.run(_drive())
+                result = hard_deadline.run_hard(_drive())
         except ValueError as exc:
             # Domain validation / free-provider rejection — raised before
             # any harvest context exists, so there is nothing to export.
@@ -1026,6 +1102,8 @@ def run_harvest_emails(
         except Exception as exc:  # noqa: BLE001
             drive_error = exc
     finally:
+        watchdog.stop()
+        hard_deadline.disarm_last_resort()
         settings.ml_name_classifier = original_ml_pref
     # MUST-FIX M3: no settings restoration needed — we never mutated
     # settings in the first place.
@@ -1098,8 +1176,19 @@ def run_harvest_emails(
             )
 
     timeout_metadata = result.metadata or {}
+    if isinstance(timeout_metadata, dict) and timeout_metadata.get("timed_out"):
+        # Abandoned work (threads that cannot be cancelled) may still be alive;
+        # the command exits without waiting for it once output is flushed.
+        global LAST_RUN_TIMED_OUT
+        LAST_RUN_TIMED_OUT = True
     if isinstance(timeout_metadata, dict) and timeout_metadata.get("harvest_status") == "partial_timeout":
         timeout_at = timeout_metadata.get("timeout_at_seconds")
+        still_running = timeout_metadata.get("still_running_at_timeout") or []
+        if still_running:
+            console.print(
+                "[yellow]Still running at the timeout (abandoned):[/] "
+                + ", ".join(str(name) for name in still_running)
+            )
         display.log_event(
             "TIMEOUT",
             f"discovery timed out at {timeout_at}s; verification tail completed before export",

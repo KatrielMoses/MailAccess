@@ -38,6 +38,7 @@ from ..modules.wordpress_rest import WordPressRestModule
 from .concurrent_fetch_cache import CachedFetch, ConcurrentFetchCache
 from .context_router import IndustryVocabularyRouter
 from .email_extraction import extract_emails
+from .hard_deadline import CANCEL_GRACE_SECONDS, wait_hard
 from .mail_provider import detect_provider_from_mx
 from .mx_resolver import resolve_mx
 from .name_quality import _NAVIGATION_TOKENS, COMMON_ENGLISH_NOUNS, _clean_token
@@ -153,6 +154,11 @@ MODULE_SHODAN_INTERNETDB = "shodan_internetdb"
 # profile budget, while the tail must not turn a 600-second harvest into a
 # second long-running phase.  Enrichment is dropped when this window closes.
 VERIFICATION_TAIL_SECONDS = 15.0
+# After the discovery deadline, the remaining wrap-up steps (signal-pool flush,
+# breach / waterfall enrichment, grading, technographics) share this budget. Any
+# step still running when it is spent is abandoned, so a timed-out harvest
+# returns within ``timeout + VERIFICATION_TAIL_SECONDS + POST_TIMEOUT_BUDGET``.
+POST_TIMEOUT_BUDGET_SECONDS = 20.0
 
 # Seed dispatch priorities for the discovery scheduler. Insertion order is the
 # submission order; the scheduler pulls lower numbers first. Kept at module
@@ -306,6 +312,9 @@ class WorkerContext:
     # Per-run Netlas shared state — e.g. the ONE certificate fetch (F3) that
     # both ``netlas_cert`` and ``subdomain_intel`` consume.
     netlas_state: dict[str, Any] = field(default_factory=dict)
+    # Modules in flight right now: name -> (module instance, perf_counter start).
+    # Read at the harvest deadline to report (and abandon) what was still running.
+    running_modules: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.signal_pool.pattern_resolver = self.pattern_run_state.resolver
@@ -364,6 +373,7 @@ def _termination_snapshot(
     started_iso: str,
     timeout_seconds: float,
     timed_out: bool,
+    still_running: list[str] | None = None,
 ) -> Any:
     """Snapshot the harvest context exactly as it exists at termination.
 
@@ -408,6 +418,9 @@ def _termination_snapshot(
         "mode": get_active_mode().value,
         "budget": ctx.budget.stats,
     }
+    if still_running is not None:
+        metadata["hard_timeout"] = True
+        metadata["still_running_at_timeout"] = list(still_running)
     return DomainHarvestResult(
         domain=cleaned,
         started_at=started_iso,
@@ -483,7 +496,15 @@ async def run_adaptive_harvest(
     whoisfreaks_enabled: bool = False,
     whoisfreaks_refresh: bool = False,
     no_whoisfreaks: bool = False,
+    on_context_ready: Any | None = None,
 ) -> Any:
+    """Run one adaptive harvest under a HARD ``timeout_seconds`` deadline.
+
+    ``on_context_ready`` (optional, synchronous) receives a zero-argument
+    callable that returns a snapshot of the run as it stands right now (the
+    finished result once there is one). A caller's watchdog uses it to export
+    partial results if the event loop itself is blocked past the deadline.
+    """
     from .domain_harvest_orchestrator import (
         DomainHarvestResult,
         _aggregate,
@@ -943,17 +964,50 @@ async def run_adaptive_harvest(
     # soft kill). This outer try is what makes the export reachable from
     # every termination path.
     final_result: Any | None = None
+    still_running: list[str] = []
+
+    def _live_snapshot() -> Any:
+        if final_result is not None:
+            return final_result
+        return _termination_snapshot(
+            ctx,
+            cleaned,
+            started=started,
+            started_iso=started_iso,
+            timeout_seconds=timeout_seconds,
+            timed_out=True,
+            still_running=sorted(set(still_running) | set(ctx.running_modules)),
+        )
+
+    if on_context_ready is not None:
+        try:
+            on_context_ready(_live_snapshot)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("on_context_ready hook failed: %s", exc)
     try:
         try:
-            await asyncio.wait_for(_run_tracks(ctx), timeout=timeout_seconds)
-        except (TimeoutError, asyncio.TimeoutError):
-            timed_out = True
-            budget.mark_exhausted()
-            logger.info("Budget exhausted - returning partial results")
+            # HARD deadline: at ``timeout_seconds`` everything still running is
+            # cancelled and given a short grace to unwind; anything that ignores
+            # the cancellation (or sits behind an un-cancellable await) is
+            # abandoned rather than waited for. ``asyncio.wait_for`` would wait
+            # for it forever, which is how spryker.com ran 48 minutes past
+            # ``--timeout 300``.
+            tracks_task = asyncio.ensure_future(_run_tracks(ctx))
+            try:
+                done, _ = await asyncio.wait({tracks_task}, timeout=timeout_seconds)
+            except asyncio.CancelledError:
+                tracks_task.cancel()
+                raise
+            if tracks_task in done:
+                tracks_task.result()
+            else:
+                timed_out = True
+                budget.mark_exhausted()
+                # Named before the cancel, while they are still in flight.
+                still_running = sorted(ctx.running_modules)
+                logger.info("Budget exhausted - returning partial results")
+                await wait_hard(tracks_task, 0.0, grace=CANCEL_GRACE_SECONDS)
         except asyncio.CancelledError:
-            # ``wait_for`` can surface cancellation from a child track on very
-            # short budgets instead of translating it to TimeoutError. Preserve
-            # the partial-result contract once the configured budget is spent.
             if budget.is_expired():
                 timed_out = True
                 budget.mark_exhausted()
@@ -962,6 +1016,18 @@ async def run_adaptive_harvest(
                 raise
         except Exception as exc:  # noqa: BLE001
             logger.error("Track failure: %s", exc)
+
+        if timed_out:
+            # Report what the deadline cut off, and keep whatever those modules
+            # streamed before it (partial_findings hook), as a PARTIAL result.
+            stuck = _abandon_running_modules(ctx)
+            still_running = sorted(set(still_running) | set(stuck))
+            if still_running and ctx.log_callback is not None:
+                with contextlib.suppress(Exception):
+                    ctx.log_callback(
+                        "TIMEOUT",
+                        "harvest deadline reached; still running: " + ", ".join(still_running),
+                    )
 
         # A module can soft-timeout internally while the overall harvest still
         # completes normally. Preserve incremental source telemetry on that
@@ -972,21 +1038,44 @@ async def run_adaptive_harvest(
         if timed_out:
             # The discovery timeout is a valid partial-result boundary. The
             # dedicated post-discovery tail still runs before aggregation and
-            # export, using its own deadline.
-            try:
-                await asyncio.wait_for(signal_pool.close(), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("Signal-pool shutdown exceeded 5s during timeout recovery")
+            # export, using its own deadline; every other wrap-up step shares
+            # POST_TIMEOUT_BUDGET_SECONDS and is abandoned when it is spent.
+            post_deadline = time.monotonic() + POST_TIMEOUT_BUDGET_SECONDS
+
+            def _post_left(cap: float | None = None) -> float:
+                left = max(0.0, post_deadline - time.monotonic())
+                return left if cap is None else min(cap, left)
+
+            post_dropped: list[str] = []
+
+            async def _bounded(label: str, aw: Any, cap: float | None = None) -> tuple[bool, Any]:
+                ok, value = await wait_hard(aw, _post_left(cap), grace=0.5)
+                if not ok:
+                    post_dropped.append(label)
+                    logger.warning("post-timeout step %s dropped at the hard deadline", label)
+                return ok, value
+
+            await _bounded("signal_pool_close", signal_pool.close(), cap=5.0)
             from .domain_harvest_orchestrator import (
                 DomainHarvestResult,
                 _aggregate,
                 _sort_key,
             )
 
-            identity_clusters = await signal_pool.all_candidates()
+            _ok, identity_clusters = await _bounded(
+                "identity_clusters", signal_pool.all_candidates(), cap=5.0
+            )
+            identity_clusters = identity_clusters or []
             _hydrate_subdomain_source_telemetry(ctx)
             shadow_profiles: list[dict[str, Any]] = []
-            tail = await _run_verification_tail(identity_clusters)
+            # The tail has its own VERIFICATION_TAIL_SECONDS deadline; the hard
+            # wrapper only guarantees a stuck step inside it cannot outlive it.
+            _ok, tail = await wait_hard(
+                _run_verification_tail(identity_clusters),
+                VERIFICATION_TAIL_SECONDS + 1.0,
+                grace=0.5,
+            )
+            tail = tail or {"tail_status": "partial_timeout"}
             smtp_validation = tail.get("smtp_email_verification", {})
             unique_emails = _aggregate(
                 cleaned,
@@ -999,19 +1088,29 @@ async def run_adaptive_harvest(
             unique_emails.sort(key=_sort_key)
             timeout_enrichment: dict[str, Any] | None = None
             if not ctx.module_overrides:
-                await _attach_breach_enrichment(unique_emails, module_results, ctx)
+                await _bounded(
+                    "breach_enrichment",
+                    _attach_breach_enrichment(unique_emails, module_results, ctx),
+                )
                 # Phase 7A/7B — enrichment waterfall before grading, parity with
                 # the normal path.
-                timeout_enrichment = await _enrich_leads_waterfall(cleaned, unique_emails)
+                _ok, timeout_enrichment = await _bounded(
+                    "enrichment_waterfall", _enrich_leads_waterfall(cleaned, unique_emails)
+                )
                 # Phase 3C/3D + 4A — grade + capture on the partial-timeout path
                 # too, so a timed-out bulk domain still contributes calibration
                 # volume and carries deliverability grades (parity with normal).
-                await _grade_leads_and_capture(cleaned, unique_emails, module_results)
+                await _bounded(
+                    "grading",
+                    _grade_leads_and_capture(cleaned, unique_emails, module_results),
+                )
             # Capstone finding — final observed-beats-inferred pass over the complete
             # set (late soft-timeout completions / enrichment can add observed
             # addresses after the aggregate).
             unique_emails = _finalize_person_selection(ctx, unique_emails)
-            technographics = await _compute_technographics(ctx, cache)
+            _ok, technographics = await _bounded(
+                "technographics", _compute_technographics(ctx, cache)
+            )
             completed = datetime.now(timezone.utc)
             errors = [
                 f"[{name}] {err}"
@@ -1032,6 +1131,11 @@ async def run_adaptive_harvest(
                 "yahoo_email_verification": tail.get("yahoo_email_verification", {}),
                 "low_email_validation": tail.get("low_email_validation", {}),
                 "verification_tail": tail,
+                # Hard-timeout report: which modules the deadline cut off, and
+                # which wrap-up steps were dropped to return on time.
+                "hard_timeout": True,
+                "still_running_at_timeout": still_running,
+                "post_timeout_dropped": post_dropped,
             }
             m365_infra = _m365_context_infrastructure(ctx.m365_context)
             if m365_infra is not None:
@@ -1082,9 +1186,8 @@ async def run_adaptive_harvest(
             return final_result
 
         # Flush subscriber work before taking the identity-cluster snapshot.
-        try:
-            await asyncio.wait_for(signal_pool.close(), timeout=5.0)
-        except asyncio.TimeoutError:
+        closed, _ = await wait_hard(signal_pool.close(), 5.0, grace=0.5)
+        if not closed:
             logger.warning("Signal-pool shutdown exceeded 5s; continuing with snapshot")
         from .domain_harvest_orchestrator import _attach_native_email_validation
         from .historical_diff import annotate_historical_diff
@@ -1260,10 +1363,11 @@ async def run_adaptive_harvest(
         )
         return final_result
     finally:
+        # Bounded: a stuck subscriber or in-flight fetch must not hold the harvest open.
         with contextlib.suppress(Exception):
-            await signal_pool.close()
+            await wait_hard(signal_pool.close(), 2.0, grace=0.5)
         with contextlib.suppress(Exception):
-            await cache.aclose()
+            await wait_hard(cache.aclose(), 2.0, grace=0.5)
         # A cert fetch still in flight when the harvest ends must not outlive it.
         _cert_future = ctx.netlas_state.get("certs")
         if _cert_future is not None and not _cert_future.done():
@@ -1292,6 +1396,7 @@ async def run_adaptive_harvest(
                     started_iso=started_iso,
                     timeout_seconds=timeout_seconds,
                     timed_out=timed_out,
+                    still_running=still_running if timed_out else None,
                 )
             try:
                 on_harvest_end(snapshot)
@@ -1961,6 +2066,47 @@ def _module_partial(module: Any) -> dict[str, Any]:
     return {"findings": findings, "metadata": metadata}
 
 
+def _abandon_running_modules(ctx: WorkerContext) -> list[str]:
+    """At the hard deadline: name every module still in flight and record it.
+
+    A module that unwound on cancellation has already recorded its own PARTIAL
+    result. One that is stuck (ignores cancellation, or waits on a thread) gets a
+    PARTIAL result here carrying whatever it streamed so far, so the export shows
+    it was cut off by the timeout instead of silently missing.
+    """
+    running = dict(ctx.running_modules)
+    names = sorted(running)
+    for name, entry in running.items():
+        module, started = entry if isinstance(entry, tuple) else (entry, None)
+        existing = (ctx.module_results or {}).get(name)
+        if existing is not None and existing.status is not ModuleStatus.SKIPPED:
+            # It already reported (e.g. cancelled cleanly); just tag the cause.
+            if not any("timeout" in str(err) for err in existing.errors or []):
+                existing.errors = [
+                    *(existing.errors or []),
+                    "still running at the harvest timeout",
+                ]
+            continue
+        recovered = _module_partial(module)
+        elapsed = round(time.perf_counter() - started, 3) if started else None
+        result = ModuleResult(
+            status=ModuleStatus.PARTIAL,
+            findings=recovered["findings"],
+            errors=["still running at the harvest timeout; abandoned"],
+            metadata={
+                "domain": ctx.domain,
+                **({"duration_seconds": elapsed} if elapsed is not None else {}),
+                **recovered["metadata"],
+            },
+        )
+        with contextlib.suppress(Exception):
+            _record_module_result(ctx, name, result)
+            _emit_module_complete(ctx, name, result)
+            for finding in result.findings or []:
+                _emit_finding(ctx.signal_pool, name, finding, ctx.domain)
+    return names
+
+
 async def _run_module_core(
     module_name: str,
     ctx: WorkerContext,
@@ -1973,6 +2119,7 @@ async def _run_module_core(
     if ctx.progress_callback is not None:
         ctx.progress_callback(module_name, "Starting module...")
     result: ModuleResult | None = None
+    ctx.running_modules[module_name] = (module, started)
     try:
         instance = _run_module_instance(module_name, module, ctx, soft_timeout)
         if outer_timeout:
@@ -1980,7 +2127,12 @@ async def _run_module_core(
             # _run_module_instance applies the same soft timeout internally
             # and returns a PARTIAL result. A small grace window prevents the
             # outer guard from cancelling that result at the exact deadline.
-            result = await asyncio.wait_for(instance, timeout=soft_timeout + 1.0)
+            # Hard: a module that ignores the cancellation is abandoned.
+            finished, result = await wait_hard(
+                instance, soft_timeout + 1.0, grace=CANCEL_GRACE_SECONDS
+            )
+            if not finished:
+                raise asyncio.TimeoutError
         else:
             # subdomain_intel is governed by the explicit task hard wall. Do
             # not install a second soft timeout around the module coroutine.
@@ -2017,6 +2169,7 @@ async def _run_module_core(
             )
         raise
     finally:
+        ctx.running_modules.pop(module_name, None)
         if result is not None:
             result.metadata.setdefault(
                 "duration_seconds", round(time.perf_counter() - started, 3)
@@ -2107,17 +2260,16 @@ async def _run_subdomain_intel_with_hard_cap(
             ctx.module_results[MODULE_SUBDOMAIN_INTEL] = result
         return result
 
+    ctx.running_modules.setdefault(MODULE_SUBDOMAIN_INTEL, (None, started))
     try:
-        return await asyncio.wait_for(
-            subdomain_task,
-            timeout=hard_cap,
-        )
+        done, _ = await asyncio.wait({subdomain_task}, timeout=hard_cap)
+        if subdomain_task in done:
+            return subdomain_task.result()
+        raise asyncio.TimeoutError
     except asyncio.TimeoutError:
         subdomain_task.cancel()
-        try:
-            await subdomain_task
-        except asyncio.CancelledError:
-            pass
+        # Bounded: a task that ignores the cancellation is abandoned.
+        await asyncio.wait({subdomain_task}, timeout=CANCEL_GRACE_SECONDS)
         logger.warning(
             "subdomain_intel cancelled at hard cap %ds",
             hard_cap,
@@ -2127,12 +2279,13 @@ async def _run_subdomain_intel_with_hard_cap(
         # If the harvest itself is cancelled, do not leave the child task
         # running after its parent has unwound.
         subdomain_task.cancel()
-        try:
-            await subdomain_task
-        except asyncio.CancelledError:
-            pass
+        with contextlib.suppress(BaseException):
+            await asyncio.wait({subdomain_task}, timeout=CANCEL_GRACE_SECONDS)
         write_duration()
         raise
+    finally:
+        ctx.running_modules.pop(MODULE_SUBDOMAIN_INTEL, None)
+
 
 async def _run_module_with_payload(
     module_name: str,
@@ -2174,10 +2327,14 @@ async def _run_module_with_payload(
                 kwargs["progress_callback"] = (
                     lambda action: ctx.progress_callback(module_name, action)
                 )
-        result = await asyncio.wait_for(
+        ctx.running_modules[module_name] = (module, started)
+        finished, result = await wait_hard(
             run_with_payload(payload, **kwargs),
-            timeout=soft_timeout,
+            soft_timeout,
+            grace=CANCEL_GRACE_SECONDS,
         )
+        if not finished:
+            raise asyncio.TimeoutError
     except asyncio.TimeoutError:
         elapsed = round(time.perf_counter() - started, 3)
         result = ModuleResult(
@@ -2195,6 +2352,7 @@ async def _run_module_with_payload(
         )
         raise
     finally:
+        ctx.running_modules.pop(module_name, None)
         if result is not None:
             result.metadata.setdefault(
                 "duration_seconds", round(time.perf_counter() - started, 3)

@@ -2053,7 +2053,16 @@ def format_harvest_json_export(result: DomainHarvestResult) -> dict[str, Any]:
     }
     export_metadata = result.metadata or {}
     if isinstance(export_metadata, dict):
-        for key in ("harvest_status", "timed_out", "timeout_at_seconds"):
+        for key in (
+            "harvest_status",
+            "timed_out",
+            "timeout_at_seconds",
+            # Hard-timeout report: the modules the deadline cut off.
+            "hard_timeout",
+            "still_running_at_timeout",
+            "post_timeout_dropped",
+            "stall_watchdog",
+        ):
             if key in export_metadata:
                 payload[key] = export_metadata[key]
         # Phase 5D — surface technographic tags (mail provider / CMS / analytics /
