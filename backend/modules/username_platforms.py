@@ -73,14 +73,54 @@ def _tags(defn: dict[str, Any]) -> list[str]:
     return []
 
 
-def _username_variants(email: str) -> list[str]:
-    local = email.split("@", 1)[0]
-    variants = [
-        local,
-        re.sub(r"[._-]+", "", local),
-        re.sub(r"[.-]+", "_", local),
-    ]
-    return list(dict.fromkeys(v for v in variants if v))
+_MAX_VARIANTS = 4
+
+
+def _local_part(email: str) -> str:
+    # ``+tag`` subaddressing is mail routing, never part of a handle.
+    return email.split("@", 1)[0].split("+", 1)[0].strip()
+
+
+def _username_variants(email: str, original_email: str | None = None) -> list[str]:
+    """Handles to probe, best first, capped at ``_MAX_VARIANTS``.
+
+    The handle *as written* leads. The orchestrator hands modules the canonical
+    address, and Gmail canonicalisation drops dots (``jane.doe`` →
+    ``janedoe``), so ``original_email`` carries the dotted form the person
+    actually typed. Then the separator-free, hyphen and underscore forms. Each
+    site's ``regexCheck`` still decides which variants reach it.
+    """
+    locals_ = [_local_part(e) for e in (original_email, email) if e]
+    variants: list[str] = []
+    for local in locals_:
+        variants += [
+            local,
+            re.sub(r"[._-]+", "", local),
+            re.sub(r"[._]+", "-", local),
+            re.sub(r"[.-]+", "_", local),
+        ]
+    cap = max(1, int(getattr(settings, "username_max_variants", _MAX_VARIANTS) or _MAX_VARIANTS))
+    return list(dict.fromkeys(v for v in variants if v))[:min(cap, _MAX_VARIANTS)]
+
+
+def _name_split_variant(handle: str, names: list[str]) -> str | None:
+    """A dot-inserted handle (``janedoe`` → ``jane.doe``) from names found on
+    the subject's own profiles, never a blind split.
+
+    Only when the handle has no separator and a found name's words concatenate to
+    exactly the handle. The most common such split wins.
+    """
+    if not handle or re.search(r"[._-]", handle):
+        return None
+    counts: dict[str, int] = {}
+    for name in names:
+        words = [w for w in re.split(r"[^0-9a-z]+", str(name).lower()) if w]
+        if len(words) >= 2 and "".join(words) == handle.lower():
+            split = ".".join(words)
+            counts[split] = counts.get(split, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=lambda s: (counts[s], -len(s)))
 
 
 def _is_regional_fragile(defn: dict[str, Any]) -> bool:
@@ -167,6 +207,9 @@ def _finding(
             "verification": "unverified",
             "speculative": True,
             "detection_confidence": detection_confidence,
+            # UC1: which probed handle produced this hit (as written, separator
+            # variant, or name-split pivot).
+            "matched_variant": username,
         },
     }
     # Logic upgrade (Phase 3): fold extracted profile data into the finding using the
@@ -244,6 +287,7 @@ class UsernamePlatformsModule(BaseModule):
         email: str,
         force: bool = False,
         sink: list[dict[str, Any]] | None = None,
+        original_email: str | None = None,
     ) -> ModuleResult:
         from ..config import opt_in_active
 
@@ -266,7 +310,7 @@ class UsernamePlatformsModule(BaseModule):
                 errors=[f"Failed to load the username platform corpus: {exc}"],
             )
 
-        variants = _username_variants(email)
+        variants = _username_variants(email, original_email)
         catch_all = await self._detect_catch_all(sites)
 
         health = get_health_db()
@@ -412,12 +456,16 @@ class UsernamePlatformsModule(BaseModule):
                 return
             seen_hits.add(key)
             finding = _finding(name, defn, variant, detail, wave, email=email, profile=profile)
+            if variant == pivot_variant:
+                finding["metadata"]["variant_source"] = "name_split_pivot"
             findings.append(finding)
             if sink is not None:
                 sink.append(finding)
 
         probes_total = len(wave1_queue) + (len(wave2_queue) if include_wave2 else 0)
         probes_done = 0
+        pivot_variant: str | None = None
+        pivot_queue: list[tuple[str, dict[str, Any], str]] = []
 
         def _tick() -> None:
             nonlocal probes_done
@@ -428,6 +476,29 @@ class UsernamePlatformsModule(BaseModule):
             wave1 = await self._run_wave(
                 client, wave1_queue, wave=1, health=health, on_hit=_emit_hit, on_progress=_tick
             )
+            # UC1 name-split pivot: a separator-free handle whose own Wave-1 profiles
+            # carry a name that spells it ("Jane Doe" for janedoe) gets ONE extra
+            # dotted variant, probed on the same Wave-1 platforms. Bounded: at most one
+            # variant, only when the handle produced a single variant to begin with.
+            if len(variants) == 1:
+                pivot_variant = _name_split_variant(
+                    variants[0],
+                    [f["metadata"].get("display_name") for f in findings
+                     if f["username"] == variants[0] and f["metadata"].get("display_name")],
+                )
+            if pivot_variant:
+                seen_platforms: set[str] = set()
+                for name, defn, _variant in wave1_queue:
+                    if name in seen_platforms:
+                        continue
+                    seen_platforms.add(name)
+                    if username_matches_regex(defn, pivot_variant):
+                        pivot_queue.append((name, defn, pivot_variant))
+                probes_total += len(pivot_queue)
+                wave1 += await self._run_wave(
+                    client, pivot_queue, wave=1, health=health, on_hit=_emit_hit,
+                    on_progress=_tick,
+                )
             wave2 = (
                 await self._run_wave(
                     client, wave2_queue, wave=2, health=health, on_hit=_emit_hit,
@@ -458,7 +529,7 @@ class UsernamePlatformsModule(BaseModule):
         # `len(wave1_queue)+len(wave2_queue)` inflated "platforms checked" by the variant
         # fan-out. Keep the raw probe count separately as `total_probes_attempted`.
         distinct_platforms_probed = health_tracked
-        total_probes_attempted = len(wave1_queue) + len(wave2_queue)
+        total_probes_attempted = len(wave1_queue) + len(pivot_queue) + len(wave2_queue)
         probe_funnel = {
             "corpus_sites": load_meta.get("sites_loaded") or load_meta.get("username_sites"),
             "distinct_platforms_probed": distinct_platforms_probed,
@@ -488,7 +559,8 @@ class UsernamePlatformsModule(BaseModule):
                 "regex_skipped": regex_skipped,
                 "health_skipped": health_skipped,
                 "health_tracked": health_tracked,
-                "username_variants": variants,
+                "username_variants": variants + ([pivot_variant] if pivot_variant else []),
+                "name_split_pivot": {"variant": pivot_variant, "probes": len(pivot_queue)},
                 "wave1_probes": len(wave1_queue),
                 "wave2_probes": len(wave2_queue),
                 "wave1_platform_cap": settings.username_wave1_cap,

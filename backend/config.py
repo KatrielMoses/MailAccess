@@ -362,6 +362,12 @@ class Settings(BaseSettings):
     # handle enumeration is username_pivot's job.
     username_wave1_cap: int = 2500
     username_wave2_cap: int = 0
+    # Handle variants probed per email, best first: as written, separator-free,
+    # hyphen, underscore (max 4). Each variant is a full Wave-1 pass, so this
+    # multiplies sweep time. 2 by default: on the UC scoreboard the hyphen and
+    # underscore forms found no real profiles and pushed a dotted email's sweep past
+    # its 180 s limit. The name-split pivot (jane.doe from "Jane Doe") is separate.
+    username_max_variants: int = 2
 
     # GitHub Code Search — surfaces email mentions in public code and gists
     enable_github_code_search: bool = True

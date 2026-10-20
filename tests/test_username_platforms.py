@@ -6,7 +6,7 @@ from backend.core.platform_dedup import dedup_key, deduplicate_platform_findings
 from backend.core.probe_detector import detect_hit, username_matches_regex
 from backend.core.username_sites import _is_supported_site, load_username_sites
 from backend.modules.base import ModuleResult, ModuleStatus
-from backend.modules.username_platforms import _username_variants, _wave
+from backend.modules.username_platforms import _name_split_variant, _username_variants, _wave
 
 
 def test_message_detection_uses_presense_spelling() -> None:
@@ -64,12 +64,46 @@ def test_load_username_sites_reads_local_corpus_offline() -> None:
     assert sample.get("uri_check") or sample.get("url")
 
 
-def test_username_variants_are_default_three_only() -> None:
-    assert _username_variants("katriel.moses-test@example.com") == [
-        "katriel.moses-test",
-        "katrielmosestest",
-        "katriel_moses_test",
+def test_username_variants_default_is_as_written_then_separator_free() -> None:
+    assert _username_variants("jane.doe-test@example.com") == [
+        "jane.doe-test",
+        "janedoetest",
     ]
+
+
+def test_username_variants_order_and_hard_cap_of_four(monkeypatch) -> None:
+    from backend.config import settings
+
+    monkeypatch.setattr(settings, "username_max_variants", 9)
+    assert _username_variants("jane.doe-test@example.com") == [
+        "jane.doe-test",
+        "janedoetest",
+        "jane-doe-test",
+        "jane_doe_test",
+    ]
+
+
+def test_username_variants_use_the_address_as_typed() -> None:
+    # Gmail canonicalisation drops the dot; the typed address restores it, first.
+    assert _username_variants("janedoe@example.com", "jane.doe@example.com") == [
+        "jane.doe",
+        "janedoe",
+    ]
+    assert _username_variants("janedoe@example.com", "janedoe@example.com") == [
+        "janedoe"
+    ]
+
+
+def test_username_variants_drop_plus_tag() -> None:
+    assert _username_variants("jane.doe+news@example.com")[0] == "jane.doe"
+
+
+def test_name_split_variant_only_from_a_name_that_spells_the_handle() -> None:
+    assert _name_split_variant("janedoe", ["Jane Doe", "Jane Doe", "J D"]) == "jane.doe"
+    assert _name_split_variant("janedoe", ["Jane Q Doe"]) is None
+    assert _name_split_variant("johnqdoe", ["John Doe"]) is None
+    assert _name_split_variant("jane.doe", ["Jane Doe"]) is None  # already separated
+    assert _name_split_variant("janedoe", []) is None
 
 
 def test_wave_classification_is_popularity_not_method_based() -> None:
