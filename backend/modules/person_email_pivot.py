@@ -21,6 +21,7 @@ from .base import BaseModule, ModuleResult, ModuleStatus
 
 _LOG = logging.getLogger(__name__)
 _MAX_NAMES = 40
+_MAX_NAMES_INDEX = 10
 _MAX_SEARCH_RESULTS = 8
 _ROLE_LOCALS = frozenset({
     "abuse", "admin", "contact", "hello", "help", "info", "office",
@@ -92,7 +93,15 @@ class PersonEmailPivotModule(BaseModule):
             str(item.get("name") if isinstance(item, dict) else item).strip()
             for item in payload.get("names", [])
         ]
-        names = list(dict.fromkeys(name for name in names if len(_tokens(name)) >= 1))[:_MAX_NAMES]
+        names = list(dict.fromkeys(name for name in names if len(_tokens(name)) >= 1))
+
+        sourced_emails = {str(e).lower() for e in payload.get("sourced_emails", [])}
+        sourced_locals = {e.split("@", 1)[0] for e in sourced_emails if "@" in e}
+        if sourced_locals:
+            names = [n for n in names if not any(_local_matches_name(n, loc) for loc in sourced_locals)]
+
+        cap = _MAX_NAMES_INDEX if payload.get("own_index_active") else _MAX_NAMES
+        names = names[:cap]
         if not domain or not names:
             return ModuleResult(
                 status=ModuleStatus.SKIPPED,

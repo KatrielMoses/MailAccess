@@ -4573,7 +4573,23 @@ async def run_domain_harvest(
         # per-query, live-only). ``result`` itself remains available to the live
         # renderer; export helpers use the native-only channel. write_back
         # re-sanitises defensively.
-        await write_back(domain, sanitize_for_persistence(result))
+        corpus_result = sanitize_for_persistence(result)
+        # Phase 1b — index-only emails never enter the corpus store. Emails
+        # also found by a non-index source keep the non-index evidence.
+        from .own_index_client import own_index_active, strip_own_index_leads
+
+        if own_index_active():
+            from dataclasses import replace as _replace
+
+            stripped = strip_own_index_leads(
+                list(getattr(corpus_result, "unique_emails", None) or [])
+            )
+            corpus_result = _replace(
+                corpus_result,
+                unique_emails=stripped,
+                total_unique_emails=len(stripped),
+            )
+        await write_back(domain, corpus_result)
     # F8 — a keyed Netlas fetch actually ran this execution, so tag the snapshot
     # just written as a Netlas-enrichment blob (starts its 30-day refresh clock).
     # No-key / native-only runs skip this: they read the store but never write one.

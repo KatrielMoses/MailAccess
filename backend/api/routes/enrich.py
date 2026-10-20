@@ -110,6 +110,16 @@ _PERSONAL_PROVIDERS_EXACT = frozenset(
         "zoho.com", "yandex.com", "yandex.ru", "mail.com", "mail.ru", "hey.com",
         "gmx.com", "gmx.net", "gmx.de", "gmx.us", "web.de", "fastmail.com",
         "tutanota.com", "tuta.com", "hushmail.com", "inbox.com", "email.com",
+        # NetEase (China)
+        "qq.com", "163.com", "126.com",
+        # Naver (Korea)
+        "naver.com",
+        # Sina / Sohu (China)
+        "sina.com", "sina.cn", "sohu.com",
+        # Kakao / Daum (Korea)
+        "daum.net", "hanmail.net",
+        # Rambler / Mail.ru group (Russia)
+        "rambler.ru", "list.ru", "bk.ru", "inbox.ru",
     }
 )
 # First-label brands that mark a consumer provider regardless of TLD. Kept to

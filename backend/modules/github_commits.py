@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections import Counter
 from typing import Any
 
@@ -494,10 +495,13 @@ class GitHubDomainCommitsModule(BaseModule):
     description = "Search public GitHub commit history for target-domain authors."
     requires_key = False
 
+    _WALL_CAP_S = 45.0
+
     async def run(self, target: str, **_kwargs: Any) -> ModuleResult:  # type: ignore[override]
         domain = (target or "").strip().lower()
         if not domain or "@" in domain or "." not in domain:
             return ModuleResult(status=ModuleStatus.SKIPPED, errors=["github_domain_commits: invalid domain"], metadata={"skip_reason": "invalid_domain"})
+        _t0 = time.perf_counter()
         token = settings.github_token
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
         if token:
@@ -534,8 +538,9 @@ class GitHubDomainCommitsModule(BaseModule):
         except Exception:
             return ModuleResult(status=ModuleStatus.PARTIAL, errors=["GitHub domain commit search returned unparseable JSON"], metadata={"health_category": "provider_failure", "query": query})
 
+        partial = False
         queries = [query]
-        if not items:
+        if not items and (time.perf_counter() - _t0) < self._WALL_CAP_S:
             fallback_query = f"@{domain}"
             try:
                 async with build_client(base_url=_GITHUB_API, timeout=10.0) as client:
@@ -565,6 +570,9 @@ class GitHubDomainCommitsModule(BaseModule):
             try:
                 async with build_client(base_url=_GITHUB_API, timeout=10.0) as client:
                     for name in candidate_names:
+                        if (time.perf_counter() - _t0) >= self._WALL_CAP_S:
+                            partial = True
+                            break
                         name_query = f'author:"{name}"'
                         name_response = await client.get(
                             "/search/commits",
@@ -601,9 +609,14 @@ class GitHubDomainCommitsModule(BaseModule):
             repository = item.get("repository") if isinstance(item.get("repository"), dict) else {}
             breakdown = compute_confidence_breakdown(source_types=["github_commit_author"], is_smtp_verified=False, is_ca_attested=False)
             findings.append({"platform": "github_domain_commit", "profile_url": str(item.get("html_url") or ""), "username": email.split("@", 1)[0], "confidence": label_for_score(breakdown.score).lower(), "metadata": {"email": email, "on_domain": True, "source_type": "github_commit_author", "author_name": str(author.get("name") or ""), "commit_sha": str(item.get("sha") or "")[:7], "commit_date": str(author.get("date") or ""), "repo": str(repository.get("full_name") or ""), "repo_url": str(repository.get("html_url") or ""), "html_url": str(item.get("html_url") or ""), "confidence_score": round(breakdown.score, 4), "confidence_breakdown": breakdown.breakdown}})
-        metadata = {"query": query, "queries": queries, "name_queries": name_queries, "names_considered": len(candidate_names), "raw_items": len(items), "accepted_emails": len(findings), "health_category": "ok" if findings else "success_empty"}
+        elapsed = round(time.perf_counter() - _t0, 3)
+        metadata = {"query": query, "queries": queries, "name_queries": name_queries, "names_considered": len(candidate_names), "raw_items": len(items), "accepted_emails": len(findings), "health_category": "ok" if findings else "success_empty", "elapsed_seconds": elapsed}
+        if partial:
+            metadata["wall_cap_hit"] = True
         if name_query_errors:
             metadata["name_query_errors"] = name_query_errors
-        status = ModuleStatus.PARTIAL if name_query_errors and not findings else ModuleStatus.SUCCESS
+        status = ModuleStatus.PARTIAL if (partial or name_query_errors) and not findings else ModuleStatus.SUCCESS if not partial else ModuleStatus.PARTIAL
         errors = name_query_errors
+        if partial:
+            errors = list(errors) + [f"wall-time cap ({self._WALL_CAP_S}s) reached after {elapsed}s"]
         return ModuleResult(status=status, findings=findings, errors=errors, metadata=metadata)

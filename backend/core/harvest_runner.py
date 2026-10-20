@@ -174,14 +174,14 @@ _MODULE_PRIORITIES: dict[str, int] = {
     # discovery competes alongside code_and_cert_email and the GitHub modules
     # instead of after the archive crawlers and 11 other higher-priority seeds.
     MODULE_EMAIL_DORK: PRIORITY_HIGH_SIGNAL,
-    MODULE_NPM_EMAIL: PRIORITY_REGISTRY,
-    MODULE_PYPI_EMAIL: PRIORITY_REGISTRY,
+    MODULE_NPM_EMAIL: PRIORITY_HIGH_SIGNAL,
+    MODULE_PYPI_EMAIL: PRIORITY_HIGH_SIGNAL,
     MODULE_PUBLIC_SURFACE: PRIORITY_GUARANTEED,
     MODULE_SUBDOMAIN_SURFACE: PRIORITY_HIGH_SIGNAL,
     MODULE_HACKERTARGET: PRIORITY_HIGH_SIGNAL,
     MODULE_PUBLIC_FORGE: PRIORITY_HIGH_SIGNAL,
-    MODULE_PACKAGE_ECOSYSTEMS: PRIORITY_REGISTRY,
-    MODULE_PGP_DOMAIN_EMAIL: PRIORITY_REGISTRY,
+    MODULE_PACKAGE_ECOSYSTEMS: PRIORITY_HIGH_SIGNAL,
+    MODULE_PGP_DOMAIN_EMAIL: PRIORITY_HIGH_SIGNAL,
     MODULE_GITHUB_ORG_MEMBERS: PRIORITY_HIGH_SIGNAL,
     MODULE_GITHUB_DOMAIN_COMMITS: PRIORITY_HIGH_SIGNAL,
     MODULE_EMPLOYEE_NAMES: PRIORITY_UNIVERSAL,
@@ -669,9 +669,14 @@ async def run_adaptive_harvest(
     await _seed_scheduler(ctx)
 
     from ..modules.name_to_github_profile import _github_name_pivot
-    
+
+    index_names_seen: dict[str, int] = {}
     signal_pool.register_name_subscriber(_on_name_found)
-    signal_pool.register_name_subscriber(_github_name_pivot)
+    signal_pool.register_name_subscriber(
+        lambda name, source, metadata: _github_name_pivot(
+            name, source, metadata, index_names_seen
+        )
+    )
     persona_seen: set[str] = set()
     signal_pool.register_name_subscriber(
         lambda name, source, metadata: _on_name_found_persona_pivot(
@@ -2281,10 +2286,19 @@ async def _run_module_core(
             and (finding.get("metadata") or {}).get("name")
         ]
         if names:
+            sourced = [
+                e["email"] for e in (ctx.signal_pool.get_emails(ctx.domain) if ctx.signal_pool else [])
+                if isinstance(e, dict) and e.get("email")
+            ]
             new_items.append(WorkItem(
                 kind="run_module",
                 module_name=MODULE_PERSON_EMAIL_PIVOT,
-                payload={"domain": ctx.domain, "names": names},
+                payload={
+                    "domain": ctx.domain,
+                    "names": names,
+                    "sourced_emails": sourced,
+                    "own_index_active": bool(ctx.own_index_enabled),
+                },
                 priority=PRIORITY_HIGH_SIGNAL,
                 track=TRACK_OPPORTUNISTIC,
                 source="employee_name_discovery_complete",
@@ -2823,6 +2837,8 @@ async def _on_name_found(
     from backend.core.name_classifier import classify_name
     from backend.modules.employee_name_discovery import classify_role_bucket
 
+    if source == "own_index":
+        return []
     confidence = float(metadata.get(
         "confidence_score", 0.5
     ))

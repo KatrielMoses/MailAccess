@@ -7,16 +7,20 @@ from urllib.parse import quote_plus
 
 from ..config import settings
 from ..core.concurrent_fetch_cache import CachedFetch
-from ..core.work_scheduler import PRIORITY_HIGH_SIGNAL, TRACK_GUARANTEED, WorkItem
+from ..core.work_scheduler import PRIORITY_HIGH_SIGNAL, TRACK_GUARANTEED, TRACK_OPPORTUNISTIC, WorkItem
 from .base import BaseModule, ModuleResult, ModuleStatus
 
 logger = logging.getLogger(__name__)
 
 
+_INDEX_NAME_CAP = 5
+
+
 async def _github_name_pivot(
     name: str,
     source: str,
-    metadata: dict
+    metadata: dict,
+    index_names_seen: dict[str, int] | None = None,
 ) -> list[WorkItem]:
     from backend.core.name_classifier import classify_name
 
@@ -25,6 +29,12 @@ async def _github_name_pivot(
         return []
     if len(name.strip().split()) < 2 and not metadata.get("derived_from_email"):
         return []
+    if source == "own_index" and index_names_seen is not None:
+        domain_key = (metadata.get("domain") or "").lower()
+        count = index_names_seen.get(domain_key, 0)
+        if count >= _INDEX_NAME_CAP:
+            return []
+        index_names_seen[domain_key] = count + 1
     module_name = "person_email_pivot" if metadata.get("derived_from_email") else "name_to_github_profile"
     return [WorkItem(
         kind="run_module",
@@ -35,7 +45,7 @@ async def _github_name_pivot(
             "title": metadata.get("title_or_role", ""),
         },
         priority=PRIORITY_HIGH_SIGNAL,
-        track=TRACK_GUARANTEED,
+        track=TRACK_OPPORTUNISTIC,
         source="name_subscriber",
     )]
 
@@ -174,7 +184,7 @@ class NameToGitHubProfileModule(BaseModule):
                         kind="fetch_page",
                         url=blog,
                         priority=PRIORITY_HIGH_SIGNAL,
-                        track=TRACK_GUARANTEED,
+                        track=TRACK_OPPORTUNISTIC,
                         source=f"github_blog:{login}",
                         payload={"source_name": name},
                     ))
