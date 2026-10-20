@@ -278,6 +278,11 @@ class InvestigationEngine:
         async def _run_and_persist() -> None:
             current_email = canonical_email
             events_token = run_events.set_current(emitter)
+            # UC2: one per-host slot registry per investigation, shared by every
+            # module task that opts into per-host politeness.
+            from . import host_politeness
+
+            host_politeness.new_run()
             run_done_sent = False
             run_error: str | None = None
             try:

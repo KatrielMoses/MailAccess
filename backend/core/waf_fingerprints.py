@@ -32,3 +32,29 @@ class WAFDetector:
 
 
 _WAF = WAFDetector()
+
+
+# UC2 — bot-challenge interstitials (live-observed 2026-10-20). A challenge says
+# nothing about the account: it is always *inconclusive*, never "not found", and we
+# never try to pass it.
+_CHALLENGE_HEADERS: tuple[tuple[str, str], ...] = (
+    ("x-vercel-mitigated", "challenge"),  # Vercel Security Checkpoint (TryHackMe)
+    ("cf-mitigated", "challenge"),  # Cloudflare managed challenge
+)
+_CHALLENGE_BODY_MARKERS: tuple[str, ...] = (
+    "<title>Just a moment...</title>",  # Cloudflare
+    "<title>Client Challenge</title>",  # PyPI / Fastly
+    "<title>Vercel Security Checkpoint</title>",
+)
+
+
+def is_challenge_response(headers: object, body: str) -> bool:
+    """True when a response is a bot-challenge page rather than the site's answer."""
+    try:
+        for name, value in _CHALLENGE_HEADERS:
+            if value in str(headers.get(name) or "").lower():  # type: ignore[attr-defined]
+                return True
+    except Exception:
+        pass
+    head = body[:20_000] if body else ""
+    return any(marker in head for marker in _CHALLENGE_BODY_MARKERS)

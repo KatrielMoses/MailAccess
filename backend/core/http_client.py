@@ -109,6 +109,26 @@ class _MailAccessClient(httpx.AsyncClient):
     """AsyncClient subclass that converts proxy errors into ProxyConnectionError."""
 
     async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        from . import host_politeness
+
+        if not host_politeness.is_active():
+            return await self._send_bounded(request, **kwargs)
+        # UC2: one in-flight request per host for opted-in probing; the host slot is
+        # taken before the global slot so a queued host never idles a global slot.
+        async with host_politeness.host_slot(request.url.host):
+            response = await self._send_bounded(request, **kwargs)
+            wait = (
+                host_politeness.retry_after_seconds(response.headers)
+                if response.status_code == 429
+                else None
+            )
+            if wait is None:
+                return response
+            await response.aclose()
+            await asyncio.sleep(wait)
+            return await self._send_bounded(request, **kwargs)
+
+    async def _send_bounded(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
         sem = _get_request_semaphore()
         try:
             if sem is not None:

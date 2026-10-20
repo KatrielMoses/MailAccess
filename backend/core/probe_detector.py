@@ -11,7 +11,7 @@ import httpx
 from ..config import APP_VERSION
 from .pre_check import apply_pre_check_values, cookie_header, run_pre_check
 from .profile_extractor import extract_profile
-from .waf_fingerprints import _WAF
+from .waf_fingerprints import _WAF, is_challenge_response
 
 # Single identified User-Agent for every username-url / email-existence probe. Centralised
 # here so all probes identify consistently through the one unified detector. Kept dynamic so
@@ -42,11 +42,21 @@ def _detect_message(defn: dict[str, Any], body: str) -> str:
     if not body.strip():
         return "inconclusive"
 
+    presense = _as_list(defn.get("presenseStrs"))
+    if defn.get("messageStrict"):
+        # UC2: the found marker is specific (it names the handle or the profile), so it
+        # decides first; a missing marker can also occur on real pages (Instagram's
+        # bare <title>). Neither marker (login wall, layout change) proves nothing.
+        if presense and all(marker in body for marker in presense):
+            return "hit"
+        if any(marker in body for marker in _as_list(defn.get("absenceStrs"))):
+            return "miss"
+        return "inconclusive"
+
     for marker in _as_list(defn.get("absenceStrs")):
         if marker in body:
             return "miss"
 
-    presense = _as_list(defn.get("presenseStrs"))
     if presense:
         return "hit" if all(marker in body for marker in presense) else "miss"
 
@@ -55,8 +65,81 @@ def _detect_message(defn: dict[str, Any], body: str) -> str:
     return "miss"
 
 
+_MISSING = object()
+
+
+def _json_path(data: Any, path: str) -> Any:
+    """Dot path into parsed JSON (``a.b.0.c``); ``_MISSING`` when any step is absent."""
+    node = data
+    for part in str(path).split(".") if path else []:
+        if isinstance(node, dict):
+            if part not in node:
+                return _MISSING
+            node = node[part]
+        elif isinstance(node, list) and part.lstrip("-").isdigit():
+            idx = int(part)
+            if not -len(node) <= idx < len(node):
+                return _MISSING
+            node = node[idx]
+        else:
+            return _MISSING
+    return node
+
+
+def _json_condition(data: Any, cond: dict[str, Any]) -> bool:
+    """One UC2 JSON condition: ``{"path": ..., one of equals / exists / nonEmpty / contains}``.
+
+    With no operator the condition means "present and not null"."""
+    value = _json_path(data, str(cond.get("path") or ""))
+    if "equals" in cond:
+        return value is not _MISSING and value == cond["equals"]
+    if "contains" in cond:
+        return value is not _MISSING and str(cond["contains"]) in str(value)
+    if "nonEmpty" in cond:
+        filled = value is not _MISSING and value not in (None, "", [], {})
+        return filled is bool(cond["nonEmpty"])
+    if "exists" in cond:
+        return (value is not _MISSING and value is not None) is bool(cond["exists"])
+    return value is not _MISSING and value is not None
+
+
+def _conditions(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list):
+        return [c for c in raw if isinstance(c, dict)]
+    return []
+
+
+def _detect_json(defn: dict[str, Any], body: str, status: int) -> str:
+    """UC2 ``checkType: "json"``: found when every ``jsonFound`` condition holds (and the
+    status is in ``foundStatus`` if given); missing when any ``jsonMissing`` condition
+    holds or the status is in ``missingStatus``. Anything else, including a body that is
+    not JSON, is inconclusive."""
+    import json
+
+    found_status = defn.get("foundStatus")
+    missing_status = defn.get("missingStatus")
+    try:
+        data = json.loads(body) if body and body.strip() else _MISSING
+    except ValueError:
+        data = _MISSING
+    if data is not _MISSING:
+        found = _conditions(defn.get("jsonFound"))
+        if found and all(_json_condition(data, c) for c in found) and (
+            not found_status or status in found_status
+        ):
+            return "hit"
+        if any(_json_condition(data, c) for c in _conditions(defn.get("jsonMissing"))):
+            return "miss"
+    if missing_status and status in missing_status:
+        return "miss"
+    return "inconclusive"
+
+
 def detect_hit(defn: dict[str, Any], body: str, status: int, final_url: str) -> str:
     """Classify a username-URL / email-existence probe result as hit, miss, or inconclusive."""
+    raw_body = body
     body = html.unescape(body)
 
     if "e_code" in defn and "m_code" in defn:
@@ -106,6 +189,9 @@ def detect_hit(defn: dict[str, Any], body: str, status: int, final_url: str) -> 
 
     check_type = str(defn.get("checkType") or "status_code")
 
+    if check_type == "json":
+        return _detect_json(defn, raw_body, status)
+
     if check_type == "status_code":
         if status == 200:
             for marker in _as_list(defn.get("absenceStrs")):
@@ -147,6 +233,38 @@ def detect_hit(defn: dict[str, Any], body: str, status: int, final_url: str) -> 
     return "miss"
 
 
+_SNAPSHOT_JSON_MAX = 64_000
+_SNAPSHOT_HTML_MAX = 32_000
+
+
+def probe_response_snapshot(response: httpx.Response, body: str) -> dict[str, Any]:
+    """What the probe saw, compact: parsed JSON (if small enough) or the HTML ``<head>``
+    (where og:/twitter: tags live), plus status, final URL and content type."""
+    import json
+
+    headers = getattr(response, "headers", None) or {}
+    content_type = str(headers.get("content-type") or "").split(";")[0].strip()
+    snap: dict[str, Any] = {
+        "url": str(response.url),
+        "status": response.status_code,
+        "content_type": content_type,
+    }
+    text = body or ""
+    if "json" in content_type or text.lstrip()[:1] in ("{", "["):
+        if len(text) <= _SNAPSHOT_JSON_MAX:
+            try:
+                snap["json"] = json.loads(text)
+                return snap
+            except ValueError:
+                pass
+    if content_type.startswith("image/"):
+        return snap
+    end = text.lower().find("</head>")
+    head = text[: end + 7] if end != -1 else text
+    snap["text"] = head[:_SNAPSHOT_HTML_MAX]
+    return snap
+
+
 def is_non_discriminating_url(url: str, token: str | None = None) -> bool:
     """RC1 (Output-Trust): True when a 'hit' URL cannot be a user-specific profile.
 
@@ -170,7 +288,11 @@ def is_non_discriminating_url(url: str, token: str | None = None) -> bool:
         return True  # bare-domain 200
     if any(marker in path for marker in ("search", "find", "lookup", "results")):
         return True  # search-results page
-    if any(key in query for key in ("q=", "query=", "search=", "keyword=", "term=", "s=")):
+    from urllib.parse import parse_qs
+
+    # Exact parameter names: ``handles=`` (Codeforces' user API) is not a search ``s=``.
+    search_keys = {"q", "query", "search", "keyword", "term", "s"}
+    if search_keys & {key.lower() for key in parse_qs(query, keep_blank_values=True)}:
         return True  # search query — succeeds for any input
     return False
 
@@ -289,6 +411,10 @@ async def probe_platform(
     # does its substring match against the final URL, or it can never match (silent false hits).
     if prepared.get("errorUrl"):
         prepared["errorUrl"] = str(prepared["errorUrl"]).replace("{username}", username)
+    # UC2: markers may name the handle (Instagram og:title "(@{username})").
+    for key in ("presenseStrs", "absenceStrs", "jsonFound", "jsonMissing"):
+        if prepared.get(key):
+            prepared[key] = substitute_username(prepared[key], username)
     method = str(prepared.get("requestMethod") or "GET").upper()
     headers = dict(prepared.get("headers") or {})
     headers.setdefault("User-Agent", _USER_AGENT)
@@ -317,6 +443,10 @@ async def probe_platform(
                 follow_redirects=True,
             )
             body = response.text
+            # UC2: a bot challenge (Vercel / Cloudflare / PyPI) is the site declining to
+            # answer. Inconclusive, never "not found", and never something we try to pass.
+            if is_challenge_response(getattr(response, "headers", {}), body):
+                return ("inconclusive", "challenge", None)
             # Bot-wall / WAF challenge pages return 200 with real-looking HTML; treat them as
             # inconclusive rather than a false hit (shared fingerprint set — Phase 4 fold).
             if body and _WAF.is_waf_blocked(body):
@@ -326,7 +456,10 @@ async def probe_platform(
                 # RC1: a bare-domain / search-URL 200 is not an existence signal.
                 return ("inconclusive", "non_discriminating_url", None)
             if verdict == "hit":
-                profile = extract_profile(response.text, str(response.url)) or None
+                profile: dict[str, Any] = dict(extract_profile(body, str(response.url)) or {})
+                # UC2: keep what the site answered so UC3 parsers read fields from it
+                # without a second fetch. Private key: ``_finding`` moves it to metadata.
+                profile["_probe_response"] = probe_response_snapshot(response, body)
                 return ("hit", display_url, profile)
             if verdict == "miss":
                 return ("miss", None, None)

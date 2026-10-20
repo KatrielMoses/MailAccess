@@ -167,6 +167,11 @@ class AccountDiscoveryModule(BaseModule):
             "account_discovery: probing fresh for %s (force=%s)", email, force
         )
 
+        # UC2: share the run's one-request-per-host slots with the username sweep.
+        from ..core import host_politeness
+
+        host_politeness.activate()
+
         sites, load_meta = load_mailaccess_sites()
         # ``intrusive`` sites (forgot-password oracles that email the subject) are
         # excluded unless explicitly opted in — a routine run never spams targets.

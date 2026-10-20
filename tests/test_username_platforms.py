@@ -72,9 +72,9 @@ def test_username_variants_default_is_as_written_then_separator_free() -> None:
 
 
 def test_username_variants_order_and_hard_cap_of_four(monkeypatch) -> None:
-    from backend.config import settings
+    import backend.modules.username_platforms as up
 
-    monkeypatch.setattr(settings, "username_max_variants", 9)
+    monkeypatch.setattr(up.settings, "username_max_variants", 9)
     assert _username_variants("jane.doe-test@example.com") == [
         "jane.doe-test",
         "janedoetest",

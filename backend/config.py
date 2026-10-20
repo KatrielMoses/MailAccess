@@ -368,6 +368,10 @@ class Settings(BaseSettings):
     # underscore forms found no real profiles and pushed a dotted email's sweep past
     # its 180 s limit. The name-split pivot (jane.doe from "Jane Doe") is separate.
     username_max_variants: int = 2
+    # UC2: with a validated core list in the corpus, the default sweep is the core.
+    # The remaining Wave-1 sites (the tail) run after it only within this many
+    # seconds, hits marked "low". 0 = core only.
+    username_tail_budget_seconds: float = 0.0
 
     # GitHub Code Search — surfaces email mentions in public code and gists
     enable_github_code_search: bool = True

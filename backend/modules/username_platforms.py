@@ -58,6 +58,10 @@ def _is_high_precision(defn: dict[str, Any]) -> bool:
     """
     if _alexa_rank(defn) is not None:
         return True
+    # UC2: "validated beats rank" — a site whose check passed a live known-found /
+    # known-missing test discriminates by measurement, ranked or not.
+    if defn.get("core") or defn.get("validated"):
+        return True
     has_two_marker = bool(
         defn.get("presenseStrs") or defn.get("presence_strs")
     ) and bool(defn.get("absenceStrs") or defn.get("absence_strs"))
@@ -145,6 +149,10 @@ def _wave(defn: dict[str, Any]) -> int:
     * cheap ``status_code`` existence checks stay Wave 1 (the safe corpus backbone), while the
       unranked ``message`` / ``response_url`` long tail stays Wave 2.
     """
+    if defn.get("core"):
+        return 1  # UC2: validated core sites always run first
+    if defn.get("alwaysHit"):
+        return 2  # UC2: "found" a made-up handle in validation; opt-in only
     if defn.get("protection") or _is_regional_fragile(defn):
         return 2
     rank = _alexa_rank(defn)
@@ -174,7 +182,8 @@ def _finding(
     profile_url: str,
     wave: int,
     email: str | None = None,
-    profile: dict[str, str] | None = None,
+    profile: dict[str, Any] | None = None,
+    core_primary: bool = False,
 ) -> dict[str, Any]:
     from ..core.common_names import is_common_username
     from ..core.disposable_domains import is_disposable_email
@@ -219,6 +228,17 @@ def _finding(
             value = profile.get(key)
             if value:
                 finding["metadata"][key] = value
+        # UC2: what the site answered (JSON or HTML <head>), for UC3 parsers.
+        if profile.get("_probe_response"):
+            finding["metadata"]["probe_response"] = profile["_probe_response"]
+    if defn.get("core"):
+        finding["metadata"]["core"] = True
+    # UC2: a validated core site's hit on the handle as written is a measured
+    # existence signal, so "medium" rather than RC1's blanket "low". It stays
+    # speculative/unverified (a matching handle is not proof of ownership); separator
+    # and pivot variants stay "low".
+    if core_primary:
+        finding["confidence"] = "medium"
     if is_common_username(username):
         if finding["confidence"] != "low":
             finding["confidence"] = "low"
@@ -301,6 +321,12 @@ class UsernamePlatformsModule(BaseModule):
                 ],
             )
 
+        # UC2: one request in flight per host across all variants (and any other
+        # opted-in module in this run); Retry-After <= 5 s honoured once.
+        from ..core import host_politeness
+
+        host_politeness.activate()
+
         include_wave2 = settings.enable_username_wave2
         try:
             sites, load_meta = await load_username_sites(include_wave2=include_wave2)
@@ -311,7 +337,22 @@ class UsernamePlatformsModule(BaseModule):
             )
 
         variants = _username_variants(email, original_email)
-        catch_all = await self._detect_catch_all(sites)
+        # UC2: validation already proved every core site reads a made-up handle as
+        # missing, so the catch-all pre-check only covers non-core sites, and only
+        # when they will be probed (tail budget or Wave 2).
+        has_core = any(defn.get("core") for defn in sites.values())
+        probes_non_core = (
+            not has_core
+            or include_wave2
+            or float(getattr(settings, "username_tail_budget_seconds", 0) or 0) > 0
+        )
+        catch_all = (
+            await self._detect_catch_all(
+                {n: d for n, d in sites.items() if not d.get("core")}
+            )
+            if probes_non_core
+            else set()
+        )
 
         health = get_health_db()
 
@@ -404,6 +445,15 @@ class UsernamePlatformsModule(BaseModule):
         )
         wave2_queue = _cap_queue_by_rank(wave2_queue, settings.username_wave2_cap)
 
+        # UC2 core list: when the corpus carries validated core sites, the default
+        # sweep is the core list. The rest of Wave 1 becomes the tail, run after the
+        # core only within ``username_tail_budget_seconds`` (0 = off), its hits "low".
+        tail_queue: list[tuple[str, dict[str, Any], str]] = []
+        if has_core:
+            tail_queue = [item for item in wave1_queue if not item[1].get("core")]
+            wave1_queue = [item for item in wave1_queue if item[1].get("core")]
+        tail_budget = float(getattr(settings, "username_tail_budget_seconds", 0) or 0)
+
         # ── Write one audit-log entry per applied action ──────────────────────
         # Stats are computed from the rolling window. We log AFTER queueing so
         # the log captures the same numbers the skip/demote decision used.
@@ -455,7 +505,10 @@ class UsernamePlatformsModule(BaseModule):
             if key in seen_hits:
                 return
             seen_hits.add(key)
-            finding = _finding(name, defn, variant, detail, wave, email=email, profile=profile)
+            finding = _finding(
+                name, defn, variant, detail, wave, email=email, profile=profile,
+                core_primary=bool(defn.get("core")) and variant == variants[0],
+            )
             if variant == pivot_variant:
                 finding["metadata"]["variant_source"] = "name_split_pivot"
             findings.append(finding)
@@ -499,6 +552,23 @@ class UsernamePlatformsModule(BaseModule):
                     client, pivot_queue, wave=1, health=health, on_hit=_emit_hit,
                     on_progress=_tick,
                 )
+            tail_probed = 0
+            if tail_queue and tail_budget > 0:
+                tail_results: list[Any] = []
+
+                async def _tail() -> None:
+                    tail_results.extend(await self._run_wave(
+                        client, tail_queue, wave=1, health=health, on_hit=_emit_hit,
+                        on_progress=_tick,
+                    ))
+
+                probes_total += len(tail_queue)
+                try:
+                    await asyncio.wait_for(_tail(), timeout=tail_budget)
+                except asyncio.TimeoutError:
+                    pass  # hits already streamed via _emit_hit; the rest is unprobed
+                tail_probed = len(tail_results)
+                wave1 += tail_results
             wave2 = (
                 await self._run_wave(
                     client, wave2_queue, wave=2, health=health, on_hit=_emit_hit,
@@ -529,7 +599,9 @@ class UsernamePlatformsModule(BaseModule):
         # `len(wave1_queue)+len(wave2_queue)` inflated "platforms checked" by the variant
         # fan-out. Keep the raw probe count separately as `total_probes_attempted`.
         distinct_platforms_probed = health_tracked
-        total_probes_attempted = len(wave1_queue) + len(pivot_queue) + len(wave2_queue)
+        total_probes_attempted = (
+            len(wave1_queue) + len(pivot_queue) + tail_probed + len(wave2_queue)
+        )
         probe_funnel = {
             "corpus_sites": load_meta.get("sites_loaded") or load_meta.get("username_sites"),
             "distinct_platforms_probed": distinct_platforms_probed,
@@ -561,6 +633,9 @@ class UsernamePlatformsModule(BaseModule):
                 "health_tracked": health_tracked,
                 "username_variants": variants + ([pivot_variant] if pivot_variant else []),
                 "name_split_pivot": {"variant": pivot_variant, "probes": len(pivot_queue)},
+                "core_probes": len(wave1_queue),
+                "tail": {"queued": len(tail_queue), "probed": tail_probed,
+                         "budget_seconds": tail_budget},
                 "wave1_probes": len(wave1_queue),
                 "wave2_probes": len(wave2_queue),
                 "wave1_platform_cap": settings.username_wave1_cap,
