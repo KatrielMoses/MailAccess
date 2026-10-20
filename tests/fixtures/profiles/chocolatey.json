@@ -1,0 +1,14 @@
+{
+ "site_id": "chocolatey",
+ "username": "sampleperson",
+ "snapshot": {
+  "url": "https://community.chocolatey.org/profiles/sampleperson",
+  "status": 200,
+  "content_type": "text/html"
+ },
+ "body": "<html><head><meta charset=\"UTF-8\">\n<meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<meta name=\"description\" content=\"Chocolatey is software management automation for Windows that wraps installers, executables, zips, and scripts into compiled packages. Chocolatey integrates w/SCCM, Puppet, Chef, etc. Chocolatey is trusted by businesses to manage software deployments.\">\n<meta name=\"twitter:card\" content=\"summary\">\n<meta name=\"twitter:site\" content=\"@chocolateynuget\">\n<meta name=\"twitter:title\" content=\"sampleperson\">\n<meta name=\"twitter:image\" content=\"https://img.chocolatey.org/social-share/twitter-share.png\">\n<meta property=\"og:title\" content=\"sampleperson\">\n<meta property=\"og:description\" content=\"Chocolatey is software management automation for Windows that wraps installers, executables, zips, and scripts into compiled packages. Chocolatey integrates w/SCCM, Puppet, Chef, etc. Chocolatey is trusted by businesses to manage software deployments.\">\n<meta property=\"og:site_name\" content=\"Chocolatey Software\">\n<meta property=\"og:type\" content=\"product\">\n<meta property=\"og:image\" content=\"https://img.chocolatey.org/social-share/facebook-share.png\">\n<meta property=\"og:url\" content=\"/profiles/sampleperson\">\n<meta property=\"product:brand\" content=\"Chocolatey Software\">\n<meta property=\"product:category\" content=\"software\">\n<meta name=\"flattr:id\" content=\"mqgjkp\">\n<meta property=\"DC.title\" content=\"sampleperson\">\n<meta property=\"copyright\" content=\"Chocolatey is Copyright 2017 - 2026 Chocolatey Software, Inc. Copyright 2011 - 2017 RealDimensions Software, LLC.\"></head><body></body></html>",
+ "follow_ups": {},
+ "expected": {
+  "profile_username": "sampleperson"
+ }
+}

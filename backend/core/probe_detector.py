@@ -189,6 +189,11 @@ def detect_hit(defn: dict[str, Any], body: str, status: int, final_url: str) -> 
 
     check_type = str(defn.get("checkType") or "status_code")
 
+    # UC3: a declared "missing" status (Instagram: only a 404 means no account) decides
+    # for text checks too; JSON checks read missingStatus themselves.
+    if check_type != "json" and defn.get("missingStatus") and status in defn["missingStatus"]:
+        return "miss"
+
     if check_type == "json":
         return _detect_json(defn, raw_body, status)
 
@@ -234,6 +239,7 @@ def detect_hit(defn: dict[str, Any], body: str, status: int, final_url: str) -> 
 
 
 _SNAPSHOT_JSON_MAX = 64_000
+_PARSE_BODY_MAX = 3_000_000
 _SNAPSHOT_HTML_MAX = 32_000
 
 
@@ -418,6 +424,8 @@ async def probe_platform(
     method = str(prepared.get("requestMethod") or "GET").upper()
     headers = dict(prepared.get("headers") or {})
     headers.setdefault("User-Agent", _USER_AGENT)
+    # UC3: English pages (counts like "10 followers" are localised by IP otherwise).
+    headers.setdefault("Accept-Language", "en-US,en;q=0.8")
     payload = prepared.get("requestPayload")
     if payload:
         payload = substitute_username(payload, username)
@@ -460,6 +468,9 @@ async def probe_platform(
                 # UC2: keep what the site answered so UC3 parsers read fields from it
                 # without a second fetch. Private key: ``_finding`` moves it to metadata.
                 profile["_probe_response"] = probe_response_snapshot(response, body)
+                # UC3: the full body, for profile parsers at probe time only; the caller
+                # drops it before anything is stored (``profiles.enrich``).
+                profile["_body"] = body[:_PARSE_BODY_MAX]
                 return ("hit", display_url, profile)
             if verdict == "miss":
                 return ("miss", None, None)

@@ -350,6 +350,9 @@ def _make_finding(
     query: str,
     method: str,
 ) -> dict[str, Any]:
+    from ..core.profiles.geo import normalize_location
+
+    location = normalize_location(parsed.get("location"))
     return {
         "platform": "linkedin_snippet",
         "profile_url": f"https://www.linkedin.com/in/{slug}",
@@ -357,6 +360,7 @@ def _make_finding(
         "source": "linkedin_serp",
         "metadata": {
             **parsed,
+            **({"location_normalized": location} if location else {}),
             "linkedin_url": f"https://www.linkedin.com/in/{slug}",
             "snippet_text": snippet,
             "search_query": query,

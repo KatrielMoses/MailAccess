@@ -1,0 +1,20 @@
+{
+ "site_id": "bandlab",
+ "username": "sampleperson",
+ "snapshot": {
+  "url": "https://www.bandlab.com/api/v1.3/users/sampleperson",
+  "status": 200,
+  "content_type": "application/json"
+ },
+ "body": "{\"about\": null, \"backgroundPicture\": {\"isDefault\": true, \"url\": \"https://bl-prod-images.azureedge.net/v1.0/userbackgrounds/default/\"}, \"backgroundPictureId\": null, \"badges\": [], \"collaborationStatus\": \"None\", \"conversationId\": null, \"counters\": {\"bandFollowings\": 0, \"bands\": 0, \"collections\": 0, \"followers\": 0, \"following\": 0, \"plays\": 0, \"profilePictures\": 1}, \"createdOn\": \"2019-05-22T11:25:02Z\", \"followingState\": \"None\", \"genres\": [{\"id\": \"pop\", \"name\": \"Pop\"}, {\"id\": \"electronic\", \"name\": \"Electronic\"}], \"hasOnlyEduPlatform\": false, \"id\": \"7k1k7978k872kkk792fkkf9k80011464kk7f\", \"inspiredBy\": [], \"introVideo\": null, \"invite\": null, \"isBoosted\": false, \"isFollower\": false, \"isPrivate\": false, \"isTippable\": false, \"isVerified\": false, \"links\": {}, \"liveShowId\": null, \"modifiedOn\": \"2019-05-22T11:25:48Z\", \"name\": \"SPM Person\", \"picture\": {\"adjustedColor\": \"#85796A\", \"adjustedColorLValue\": 0.5827, \"color\": \"#85796A\", \"isDefault\": false, \"url\": \"https://cdn.example.test/avatar_url.png\"}, \"pictureId\": \"7k1k7978k872kkk792fkkf9k80011464kk7f\", \"place\": null, \"skills\": [{\"id\": \"guitarist\", \"name\": \"Guitarist\"}, {\"id\": \"vocalist\", \"name\": \"Vocalist\"}, {\"id\": \"songwriter\", \"name\": \"Songwriter\"}], \"username\": \"sampleperson\"}",
+ "follow_ups": {},
+ "expected": {
+  "display_name": "SPM Person",
+  "profile_username": "sampleperson",
+  "avatar_url": "https://cdn.example.test/avatar_url.png",
+  "joined_at": "2019-05-22T11:25:02Z",
+  "followers": 0,
+  "following": 0,
+  "verified": false
+ }
+}

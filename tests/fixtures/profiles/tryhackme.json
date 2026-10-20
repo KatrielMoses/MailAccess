@@ -1,0 +1,12 @@
+{
+ "site_id": "tryhackme",
+ "username": "sample.person",
+ "snapshot": {
+  "url": "https://tryhackme-badges.s3.amazonaws.com/sample.person.png",
+  "status": 200,
+  "content_type": "image/png"
+ },
+ "body": "",
+ "follow_ups": {},
+ "expected": {}
+}

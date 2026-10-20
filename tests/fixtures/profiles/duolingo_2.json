@@ -1,0 +1,16 @@
+{
+ "site_id": "duolingo_2",
+ "username": "testjuser",
+ "snapshot": {
+  "url": "https://www.duolingo.com/2017-06-30/users?username=testjuser",
+  "status": 200,
+  "content_type": "application/json"
+ },
+ "body": "{\"users\": [{\"name\": \"Test M User\", \"username\": \"TestJUser\", \"picture\": \"//simg-ssl.duolingo.com/avatar/default_2\", \"bio\": \"\", \"profileCountry\": null, \"creationDate\": 1702855137, \"id\": 1430328206}]}",
+ "follow_ups": {},
+ "expected": {
+  "display_name": "Test M User",
+  "profile_username": "TestJUser",
+  "joined_at": "2023-12-17T23:18:57Z"
+ }
+}

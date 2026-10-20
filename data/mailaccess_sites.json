@@ -6775,16 +6775,16 @@
    "presenseStrs": [
     "(@{username})"
    ],
-   "absenceStrs": [
-    "<title>Instagram</title>"
-   ],
    "errors": {
     "Login • Instagram": "Login required"
    },
    "usernameClaimed": "instagram",
    "usernameUnclaimed": "xq9vb2kt7wz4mp",
    "validated": "2026-10-21",
-   "core": true
+   "core": true,
+   "missingStatus": [
+    404
+   ]
   },
   "twitter_2": {
    "id": "twitter_2",
@@ -21034,7 +21034,7 @@
     "Content-Type": "application/json"
    },
    "requestPayload": {
-    "query": "query userPublicProfile($username: String!) { matchedUser(username: $username) { username profile { realName userAvatar countryName } } }",
+    "query": "query userPublicProfile($username: String!) { matchedUser(username: $username) { username githubUrl twitterUrl linkedinUrl profile { realName userAvatar countryName aboutMe websites } } }",
     "variables": {
      "username": "{username}"
     }

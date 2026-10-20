@@ -14,6 +14,8 @@ from ..core.demotion_log import log_event as log_demotion_event
 from ..core.http_client import build_client
 from ..core.platform_health import PlatformHealthDB, get_health_db
 from ..core.probe_detector import probe_platform, username_matches_regex
+from ..core.profiles import FIELD_KEYS as PROFILE_FIELD_KEYS
+from ..core.profiles import enrich as enrich_profile
 from ..core.username_sites import load_username_sites
 from .base import BaseModule, ModuleResult, ModuleStatus
 
@@ -119,7 +121,9 @@ def _name_split_variant(handle: str, names: list[str]) -> str | None:
     counts: dict[str, int] = {}
     for name in names:
         words = [w for w in re.split(r"[^0-9a-z]+", str(name).lower()) if w]
-        if len(words) >= 2 and "".join(words) == handle.lower():
+        # first.last only: an initial ("John Q Doe" → john.q.doe) is not a handle
+        # people pick, and the dotted three-part form hit non-discriminating sites.
+        if len(words) == 2 and min(map(len, words)) >= 2 and "".join(words) == handle.lower():
             split = ".".join(words)
             counts[split] = counts.get(split, 0) + 1
     if not counts:
@@ -224,9 +228,11 @@ def _finding(
     # Logic upgrade (Phase 3): fold extracted profile data into the finding using the
     # metadata-key convention the identity graph + name-consensus already consume.
     if profile:
-        for key in ("display_name", "bio", "avatar_url", "location"):
+        # UC3 field set (name … verified) + field_sources / location_normalized.
+        for key in (*PROFILE_FIELD_KEYS.values(), "location_normalized", "linkedin_url",
+                    "field_sources"):
             value = profile.get(key)
-            if value:
+            if value not in (None, "", [], {}):
                 finding["metadata"][key] = value
         # UC2: what the site answered (JSON or HTML <head>), for UC3 parsers.
         if profile.get("_probe_response"):
@@ -678,6 +684,12 @@ class UsernamePlatformsModule(BaseModule):
                     client, no_limit, name, defn, username, timeout=timeout
                 )
                 latency_ms = int((time.perf_counter() - t0) * 1000)
+            if outcome == "hit":
+                # UC3: profile fields from the response the check already received
+                # (plus an official follow-up API for a few sites).
+                await enrich_profile(client, defn, username, profile)
+            elif isinstance(profile, dict):
+                profile.pop("_body", None)
             try:
                 await health.record_probe_async(
                     platform=name,

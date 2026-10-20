@@ -1,0 +1,20 @@
+{
+ "site_id": "leetcode",
+ "username": "sampleperson",
+ "snapshot": {
+  "url": "https://leetcode.com/graphql/",
+  "status": 200,
+  "content_type": "application/json"
+ },
+ "body": "{\"data\": {\"matchedUser\": {\"username\": \"sampleperson\", \"profile\": {\"realName\": \"Sample Middle Person\", \"userAvatar\": \"https://cdn.example.test/avatar_url.png\", \"countryName\": \"India\"}}}}",
+ "follow_ups": {},
+ "expected": {
+  "display_name": "Sample Middle Person",
+  "profile_username": "sampleperson",
+  "avatar_url": "https://cdn.example.test/avatar_url.png",
+  "location": "India",
+  "location_normalized": {
+   "country_code": "IN"
+  }
+ }
+}

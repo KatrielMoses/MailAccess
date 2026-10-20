@@ -101,6 +101,7 @@ def test_username_variants_drop_plus_tag() -> None:
 def test_name_split_variant_only_from_a_name_that_spells_the_handle() -> None:
     assert _name_split_variant("janedoe", ["Jane Doe", "Jane Doe", "J D"]) == "jane.doe"
     assert _name_split_variant("janedoe", ["Jane Q Doe"]) is None
+    assert _name_split_variant("johnqdoe", ["John Q Doe"]) is None  # no initials
     assert _name_split_variant("johnqdoe", ["John Doe"]) is None
     assert _name_split_variant("jane.doe", ["Jane Doe"]) is None  # already separated
     assert _name_split_variant("janedoe", []) is None
