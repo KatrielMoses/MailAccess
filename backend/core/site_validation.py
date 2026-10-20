@@ -170,6 +170,15 @@ def build_core(paths: list[str]) -> dict[str, str]:
     runs = [json.loads(Path(p).read_text())["results"] for p in paths]
     ids = set().union(*runs)
     rows = {sid: [run[sid] for run in runs if sid in run] for sid in ids}
+    for sid, site_rows in rows.items():
+        # A site whose only "missing" signal is a status we don't get (Instagram:
+        # 404-only, bare page otherwise) may read the control as inconclusive.
+        if (corpus.get(sid) or {}).get("validationMissingMayBeInconclusive"):
+            rows[sid] = [
+                {**r, "unclaimed": {**r.get("unclaimed", {}), "outcome": "miss"}}
+                if (r.get("unclaimed") or {}).get("outcome") == "inconclusive" else r
+                for r in site_rows
+            ]
     verdicts = {sid: verdict(r) for sid, r in rows.items()}
     passing = [sid for sid, v in verdicts.items() if v == "pass" and sid in corpus]
     passing.sort(key=lambda sid: core_score(corpus[sid], rows[sid]), reverse=True)

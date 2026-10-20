@@ -140,3 +140,14 @@ def test_retry_after_only_for_short_numeric_waits() -> None:
     assert host_politeness.retry_after_seconds(
         httpx.Headers({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"})
     ) is None
+
+
+def test_validation_tolerates_inconclusive_control_when_flagged(tmp_path, monkeypatch) -> None:
+    import backend.core.mailaccess_sites_loader as loader
+    from backend.core.site_validation import build_core
+
+    run = {"results": {"instagram_2": {"claimed": {"outcome": "hit", "ms": 500},
+                                        "unclaimed": {"outcome": "inconclusive", "ms": 500}}}}
+    path = tmp_path / "v.json"
+    path.write_text(json.dumps(run))
+    assert build_core([str(path)])["instagram_2"] in ("core", "validated")

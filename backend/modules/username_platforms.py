@@ -131,6 +131,20 @@ def _name_split_variant(handle: str, names: list[str]) -> str | None:
     return max(counts, key=lambda s: (counts[s], -len(s)))
 
 
+def _is_mastodon(defn: dict[str, Any]) -> bool:
+    tags = {tag.lower() for tag in _tags(defn)} | {str(defn.get("category") or "").lower()}
+    host = str(defn.get("uri_check") or defn.get("url") or "").split("/")[2:3]
+    return "mastodon" in tags or any(m in h.lower() for h in host for m in ("mstdn", "masto"))
+
+
+def _variant_allowed(defn: dict[str, Any], variant: str) -> bool:
+    """The site's own username rule, plus: Mastodon handles never contain a dot, and
+    instances answer "found" for dotted paths (UC3: aaron.j.jean-style false hits)."""
+    if "." in variant and _is_mastodon(defn):
+        return False
+    return username_matches_regex(defn, variant)
+
+
 def _is_regional_fragile(defn: dict[str, Any]) -> bool:
     tags = {tag.lower() for tag in _tags(defn)}
     return bool(tags & {"cn", "ru", "china", "russia"})
@@ -433,7 +447,7 @@ class UsernamePlatformsModule(BaseModule):
                 if key in queued:
                     continue
                 queued.add(key)
-                if not username_matches_regex(defn, variant):
+                if not _variant_allowed(defn, variant):
                     regex_skipped += 1
                     continue
                 (wave1_queue if wave == 1 else wave2_queue).append((name, defn, variant))
@@ -551,7 +565,7 @@ class UsernamePlatformsModule(BaseModule):
                     if name in seen_platforms:
                         continue
                     seen_platforms.add(name)
-                    if username_matches_regex(defn, pivot_variant):
+                    if _variant_allowed(defn, pivot_variant):
                         pivot_queue.append((name, defn, pivot_variant))
                 probes_total += len(pivot_queue)
                 wave1 += await self._run_wave(

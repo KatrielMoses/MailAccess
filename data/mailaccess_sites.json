@@ -6784,7 +6784,8 @@
    "core": true,
    "missingStatus": [
     404
-   ]
+   ],
+   "validationMissingMayBeInconclusive": true
   },
   "twitter_2": {
    "id": "twitter_2",
