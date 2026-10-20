@@ -791,6 +791,13 @@ class Settings(BaseSettings):
     ipgeo_timeout_seconds: float = 10.0
     ipgeo_refresh_ttl_days: int = 30
 
+    # Bright Data (BYOK, Pro): LinkedIn people-profile lookups for the LinkedIn card.
+    # Without a key the module does not exist anywhere (events, report, module list).
+    brightdata_api_key: str | None = None
+    brightdata_disabled: bool = False
+    brightdata_timeout_seconds: float = 25.0
+    brightdata_cache_days: int = 7
+
     # WhoisFreaks (BYOK): WHOIS history, reverse WHOIS, dated subdomains.
     # Without a key nothing changes and no call is made.
     whoisfreaks_api_key: str | None = None

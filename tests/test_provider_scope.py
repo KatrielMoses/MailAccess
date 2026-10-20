@@ -74,6 +74,8 @@ def env(monkeypatch, isolated_db):
     monkeypatch.setattr(settings, "ipgeolocation_api_key", IPGEO_KEY)
     monkeypatch.setattr(settings, "ipgeo_disabled", False, raising=False)
     _set(monkeypatch, "whoisfreaks_api_key", WF_KEY)
+    # Bright Data (LinkedIn card) is not part of these runs; the repo .env may hold a key.
+    _set(monkeypatch, "brightdata_api_key", None)
     calls: list[httpx.Request] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -171,7 +173,9 @@ async def test_a_keyed_run_still_shows_its_own_provider_facts(env) -> None:
         providers = {o.provider for o in (await db.execute(select(Observation))).scalars()}
         manifest = (await db.execute(select(RunManifest).where(RunManifest.run_id == run))).scalar_one()
     assert {"whoisfreaks", "ipgeolocation"} <= providers
-    assert manifest.providers == {"ipgeolocation": True, "whoisfreaks": True, "netlas": False}
+    assert manifest.providers == {
+        "ipgeolocation": True, "whoisfreaks": True, "netlas": False, "brightdata": False,
+    }
 
 
 async def test_keyed_then_keyless_run_reports_no_provider_fact_anywhere(env, monkeypatch) -> None:

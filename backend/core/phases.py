@@ -315,20 +315,27 @@ class ProfilePhase(InvestigationPhase):
         from ..modules.marketplace_profile import MarketplaceProfileModule
         from ..modules.twitter_profile import TwitterProfileModule
 
-        modules = (
-            TwitterProfileModule(),
-            LinkedInSerpModule(),
-            MarketplaceProfileModule(),
-        )
+        from .brightdata_client import brightdata_active
+
+        def _record(mod):
+            return _run_and_record(
+                mod, **_runner_kwargs(kwargs), findings_input=kwargs["collected"]
+            )
+
+        async def _linkedin() -> None:
+            # The LinkedIn card (Bright Data, Pro) runs right after the SERP lookup so it
+            # can use its slug; off (no key) means fully off: never run, never shown.
+            await _record(LinkedInSerpModule())
+            explicit = kwargs.get("explicit_modules")
+            if brightdata_active() and (explicit is None or "linkedin_brightdata" in explicit):
+                from ..modules.linkedin_brightdata import LinkedInBrightDataModule
+
+                await _record(LinkedInBrightDataModule())
+
         await asyncio.gather(
-            *(
-                _run_and_record(
-                    mod,
-                    **_runner_kwargs(kwargs),
-                    findings_input=kwargs["collected"],
-                )
-                for mod in modules
-            ),
+            _record(TwitterProfileModule()),
+            _linkedin(),
+            _record(MarketplaceProfileModule()),
             return_exceptions=True,
         )
         return kwargs["collected"]
@@ -590,7 +597,7 @@ def plan_modules(
         add("email_discovery", "email_discovery")
     add("alternate_email", "alternate_email")
     add("domain_cluster", "domain_cluster")
-    add("profile", "twitter_profile", "linkedin_serp", "marketplace_profile")
+    add("profile", "twitter_profile", "linkedin_serp", "linkedin_brightdata", "marketplace_profile")
     if config.enable_phone_intel:
         add("phone_intel", "phone_intel")
     return planned, unavailable

@@ -27,6 +27,7 @@ _SOCIAL_MODULES = frozenset(
         "social",
         "twitter_profile",
         "linkedin_serp",
+        "linkedin_brightdata",
         "marketplace_profile",
         "email_discovery",
     }
@@ -39,6 +40,7 @@ _POST_PRIMARY_ONLY = frozenset(
         "alternate_email",
         "twitter_profile",
         "linkedin_serp",
+        "linkedin_brightdata",
         "marketplace_profile",
         "domain_cluster",
         "breach_aggregator",
@@ -111,6 +113,8 @@ _MODULE_CAP: dict[str, int] = {
     "whoisfreaks_intel": 5,
 }
 _MODULE_DEFAULT_TIMEOUTS: dict[str, int] = {
+    # Bright Data's call is bounded at 25 s; room for the cache and the match.
+    "linkedin_brightdata": 40,
     "breach_deep": 90,
     "github_commits": 90,
     # F6 — Netlas call latency swings 0.4s→>10s under load and the certs lookup

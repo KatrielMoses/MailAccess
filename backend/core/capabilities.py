@@ -8,12 +8,17 @@ module list). Booleans only: never key values, fragments or quota.
 from __future__ import annotations
 
 # investigate modules that belong to one provider (hidden everywhere when it is off)
-PROVIDER_OF_MODULE = {"ip_intel": "ipgeolocation", "whoisfreaks_intel": "whoisfreaks"}
+PROVIDER_OF_MODULE = {
+    "ip_intel": "ipgeolocation",
+    "whoisfreaks_intel": "whoisfreaks",
+    "linkedin_brightdata": "brightdata",
+}
 
 
 def provider_capabilities() -> dict[str, bool]:
-    """``{"ipgeolocation": bool, "whoisfreaks": bool, "netlas": bool}`` for this engine
+    """``{"ipgeolocation", "whoisfreaks", "netlas", "brightdata": bool}`` for this engine
     (key set and not persistently disabled; a per-run opt-out is not considered)."""
+    from .brightdata_client import brightdata_active
     from .ipgeo_client import ipgeo_active
     from .netlas_client import netlas_active
     from .whoisfreaks_client import whoisfreaks_active
@@ -22,6 +27,7 @@ def provider_capabilities() -> dict[str, bool]:
         "ipgeolocation": bool(ipgeo_active(no_ipgeo=False)),
         "whoisfreaks": bool(whoisfreaks_active(no_whoisfreaks=False)),
         "netlas": bool(netlas_active(no_netlas=False)),
+        "brightdata": bool(brightdata_active(no_brightdata=False)),
     }
 
 
@@ -31,15 +37,19 @@ def provider_module_enabled(module: str) -> bool:
     provider = PROVIDER_OF_MODULE.get(module)
     if provider is None:
         return True
+    from .brightdata_client import brightdata_active
     from .ipgeo_client import ipgeo_active
     from .whoisfreaks_client import whoisfreaks_active
 
+    if provider == "brightdata":
+        return bool(brightdata_active())
     return bool(ipgeo_active() if provider == "ipgeolocation" else whoisfreaks_active())
 
 
 def active_providers() -> dict[str, bool]:
     """What is ACTIVE for the current run: key set, not disabled, and not opted out
     per-run (reads the run's context flags). Recorded in the run manifest."""
+    from .brightdata_client import brightdata_active
     from .ipgeo_client import ipgeo_active
     from .netlas_client import netlas_active
     from .whoisfreaks_client import whoisfreaks_active
@@ -48,6 +58,7 @@ def active_providers() -> dict[str, bool]:
         "ipgeolocation": bool(ipgeo_active()),
         "whoisfreaks": bool(whoisfreaks_active()),
         "netlas": bool(netlas_active()),
+        "brightdata": bool(brightdata_active()),
     }
 
 
@@ -68,8 +79,12 @@ def providers_for_flags(
 
 # Providers whose stored facts are filtered at cross-run reads. (Netlas keeps its
 # deliberate F8 design: the enrichment store is readable without a key.)
-FILTERED_PROVIDERS = ("ipgeolocation", "whoisfreaks")
-_MODULE_PROVIDER = {"ip_intel": "ipgeolocation", "whoisfreaks_intel": "whoisfreaks"}
+FILTERED_PROVIDERS = ("ipgeolocation", "whoisfreaks", "brightdata")
+_MODULE_PROVIDER = {
+    "ip_intel": "ipgeolocation",
+    "whoisfreaks_intel": "whoisfreaks",
+    "linkedin_brightdata": "brightdata",
+}
 
 
 async def allowed_providers_for_run(run_id: str, session=None) -> set[str]:

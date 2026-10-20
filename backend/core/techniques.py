@@ -40,6 +40,7 @@ TECHNIQUES: dict[str, tuple[str, str]] = {
     "hackernews": ("hackernews_profile", "Looking for a Hacker News profile with this username."),
     "twitter_profile": ("twitter_profile", "Reading the public X/Twitter profile for a found username."),
     "linkedin_serp": ("linkedin_search", "Searching LinkedIn for the name found so far."),
+    "linkedin_brightdata": ("linkedin_profile", "Reading the LinkedIn profile that matches this person."),
     "marketplace_profile": ("marketplace_profile", "Reading Etsy and eBay profiles for a found username."),
     "messaging_hints": ("messaging_hints", "Checking Telegram and WhatsApp for a found username or phone."),
     "phone_intel": ("phone_check", "Checking phone numbers found so far."),

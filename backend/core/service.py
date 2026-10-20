@@ -437,6 +437,10 @@ class InvestigationService:
                     off_modules.add("ip_intel")
                 if not whoisfreaks_active(no_whoisfreaks=no_whoisfreaks):
                     off_modules.add("whoisfreaks_intel")
+                from .brightdata_client import brightdata_active
+
+                if not brightdata_active():
+                    off_modules.add("linkedin_brightdata")
                 if any(run.module_name in off_modules for run in runs):
                     recent = None
             if recent is not None:
