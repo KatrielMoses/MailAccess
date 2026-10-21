@@ -38,17 +38,19 @@ def _run(defn, status, body):
 
 
 @pytest.mark.parametrize("site_id", list(FIXTURES))
-def test_extended_def_discriminates(site_id):
+def test_registration_def_discriminates(site_id):
+    # Adobe is a Class-1 major — UC7.3 moved it ON by default (no longer behind the
+    # extended-off gate). It must still classify a registered vs unregistered address.
     defn = ported_sites()[site_id]
-    assert defn.get("default_off") is True, f"{site_id} must be default_off"
     reg, unreg = FIXTURES[site_id]
     assert _run(defn, *reg)["exists"] is True, f"{site_id}: registered should be exists"
     assert _run(defn, *unreg)["exists"] is False, f"{site_id}: unregistered should be absent"
 
 
 def test_every_extended_def_has_a_fixture():
-    """No extended def ships without a both-ways classification fixture (UC2.1)."""
+    """Any def still behind the extended-off gate must carry a both-ways fixture. UC7.3
+    moved the majors (Adobe) on by default, so the gated set can be empty — the gate
+    infra stays for a future bot-walled tail."""
     extended = {s_id for s_id, d in ported_sites().items() if d.get("default_off")}
-    assert extended, "expected at least one default_off def"
     missing = extended - set(FIXTURES)
     assert not missing, f"extended defs with no validation fixture: {sorted(missing)}"
