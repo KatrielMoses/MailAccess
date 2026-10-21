@@ -400,7 +400,10 @@ class InvestigationService:
         """
         from .product_mode import normalize_mode
 
-        canonical_email = normalize_email_address(email).canonical_email
+        # UC5: a target with no "@" is a username run; don't normalise it as an email
+        # and don't serve it from the email cache.
+        username_mode = "@" not in str(email)
+        canonical_email = str(email).strip() if username_mode else normalize_email_address(email).canonical_email
         cached_results = None
         # Resolve the effective mode exactly as the engine does (per-run override
         # else the server default) so the cache key matches the mode actually
@@ -414,6 +417,7 @@ class InvestigationService:
             and settings.enable_investigation_cache
             and module_names is None
             and not enable_modules
+            and not username_mode
         ):
             recent = await self._find_recent_complete(email, canonical_email, mode=resolved_mode)
             if recent is not None:

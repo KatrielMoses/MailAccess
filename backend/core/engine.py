@@ -270,8 +270,14 @@ class InvestigationEngine:
         module_names: list[str] | None = None,
         enable_modules: list[str] | None = None,
     ) -> asyncio.Queue[QueueEvent | None]:
-        normalized = normalize_email_address(email)
-        canonical_email = normalized.canonical_email
+        # UC5: a target with no "@" is a username run — the handle-based half of the
+        # pipeline (sweep, pivot, profile parsers, LinkedIn, card), skipping the
+        # email-only modules (breach, domain, DNS, account_discovery, credibility).
+        username_mode = "@" not in str(email)
+        if username_mode:
+            canonical_email = str(email).strip()
+        else:
+            canonical_email = normalize_email_address(email).canonical_email
         emitter = run_events.create(investigation_id)
         queue: asyncio.Queue[QueueEvent | None] = run_events.FanoutQueue(emitter)
         semaphore = asyncio.Semaphore(self._max_concurrency)
@@ -292,7 +298,10 @@ class InvestigationEngine:
             from ..modules.username_platforms import set_tail_budget
             from .probe_cache import set_no_cache_read
 
-            set_tail_budget(float(getattr(_settings, "username_tail_budget_full_seconds", 15.0) or 0))
+            # UC5: a username run stays lean (sweep + pivot + profile), so no tail —
+            # the core sweep already yields the true hits; the pivot adds the rest.
+            set_tail_budget(0.0 if username_mode
+                            else float(getattr(_settings, "username_tail_budget_full_seconds", 15.0) or 0))
             set_no_cache_read(self._no_cache or self._force)
             run_done_sent = False
             run_error: str | None = None
@@ -345,6 +354,16 @@ class InvestigationEngine:
                 effective_modules = module_names
                 if effective_modules is None and config.investigation_fast_modules:
                     effective_modules = list(config.investigation_fast_modules)
+                if username_mode:
+                    # PrimaryPhase only runs the sweep; the pivot and profile phases run
+                    # their own handle/name-based modules.
+                    effective_modules = ["username_platforms"]
+                    active_dag = tuple(
+                        ph for ph in PHASE_DAG
+                        if ph.name in ("primary", "username_pivot", "profile")
+                    )
+                else:
+                    active_dag = PHASE_DAG
 
                 # First event of the run: sent before any module starts (and before
                 # the status write and DNS gate), so a viewer sees activity at once.
@@ -395,7 +414,7 @@ class InvestigationEngine:
                 # A role/system address (noreply@, info@) is not a person.
                 from .investigation_gate import reset_target_gate, set_target_gate
 
-                domain = current_email.split("@", 1)[1] if "@" in current_email else ""
+                domain = "" if username_mode else (current_email.split("@", 1)[1] if "@" in current_email else "")
                 try:
                     from .name_consensus import is_role_or_system_email
 
@@ -485,7 +504,7 @@ class InvestigationEngine:
                     # module key into ``collected`` — so running them together removes the
                     # old strictly-sequential tail without changing results. Levels still run
                     # in order, so every dependency is satisfied before its dependents start.
-                    for level in _phase_levels(PHASE_DAG):
+                    for level in _phase_levels(active_dag):
                         runnable = [
                             phase for phase in level
                             if not (
