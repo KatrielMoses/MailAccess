@@ -447,10 +447,14 @@ _SITES: list[dict[str, Any]] = [
         "params": {"http_envelope": "1", "locale": "fr"},
         "headers": {"User-Agent": _UA},
         "rules": [
+            # The auth-options endpoint returns an ``email_verified`` flag only for a
+            # real account; a genuinely unknown address returns ``unknown_user``. So
+            # ``email_verified: false`` means the account exists but its email is not
+            # verified — still a registered account, not absent.
             {"when": {"json_eq": {"path": ["body", "email_verified"], "value": True}},
              "verdict": "exists"},
             {"when": {"json_eq": {"path": ["body", "email_verified"], "value": False}},
-             "verdict": "absent"},
+             "verdict": "exists"},
             {"when": {"text_contains": "unknown_user"}, "verdict": "absent"},
             {"when": {"text_contains": "email_login_not_allowed"}, "verdict": "absent"},
         ],
