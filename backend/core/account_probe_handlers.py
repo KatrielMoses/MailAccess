@@ -173,17 +173,22 @@ async def odnoklassniki_recovery(
 
     text = resp.text
     lowered = text.lower()
-    # Recovery-offer container implies the account exists.
-    if "offer_contact_rest" not in lowered and "registrationcontainer" not in lowered:
-        if "home_rest" in lowered:
-            return _empty_record(defn, exists=False)
-        return _empty_record(defn)
-    record = _empty_record(defn, exists=True)
-    extracted = apply_extract_fields(defn, resp, text)
-    record["emailrecovery"] = extracted["emailrecovery"]
-    record["phoneNumber"] = extracted["phoneNumber"]
-    record["others"] = extracted["others"]
-    return record
+    # Existence signal is the recovery-OFFER container (masked email/phone shown because
+    # the account was found) — NOT ``registrationcontainer``, which is page chrome present
+    # on every response (a "register instead" prompt), so keying on it reported every
+    # address, including never-registered ones, as existing (UC7.3 false-positive fix).
+    if "offer_contact_rest" in lowered:
+        record = _empty_record(defn, exists=True)
+        extracted = apply_extract_fields(defn, resp, text)
+        record["emailrecovery"] = extracted["emailrecovery"]
+        record["phoneNumber"] = extracted["phoneNumber"]
+        record["others"] = extracted["others"]
+        return record
+    # No recovery offer: a registration prompt or the home page means OK.ru will not
+    # recover this address — treat it as not found, not unknown.
+    if "registrationcontainer" in lowered or "home_rest" in lowered:
+        return _empty_record(defn, exists=False)
+    return _empty_record(defn)
 
 
 async def okcupid(
