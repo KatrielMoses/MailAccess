@@ -3179,6 +3179,7 @@ async def _investigate(
     no_whoisfreaks: bool = False,
     org_surface_deep: bool = False,
     refresh: bool = False,
+    no_cache: bool = False,
 ) -> int:
     base_url = get_backend_url()
     managed_proc = await _ensure_server_running(base_url, email)
@@ -3210,6 +3211,7 @@ async def _investigate(
             no_whoisfreaks=no_whoisfreaks,
             org_surface_deep=org_surface_deep,
             refresh=refresh,
+            no_cache=no_cache,
         )
     finally:
         if managed_proc is not None:
@@ -3235,6 +3237,7 @@ async def _investigate_run(
     no_whoisfreaks: bool = False,
     org_surface_deep: bool = False,
     refresh: bool = False,
+    no_cache: bool = False,
 ) -> int:
     _apply_scrapingant_transport_override(scrapingant_transport_override)
     base_url = get_backend_url()
@@ -3275,6 +3278,8 @@ async def _investigate_run(
         payload["org_surface_deep"] = True
     if refresh:
         payload["refresh"] = True
+    if no_cache:
+        payload["no_cache"] = True
     if enable_modules_list:
         payload["enable_modules"] = enable_modules_list
         err_console.print(f"[dim]Opt-in modules enabled: {', '.join(enable_modules_list)}[/dim]")
@@ -5150,6 +5155,10 @@ def investigate(
         help="Force fresh Netlas, ipgeolocation.io and WhoisFreaks lookups past their 30-day caches "
              "(needs a key). The store is read either way.",
     ),
+    no_cache: bool = typer.Option(
+        False, "--no-cache",
+        help="Ignore the 7-day probe cache on read (it is still written). For debugging.",
+    ),
 ) -> None:
     """Run a full OSINT investigation against an email address.
     Exit codes: 0=completed 1=failed 2=invalid input 3=server unavailable"""
@@ -5224,6 +5233,7 @@ def investigate(
                 no_whoisfreaks=no_whoisfreaks,
                 org_surface_deep=org_surface_deep,
                 refresh=refresh,
+                no_cache=no_cache,
             )
         )
         if code > max_code:

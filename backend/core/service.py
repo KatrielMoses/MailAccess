@@ -372,6 +372,7 @@ class InvestigationService:
         no_whoisfreaks: bool = False,
         org_surface_deep: bool = False,
         refresh: bool = False,
+        no_cache: bool = False,
     ) -> tuple[str, datetime, asyncio.Queue | None, bool]:
         """
         Persist a new Investigation (PENDING), launch the engine in the
@@ -490,6 +491,7 @@ class InvestigationService:
             no_whoisfreaks=no_whoisfreaks,
             org_surface_deep=org_surface_deep,
             refresh=refresh,
+            no_cache=no_cache,
             cached_results=cached_results,
         )
         queue = await engine.investigate(email, investigation_id, module_names, enable_modules)
