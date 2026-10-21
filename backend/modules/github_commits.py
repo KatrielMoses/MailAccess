@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import Counter
 from typing import Any
 
@@ -8,6 +9,7 @@ import httpx
 from ..config import settings
 from ..core.bio_analyzer import analyze_bio, is_aggregator_url
 from ..core.bio_link_extractor import extract_from_aggregator
+from ..core.common_names import is_common_username
 from ..core.email_confidence import compute_confidence_breakdown, label_for_score
 from ..core.http_client import build_client
 from ..core.rate_limiter import rate_limiter
@@ -16,6 +18,56 @@ from .base import BaseModule, ModuleResult, ModuleStatus
 _GITHUB_API = "https://api.github.com"
 _REPO_FETCH_LIMIT = 5
 _UNKNOWN_LANGUAGE = "Unknown"
+
+# UC7.3b: derive candidate GitHub logins from the email and verify each via the API.
+# GitHub removed the public email->user lookup, so an account that set the email but
+# has no public commits is invisible to the commit/search routes. The local part and the
+# domain tokens are a legitimate handle source (e.g. user@rootbox.io -> user-root);
+# a candidate becomes an account only when GET /users/{login} confirms it against a
+# Class-1 fact (its public email, or a linked site on the subject's domain).
+_GH_LOGIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}$")
+_MAX_DERIVED_HANDLES = 10
+
+
+def _domain_tokens(domain: str) -> list[str]:
+    """The domain label plus a common-word split (``rootbox`` -> root, box)."""
+    label = re.sub(r"[^a-z0-9]", "", (domain or "").split(".")[0].lower())
+    tokens = [label] if len(label) >= 3 else []
+    for i in range(3, len(label) - 2):
+        if is_common_username(label[:i]) or is_common_username(label[i:]):
+            tokens += [label[:i], label[i:]]
+            break
+    return [t for t in dict.fromkeys(tokens) if len(t) >= 3]
+
+
+def derive_github_handles(email: str) -> list[str]:
+    """Candidate GitHub logins from the local part + domain tokens, most-likely first."""
+    if "@" not in (email or ""):
+        return []
+    local = re.sub(r"[^a-z0-9.-]", "", email.split("@", 1)[0].lower())
+    domain = email.split("@", 1)[1]
+    bases = [b for b in dict.fromkeys(
+        [local, local.replace(".", "-"), local.replace(".", "")]) if b]
+    out: list[str] = []
+
+    def add(handle: str) -> None:
+        handle = handle.strip("-").lower()
+        if handle and _GH_LOGIN_RE.match(handle) and handle not in out:
+            out.append(handle)
+
+    for b in bases:
+        add(b)
+    # Domain tokens only for a domain subject — a freemail domain (gmail.com) is a
+    # provider, not an identity, so its tokens are noise.
+    from ..core.evidence import subject_is_freemail
+
+    if not subject_is_freemail(email):
+        for dt in _domain_tokens(domain):
+            for b in bases:
+                add(f"{b}-{dt}")
+                add(f"{b}{dt}")
+            add(dt)
+    return out[:_MAX_DERIVED_HANDLES]
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -84,6 +136,12 @@ class GitHubCommitsModule(BaseModule):
                 findings.extend(user_findings)
                 errors.extend(user_errors)
                 partial = partial or rate_limited
+
+                # UC7.3b: if no GitHub account tied to the email surfaced yet, derive
+                # candidate logins and verify each against a Class-1 fact.
+                if not any(f.get("platform") == "GitHub" and f.get("username") for f in findings):
+                    derived = await self._verify_derived_handles(client, headers, email, domain)
+                    findings.extend(derived)
         except httpx.TimeoutException:
             return ModuleResult(status=ModuleStatus.PARTIAL, errors=["GitHub request timed out"])
         except (httpx.ConnectError, httpx.NetworkError) as exc:
@@ -206,6 +264,51 @@ class GitHubCommitsModule(BaseModule):
             )
         return findings, [], False
 
+    async def _verify_derived_handles(
+        self, client: httpx.AsyncClient, headers: dict[str, str], email: str, domain: str | None
+    ) -> list[dict[str, Any]]:
+        """UC7.3b: GET /users/{login} for each derived candidate; keep the FIRST that a
+        Class-1 fact confirms — its public email matches the subject, or a linked site /
+        bio names the subject's domain. An unconfirmed hit is never shown (the guess is
+        not evidence); a 404 is just a free login."""
+        reg_domain = (domain or "").lower().strip()
+        bare_domain = reg_domain.split(".")[0] if reg_domain else ""
+        for login in derive_github_handles(email):
+            try:
+                resp = await client.get(f"/users/{login}", headers=headers)
+            except (httpx.TimeoutException, httpx.NetworkError):
+                continue
+            if _is_rate_limited(resp):
+                break
+            if resp.status_code != 200:
+                continue
+            try:
+                user = resp.json()
+            except ValueError:
+                continue
+            gh_email = str(user.get("email") or "").lower().strip()
+            blob = " ".join(str(user.get(k) or "") for k in ("blog", "bio", "html_url")).lower()
+            email_match = bool(gh_email) and gh_email == email.lower().strip()
+            domain_match = bool(reg_domain) and (reg_domain in blob or (
+                len(bare_domain) >= 4 and bare_domain in blob))
+            if not (email_match or domain_match):
+                continue
+            how = "public_email" if email_match else "linked_domain"
+            return [{
+                "platform": "GitHub",
+                "profile_url": str(user.get("html_url") or f"https://github.com/{login}"),
+                "username": str(user.get("login") or login),
+                "confidence": "high",
+                "email_linked": True,
+                "metadata": {
+                    "source": "github_commits", "signal": "derived_handle_verified",
+                    "verified_by": how, "display_name": user.get("name") or None,
+                    "avatar_url": user.get("avatar_url") or None,
+                    "location": user.get("location") or None,
+                    "derived_login": login,
+                },
+            }]
+        return []
 
     async def _enrich_commit_repos(
         self,
