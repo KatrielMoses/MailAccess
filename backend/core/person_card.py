@@ -222,14 +222,23 @@ def _mark_direct(accounts: list[dict[str, Any]], data: dict[str, Any]) -> None:
     """
     subj = _subject(data)
     username_subject = subj["type"] == "username"
-    freemail = (not username_subject) and subject_is_freemail(
-        str(data.get("original_email") or data.get("email") or data.get("canonical_email") or ""))
+    email = str(data.get("original_email") or data.get("email") or data.get("canonical_email") or "")
+    # UC7.3 r3: a freemail subject keeps corroborated Class-2 ONLY when its handle is
+    # specific. A bare common first name (``john@gmail.com``) collides with strangers
+    # exactly like a domain role, so a low-specificity freemail handle is treated as
+    # Class-1 only — the freemail/domain split alone does not catch this.
+    from .common_names import is_specific_handle
+
+    local_part = email.split("@", 1)[0] if "@" in email else ""
+    freemail_specific = (
+        (not username_subject) and subject_is_freemail(email) and is_specific_handle(local_part)
+    )
     subj_handles = _subject_handles(data)
     for a in accounts:
         handle_match = bool(a["handle"] and a["handle"].lower() in subj_handles)
         if username_subject:
             a["_direct"] = bool(a["email_linked"] or a["class1"] or handle_match)
-        elif freemail:
+        elif freemail_specific:
             a["_direct"] = bool(a["email_linked"] or a["class1"] or a["corroborated"])
         else:
             a["_direct"] = bool(a["email_linked"] or a["class1"])

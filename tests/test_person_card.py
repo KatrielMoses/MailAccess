@@ -187,7 +187,8 @@ def test_uc72r2_domain_subject_corroborated_class2_stays_out():
 
 def test_uc72r2_freemail_corroborated_class2_joins():
     """UC7.2 r2: a FREEMAIL subject's local part is their own handle, so a Class-2 match
-    UC7.1 corroborated up to the spine DOES join the identity."""
+    UC7.1 corroborated up to the spine DOES join the identity — when the handle is
+    specific (UC7.3)."""
     data = _report({
         "username_platforms": [
             _acct("GitHub", "janedoe", {"core": True, "display_name": "Jane Doe"}, corroborated=True),
@@ -196,6 +197,33 @@ def test_uc72r2_freemail_corroborated_class2_joins():
     card = build_card(data)
     assert card["accounts"][0]["in_aggregates"] is True
     assert card["counts"]["linked_to_subject"] == 1
+
+
+def test_uc73e_bare_common_firstname_freemail_stays_sparse():
+    """UC7.3 Part 5: a bare common-first-name freemail (local part ``john``) is treated
+    like a domain role — Class-1 only — so a corroborated Class-2 match does NOT blend in,
+    even though the subject is freemail."""
+    data = _report({
+        "username_platforms": [
+            _acct("GitHub", "john", {"core": True, "display_name": "John Smith"}, corroborated=True),
+        ],
+    }, original_email="john@gmail.com", canonical_email="john@gmail.com")
+    card = build_card(data)
+    assert card["accounts"][0]["in_aggregates"] is False
+    assert card["counts"]["linked_to_subject"] == 0
+
+
+def test_uc73e_specific_freemail_handle_keeps_corroborated_class2():
+    """A compound/distinctive freemail handle (``janedoe``) is specific → corroborated
+    Class-2 still joins (owner's photos/locations survive)."""
+    data = _report({
+        "username_platforms": [
+            _acct("GitHub", "janedoe", {"core": True, "display_name": "Jane Doe",
+                                        "avatar_url": "https://a/1.png"}, corroborated=True),
+        ],
+    }, original_email="janedoe@gmail.com", canonical_email="janedoe@gmail.com")
+    card = build_card(data)
+    assert card["accounts"][0]["in_aggregates"] is True
 
 
 def test_names_match_rule():
