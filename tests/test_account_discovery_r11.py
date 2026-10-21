@@ -35,6 +35,9 @@ def tmp_path() -> Iterator[Path]:
 def _setup(monkeypatch: pytest.MonkeyPatch, tmp_path: Any, probe: Any, n: int = 3) -> None:
     monkeypatch.setattr(AD.settings, "enable_account_discovery", True, raising=False)
     monkeypatch.setattr(AD, "_CACHE_DIR", tmp_path)
+    # UC7.4: zero the retry backoff/jitter so the retry-path tests don't sleep for real.
+    monkeypatch.setattr(AD, "_RETRY_BACKOFFS_S", (0.0, 0.0), raising=True)
+    monkeypatch.setattr(AD, "_RETRY_JITTER_S", 0.0, raising=True)
     sites = {
         f"site{i}": {"name": f"site{i}", "id": f"site{i}",
                      "check_type": "email-existence", "domain": f"site{i}.com"}
@@ -139,15 +142,17 @@ async def test_blocked_sweep_reprobes_on_next_run(
         calls["n"] += 1
         return _rec(defn, exists=None, rate=True)
 
+    monkeypatch.setattr(AD, "_RETRY_BACKOFFS_S", (0.0, 0.0), raising=True)  # fast test
+    monkeypatch.setattr(AD, "_RETRY_JITTER_S", 0.0, raising=True)
     _setup(monkeypatch, tmp_path, probe)
     await AD.AccountDiscoveryModule().run("jane@corp.com")
     first = calls["n"]
-    # UC7.2: each rate-limited check gets ONE bounded retry, so 3 defns => 6 probes
-    # (the mock stays rate-limited, so the retry doesn't clear it here).
-    assert first == 6
+    # UC7.4: a rate-limited check gets up to 2 retries, so 3 defns => 9 probes (the mock
+    # stays rate-limited, so the retries don't clear it here).
+    assert first == 9
     # Second run must actually probe again (nothing cached from the blocked sweep).
     await AD.AccountDiscoveryModule().run("jane@corp.com")
-    assert calls["n"] == first + 6
+    assert calls["n"] == first + 9
 
 
 async def test_transient_rate_limit_recovered_by_retry(
@@ -164,7 +169,40 @@ async def test_transient_rate_limit_recovered_by_retry(
             return _rec(defn, exists=None, rate=True)   # first attempt: throttled
         return _rec(defn, exists=True)                   # retry: clears, real hit
 
+    monkeypatch.setattr(AD, "_RETRY_BACKOFFS_S", (0.0, 0.0), raising=True)
+    monkeypatch.setattr(AD, "_RETRY_JITTER_S", 0.0, raising=True)
     _setup(monkeypatch, tmp_path, probe)
     result = await AD.AccountDiscoveryModule().run("jane@corp.com")
     assert len(result.findings) == 3                     # all three recovered on retry
     assert not result.metadata.get("rate_limited")
+
+
+async def test_retry_deadline_bounds_the_pool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """UC7.4: with the per-run retry pool exhausted, no retries fire — the check stays
+    unknown rather than ballooning the run."""
+    calls = {"n": 0}
+
+    async def probe(client: Any, sem: Any, defn: dict, email: str, **kw: Any) -> dict:
+        calls["n"] += 1
+        return _rec(defn, exists=None, rate=True)
+
+    monkeypatch.setattr(AD, "_MAX_RETRY_WALL_S", 0.0, raising=True)  # pool already spent
+    _setup(monkeypatch, tmp_path, probe)
+    await AD.AccountDiscoveryModule().run("jane@corp.com")
+    assert calls["n"] == 3  # one attempt per defn, no retries
+
+
+def test_retry_after_parser():
+    """UC7.4: Retry-After delta-seconds and HTTP-date parse to a bounded seconds value."""
+    from backend.core.account_probe_ported import _retry_after_seconds
+
+    class _Resp:
+        def __init__(self, v):
+            self.headers = {"retry-after": v} if v is not None else {}
+
+    assert _retry_after_seconds(_Resp("5")) == 5.0
+    assert _retry_after_seconds(_Resp("99999")) == 60.0        # capped
+    assert _retry_after_seconds(_Resp("not-a-number")) is None
+    assert _retry_after_seconds(_Resp(None)) is None

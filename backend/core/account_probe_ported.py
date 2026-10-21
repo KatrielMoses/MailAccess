@@ -28,6 +28,33 @@ import httpx
 
 from .account_probe import _empty_record
 
+
+def _retry_after_seconds(response: Any) -> float | None:
+    """UC7.4: parse a ``Retry-After`` header (delta-seconds or HTTP-date) to seconds, or
+    None. Capped to a sane ceiling so a hostile header can't stall a run."""
+    try:
+        raw = response.headers.get("retry-after")
+    except Exception:  # noqa: BLE001 - defensive; a header-less response just has none
+        return None
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    try:
+        return max(0.0, min(float(raw), 60.0))
+    except ValueError:
+        pass
+    try:
+        from datetime import datetime, timezone
+        from email.utils import parsedate_to_datetime
+
+        when = parsedate_to_datetime(raw)
+        if when is not None:
+            delta = (when - datetime.now(timezone.utc)).total_seconds()
+            return max(0.0, min(delta, 60.0))
+    except Exception:  # noqa: BLE001 - unparseable date → no hint
+        return None
+    return None
+
 _LOG = logging.getLogger(__name__)
 
 _SPEC_HANDLER = "ported_spec"
@@ -197,12 +224,14 @@ async def run_spec(
             if verdict == "absent":
                 return _empty_record(defn, exists=False)
             if verdict == "rate_limited":
-                return _empty_record(defn, rate_limited=True)
+                return _empty_record(defn, rate_limited=True,
+                                     retry_after=_retry_after_seconds(response))
             return _empty_record(defn, exists=None)
 
     default = str(spec.get("default") or "inconclusive")
     if default == "rate_limited":
-        return _empty_record(defn, rate_limited=True)
+        return _empty_record(defn, rate_limited=True,
+                             retry_after=_retry_after_seconds(response))
     if default == "absent":
         return _empty_record(defn, exists=False)
     return _empty_record(defn, exists=None)

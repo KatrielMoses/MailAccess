@@ -44,8 +44,9 @@ def default_health_key(defn: dict[str, Any]) -> str:
 
 def _empty_record(defn: dict[str, Any], *, rate_limited: bool = False,
                   transport_error: bool = False,
-                  exists: bool | None = None) -> dict[str, Any]:
-    return {
+                  exists: bool | None = None,
+                  retry_after: float | None = None) -> dict[str, Any]:
+    record = {
         "name": defn.get("name") or defn.get("id"),
         "domain": defn.get("domain") or "",
         "method": defn.get("flow") or "other",
@@ -62,6 +63,10 @@ def _empty_record(defn: dict[str, Any], *, rate_limited: bool = False,
         "phoneNumber": None,
         "others": None,
     }
+    # UC7.4: carry the site's Retry-After hint (seconds) so the retry path can honour it.
+    if retry_after is not None:
+        record["retry_after"] = retry_after
+    return record
 
 
 def _mask_email(value: str) -> str:

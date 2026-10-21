@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import random
 import time
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,12 @@ _LOG = logging.getLogger(__name__)
 # site list) changes materially.
 ENGINE_VERSION = "mailaccess-account-probe/1.0"
 _CONCURRENCY = 20
-_RETRY_BACKOFF_S = 1.5  # UC7.2: cool-off before the single retry of a throttled check
+# UC7.4: a throttled ("unknown") check gets up to 2 retries with exponential backoff +
+# jitter, honouring Retry-After when the site sends one. Bounded by a per-run wall-clock
+# pool so retries can never balloon the investigation.
+_RETRY_BACKOFFS_S = (1.5, 4.0)  # two retries; exponential (next step would be ~8s)
+_RETRY_JITTER_S = 0.5
+_MAX_RETRY_WALL_S = 30.0
 
 _CACHE_DIR = Path.home() / ".mailaccess" / "cache" / "account_discovery"
 _CACHE_TTL = 21_600  # 6 hours
@@ -211,6 +217,8 @@ class AccountDiscoveryModule(BaseModule):
         sem = asyncio.Semaphore(_CONCURRENCY)
         progress_done = 0
         progress_total = len(probeable)
+        # UC7.4: shared, bounded wall-clock pool for all retries this run.
+        retry_deadline = time.monotonic() + _MAX_RETRY_WALL_S
 
         async def _run_one(defn: dict[str, Any], client: Any) -> dict[str, Any] | None:
             try:
@@ -237,19 +245,33 @@ class AccountDiscoveryModule(BaseModule):
             )
             if record is None:
                 return None
-            # UC7.2: a rate-limited or transport-errored Class-1 check is "unknown", not
-            # a miss — give it ONE bounded retry after a short cool-off (the first pass
-            # runs as a burst, so a transient 429 / resolver timeout often clears). Never
-            # dropped silently; if the retry still can't decide, it stays unknown.
-            if (record.get("rateLimit") or record.get("transportError")):
-                await asyncio.sleep(_RETRY_BACKOFF_S)
+            # UC7.4: a rate-limited / transport-errored check is "unknown", not a miss.
+            # Give it up to 2 retries with exponential backoff + jitter, honouring any
+            # Retry-After the site sent, drawn from a bounded per-run time pool
+            # (``retry_deadline``) so retries can never balloon the run. A clean
+            # not-found is never retried; if it still can't decide, it stays unknown.
+            for attempt in range(len(_RETRY_BACKOFFS_S)):
+                if not (record.get("rateLimit") or record.get("transportError")):
+                    break
+                if time.monotonic() >= retry_deadline:
+                    break  # bounded pool exhausted — leave it unknown, honestly
+                delay = _RETRY_BACKOFFS_S[attempt]
+                hint = record.get("retry_after")
+                if isinstance(hint, (int, float)) and hint > 0:
+                    delay = max(delay, float(hint))
+                delay += random.uniform(0.0, _RETRY_JITTER_S)
+                delay = min(delay, max(0.0, retry_deadline - time.monotonic()))
+                await asyncio.sleep(delay)
                 retry = await probe_site(
                     client, sem, defn, email,
                     no_password_recovery=no_password_recovery,
                 )
-                if retry is not None and retry.get("exists") is not None:
-                    retry.setdefault("dedup_key", defn.get("dedup_key"))
-                    record = retry
+                if retry is None:
+                    break
+                retry.setdefault("dedup_key", defn.get("dedup_key"))
+                record = retry
+                if retry.get("exists") is not None:
+                    break  # decided — done
             record.setdefault("dedup_key", defn.get("dedup_key"))
             if health is not None:
                 outcome = (
