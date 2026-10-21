@@ -14,7 +14,7 @@ from backend.core.evidence import corroborate_username_matches, subject_is_freem
 def _um(host, user, name="", links=None, other_handles=None):
     return {
         "platform": host, "username": user, "profile_url": f"https://{host}/{user}",
-        "label": "username_match",
+        "label": "username_match", "confidence": "low",
         "metadata": {"display_name": name, "links": links or [],
                      "other_handles": other_handles or []},
         "trace": {"module": "username_platforms", "signal_type": "username_match"},
@@ -98,14 +98,25 @@ def test_same_site_confirmed_plus_name_is_confirmed():
     assert _group(match) == "corroborated"
 
 
-def test_cross_site_handle_name_consistency_promotes():
-    """Same handle + same name on two sites corroborates even without a confirmed name."""
+def test_cross_site_handle_name_consistency_promotes_for_freemail():
+    """Freemail: same handle + same name on two sites corroborates (no confirmed name)."""
+    a = _um("siteone.example", "jdoe", "Jamie Doe")
+    b = _um("sitetwo.example", "jdoe", "Jamie Doe")
+    rows = [("username_platforms", a), ("username_platforms", b)]
+    corroborate_username_matches(rows, "jdoe@gmail.com", {"confirmed_name": None})
+    assert _tier(a) == "possible" and _tier(b) == "possible"
+    assert a["trace"]["username_corroboration"]["cross_site"] is True
+
+
+def test_cross_site_alone_does_not_promote_for_domain_subject():
+    """Domain: a handle consistent elsewhere is a role-name collision, not the owner —
+    cross-site consistency alone must NOT promote it (stays grouped)."""
     a = _um("siteone.example", "jdoe", "Jamie Doe")
     b = _um("sitetwo.example", "jdoe", "Jamie Doe")
     rows = [("username_platforms", a), ("username_platforms", b)]
     corroborate_username_matches(rows, "jdoe@acme.test", {"confirmed_name": None})
-    assert _tier(a) == "possible" and _tier(b) == "possible"
-    assert a["trace"]["username_corroboration"]["cross_site"] is True
+    assert a["trace"]["username_corroboration"]["cross_site"] is True  # signal observed
+    assert _tier(a) == "none" and _group(a) == "uncorroborated"  # but not promoted
 
 
 def test_linkback_to_confirmed_handle_promotes():
@@ -118,3 +129,20 @@ def test_linkback_to_confirmed_handle_promotes():
     corroborate_username_matches(rows, "sampleperson@acme.test", {"confirmed_name": None})
     assert match["trace"]["username_corroboration"]["link_back"] is True
     assert _tier(match) == "possible"
+
+
+def test_label_and_confidence_follow_tier():
+    """UC7.1b: label + confidence track the corroboration tier; bare stays low."""
+    bare = _um("rand.example", "roleuser")
+    poss = _um("medium.com", "sampleperson", "Sample Person")
+    conf = _um("github.com", "sampleperson", "Sample Person")
+    rows = [
+        ("username_platforms", bare),
+        ("username_platforms", poss),
+        ("username_platforms", conf),
+        ("account_discovery", _confirmed("github.com", "sampleperson", "Sample Person")),
+    ]
+    corroborate_username_matches(rows, "sampleperson@gmail.com", {"confirmed_name": "Sample Person"})
+    assert bare["label"] == "username_match" and bare["confidence"] == "low"
+    assert poss["label"] == "possible" and poss["confidence"] == "medium"
+    assert conf["label"] == "confirmed" and conf["confidence"] == "high"

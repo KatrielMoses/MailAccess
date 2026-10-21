@@ -160,6 +160,14 @@ def evidence_label(finding: dict[str, Any], module: str | None = None) -> str:
         infer_module(finding, module), finding
     )
     if stype == SIG_USERNAME:
+        # UC7.1b: a corroborated local-part match follows its corroboration tier; a
+        # bare collision stays username_match. ``corroborate_username_matches`` sets
+        # the tier (absent until then, so this is a no-op during the live run).
+        tier = str((trace.get("username_corroboration") or {}).get("tier") or "")
+        if tier == CONFIRMED:
+            return CONFIRMED
+        if tier == POSSIBLE:
+            return POSSIBLE
         return USERNAME_MATCH
     signals = {str(s) for s in (trace.get("signal_types") or []) if s} | {stype}
     signals.discard(SIG_USERNAME)
@@ -800,9 +808,18 @@ def corroborate_username_matches(
             "same_site_confirmed": same_site_confirmed,
             "domain_context": domain_context,
         }
+        # Cross-site handle/name consistency ties the handle to a named person, but for
+        # a DOMAIN subject that person is not necessarily the role owner — a handle
+        # collision elsewhere. So it corroborates for freemail only (there the local
+        # part is the subject's own handle). Domain subjects lean on name agreement,
+        # a link back, a same-site confirmation, or the domain's own context.
+        corroborated = (
+            name_agree or link_back or same_site_confirmed
+            or (cross_site if freemail else domain_context)
+        )
         if name_agree and same_site_confirmed:
             tier = CONFIRMED
-        elif name_agree or cross_site or link_back or domain_context or same_site_confirmed:
+        elif corroborated:
             tier = POSSIBLE
         else:
             tier = "none"
@@ -815,6 +832,14 @@ def corroborate_username_matches(
         elif not freemail:
             meta["localpart_group"] = "uncorroborated"
         f.setdefault("metadata", meta)
+        # UC7.1b: label + confidence follow the tier. refresh_label re-reads the tier
+        # via evidence_label; confidence tracks the richer label (a bare collision
+        # stays username_match / low).
+        label = refresh_label(f)
+        if label == CONFIRMED:
+            f["confidence"] = "high"
+        elif label == POSSIBLE:
+            f["confidence"] = "medium"
 
 
 _TITLES = {
