@@ -23,6 +23,7 @@ _LOG = logging.getLogger(__name__)
 # site list) changes materially.
 ENGINE_VERSION = "mailaccess-account-probe/1.0"
 _CONCURRENCY = 20
+_RETRY_BACKOFF_S = 1.5  # UC7.2: cool-off before the single retry of a throttled check
 
 _CACHE_DIR = Path.home() / ".mailaccess" / "cache" / "account_discovery"
 _CACHE_TTL = 21_600  # 6 hours
@@ -236,6 +237,19 @@ class AccountDiscoveryModule(BaseModule):
             )
             if record is None:
                 return None
+            # UC7.2: a rate-limited or transport-errored Class-1 check is "unknown", not
+            # a miss — give it ONE bounded retry after a short cool-off (the first pass
+            # runs as a burst, so a transient 429 / resolver timeout often clears). Never
+            # dropped silently; if the retry still can't decide, it stays unknown.
+            if (record.get("rateLimit") or record.get("transportError")):
+                await asyncio.sleep(_RETRY_BACKOFF_S)
+                retry = await probe_site(
+                    client, sem, defn, email,
+                    no_password_recovery=no_password_recovery,
+                )
+                if retry is not None and retry.get("exists") is not None:
+                    retry.setdefault("dedup_key", defn.get("dedup_key"))
+                    record = retry
             record.setdefault("dedup_key", defn.get("dedup_key"))
             if health is not None:
                 outcome = (
