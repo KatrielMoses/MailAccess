@@ -36,6 +36,33 @@ _PHOTO_DISTANCE = 6  # perceptual-hash Hamming distance for "same photo"
 _AVATAR_FETCH_CAP = 8
 _AVATAR_TIMEOUT_S = 5.0
 
+# UC7.2: the identity spine. Class 1 = email-anchored signals (the email itself proves
+# the account); a Class-2 username/local-part guess only joins the identity when UC7.1
+# corroborated it up to the spine. See dev/UC-IDENTITY-ARCHITECTURE.md.
+from .evidence import (  # noqa: E402 - small, stable constant set; avoids a cycle at call time
+    SIG_BREACH, SIG_GRAVATAR, SIG_LOCALPART, SIG_PROVIDER, SIG_PUBLIC_RECORD,
+    SIG_REGISTRATION, SIG_SIGNIN_PROBE, SIG_USERNAME, signal_type_for,
+)
+
+_CLASS1_SIGNALS = frozenset({
+    SIG_REGISTRATION, SIG_SIGNIN_PROBE, SIG_PUBLIC_RECORD, SIG_PROVIDER, SIG_GRAVATAR, SIG_BREACH,
+})
+_CLASS2_SIGNALS = frozenset({SIG_USERNAME, SIG_LOCALPART})
+
+
+def _finding_signal(module: str, f: dict[str, Any]) -> str:
+    trace = f.get("trace") if isinstance(f.get("trace"), dict) else {}
+    return str(trace.get("signal_type") or "") or signal_type_for(module, f)
+
+
+def _finding_corroborated(f: dict[str, Any]) -> bool:
+    """UC7.1 lifted this Class-2 match up to the spine (freemail-aware)."""
+    meta = _meta(f) if isinstance(f, dict) else {}
+    if meta.get("localpart_group") == "corroborated":
+        return True
+    trace = f.get("trace") if isinstance(f.get("trace"), dict) else {}
+    return (trace.get("username_corroboration") or {}).get("tier") in ("possible", "confirmed")
+
 
 # ── small helpers ───────────────────────────────────────────────────────────
 
@@ -149,6 +176,7 @@ def _collect_accounts(data: dict[str, Any]) -> list[dict[str, Any]]:
                 "platform": f.get("platform"), "handle": handle or None,
                 "url": f.get("profile_url"), "modules": [], "confidence": "low",
                 "tier": _tier(meta), "email_linked": False, "_metas": [],
+                "class1": False, "corroborated": False,
             }
             by_key[key] = entry
         if module not in entry["modules"]:
@@ -156,6 +184,12 @@ def _collect_accounts(data: dict[str, Any]) -> list[dict[str, Any]]:
         entry["_metas"].append((module, meta, f))
         entry["email_linked"] = entry["email_linked"] or bool(f.get("email_linked")) \
             or module in _EMAIL_LINKED_MODULES
+        # UC7.2: identity class per account — Class-1 (email-anchored signal) or a
+        # Class-2 match UC7.1 corroborated up to the spine.
+        if _finding_signal(module, f) in _CLASS1_SIGNALS:
+            entry["class1"] = True
+        if _finding_corroborated(f):
+            entry["corroborated"] = True
         if _CONF_RANK.get(str(f.get("confidence") or "").lower(), 0) > _CONF_RANK.get(entry["confidence"], 0):
             entry["confidence"] = str(f.get("confidence") or "low").lower()
         # a core-site hit outranks a tail hit
@@ -170,10 +204,21 @@ def _collect_accounts(data: dict[str, Any]) -> list[dict[str, Any]]:
 # ── 1f collision guard ──────────────────────────────────────────────────────
 
 def _mark_direct(accounts: list[dict[str, Any]], data: dict[str, Any]) -> None:
-    """Pass 1: email-linked, or found under a searched handle variant."""
+    """Pass 1 (UC7.2): the identity spine is Class 1. A direct tie is email-linked, a
+    Class-1 signal, or a Class-2 match UC7.1 corroborated up to the spine. A bare
+    ``username_match`` / ``localpart_guess`` — the handle merely equals a searched
+    local-part variant — is NOT a direct tie for an email subject (that is the Class-2
+    blend that merged strangers into one person). In ``--username`` mode the handle IS
+    the identity, so a handle match stays direct there."""
+    subj = _subject(data)
+    username_subject = subj["type"] == "username"
     subj_handles = _subject_handles(data)
     for a in accounts:
-        a["_direct"] = bool(a["email_linked"] or (a["handle"] and a["handle"].lower() in subj_handles))
+        handle_match = bool(a["handle"] and a["handle"].lower() in subj_handles)
+        a["_direct"] = bool(
+            a["email_linked"] or a["class1"] or a["corroborated"]
+            or (handle_match and username_subject)
+        )
         a["in_aggregates"] = a["_direct"]
 
 
