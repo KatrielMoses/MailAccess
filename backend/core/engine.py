@@ -521,6 +521,14 @@ class InvestigationEngine:
                     # site that rest on different signal types are linked, BEFORE the
                     # graph is built (the graph filters on the label).
                     evidence.annotate_results(collected, current_email)
+                    # UC5: hash avatars (cap 8, host-politeness) so the person card can
+                    # drop duplicate photos. Best-effort; writes into finding metadata.
+                    try:
+                        from .person_card import attach_avatar_hashes
+
+                        await attach_avatar_hashes(collected)
+                    except Exception:  # noqa: BLE001 - photo hashing is additive
+                        logger.debug("avatar hashing skipped", exc_info=True)
                     graph_data = await _build_graph_with_timeout(
                         current_email, collected, name_consensus=name_consensus
                     )
