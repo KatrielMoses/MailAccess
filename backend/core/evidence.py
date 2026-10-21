@@ -642,6 +642,181 @@ def annotate_results(results: dict[str, Any], email: str) -> None:
     corroborate(results)
 
 
+# --------------------------------------------------------------------------- UC7.1
+# Context-aware corroboration for local-part username matches. A bare username-sweep
+# hit (origin = the email's local part) says only "some @handle exists here"; for a
+# common handle that is 100+ different people. This pass uses the rest of the report
+# as context — the confirmed accounts, the cross-site handle/name consistency, the
+# subject's own domain context — to decide whether each such match is plausibly the
+# subject, and tags it so the view can promote the corroborated ones and group the
+# rest. It never drops a finding and never probes: purely scoring/surfacing over
+# findings already collected. UC7.1b makes the label and confidence follow the tier.
+
+_FREEMAIL_FALLBACK = frozenset({
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
+    "proton.me", "protonmail.com", "yahoo.com", "icloud.com", "aol.com", "gmx.com",
+})
+
+
+def _names_agree(a: Any, b: Any) -> bool:
+    """First and last name agree (initials allowed). Local mirror of
+    ``person_card.names_match`` so evidence.py stays import-light."""
+    wa = [w for w in re.split(r"[^a-z]+", str(a or "").lower()) if w]
+    wb = [w for w in re.split(r"[^a-z]+", str(b or "").lower()) if w]
+    if len(wa) < 2 or len(wb) < 2 or wa[-1] != wb[-1]:
+        return False
+    fa, fb = wa[0], wb[0]
+    return fa == fb or (len(fa) == 1 and fb.startswith(fa)) or (len(fb) == 1 and fa.startswith(fb))
+
+
+def subject_is_freemail(email: str) -> bool:
+    """True when the subject address is a freemail account (local part = a chosen
+    handle), False for a domain address (local part = a role on that domain)."""
+    if not email or "@" not in email:
+        return False
+    domain = email.rsplit("@", 1)[-1].strip().lower()
+    try:
+        from ..modules.domain_intel import _FREE_PROVIDERS
+        providers = _FREE_PROVIDERS
+    except Exception:  # noqa: BLE001 - keep the pass working if the import shape changes
+        providers = _FREEMAIL_FALLBACK
+    return bool(domain) and domain in providers
+
+
+def _link_hosts(meta: dict[str, Any]) -> set[str]:
+    hosts: set[str] = set()
+    for link in meta.get("links") or []:
+        host = site_of_url(str(link)) if isinstance(link, str) else ""
+        if host:
+            hosts.add(host.removeprefix("www."))
+    return hosts
+
+
+def _parse_other_handles(meta: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """Return (bare handles, host-ish parts) from ``other_handles`` entries, which come
+    in several shapes: ``handle``, ``@handle``, ``handle@host`` or ``provider:handle``."""
+    handles: set[str] = set()
+    hosts: set[str] = set()
+    for oh in meta.get("other_handles") or []:
+        if not isinstance(oh, str):
+            continue
+        s = oh.strip().lower().lstrip("@")
+        if "@" in s:
+            h, _, host = s.partition("@")
+            if h:
+                handles.add(h)
+            if "." in host:
+                hosts.add(host.removeprefix("www."))
+        elif ":" in s:
+            _, _, h = s.partition(":")
+            if h:
+                handles.add(h)
+        elif s:
+            handles.add(s)
+    return handles, hosts
+
+
+def corroborate_username_matches(
+    rows: list[tuple[str, dict[str, Any]]], email: str, name_consensus: dict[str, Any] | None
+) -> None:
+    """Tag each local-part ``username_match`` with a corroboration tier.
+
+    ``rows`` is ``[(module, finding_data)]`` for the whole report. Writes
+    ``finding['trace']['username_corroboration']`` (flags + ``tier`` in
+    {``none``, ``possible``, ``confirmed``}) and, for a domain subject,
+    ``finding['metadata']['localpart_group']`` (``corroborated`` / ``uncorroborated``).
+    """
+    freemail = subject_is_freemail(email)
+    confirmed_name = str((name_consensus or {}).get("confirmed_name") or "").strip()
+
+    confirmed_hosts: set[str] = set()
+    confirmed_handles: set[str] = set()
+    confirmed_link_hosts: set[str] = set()   # hosts a confirmed account links out to
+    domain_link_hosts: set[str] = set()      # hosts the subject's domain context links to
+    handle_name_hosts: dict[str, dict[str, set[str]]] = {}
+
+    for module, f in rows:
+        if not isinstance(f, dict):
+            continue
+        meta = _meta(f)
+        trace = f.get("trace") if isinstance(f.get("trace"), dict) else {}
+        stype = str(trace.get("signal_type") or "")
+        label = f.get("label")
+        host = (host_key(f) or "").removeprefix("www.")
+        handle = _username(f).lower()
+        name = str(meta.get("display_name") or "").strip()
+        # Cross-site handle/name map: every finding that carries both.
+        if handle and name:
+            handle_name_hosts.setdefault(handle, {}).setdefault(
+                name.lower(), set()
+            ).add(host or module)
+        # An email-tied (non-username) confirmed/possible finding = a real account.
+        if stype and stype != SIG_USERNAME and label in (CONFIRMED, POSSIBLE):
+            if host:
+                confirmed_hosts.add(host)
+            if handle:
+                confirmed_handles.add(handle)
+            confirmed_link_hosts |= _link_hosts(meta)
+            oh_handles, oh_hosts = _parse_other_handles(meta)
+            confirmed_handles |= oh_handles
+            confirmed_link_hosts |= oh_hosts
+        # Domain context: records read directly about the subject's domain (DNS/WHOIS/
+        # website/Wayback carry label None) — the hosts they link out to tie an external
+        # profile back to the domain (not the bare local part, which is circular).
+        if label is None:
+            domain_link_hosts |= _link_hosts(meta)
+
+    for module, f in rows:
+        if not isinstance(f, dict):
+            continue
+        trace = f.get("trace") if isinstance(f.get("trace"), dict) else None
+        if trace is None or trace.get("signal_type") != SIG_USERNAME:
+            continue
+        meta = _meta(f)
+        host = (host_key(f) or "").removeprefix("www.")
+        handle = _username(f).lower()
+        name = str(meta.get("display_name") or "").strip()
+
+        name_agree = bool(confirmed_name) and _names_agree(name, confirmed_name)
+        # Same handle, same name, on >= 2 distinct sites (including this one).
+        cross_site = any(
+            len(hosts) >= 2 for hosts in handle_name_hosts.get(handle, {}).values()
+        )
+        mine_link_hosts = _link_hosts(meta)
+        oh_handles, oh_hosts = _parse_other_handles(meta)
+        link_back = bool(
+            (mine_link_hosts & confirmed_hosts)
+            or (oh_hosts & confirmed_hosts)
+            or (host and host in confirmed_link_hosts)
+            or (oh_handles & confirmed_handles)
+        )
+        same_site_confirmed = bool(host and host in confirmed_hosts)
+        domain_context = bool(not freemail and host and host in domain_link_hosts)
+
+        signals = {
+            "name_agree": name_agree,
+            "cross_site": cross_site,
+            "link_back": link_back,
+            "same_site_confirmed": same_site_confirmed,
+            "domain_context": domain_context,
+        }
+        if name_agree and same_site_confirmed:
+            tier = CONFIRMED
+        elif name_agree or cross_site or link_back or domain_context or same_site_confirmed:
+            tier = POSSIBLE
+        else:
+            tier = "none"
+
+        trace["username_corroboration"] = {**signals, "tier": tier, "freemail": freemail}
+        # Context gate / surfacing flag. Freemail keeps current behaviour (the local
+        # part IS the handle), so only a domain subject's bare matches are grouped away.
+        if tier in (POSSIBLE, CONFIRMED):
+            meta["localpart_group"] = "corroborated"
+        elif not freemail:
+            meta["localpart_group"] = "uncorroborated"
+        f.setdefault("metadata", meta)
+
+
 _TITLES = {
     "dns_mx": "Mail servers (MX)", "dns_spf": "SPF record", "dns_dmarc": "DMARC policy",
     "dns_a": "Web address (A record)", "dns_ns": "Name servers", "whois": "WHOIS registration",

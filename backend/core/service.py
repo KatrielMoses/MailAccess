@@ -184,6 +184,23 @@ def enrich_report(data: dict) -> dict:
         findings_by_module.setdefault(f["module_name"], []).append(f["data"])
     data["findings_by_module"] = findings_by_module
 
+    # UC7.1: context-aware corroboration of local-part username matches. Uses the whole
+    # report (confirmed accounts, cross-site handle/name consistency, the subject's own
+    # domain context) to tag each bare @handle match with a corroboration tier, so the
+    # view can promote the corroborated ones and group the rest. Scoring only — never
+    # drops a finding, never probes.
+    try:
+        from .evidence import corroborate_username_matches
+
+        corroborate_username_matches(
+            [(f["module_name"], f["data"]) for f in findings
+             if isinstance(f, dict) and isinstance(f.get("data"), dict)],
+            data.get("original_email") or data.get("email") or "",
+            data.get("name_consensus"),
+        )
+    except Exception:  # noqa: BLE001 - corroboration is additive; never break the report
+        logging.getLogger(__name__).exception("username corroboration failed")
+
     # UC5: the person card — one summary across the accounts, names, locations, photos,
     # timeline and links the investigation found. A pure function of the findings above
     # (any avatar hashing already ran during the investigation); never fatal.
