@@ -147,6 +147,7 @@ def ranked_usernames(email: str, collected: dict[str, Any]) -> list[tuple[str, i
     Tier 2: usernames from other findings (profile URLs, username fields).
     Tier 3: slugs of names found for this person.
     """
+    from ..core.evidence import subject_is_freemail
     from .linkedin_brightdata import known_names, names_match
 
     names = known_names(collected)
@@ -159,8 +160,13 @@ def ranked_usernames(email: str, collected: dict[str, Any]) -> list[tuple[str, i
         if u not in out or tier < out[u][0]:
             out[u] = (tier, origin)
 
-    local = email.split("@", 1)[0] if "@" in email else ""
-    add(local, 2, {"module": "email", "finding_id": None, "username_match": False})
+    # UC7.2: the raw email local part seeds a pivot only when it is actually the
+    # person's handle — a freemail subject, or a --username subject (no "@"). For a
+    # domain subject the local part is a role, and seeding it launched full @localpart
+    # sweeps across strangers that share the local part.
+    local = email.split("@", 1)[0] if "@" in email else email
+    if local and (subject_is_freemail(email) or "@" not in email):
+        add(local, 2, {"module": "email", "finding_id": None, "username_match": False})
     for module, result in collected.items():
         if module in _THIRD_PARTY_MODULES or not hasattr(result, "findings"):
             continue
@@ -168,12 +174,18 @@ def ranked_usernames(email: str, collected: dict[str, Any]) -> list[tuple[str, i
             if not isinstance(f, dict):
                 continue
             meta = f.get("metadata") if isinstance(f.get("metadata"), dict) else {}
-            origin = {"module": module, "finding_id": f.get("finding_id"),
-                      "username_match": evidence_label(f, module) == "username_match"}
+            is_username_match = evidence_label(f, module) == "username_match"
             verified = module == "github_commits" or (
                 module == "username_platforms" and meta.get("core")
                 and any(names_match(meta.get("display_name"), n) for n in names)
             )
+            # UC7.2: a bare, name-unverified Class-2 match is not a trusted seed — it is
+            # someone who merely shares the handle. Only spine-tied handles (Class-1, or a
+            # core sweep hit whose name matches a known name) pivot.
+            if is_username_match and not verified:
+                continue
+            origin = {"module": module, "finding_id": f.get("finding_id"),
+                      "username_match": is_username_match}
             for handle in [meta.get("profile_username"), meta.get("login")] + [
                 h.split(":", 1)[1] for h in meta.get("other_handles") or []
                 if isinstance(h, str) and ":" in h and not h.startswith("linkedin:")

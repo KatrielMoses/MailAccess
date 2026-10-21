@@ -38,7 +38,12 @@ RECORD = {
 }
 
 
-def _collected(*, name="Jane Doe", links=None, country="IN", handles=("jane.doe",), profiles=1):
+def _collected(*, name="Jane Doe", links=None, country="IN", handles=("jane.doe",), profiles=1,
+               own_link=True):
+    # UC7.2: the card tests exercise the legitimate own-profile-link path (a LinkedIn URL
+    # the person links to earns high); handle-guess tests opt out with own_link=False.
+    if links is None:
+        links = ["https://www.linkedin.com/in/jane-doe/"] if own_link else []
     findings = []
     for i, handle in enumerate(handles):
         findings.append({
@@ -46,7 +51,7 @@ def _collected(*, name="Jane Doe", links=None, country="IN", handles=("jane.doe"
             "profile_url": f"https://site{i}.example/{handle}",
             "metadata": {"core": True, "display_name": name,
                          "location_normalized": {"country_code": country} if country else None,
-                         "links": links or []},
+                         "links": links if i == 0 else []},
         })
     for j in range(profiles - len(findings)):
         findings.append({"platform": f"Extra{j}", "username": "jane.doe", "confidence": "medium",
@@ -79,8 +84,25 @@ def test_url_from_own_profile_link_wins():
 
 
 def test_url_from_handle_prefers_hyphenated_dotted_handle():
-    c = _collected(handles=("janedoe", "jane.doe"))
-    assert lb.find_profile_url(c) == ("https://www.linkedin.com/in/jane-doe/", "handle")
+    # Freemail subject: the local-part sweep handle is the person's own handle.
+    c = _collected(handles=("janedoe", "jane.doe"), own_link=False)
+    assert lb.find_profile_url(c, freemail=True) == ("https://www.linkedin.com/in/jane-doe/", "handle")
+
+
+def test_domain_subject_does_not_guess_linkedin_from_local_part():
+    """UC7.2: for a domain subject a bare local-part sweep handle must NOT seed a slug
+    guess (that surfaced a stranger's profile). No spine handle, no own link => no URL."""
+    c = _collected(handles=("roleuser",), own_link=False)
+    assert lb.find_profile_url(c, freemail=False) is None
+
+
+def test_spine_handle_seeds_the_guess():
+    """A Class-1 account handle (e.g. the GitHub login from a commit-email match) is a
+    trusted seed even for a domain subject — source 'spine_handle'."""
+    c = {"github_commits": ModuleResult(status=ModuleStatus.SUCCESS, findings=[
+        {"platform": "GitHub", "username": "jane-root",
+         "metadata": {"source": "github_commits"}}])}
+    assert lb.find_profile_url(c, freemail=False) == ("https://www.linkedin.com/in/jane-root/", "spine_handle")
 
 
 def test_url_from_serp_slug_last():
@@ -144,6 +166,16 @@ def test_wrong_name_is_discarded(_env):
 def test_no_confirmed_name_means_no_call(_env):
     result = _run(_collected(name="K"))
     assert result.status == ModuleStatus.SKIPPED and _env == []
+
+
+def test_guessed_url_caps_at_medium_even_with_detail(_env):
+    """UC7.2: a slug guess (handle/spine) is never high, even when a second detail
+    agrees — only a link on the person's own profile earns high."""
+    collected = _collected(country="IN", own_link=False)  # handle path, detail agrees
+    result = asyncio.run(lb.LinkedInBrightDataModule().run("jane@gmail.com", collected))
+    assert result.findings and result.findings[0]["metadata"]["url_source"] == "handle"
+    assert result.findings[0]["metadata"]["match"]["second_detail"] in ("country", "link_back")
+    assert result.findings[0]["confidence"] == "medium"  # capped: a guess is never high
 
 
 def test_cache_hit_skips_the_call(_env):

@@ -34,6 +34,26 @@ _LINKEDIN_IN = re.compile(r"linkedin\.com/(?:in|pub)/([A-Za-z0-9%_-]{3,100})", r
 _SLUG = re.compile(r"[a-z0-9-]{3,100}")
 _CACHE_DIR = Path.home() / ".mailaccess" / "cache" / "linkedin_brightdata"
 _MIN_PROFILES_FOR_STRICT = 3
+# UC7.2: handles that come from the email-anchored spine (a Class-1 account proves the
+# email owns it — e.g. the GitHub login from a commit-email match). These are trusted to
+# seed a LinkedIn slug guess; a bare local-part sweep handle is not (that guessed
+# linkedin.com/in/<localpart> and surfaced a stranger).
+_CLASS1_HANDLE_MODULES = frozenset(
+    {"github_commits", "github_domain_commits", "github_code_search", "keybase",
+     "account_discovery", "google_account_intel", "gravatar"}
+)
+
+
+def _spine_handles(collected: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for module, f in _findings(collected):
+        if module not in _CLASS1_HANDLE_MODULES:
+            continue
+        meta = f.get("metadata") or {}
+        h = str(f.get("username") or meta.get("profile_username") or "").strip().lower()
+        if h and h not in out:
+            out.append(h)
+    return out
 
 
 def _findings(collected: dict[str, Any]):
@@ -58,8 +78,23 @@ def profile_url(slug: str) -> str:
     return f"https://www.linkedin.com/in/{slug.strip('/').lower()}/"
 
 
-def find_profile_url(collected: dict[str, Any]) -> tuple[str, str] | None:
-    """``(url, source)`` with source ``own_link`` | ``handle`` | ``serp``, or None."""
+def _ordered_slugs(handles: Any) -> list[str]:
+    """Valid LinkedIn slugs from handles: a dotted handle as its hyphen form first
+    (LinkedIn's usual ``first-last``), then as-is. Preserves order, drops duplicates."""
+    handles = list(handles)
+    out: list[str] = []
+    for handle in [h.replace(".", "-") for h in handles if "." in h] + handles:
+        if (handle and _SLUG.fullmatch(handle) and not handle.startswith("-")
+                and not handle.endswith("-") and handle not in out):
+            out.append(handle)
+    return out
+
+
+def find_profile_url(collected: dict[str, Any], *, freemail: bool = False) -> tuple[str, str] | None:
+    """``(url, source)`` with source ``own_link`` | ``spine_handle`` | ``handle`` |
+    ``serp``, or None. UC7.2: a slug guess is seeded from a spine-derived (Class-1)
+    handle first; the raw local-part sweep handle is used only for a freemail subject
+    (where the local part is the person's own handle), never for a domain subject."""
     for module, f in _findings(collected):
         if module in ("linkedin_serp", "linkedin_brightdata"):
             continue
@@ -71,14 +106,15 @@ def find_profile_url(collected: dict[str, Any]) -> tuple[str, str] | None:
                 return profile_url(m.group(1)), "own_link"
             if text.startswith("linkedin:") and _SLUG.fullmatch(text[9:].lower()):
                 return profile_url(text[9:]), "own_link"
-    handles: list[str] = []
-    for module, f in _findings(collected):
-        if module == "username_platforms" and (f.get("metadata") or {}).get("core"):
-            handle = str(f.get("username") or "").lower()
-            if handle and handle not in handles:
-                handles.append(handle)
-    for handle in [h.replace(".", "-") for h in handles if "." in h] + handles:
-        if _SLUG.fullmatch(handle) and not handle.startswith("-") and not handle.endswith("-"):
+    # Spine-derived handle (Class-1) — trusted regardless of subject class.
+    for handle in _ordered_slugs(_spine_handles(collected)):
+        return profile_url(handle), "spine_handle"
+    # Local-part sweep handle — a guess, only trusted for a freemail subject.
+    if freemail:
+        handles = [str(f.get("username") or "").lower()
+                   for module, f in _findings(collected)
+                   if module == "username_platforms" and (f.get("metadata") or {}).get("core")]
+        for handle in _ordered_slugs(dict.fromkeys(h for h in handles if h)):
             return profile_url(handle), "handle"
     for _module, f in _findings({"linkedin_serp": (collected or {}).get("linkedin_serp")}):
         m = _LINKEDIN_IN.search(str(f.get("profile_url") or (f.get("metadata") or {}).get("linkedin_url") or ""))
@@ -299,7 +335,9 @@ class LinkedInBrightDataModule(BaseModule):
             return ModuleResult(status=ModuleStatus.SKIPPED, errors=["Runs in the profile phase only"])
         if not brightdata_active():
             return ModuleResult(status=ModuleStatus.SKIPPED, errors=["Bright Data is not configured"])
-        found = find_profile_url(collected)
+        from ..core.evidence import subject_is_freemail
+
+        found = find_profile_url(collected, freemail=subject_is_freemail(email))
         if not found:
             return ModuleResult(status=ModuleStatus.SKIPPED, errors=["No LinkedIn profile URL found"])
         url, url_source = found
@@ -327,11 +365,16 @@ class LinkedInBrightDataModule(BaseModule):
             return ModuleResult(status=ModuleStatus.SUCCESS_EMPTY,
                                 metadata={**meta_out, "discarded": "no_second_detail"})
         slug = url.rstrip("/").rsplit("/", 1)[-1]
+        # UC7.2: a guessed slug (spine-derived or local-part) is never "high" — only a
+        # LinkedIn link found on the person's OWN profile earns high, and only with a
+        # corroborating second detail. A guess caps at medium even when a detail agrees.
+        is_guess = url_source != "own_link"
+        confidence = "high" if (detail and not is_guess) else "medium"
         finding = {
             "platform": "LinkedIn",
             "profile_url": url,
             "username": slug,
-            "confidence": "high" if detail else "medium",
+            "confidence": confidence,
             "source": "linkedin_brightdata",
             "metadata": {
                 **card,
