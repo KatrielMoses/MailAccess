@@ -324,6 +324,14 @@ class Settings(BaseSettings):
     # authorized, consented testing only.
     enable_forgot_password_probes: bool = False
 
+    # UC2.1 extended email-registration checks: additional signup/login "is this
+    # email registered" definitions tagged ``default_off``. These are public,
+    # logged-out, non-notifying checks (no password-reset email, no SMS), but they
+    # are OFF by default in the open-source engine so a plain ``pip install`` run
+    # probes only the built-in set. The website/prod config sets this true to run
+    # them. The existing ~130 definitions are unaffected either way.
+    enable_extended_registration_checks: bool = False
+
     # Headless-browser email-existence oracles (email-first login step-transition
     # + forgot-password). Email-first sends NO email and is on by default; it is
     # inert unless the optional `mailaccess[browser]` (Playwright) extra is

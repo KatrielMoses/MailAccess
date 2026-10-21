@@ -125,6 +125,16 @@ Silence the check with `MAILACCESS_NO_UPDATE_CHECK=1`. Prefer email? [Get releas
 
 - `ip_intel`: enrich already-collected IPs with location, owner, risk flags and abuse contact using an optional ipgeolocation.io key. Configure with `mailaccess ipgeo set-key`; `--no-ipgeo` skips fresh calls and `--refresh` bypasses the 30-day cache. Free plans supply location and ASN; paid plans add company, security and abuse data.
 
+### Extended registration checks
+
+`account_discovery` probes a built-in set of public, logged-out "is this email
+registered" checks. An additional set of such checks (more platforms) ships tagged
+`default_off` and is **off by default** in the open-source engine — a plain install
+probes only the built-in set. Turn them on with
+`ENABLE_EXTENDED_REGISTRATION_CHECKS=true` (the hosted service runs them). They are
+public signup/login checks only: none sends the subject a password-reset email or SMS
+(those remain behind `ENABLE_FORGOT_PASSWORD_PROBES`).
+
 ## API Keys
 
 Most modules work with zero keys. Optional keys unlock more coverage. Full list in [docs/api-keys.md](docs/api-keys.md).

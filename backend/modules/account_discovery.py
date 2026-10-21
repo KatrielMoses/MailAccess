@@ -178,12 +178,18 @@ class AccountDiscoveryModule(BaseModule):
         allow_intrusive = bool(
             getattr(settings, "enable_forgot_password_probes", False)
         )
+        # UC2.1: extended registration checks (``default_off``) run only when the
+        # operator opts in; the OSS default probes the built-in set only.
+        allow_extended = bool(
+            getattr(settings, "enable_extended_registration_checks", False)
+        )
         probeable = [
             defn
             for defn in sites.values()
             if defn.get("check_type") == "email-existence"
             and not defn.get("disabled")
             and (allow_intrusive or not defn.get("intrusive"))
+            and (allow_extended or not defn.get("default_off"))
         ]
 
         no_password_recovery = bool(

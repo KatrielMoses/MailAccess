@@ -214,8 +214,8 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 
 def _site(site_id: str, domain: str, category: str, flow: str, spec: dict[str, Any],
-          *, high_value: bool = False) -> dict[str, Any]:
-    return {
+          *, high_value: bool = False, default_off: bool = False) -> dict[str, Any]:
+    defn = {
         "id": site_id,
         "name": site_id,
         "domain": domain,
@@ -226,6 +226,11 @@ def _site(site_id: str, domain: str, category: str, flow: str, spec: dict[str, A
         "high_value": high_value,
         "spec": spec,
     }
+    # UC2.1: extended registration checks run only when the operator opts in
+    # (settings.enable_extended_registration_checks); off in the OSS default.
+    if default_off:
+        defn["default_off"] = True
+    return defn
 
 
 # ---------------------------------------------------------------------------
