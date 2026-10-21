@@ -15,7 +15,19 @@ from ..core.http_client import build_client
 from ..core.platform_health import PlatformHealthDB, get_health_db
 from ..core.probe_detector import probe_platform, username_matches_regex
 from ..core.profiles import FIELD_KEYS as PROFILE_FIELD_KEYS
+from contextvars import ContextVar
+
+from ..core import probe_cache
 from ..core.profiles import enrich as enrich_profile
+
+# UC4: the engine sets this for a full investigation so the non-core tail runs for
+# ``username_tail_budget_full_seconds``; a direct (sweep-mode) call leaves it unset and
+# the core sweep alone is measured.
+_TAIL_BUDGET: ContextVar[float | None] = ContextVar("mailaccess_username_tail_budget", default=None)
+
+
+def set_tail_budget(seconds: float | None):
+    return _TAIL_BUDGET.set(seconds)
 from ..core.username_sites import load_username_sites
 from .base import BaseModule, ModuleResult, ModuleStatus
 
@@ -251,6 +263,10 @@ def _finding(
         # UC2: what the site answered (JSON or HTML <head>), for UC3 parsers.
         if profile.get("_probe_response"):
             finding["metadata"]["probe_response"] = profile["_probe_response"]
+        # UC4: served from the 7-day cache (the result's age, for "checked N days ago").
+        if profile.get("cached"):
+            finding["metadata"]["cached"] = True
+            finding["metadata"]["cached_age_days"] = profile.get("cached_age_days")
     if defn.get("core"):
         finding["metadata"]["core"] = True
     # UC2: a validated core site's hit on the handle as written is a measured
@@ -468,11 +484,21 @@ class UsernamePlatformsModule(BaseModule):
         # UC2 core list: when the corpus carries validated core sites, the default
         # sweep is the core list. The rest of Wave 1 becomes the tail, run after the
         # core only within ``username_tail_budget_seconds`` (0 = off), its hits "low".
+        # UC4: the tail probes only sites that PASSED live validation (``validated``),
+        # never the unvalidated / flappy long tail — UC2 kept those out of the default
+        # sweep to avoid false positives (e.g. Tweakers), and the tail must honour that.
         tail_queue: list[tuple[str, dict[str, Any], str]] = []
         if has_core:
-            tail_queue = [item for item in wave1_queue if not item[1].get("core")]
+            tail_queue = [
+                item for item in wave1_queue
+                if item[1].get("validated") and not item[1].get("core")
+            ]
             wave1_queue = [item for item in wave1_queue if item[1].get("core")]
-        tail_budget = float(getattr(settings, "username_tail_budget_seconds", 0) or 0)
+        tail_override = _TAIL_BUDGET.get()
+        tail_budget = (
+            float(tail_override) if tail_override is not None
+            else float(getattr(settings, "username_tail_budget_seconds", 0) or 0)
+        )
 
         # ── Write one audit-log entry per applied action ──────────────────────
         # Stats are computed from the rolling window. We log AFTER queueing so
@@ -540,10 +566,14 @@ class UsernamePlatformsModule(BaseModule):
         pivot_variant: str | None = None
         pivot_queue: list[tuple[str, dict[str, Any], str]] = []
 
-        def _tick() -> None:
+        cache_stats = {"served": 0}
+
+        def _tick(*, force: bool = False) -> None:
             nonlocal probes_done
             probes_done += 1
-            run_events.module_progress("username_platforms", probes_done, probes_total)
+            run_events.module_progress(
+                "username_platforms", probes_done, probes_total, found=len(findings), force=force
+            )
 
         async with build_client(timeout=12.0) as client:
             wave1 = await self._run_wave(
@@ -570,7 +600,7 @@ class UsernamePlatformsModule(BaseModule):
                 probes_total += len(pivot_queue)
                 wave1 += await self._run_wave(
                     client, pivot_queue, wave=1, health=health, on_hit=_emit_hit,
-                    on_progress=_tick,
+                    on_progress=_tick, cache_stats=cache_stats,
                 )
             tail_probed = 0
             if tail_queue and tail_budget > 0:
@@ -579,7 +609,7 @@ class UsernamePlatformsModule(BaseModule):
                 async def _tail() -> None:
                     tail_results.extend(await self._run_wave(
                         client, tail_queue, wave=1, health=health, on_hit=_emit_hit,
-                        on_progress=_tick,
+                        on_progress=_tick, cache_stats=cache_stats,
                     ))
 
                 probes_total += len(tail_queue)
@@ -592,11 +622,14 @@ class UsernamePlatformsModule(BaseModule):
             wave2 = (
                 await self._run_wave(
                     client, wave2_queue, wave=2, health=health, on_hit=_emit_hit,
-                    on_progress=_tick,
+                    on_progress=_tick, cache_stats=cache_stats,
                 )
                 if include_wave2
                 else []
             )
+
+        if probes_total:
+            _tick(force=True)  # final "N / total checked" for the live view
 
         for name, defn, variant, outcome, detail, profile, wave in [*wave1, *wave2]:
             if outcome == "hit" and detail:
@@ -654,6 +687,8 @@ class UsernamePlatformsModule(BaseModule):
                 "username_variants": variants + ([pivot_variant] if pivot_variant else []),
                 "name_split_pivot": {"variant": pivot_variant, "probes": len(pivot_queue)},
                 "core_probes": len(wave1_queue),
+                "cache_served": cache_stats["served"],
+                "tail_budget_seconds": tail_budget,
                 "tail": {"queued": len(tail_queue), "probed": tail_probed,
                          "budget_seconds": tail_budget},
                 "wave1_probes": len(wave1_queue),
@@ -679,6 +714,7 @@ class UsernamePlatformsModule(BaseModule):
         health: PlatformHealthDB,
         on_hit: Any = None,
         on_progress: Any = None,
+        cache_stats: dict[str, int] | None = None,
     ) -> list[tuple[str, dict[str, Any], str, str, str | None, dict[str, str] | None, int]]:
         sem = asyncio.Semaphore(_WAVE1_CONCURRENCY if wave == 1 else _WAVE2_CONCURRENCY)
         # R10 (S4): measure latency POST-semaphore. probe_platform acquires its
@@ -692,10 +728,29 @@ class UsernamePlatformsModule(BaseModule):
         async def _timed_probe(
             name: str, defn: dict[str, Any], username: str
         ) -> tuple[str, dict[str, Any], str, str, str | None, dict[str, str] | None]:
+            # UC4 (4a): a site measured as consistently slow carries its own shorter
+            # timeout so it is abandoned faster instead of holding a worker for 6 s.
+            probe_timeout = timeout
+            site_to = defn.get("probe_timeout")
+            if isinstance(site_to, (int, float)) and 0 < site_to < timeout:
+                probe_timeout = float(site_to)
+            # UC4: a fresh cache row answers without any HTTP request. The cached
+            # profile already holds the UC3 parsed fields, so no re-probe, no re-parse.
+            cached = probe_cache.get(defn, name, username)
+            if cached is not None:
+                if cache_stats is not None:
+                    cache_stats["served"] = cache_stats.get("served", 0) + 1
+                fields = dict(cached.get("fields") or {})
+                detail = fields.pop("_url", None)
+                if cached["outcome"] == "hit":
+                    fields["cached"] = True
+                    fields["cached_age_days"] = cached["age_days"]
+                    return name, defn, username, "hit", detail, fields
+                return name, defn, username, cached["outcome"], None, None
             async with sem:
                 t0 = time.perf_counter()
                 outcome, detail, profile = await probe_platform(
-                    client, no_limit, name, defn, username, timeout=timeout
+                    client, no_limit, name, defn, username, timeout=probe_timeout
                 )
                 latency_ms = int((time.perf_counter() - t0) * 1000)
             if outcome == "hit":
@@ -714,6 +769,13 @@ class UsernamePlatformsModule(BaseModule):
                 )
             except Exception:
                 pass
+            # UC4: remember this (site, handle) result for 7 days. A hit stores the
+            # parsed fields plus the profile URL so a repeat serves fully from disk.
+            cache_fields = None
+            if outcome == "hit":
+                cache_fields = {k: v for k, v in (profile or {}).items() if k != "_probe_response"}
+                cache_fields["_url"] = detail
+            probe_cache.put(defn, name, username, outcome, fields=cache_fields)
             return name, defn, username, outcome, detail, profile
 
         # Explicit tasks + as_completed so each hit is surfaced to ``on_hit`` the

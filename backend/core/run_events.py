@@ -254,14 +254,32 @@ class RunEventEmitter:
         times["finished_at"] = datetime.now(timezone.utc)
         return int((times["finished_at"] - times["started_at"]).total_seconds() * 1000)
 
-    def progress(self, module: str, checked: int, total: int) -> None:
+    def progress(
+        self,
+        module: str,
+        checked: int,
+        total: int,
+        found: int | None = None,
+        label: str | None = None,
+        *,
+        force: bool = False,
+    ) -> None:
         total = max(int(total), 0)
         checked = max(0, min(int(checked), total))
         now = time.monotonic()
-        if now - self._last_progress.get(module, -1.0) < PROGRESS_MIN_INTERVAL:
+        # ``force`` lets the final tick through even inside the min-interval window, so
+        # the last "750 / 750 checked" is always emitted.
+        if not force and now - self._last_progress.get(module, -1.0) < PROGRESS_MIN_INTERVAL:
             return
         self._last_progress[module] = now
-        self.emit("module_progress", {"module": module, "checked": checked, "total": total})
+        payload: dict[str, Any] = {"module": module, "checked": checked, "total": total}
+        if found is not None:
+            payload["found"] = int(found)
+            # A ready-to-display line for the live view ("612 / 750 checked · 14 found").
+            payload["label"] = label or f"{checked} / {total} checked · {found} found"
+        elif label is not None:
+            payload["label"] = label
+        self.emit("module_progress", payload)
 
 
 class FanoutQueue(asyncio.Queue):
@@ -305,8 +323,16 @@ def current() -> RunEventEmitter | None:
     return _current.get()
 
 
-def module_progress(module: str, checked: int, total: int) -> None:
+def module_progress(
+    module: str,
+    checked: int,
+    total: int,
+    found: int | None = None,
+    label: str | None = None,
+    *,
+    force: bool = False,
+) -> None:
     """No-op unless a run is being recorded (modules call this freely)."""
     emitter = _current.get()
     if emitter is not None:
-        emitter.progress(module, checked, total)
+        emitter.progress(module, checked, total, found, label, force=force)

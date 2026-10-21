@@ -486,6 +486,30 @@ PHASE_DAG: tuple[InvestigationPhase, ...] = (
 )
 
 
+def _phase_levels(dag: tuple[InvestigationPhase, ...]) -> list[list[InvestigationPhase]]:
+    """Group the DAG into concurrent batches, preserving its order exactly (UC4).
+
+    A batch is a run of *consecutive* phases that share the identical dependency set
+    (e.g. username_pivot, permutation_discovery, email_discovery and alternate_email all
+    depend only on ``primary``). Such phases cannot depend on one another — a phase is
+    never in its own dependency set — so running them together is safe, and because the
+    grouping is strictly adjacent, no phase ever moves ahead of one it follows in the
+    DAG. A phase with a different dependency set starts a new batch and runs after the
+    previous one, so ordering (and every declared dependency) is respected even for a
+    reduced DAG whose intermediate phases are absent.
+    """
+    batches: list[list[InvestigationPhase]] = []
+    current_key: frozenset[str] | None = None
+    for phase in dag:
+        key = frozenset(getattr(phase, "dependencies", ()))
+        if batches and key == current_key:
+            batches[-1].append(phase)
+        else:
+            batches.append([phase])
+            current_key = key
+    return batches
+
+
 _KEY_SETTINGS: dict[str, tuple[str, ...]] = {
     "hibp": ("hibp_api_key", "haveibeenpwned_api_key"),
     "breachdirectory": ("breachdirectory_api_key",),

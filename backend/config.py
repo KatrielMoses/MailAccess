@@ -372,6 +372,18 @@ class Settings(BaseSettings):
     # The remaining Wave-1 sites (the tail) run after it only within this many
     # seconds, hits marked "low". 0 = core only.
     username_tail_budget_seconds: float = 0.0
+    # UC4: the username pivot stops starting probes after this many seconds and
+    # reports what it found (it used to burn its full 120 s module timeout).
+    username_pivot_budget_seconds: float = 35.0
+    # UC4: in a full investigation the engine runs the non-core "tail" of Wave 1 for
+    # this many seconds after the core list (sweep-mode direct calls keep 0 so the
+    # "core sweep <= 30 s" gate measures the core alone).
+    username_tail_budget_full_seconds: float = 15.0
+    # UC4: 7-day probe cache for the username sweep and pivot (one db per engine box).
+    probe_cache_enabled: bool = True
+    probe_cache_path: str = "data/probe_cache.db"
+    probe_cache_ttl_days: int = 7
+    probe_cache_inconclusive_ttl_seconds: float = 3600.0
 
     # GitHub Code Search — surfaces email mentions in public code and gists
     enable_github_code_search: bool = True

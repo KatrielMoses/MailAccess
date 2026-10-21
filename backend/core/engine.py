@@ -237,6 +237,7 @@ class InvestigationEngine:
         no_whoisfreaks: bool = False,
         org_surface_deep: bool = False,
         refresh: bool = False,
+        no_cache: bool = False,
         cached_results: dict[str, ModuleResult] | None = None,
     ) -> None:
         self._timeout = timeout
@@ -257,6 +258,8 @@ class InvestigationEngine:
         self._no_whoisfreaks = no_whoisfreaks
         self._org_surface_deep = org_surface_deep
         self._refresh = refresh
+        # ``--no-cache``: the 7-day probe cache is ignored on read (still written).
+        self._no_cache = no_cache
         self._cached_results = cached_results
         self.status = InvestigationStatus.PENDING
 
@@ -283,6 +286,14 @@ class InvestigationEngine:
             from . import host_politeness
 
             host_politeness.new_run()
+            # UC4: the full investigation runs the non-core tail for a bounded time,
+            # and ``--force`` / ``--no-cache`` skip the probe cache on read.
+            from ..config import settings as _settings
+            from ..modules.username_platforms import set_tail_budget
+            from .probe_cache import set_no_cache_read
+
+            set_tail_budget(float(getattr(_settings, "username_tail_budget_full_seconds", 15.0) or 0))
+            set_no_cache_read(self._no_cache or self._force)
             run_done_sent = False
             run_error: str | None = None
             try:
@@ -310,7 +321,7 @@ class InvestigationEngine:
                     settings as config,
                 )
                 from .investigation_budget import InvestigationBudget
-                from .phases import PHASE_DAG
+                from .phases import PHASE_DAG, _phase_levels
                 from .product_mode import normalize_mode
 
                 # Phase 2B — resolve the product mode (per-run override else the
@@ -424,65 +435,77 @@ class InvestigationEngine:
                         }],
                         metadata={"domain": domain, "resolves": False},
                     )
-                try:
-                    for phase in PHASE_DAG:
-                        # Native cache hits keep their original evidence. Only
-                        # IP enrichment is refreshed, with no discovery rerun.
-                        if self._cached_results is not None and phase.name not in (
-                            "ip_intel",
-                            "whoisfreaks_intel",
-                        ):
-                            continue
-                        # A provider phase that is off (no key, disabled, or the per-run
-                        # flag) is not announced at all.
-                        announce = provider_module_enabled(phase.name)
-                        emitter.phase = phase.name
-                        if announce:
-                            emitter.emit(
-                                "phase_start",
-                                {
-                                    "phase": phase.name,
-                                    "modules": [m for ph, m in plan if ph == phase.name],
-                                },
-                            )
-                        _phase_t0 = asyncio.get_running_loop().time()
-                        await phase.run(
-                            investigation_id=investigation_id,
-                            email=email,
-                            canonical_email=current_email,
-                            collected=collected,
-                            queue=queue,
-                            semaphore=semaphore,
-                            config=config,
-                            budget=budget,
-                            explicit_modules=(
-                                set(effective_modules)
-                                if effective_modules is not None
-                                else None
-                            ),
-                            enable_modules=(
-                                set(enable_modules) if enable_modules is not None else None
-                            ),
-                            mode=resolved_mode.value,
-                            force=self._force,
+                async def _run_phase(phase: InvestigationPhase) -> None:
+                    # A provider phase that is off (no key, disabled, or the per-run
+                    # flag) is not announced at all.
+                    announce = provider_module_enabled(phase.name)
+                    emitter.phase = phase.name
+                    if announce:
+                        emitter.emit(
+                            "phase_start",
+                            {
+                                "phase": phase.name,
+                                "modules": [m for ph, m in plan if ph == phase.name],
+                            },
                         )
-                        if announce:
-                            emitter.emit(
-                                "phase_end",
-                                {
-                                    "phase": phase.name,
-                                    "duration_ms": int(
-                                        (asyncio.get_running_loop().time() - _phase_t0) * 1000
-                                    ),
-                                },
+                    _phase_t0 = asyncio.get_running_loop().time()
+                    await phase.run(
+                        investigation_id=investigation_id,
+                        email=email,
+                        canonical_email=current_email,
+                        collected=collected,
+                        queue=queue,
+                        semaphore=semaphore,
+                        config=config,
+                        budget=budget,
+                        explicit_modules=(
+                            set(effective_modules) if effective_modules is not None else None
+                        ),
+                        enable_modules=(
+                            set(enable_modules) if enable_modules is not None else None
+                        ),
+                        mode=resolved_mode.value,
+                        force=self._force,
+                    )
+                    if announce:
+                        emitter.emit(
+                            "phase_end",
+                            {
+                                "phase": phase.name,
+                                "duration_ms": int(
+                                    (asyncio.get_running_loop().time() - _phase_t0) * 1000
+                                ),
+                            },
+                        )
+
+                try:
+                    # UC4: run each dependency LEVEL of the phase DAG concurrently. Phases
+                    # at the same level (e.g. username_pivot and permutation_discovery, which
+                    # both depend only on ``primary``) are independent — each writes its own
+                    # module key into ``collected`` — so running them together removes the
+                    # old strictly-sequential tail without changing results. Levels still run
+                    # in order, so every dependency is satisfied before its dependents start.
+                    for level in _phase_levels(PHASE_DAG):
+                        runnable = [
+                            phase for phase in level
+                            if not (
+                                self._cached_results is not None
+                                and phase.name not in ("ip_intel", "whoisfreaks_intel")
                             )
-                        if phase.name == "email_credibility":
-                            credibility = collected.get("email_credibility")
-                            if credibility:
-                                current_email = str(
-                                    (credibility.metadata or {}).get("canonical_email")
-                                    or current_email
-                                )
+                        ]
+                        if not runnable:
+                            continue
+                        await asyncio.gather(*(_run_phase(phase) for phase in runnable))
+                        # email_credibility is alone in its level; settle the canonical
+                        # address before any later phase reads it.
+                        for phase in runnable:
+                            if phase.name == "email_credibility":
+                                credibility = collected.get("email_credibility")
+                                if credibility:
+                                    current_email = str(
+                                        (credibility.metadata or {}).get("canonical_email")
+                                        or current_email
+                                    )
 
                     # Compute name consensus before the graph build so
                     # the Phase 6B.2 V2 shadow-profile detector can use
