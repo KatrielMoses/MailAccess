@@ -128,6 +128,84 @@ def _confirmed_accounts(collected: dict[str, Any]) -> set[tuple[str, str]]:
     return accounts
 
 
+# Modules whose findings carry OTHER people's identifiers (search results, org members,
+# harvested addresses): never a source of usernames for this person.
+_THIRD_PARTY_MODULES = frozenset({
+    "email_search_dork", "employee_name_discovery", "github_org_members", "commoncrawl_email",
+    "code_and_cert_email", "domain_harvester", "permutation_discovery", "google_dork",
+    "linkedin_serp", "linkedin_brightdata",
+})
+_HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,38}$")
+
+
+def ranked_usernames(email: str, collected: dict[str, Any]) -> list[tuple[str, int, dict[str, Any]]]:
+    """``(username, tier, origin)`` best first, at most ``_MAX_USERNAMES``.
+
+    Tier 1: a handle a profile itself states (``profile_username``, a linked handle
+    in ``other_handles``) on a core-site hit whose parsed name matches a name found for
+    this person, or a GitHub commit author login (tied to the email).
+    Tier 2: usernames from other findings (profile URLs, username fields).
+    Tier 3: slugs of names found for this person.
+    """
+    from .linkedin_brightdata import known_names, names_match
+
+    names = known_names(collected)
+    out: dict[str, tuple[int, dict[str, Any]]] = {}
+
+    def add(value: Any, tier: int, origin: dict[str, Any]) -> None:
+        u = str(value or "").strip().lower().lstrip("@")
+        if not _HANDLE_RE.fullmatch(u) or "@" in u:
+            return
+        if u not in out or tier < out[u][0]:
+            out[u] = (tier, origin)
+
+    local = email.split("@", 1)[0] if "@" in email else ""
+    add(local, 2, {"module": "email", "finding_id": None, "username_match": False})
+    for module, result in collected.items():
+        if module in _THIRD_PARTY_MODULES or not hasattr(result, "findings"):
+            continue
+        for f in result.findings:
+            if not isinstance(f, dict):
+                continue
+            meta = f.get("metadata") if isinstance(f.get("metadata"), dict) else {}
+            origin = {"module": module, "finding_id": f.get("finding_id"),
+                      "username_match": evidence_label(f, module) == "username_match"}
+            verified = module == "github_commits" or (
+                module == "username_platforms" and meta.get("core")
+                and any(names_match(meta.get("display_name"), n) for n in names)
+            )
+            for handle in [meta.get("profile_username"), meta.get("login")] + [
+                h.split(":", 1)[1] for h in meta.get("other_handles") or []
+                if isinstance(h, str) and ":" in h and not h.startswith("linkedin:")
+            ]:
+                add(handle, 1 if verified else 2, origin)
+            for key in _USERNAME_KEYS:
+                for payload in (f, meta):
+                    add(payload.get(key), 2, origin)
+    for n in names:
+        for variant in _slug_variants(n):
+            add(variant, 3, {"module": "name", "finding_id": None, "username_match": False})
+    ranked = sorted(out.items(), key=lambda kv: kv[1][0])
+    return [(u, tier, origin) for u, (tier, origin) in ranked][:_MAX_USERNAMES]
+
+
+def _swept_pairs(collected: dict[str, Any], sites: dict[str, dict[str, Any]]) -> set[tuple[str, str]]:
+    """(site, handle) pairs the primary sweep already probed: every core site for each
+    handle variant it used (``username_variants``, including the name-split pivot)."""
+    from .username_platforms import _variant_allowed
+
+    result = collected.get("username_platforms")
+    meta = getattr(result, "metadata", None) or {}
+    variants = [str(v).lower() for v in meta.get("username_variants") or []]
+    pairs = set()
+    for name, defn in sites.items():
+        if defn.get("core"):
+            for v in variants:
+                if _variant_allowed(defn, v):
+                    pairs.add((name, v))
+    return pairs
+
+
 class UsernamePivotModule(BaseModule):
     name = "username_pivot"
     description = (
@@ -137,152 +215,199 @@ class UsernamePivotModule(BaseModule):
     requires_key = False
 
     async def run(
-        self, email: str, collected: dict[str, Any] | None = None
+        self,
+        email: str,
+        collected: dict[str, Any] | None = None,
+        sink: list[dict[str, Any]] | None = None,
     ) -> ModuleResult:
+        """UC4: a time budget instead of a wall timeout, priority ordering, and no
+        re-probing of what the primary sweep already checked.
+
+        Order: for each username (best tier first) the sites where the sweep already
+        found this person, then the rest of the validated core list; after every
+        username's priority sites, the remaining Wave-1 sites by rank. No new probe
+        starts once fewer than one probe timeout is left in the budget, so the pivot
+        ends inside ``username_pivot_budget_seconds`` with everything found so far.
+        """
+        import time
+
+        from .username_platforms import _variant_allowed
+
         if collected is None:
-            return ModuleResult(
-                status=ModuleStatus.SKIPPED,
-                errors=["Runs in post-primary phase only"],
-            )
-
+            return ModuleResult(status=ModuleStatus.SKIPPED,
+                                errors=["Runs in post-primary phase only"])
         if not settings.enable_username_pivot:
-            return ModuleResult(
-                status=ModuleStatus.SKIPPED,
-                errors=["Set ENABLE_USERNAME_PIVOT=true to run this module"],
-            )
-
-        origins: dict[str, dict[str, Any]] = {}
-        usernames = _collect_usernames(email, collected, origins)
-        if not usernames:
-            return ModuleResult(
-                status=ModuleStatus.SKIPPED,
-                errors=["No usernames recovered from primary findings"],
-            )
-
+            return ModuleResult(status=ModuleStatus.SKIPPED,
+                                errors=["Set ENABLE_USERNAME_PIVOT=true to run this module"])
+        ranked = ranked_usernames(email, collected)
+        if not ranked:
+            return ModuleResult(status=ModuleStatus.SKIPPED,
+                                errors=["No usernames recovered from primary findings"])
         try:
             sites, load_meta = await load_username_sites(include_wave2=False)
         except Exception as exc:
-            return ModuleResult(
-                status=ModuleStatus.FAILED,
-                errors=[f"Failed to load the username platform corpus: {exc}"],
-            )
+            return ModuleResult(status=ModuleStatus.FAILED,
+                                errors=[f"Failed to load the username platform corpus: {exc}"])
 
-        # High-signal subset: the most popular probeable platforms, ranked.
-        selected = sorted(sites.items(), key=lambda kv: _rank(kv[1]))[:_PIVOT_SITE_CAP]
+        budget = float(getattr(settings, "username_pivot_budget_seconds", 45.0) or 45.0)
+        timeout = 6.0
+        started = time.monotonic()
+        seen = _swept_pairs(collected, sites)
         already_found = _confirmed_accounts(collected)
-        sem = asyncio.Semaphore(50)
+        found_on = [str(f.get("platform")) for f in getattr(collected.get("username_platforms"),
+                                                              "findings", []) or []
+                    if isinstance(f, dict) and f.get("platform")]
+        usable = {n: d for n, d in sites.items() if not d.get("alwaysHit")}
+        by_rank = sorted(usable, key=lambda n: _rank(usable[n]))
+        core = [n for n in by_rank if usable[n].get("core")]
+        # UC4: only validated (UC2) non-core sites, so the pivot never revives the
+        # flappy false-positive long tail the core list was built to exclude.
+        rest = [n for n in by_rank if usable[n].get("validated") and not usable[n].get("core")]
+        first = [n for n in dict.fromkeys(found_on) if n in usable]
+
+        queue: list[tuple[str, str]] = []
+        queued: set[tuple[str, str]] = set()
+
+        def enqueue(handle: str, names: list[str]) -> None:
+            for name in names:
+                key = (name, handle)
+                if key in queued or key in seen or (name.lower(), handle) in already_found:
+                    continue
+                if not _variant_allowed(usable[name], handle):
+                    continue
+                queued.add(key)
+                queue.append(key)
+
+        for handle, _tier, _origin in ranked:
+            enqueue(handle, first + core)
+        priority_len = len(queue)
+        for handle, _tier, _origin in ranked:
+            enqueue(handle, rest)
+
+        origins = {u: origin for u, _t, origin in ranked}
+        tiers = {u: tier for u, tier, _o in ranked}
         findings: list[dict[str, Any]] = []
-        errors: list[str] = []
-        checked = 0
-        confirmed = 0
-        # R11 (S2) — track outcome classes so a blocked/all-unknown sweep can
-        # never be reported as a successful all-negative.
-        hits = 0
-        misses = 0
-        inconclusive = 0
-        progress_total = sum(
-            1
-            for username in usernames
-            for _name, defn in selected
-            if username_matches_regex(defn, username)
-        )
+        stats = {"checked": 0, "hits": 0, "misses": 0, "inconclusive": 0, "cache_served": 0}
+        stopped_by_budget = False
+        sem = asyncio.Semaphore(50)
+        no_limit = asyncio.Semaphore(2**31)
 
-        async def _probe(client: Any, name: str, defn: dict[str, Any], username: str):
-            outcome = await probe_platform(client, sem, name, defn, username, timeout=6.0)
-            run_events.module_progress("username_pivot", checked + progress_seen[0], progress_total)
-            progress_seen[0] += 1
-            return outcome
+        async def probe(client: Any, name: str, handle: str) -> None:
+            from ..core import probe_cache
+            from ..core.profiles import enrich
 
-        progress_seen = [0]
-        async with build_client(timeout=6.0, follow_redirects=True) as client:
-            for username in usernames:
-                queue = [
-                    (name, defn)
-                    for name, defn in selected
-                    if username_matches_regex(defn, username)
-                ]
-                progress_seen[0] = 0
-                tasks = [_probe(client, name, defn, username) for name, defn in queue]
-                results = await asyncio.gather(*tasks)
-                checked += len(queue)
+            defn = usable[name]
+            # UC4: a fresh 7-day cache row answers without an HTTP request.
+            cached = probe_cache.get(defn, name, handle)
+            if cached is not None:
+                stats["cache_served"] += 1
+                outcome = cached["outcome"]
+                if outcome == "hit":
+                    profile = dict(cached.get("fields") or {})
+                    detail = profile.pop("_url", None)
+                    profile["cached"] = True
+                    profile["cached_age_days"] = cached["age_days"]
+                else:
+                    detail, profile = None, None
+            else:
+                outcome, detail, profile = await probe_platform(
+                    client, no_limit, name, defn, handle, timeout=timeout)
+                if outcome == "hit":
+                    await enrich(client, defn, handle, profile)
+                elif isinstance(profile, dict):
+                    profile.pop("_body", None)
+                cache_fields = None
+                if outcome == "hit":
+                    cache_fields = {k: v for k, v in (profile or {}).items() if k != "_probe_response"}
+                    cache_fields["_url"] = detail
+                probe_cache.put(defn, name, handle, outcome, fields=cache_fields)
+            stats["checked"] += 1
+            stats["hits" if outcome == "hit" else "misses" if outcome == "miss" else "inconclusive"] += 1
+            run_events.module_progress(
+                "username_pivot", stats["checked"], len(queue), found=len(findings))
+            if outcome != "hit" or not detail or (name.lower(), handle) in already_found:
+                return
+            already_found.add((name.lower(), handle))
+            tags = defn.get("tags") if isinstance(defn.get("tags"), list) else []
+            origin = origins.get(handle, {})
+            finding = {
+                "platform": name,
+                "profile_url": detail,
+                "username": handle,
+                "metadata": {
+                    "matched_username": handle,
+                    "category": tags[0] if tags else "",
+                    "source": "username_pivot",
+                    # RC1: a derived username is a speculative signal; LOW until
+                    # independently corroborated (platform_dedup).
+                    "verification": "unverified",
+                    "speculative": True,
+                    "pivot_tier": tiers.get(handle),
+                    "core": bool(defn.get("core")),
+                    "derived_from_module": origin.get("module"),
+                    "derived_from_finding": origin.get("finding_id"),
+                    "derived_from_username_match": bool(origin.get("username_match")),
+                },
+                "confidence": "low",
+            }
+            from ..core.profiles import FIELD_KEYS
 
-                for (name, defn), (outcome, detail, profile) in zip(queue, results):
-                    if outcome == "hit":
-                        hits += 1
-                    elif outcome == "miss":
-                        misses += 1
-                    else:
-                        inconclusive += 1
-                    if outcome != "hit" or not name:
-                        continue
-                    # R7 (S3): dedupe by the ACCOUNT identity (platform, username),
-                    # not the platform alone — two distinct usernames on the same
-                    # platform are two accounts and must both survive.
-                    account = (name.lower(), username.lower())
-                    if account in already_found:
-                        continue
-                    already_found.add(account)
-                    confirmed += 1
-                    tags = defn.get("tags") if isinstance(defn.get("tags"), list) else []
-                    finding = {
-                        "platform": name,
-                        "profile_url": detail,
-                        "username": username,
-                        "metadata": {
-                            "matched_username": username,
-                            "category": tags[0] if tags else "",
-                            "source": "username_pivot",
-                            # RC1 (Output-Trust): the pivot probes usernames DERIVED
-                            # from the localpart / display names — a derivative,
-                            # speculative signal. On its own it is UNVERIFIED and
-                            # capped to LOW; independent corroboration (platform_dedup
-                            # dual-confirm) is what promotes it.
-                            "verification": "unverified",
-                            "speculative": True,
-                            # Provenance: where the pivoted username came from, and
-                            # whether that source was itself only a username match.
-                            "derived_from_module": origins.get(username, {}).get("module"),
-                            "derived_from_finding": origins.get(username, {}).get("finding_id"),
-                            "derived_from_username_match": bool(
-                                origins.get(username, {}).get("username_match")
-                            ),
-                        },
-                        "confidence": "low",
-                    }
-                    if profile:
-                        for key in ("display_name", "bio", "avatar_url", "location"):
-                            value = profile.get(key)
-                            if value:
-                                finding["metadata"][key] = value
-                    findings.append(finding)
+            for key in (*FIELD_KEYS.values(), "location_normalized", "linkedin_url", "field_sources"):
+                value = (profile or {}).get(key)
+                if value not in (None, "", [], {}):
+                    finding["metadata"][key] = value
+            if (profile or {}).get("cached"):
+                finding["metadata"]["cached"] = True
+                finding["metadata"]["cached_age_days"] = profile.get("cached_age_days")
+            findings.append(finding)
+            if sink is not None:
+                sink.append(finding)
 
-        # R11 (S2) — honest coverage. A blocked / all-inconclusive sweep produced
-        # no definitive answer, so it is never a successful all-negative.
-        coverage_complete = inconclusive == 0 and not errors
-        if checked == 0:
-            # Nothing applicable to probe (no username matched any platform).
+        async with build_client(timeout=timeout, follow_redirects=True) as client:
+            pending: set[asyncio.Task] = set()
+            for name, handle in queue:
+                if time.monotonic() - started > budget - timeout:
+                    stopped_by_budget = True
+                    break
+                await sem.acquire()
+                task = asyncio.ensure_future(probe(client, name, handle))
+                task.add_done_callback(lambda _t: sem.release())
+                pending.add(task)
+                pending = {t for t in pending if not t.done()}
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        checked = stats["checked"]
+        if stopped_by_budget and not findings:
+            status = ModuleStatus.PARTIAL  # out of time is never "nothing there"
+        elif checked == 0:
             status = ModuleStatus.SUCCESS_EMPTY
-        elif hits == 0 and misses == 0:
-            # Every probe was inconclusive/blocked → no coverage at all.
-            status = ModuleStatus.FAILED if errors else ModuleStatus.PARTIAL
-        elif not coverage_complete:
+        elif stats["hits"] == 0 and stats["misses"] == 0:
+            status = ModuleStatus.PARTIAL
+        elif stats["inconclusive"] or stopped_by_budget:
             status = ModuleStatus.PARTIAL
         else:
             status = ModuleStatus.SUCCESS if findings else ModuleStatus.SUCCESS_EMPTY
-
         return ModuleResult(
             status=status,
             findings=findings,
             metadata={
-                "usernames_pivoted": usernames,
+                "usernames_pivoted": [u for u, _t, _o in ranked],
+                "username_tiers": tiers,
                 "platforms_checked": checked,
-                "platforms_confirmed": confirmed,
-                "platforms_hits": hits,
-                "platforms_misses": misses,
-                "platforms_inconclusive": inconclusive,
-                "coverage_complete": coverage_complete,
-                "sites_pool": len(selected),
+                "platforms_confirmed": len(findings),
+                "platforms_hits": stats["hits"],
+                "platforms_misses": stats["misses"],
+                "platforms_inconclusive": stats["inconclusive"],
+                "cache_served": stats["cache_served"],
+                "coverage_complete": not stopped_by_budget and not stats["inconclusive"],
+                "queued": len(queue),
+                "priority_queued": priority_len,
+                "skipped_already_swept": sum(1 for u, _t, _o in ranked for n in first + core
+                                             if (n, u) in seen),
+                "budget_seconds": budget,
+                "stopped_by_budget": stopped_by_budget,
+                "elapsed_seconds": round(time.monotonic() - started, 1),
                 **load_meta,
             },
-            errors=errors,
         )

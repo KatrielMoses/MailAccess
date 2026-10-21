@@ -125,7 +125,9 @@ _MODULE_DEFAULT_TIMEOUTS: dict[str, int] = {
 }
 _MODULE_TIMEOUT_FLOORS: dict[str, int] = {
     "account_discovery": 180,
-    "username_pivot": 120,
+    # UC4: the pivot ends inside username_pivot_budget_seconds (45 s); this is only
+    # the safety net, and the sink keeps its hits if it ever fires.
+    "username_pivot": 60,
     "username_platforms": 180,
 }
 _OPT_IN_FLAG_BY_MODULE: dict[str, str] = {
