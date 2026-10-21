@@ -243,7 +243,8 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 
 def _site(site_id: str, domain: str, category: str, flow: str, spec: dict[str, Any],
-          *, high_value: bool = False, default_off: bool = False) -> dict[str, Any]:
+          *, high_value: bool = False, default_off: bool = False,
+          disabled: bool = False) -> dict[str, Any]:
     defn = {
         "id": site_id,
         "name": site_id,
@@ -259,6 +260,12 @@ def _site(site_id: str, domain: str, category: str, flow: str, spec: dict[str, A
     # (settings.enable_extended_registration_checks); off in the OSS default.
     if default_off:
         defn["default_off"] = True
+    # UC7.4: a stale def (dead endpoint / DNS gone) is kept for documentation but never
+    # probed — the loader and account_discovery both skip ``disabled``. Only use this for
+    # endpoints that are dead everywhere (NXDOMAIN / 404), NOT ones merely blocked from a
+    # datacenter IP (those still work on prod — leave them enabled).
+    if disabled:
+        defn["disabled"] = True
     return defn
 
 
@@ -982,7 +989,9 @@ _SITES.extend([
             {"when": {"status": 204}, "verdict": "absent"},
         ],
         "default": "rate_limited",
-    }, high_value=True),
+        # UC7.4: unite.nike.com is DNS NXDOMAIN from multiple resolvers (the auth host was
+        # retired) — dead globally, not a datacenter-IP block. Kept for documentation.
+    }, high_value=True, disabled=True),
 
     _site("teamtreehouse", "teamtreehouse.com", "programing", "register", {
         "prefetch": {"method": "GET",
@@ -1242,7 +1251,7 @@ _SITES.extend([
              "verdict": "absent"},
         ],
         "default": "rate_limited",
-    }),
+    }, disabled=True),  # UC7.4: blip.fm is DNS NXDOMAIN (dead) — kept for documentation
 
     _site("lastfm", "last.fm", "music", "register", {
         "prefetch": {"method": "GET", "url": "https://www.last.fm/join",
@@ -1430,7 +1439,9 @@ _SITES.extend([
             {"when": {"status": 200}, "verdict": "absent"},
         ],
         "default": "rate_limited",
-    }),
+        # UC7.4: consumer-ow-api.deliveroo.com is DNS NXDOMAIN (API host retired) — dead
+        # globally, not a datacenter-IP block. Kept for documentation.
+    }, disabled=True),
 
     _site("dominosfr", "dominos.fr", "shopping", "register", {
         "prefetch": {"method": "GET",
@@ -1624,6 +1635,16 @@ _MYBB_FORUMS: list[tuple[str, str]] = [
 ]
 
 
+# UC7.4: MyBB forums whose endpoint is dead everywhere (NXDOMAIN or 404 on
+# member.php/xmlhttp.php from multiple IPs), confirmed 2026-10-22. Kept for documentation
+# but never probed. badeggsonline = 404 on both forum endpoints; chinaphonearena /
+# cracked_to / nattyornot = DNS NXDOMAIN; cpahero = TLS cert no longer covers the host
+# (parked). These are dead globally, not datacenter-IP blocks.
+_DEAD_MYBB: frozenset[str] = frozenset(
+    {"badeggsonline", "chinaphonearena", "cpahero", "cracked_to", "nattyornot"}
+)
+
+
 def _mybb_site(site_id: str, host: str) -> dict[str, Any]:
     base = f"https://{host}"
     return _site(site_id, host, "forum", "register", {
@@ -1647,7 +1668,7 @@ def _mybb_site(site_id: str, host: str) -> dict[str, Any]:
             {"when": {"status": 200}, "verdict": "absent"},
         ],
         "default": "rate_limited",
-    })
+    }, disabled=site_id in _DEAD_MYBB)
 
 
 _SITES.extend(_mybb_site(i, d) for i, d in _MYBB_FORUMS)
