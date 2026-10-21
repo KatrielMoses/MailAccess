@@ -282,6 +282,24 @@ class AlternateEmailPhase(InvestigationPhase):
         return kwargs["collected"]
 
 
+class AlternateEmailAnchorPhase(InvestigationPhase):
+    """UC7.3a — re-anchor Class-1 discovery on alternate emails found via a Class-1
+    signal, merged under one person. Runs after alternate_email; bounded depth 1."""
+
+    name = "alternate_email_anchor"
+    dependencies = ("primary", "alternate_email")
+
+    async def run(self, **kwargs: Any) -> dict[str, ModuleResult]:
+        from ..modules.alternate_email_anchor import AlternateEmailAnchorModule
+
+        await _run_and_record(
+            AlternateEmailAnchorModule(),
+            **_runner_kwargs(kwargs),
+            findings_input=kwargs["collected"],
+        )
+        return kwargs["collected"]
+
+
 class DomainClusterPhase(InvestigationPhase):
     """Phase 6B.1 — group platform domains by shared infrastructure.
 
@@ -478,6 +496,7 @@ PHASE_DAG: tuple[InvestigationPhase, ...] = (
     PermutationPhase(),
     EmailDiscoveryPhase(),
     AlternateEmailPhase(),
+    AlternateEmailAnchorPhase(),
     DomainClusterPhase(),
     ProfilePhase(),
     PhonePhase(),

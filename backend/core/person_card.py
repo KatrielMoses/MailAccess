@@ -29,12 +29,15 @@ _ACCOUNT_MODULES = (
     # UC7.3: a verified provider mailbox (Google/Microsoft) is a first-class Class-1
     # account, not just metadata.
     "outlook_autodiscover", "m365_active_intel", "m365_passive_intel", "imap_existence",
+    # UC7.3a: accounts re-anchored on a Class-1 alternate email (same person).
+    "alternate_email_anchor",
 )
 # Modules keyed on the email/commit identity itself (tie to the subject on their own).
 _EMAIL_LINKED_MODULES = frozenset(
     {"account_discovery", "github_commits", "github_domain_commits", "linkedin_brightdata",
      "linkedin_serp", "google_account_intel", "gravatar",
-     "outlook_autodiscover", "m365_active_intel", "m365_passive_intel", "imap_existence"}
+     "outlook_autodiscover", "m365_active_intel", "m365_passive_intel", "imap_existence",
+     "alternate_email_anchor"}
 )
 _PHOTO_DISTANCE = 6  # perceptual-hash Hamming distance for "same photo"
 _AVATAR_FETCH_CAP = 8
