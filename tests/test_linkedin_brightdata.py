@@ -40,23 +40,27 @@ RECORD = {
 
 def _collected(*, name="Jane Doe", links=None, country="IN", handles=("jane.doe",), profiles=1,
                own_link=True):
-    # UC7.2: the card tests exercise the legitimate own-profile-link path (a LinkedIn URL
-    # the person links to earns high); handle-guess tests opt out with own_link=False.
-    if links is None:
-        links = ["https://www.linkedin.com/in/jane-doe/"] if own_link else []
+    # UC7.2 r2: an own-profile LinkedIn link is trusted only on a Class-1 account, so the
+    # card tests carry it on a Gravatar (email-anchored) finding. Handle-guess tests opt
+    # out with own_link=False.
+    own = links if links is not None else (["https://www.linkedin.com/in/jane-doe/"] if own_link else [])
     findings = []
     for i, handle in enumerate(handles):
         findings.append({
             "platform": f"Site{i}", "username": handle, "confidence": "medium",
             "profile_url": f"https://site{i}.example/{handle}",
             "metadata": {"core": True, "display_name": name,
-                         "location_normalized": {"country_code": country} if country else None,
-                         "links": links if i == 0 else []},
+                         "location_normalized": {"country_code": country} if country else None},
         })
     for j in range(profiles - len(findings)):
         findings.append({"platform": f"Extra{j}", "username": "jane.doe", "confidence": "medium",
                          "metadata": {"core": True}})
-    return {"username_platforms": ModuleResult(status=ModuleStatus.SUCCESS, findings=findings)}
+    collected = {"username_platforms": ModuleResult(status=ModuleStatus.SUCCESS, findings=findings)}
+    if own:
+        collected["gravatar"] = ModuleResult(status=ModuleStatus.SUCCESS, findings=[
+            {"platform": "Gravatar", "username": "", "confidence": "medium",
+             "metadata": {"source": "gravatar", "links": own}}])
+    return collected
 
 
 @pytest.fixture(autouse=True)

@@ -41,7 +41,7 @@ _AVATAR_TIMEOUT_S = 5.0
 # corroborated it up to the spine. See dev/UC-IDENTITY-ARCHITECTURE.md.
 from .evidence import (  # noqa: E402 - small, stable constant set; avoids a cycle at call time
     SIG_BREACH, SIG_GRAVATAR, SIG_LOCALPART, SIG_PROVIDER, SIG_PUBLIC_RECORD,
-    SIG_REGISTRATION, SIG_SIGNIN_PROBE, SIG_USERNAME, signal_type_for,
+    SIG_REGISTRATION, SIG_SIGNIN_PROBE, SIG_USERNAME, signal_type_for, subject_is_freemail,
 )
 
 _CLASS1_SIGNALS = frozenset({
@@ -176,7 +176,7 @@ def _collect_accounts(data: dict[str, Any]) -> list[dict[str, Any]]:
                 "platform": f.get("platform"), "handle": handle or None,
                 "url": f.get("profile_url"), "modules": [], "confidence": "low",
                 "tier": _tier(meta), "email_linked": False, "_metas": [],
-                "class1": False, "corroborated": False,
+                "class1": False, "class2": False, "corroborated": False,
             }
             by_key[key] = entry
         if module not in entry["modules"]:
@@ -184,10 +184,15 @@ def _collect_accounts(data: dict[str, Any]) -> list[dict[str, Any]]:
         entry["_metas"].append((module, meta, f))
         entry["email_linked"] = entry["email_linked"] or bool(f.get("email_linked")) \
             or module in _EMAIL_LINKED_MODULES
-        # UC7.2: identity class per account — Class-1 (email-anchored signal) or a
-        # Class-2 match UC7.1 corroborated up to the spine.
-        if _finding_signal(module, f) in _CLASS1_SIGNALS:
+        # UC7.2: identity class per account, by SIGNAL CLASS (not a UC7.1 tag, which
+        # misses core-tier username hits). Class-1 = email-anchored; Class-2 = a
+        # username / local-part guess. An account with ANY Class-1 signal is on the
+        # spine; one with only Class-2 signals is not (see _mark_direct).
+        signal = _finding_signal(module, f)
+        if signal in _CLASS1_SIGNALS:
             entry["class1"] = True
+        if signal in _CLASS2_SIGNALS:
+            entry["class2"] = True
         if _finding_corroborated(f):
             entry["corroborated"] = True
         if _CONF_RANK.get(str(f.get("confidence") or "").lower(), 0) > _CONF_RANK.get(entry["confidence"], 0):
@@ -204,21 +209,30 @@ def _collect_accounts(data: dict[str, Any]) -> list[dict[str, Any]]:
 # ── 1f collision guard ──────────────────────────────────────────────────────
 
 def _mark_direct(accounts: list[dict[str, Any]], data: dict[str, Any]) -> None:
-    """Pass 1 (UC7.2): the identity spine is Class 1. A direct tie is email-linked, a
-    Class-1 signal, or a Class-2 match UC7.1 corroborated up to the spine. A bare
-    ``username_match`` / ``localpart_guess`` — the handle merely equals a searched
-    local-part variant — is NOT a direct tie for an email subject (that is the Class-2
-    blend that merged strangers into one person). In ``--username`` mode the handle IS
-    the identity, so a handle match stays direct there."""
+    """Pass 1 (UC7.2 r2): the identity is the email-anchored spine. A direct tie is
+    ``email_linked`` or a Class-1 signal. Class membership is decided by SIGNAL CLASS,
+    not a tag (which missed core-tier username hits and merged strangers who share a
+    common local part into one person).
+
+    - **Domain email subject:** Class-1 ONLY. A Class-2 username / local-part match is
+      never a tie, whatever its tier or UC7.1 corroboration — the local part is a role.
+    - **Freemail subject:** the local part is the person's own handle, so a Class-2 match
+      UC7.1 corroborated up to the spine (consistent handle + name) may tie in too.
+    - **``--username`` subject:** the handle IS the identity, so a handle match ties.
+    """
     subj = _subject(data)
     username_subject = subj["type"] == "username"
+    freemail = (not username_subject) and subject_is_freemail(
+        str(data.get("original_email") or data.get("email") or data.get("canonical_email") or ""))
     subj_handles = _subject_handles(data)
     for a in accounts:
         handle_match = bool(a["handle"] and a["handle"].lower() in subj_handles)
-        a["_direct"] = bool(
-            a["email_linked"] or a["class1"] or a["corroborated"]
-            or (handle_match and username_subject)
-        )
+        if username_subject:
+            a["_direct"] = bool(a["email_linked"] or a["class1"] or handle_match)
+        elif freemail:
+            a["_direct"] = bool(a["email_linked"] or a["class1"] or a["corroborated"])
+        else:
+            a["_direct"] = bool(a["email_linked"] or a["class1"])
         a["in_aggregates"] = a["_direct"]
 
 
@@ -251,6 +265,7 @@ def _mark_tied(accounts: list[dict[str, Any]], data: dict[str, Any], primary_nam
     the primary name is resolved. Name-matches the confirmed name AND a second detail
     (location / cross-linked handle) tie a non-direct account in; a parsed name that
     contradicts the confirmed surname drops an account out (a handle collision)."""
+    username_subject = _subject(data)["type"] == "username"
     tied_handles: set[str] = set()
     for a in accounts:
         if a["_direct"]:
@@ -258,7 +273,10 @@ def _mark_tied(accounts: list[dict[str, Any]], data: dict[str, Any], primary_nam
                 tied_handles.add(a["handle"].lower())
             for _m, meta, _f in a["_metas"]:
                 tied_handles |= _other_handles(meta)
-    # Pass 2: name + one more detail (a cross-linked handle, or an agreeing location).
+    # Pass 2: name + one more detail (a cross-linked handle, or an agreeing location)
+    # ties a non-direct account in. UC7.2 r2: this runs in ``--username`` mode ONLY —
+    # for an EMAIL subject the identity is Class-1 only, so a Class-2 account must never
+    # be pulled in by a name match (that re-introduced the strangers the spine excludes).
     tied_locations = {
         _loc_tuple(meta.get("location_normalized"))
         for a in accounts if a["in_aggregates"]
@@ -266,7 +284,7 @@ def _mark_tied(accounts: list[dict[str, Any]], data: dict[str, Any], primary_nam
     }
     tied_locations.discard(None)
     for a in accounts:
-        if a["in_aggregates"]:
+        if a["in_aggregates"] or not username_subject:
             continue
         name = _account_name(a)
         if not (primary_name and name and names_match(name, primary_name)):

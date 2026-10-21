@@ -95,8 +95,12 @@ def find_profile_url(collected: dict[str, Any], *, freemail: bool = False) -> tu
     ``serp``, or None. UC7.2: a slug guess is seeded from a spine-derived (Class-1)
     handle first; the raw local-part sweep handle is used only for a freemail subject
     (where the local part is the person's own handle), never for a domain subject."""
+    # UC7.2 r2: an own-profile LinkedIn link is trusted only when it sits on a Class-1
+    # (email-anchored) account. A Class-2 @handle profile's bio link is a stranger's and
+    # must not re-introduce the wrong person — for a domain subject with no Class-1 link
+    # this path yields nothing (and no Bright Data call downstream).
     for module, f in _findings(collected):
-        if module in ("linkedin_serp", "linkedin_brightdata"):
+        if module not in _CLASS1_HANDLE_MODULES:
             continue
         meta = f.get("metadata") or {}
         for text in _strings([meta.get("linkedin_url"), meta.get("links"), meta.get("bio"),

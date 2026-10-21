@@ -52,7 +52,7 @@ def test_collision_guard_keeps_bare_same_name_out_of_aggregates():
             _acct("Medium", "jdwriter", {"core": True, "display_name": "Jane Doe",
                                          "avatar_url": "https://a/x.png"}),
         ],
-    })
+    }, subject_username="janedoe")  # --username mode: handle-based accounts aggregate
     card = build_card(data)
     by = {a["platform"]: a for a in card["accounts"]}
     assert by["GitHub"]["in_aggregates"] is True
@@ -68,7 +68,7 @@ def test_collision_guard_name_plus_cross_handle_ties_in():
                                         "other_handles": ["x:jane_x"]}, corroborated=True),
             _acct("X", "jane_x", {"core": True, "display_name": "Jane Doe"}),  # cross-linked handle ties in
         ],
-    })
+    }, subject_username="janedoe")
     card = build_card(data)
     assert all(a["in_aggregates"] for a in card["accounts"])
 
@@ -83,7 +83,7 @@ def test_photo_perceptual_dedup():
             _acct("Snapchat", "janedoe", {"core": True, "display_name": "Jane Doe",
                                           "avatar_url": "https://a/3.png", "avatar_phash": "0000ffff0000ffff"}, corroborated=True),  # far
         ],
-    })
+    }, subject_username="janedoe")
     card = build_card(data)
     assert card["counts"]["photos"] == 2  # the two near-identical ones collapse
 
@@ -96,7 +96,7 @@ def test_timeline_earliest_and_latest():
             _acct("Chess", "janedoe", {"core": True, "display_name": "Jane Doe",
                                        "joined_at": "2018-05-01T00:00:00Z", "last_active_at": "2026-02-01T00:00:00Z"}, corroborated=True),
         ],
-    })
+    }, subject_username="janedoe")
     card = build_card(data)
     assert card["timeline"] == {"first_seen": "2018-05-01T00:00:00Z", "last_seen": "2026-02-01T00:00:00Z"}
 
@@ -116,7 +116,7 @@ def test_location_disagreement_shows_both_not_guessed():
             _acct("Chess", "janedoe", {"core": True, "display_name": "Jane Doe",
                                        "location_normalized": {"country_code": "US"}}, corroborated=True),
         ],
-    })
+    }, subject_username="janedoe")
     loc = build_card(data)["locations"]
     assert loc["primary"]["country_code"] == "IN"       # most sources wins; never guessed
     assert loc["countries"] == ["IN", "US"]             # disagreement surfaced
@@ -129,7 +129,7 @@ def test_names_primary_and_variants():
             _acct("GitHub", "janedoe", {"core": True, "display_name": "Jane Doe", "other_handles": ["x:jd"]}, corroborated=True),
             _acct("Bandlab", "janedoe", {"core": True, "display_name": "JD Doe"}, corroborated=True),  # variant, same subject handle
         ],
-    })
+    }, subject_username="janedoe")
     names = build_card(data)["names"]
     assert names["primary"] == "Jane Doe"
     assert {v["name"] for v in names["variants"]} == {"JD Doe"}
@@ -172,15 +172,30 @@ def test_uc72_username_subject_handle_match_stays_direct():
     assert card["counts"]["linked_to_subject"] == 1
 
 
-def test_uc72_corroborated_class2_joins_spine():
-    """A Class-2 match UC7.1 corroborated up to the spine DOES anchor (freemail owner)."""
+def test_uc72r2_domain_subject_corroborated_class2_stays_out():
+    """UC7.2 r2: a DOMAIN subject's identity is Class-1 only — a Class-2 match stays out
+    of the aggregates even when UC7.1 corroborated it (the local part is a role)."""
     data = _report({
         "username_platforms": [
             _acct("GitHub", "janedoe", {"core": True, "display_name": "Jane Doe"}, corroborated=True),
         ],
-    })
+    }, original_email="role@acme.test", canonical_email="role@acme.test")
+    card = build_card(data)
+    assert card["accounts"][0]["in_aggregates"] is False
+    assert card["counts"]["linked_to_subject"] == 0
+
+
+def test_uc72r2_freemail_corroborated_class2_joins():
+    """UC7.2 r2: a FREEMAIL subject's local part is their own handle, so a Class-2 match
+    UC7.1 corroborated up to the spine DOES join the identity."""
+    data = _report({
+        "username_platforms": [
+            _acct("GitHub", "janedoe", {"core": True, "display_name": "Jane Doe"}, corroborated=True),
+        ],
+    }, original_email="janedoe@gmail.com", canonical_email="janedoe@gmail.com")
     card = build_card(data)
     assert card["accounts"][0]["in_aggregates"] is True
+    assert card["counts"]["linked_to_subject"] == 1
 
 
 def test_names_match_rule():
