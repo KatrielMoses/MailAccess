@@ -58,14 +58,18 @@ def derive_github_handles(email: str) -> list[str]:
     for b in bases:
         add(b)
     # Domain tokens only for a domain subject — a freemail domain (gmail.com) is a
-    # provider, not an identity, so its tokens are noise.
+    # provider, not an identity, so its tokens are noise. Prefer local-part + token
+    # handles (user-root) — those are the person; a bare domain token (rootbox) is
+    # more likely an org/shared account, so it goes last.
     from ..core.evidence import subject_is_freemail
 
     if not subject_is_freemail(email):
-        for dt in _domain_tokens(domain):
+        tokens = _domain_tokens(domain)
+        for dt in tokens:
             for b in bases:
                 add(f"{b}-{dt}")
                 add(f"{b}{dt}")
+        for dt in tokens:
             add(dt)
     return out[:_MAX_DERIVED_HANDLES]
 
