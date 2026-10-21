@@ -1806,6 +1806,41 @@ _SITES.extend([
 ])
 
 
+# ---------------------------------------------------------------------------
+# UC2.1 extended registration checks (``default_off=True``).
+#
+# Additional "is this email registered" definitions, off by default and only run
+# when ``ENABLE_EXTENDED_REGISTRATION_CHECKS=true`` (see ``backend/config.py`` and
+# ``account_discovery``). The OSS default probe set is the built-in defs above;
+# these are the website's extended set. Each one was validated live against a
+# known-registered and a known-unregistered email before being added (UC2.1);
+# anything that could not cleanly separate the two was dropped, not shipped
+# disabled. Public, logged-out, non-notifying checks only — no CAPTCHA/bot-check
+# path and nothing that emails or texts the subject.
+# ---------------------------------------------------------------------------
+_SITES.extend([
+    # Adobe — the public account-lookup the adobe.com sign-in uses. A registered
+    # address returns a 200 JSON array of account objects (each with
+    # ``authenticationMethods``); an unknown address returns a 200 empty array
+    # ``[]``. No CSRF prefetch, no CAPTCHA. (emailosint target.)
+    _site("adobe", "adobe.com", "software", "login", {
+        "method": "POST",
+        "url": "https://auth.services.adobe.com/signin/v2/users/accounts",
+        # No Origin header: Adobe rejects a cross-origin POST with 403 "Invalid
+        # CORS request". The X-IMS-ClientId alone is what the endpoint keys on.
+        "headers": {"User-Agent": _UA, "Content-Type": "application/json",
+                    "X-IMS-ClientId": "adobedotcom2"},
+        "raw": '{"username":"{email}","accountType":"individual"}',
+        "rules": [
+            {"when": {"status": 200, "text_contains": "authenticationMethods"},
+             "verdict": "exists"},
+            {"when": {"status": 200, "text_equals": "[]"}, "verdict": "absent"},
+        ],
+        "default": "rate_limited",
+    }, high_value=True, default_off=True),
+])
+
+
 # Dedicated handlers for multi-step / token-prefetch services go here later.
 _EXTRA_HANDLERS: dict[str, Any] = {}
 
