@@ -39,9 +39,23 @@ def _get_request_semaphore() -> asyncio.Semaphore | None:
 
 async def _before_request(request: httpx.Request) -> None:
     """Event hook: enforce per-domain rate limit and rotate UA for Tor."""
+    _github_auth(request)
     await rate_limiter.acquire(request.url.host)
     if proxy_config.is_tor:
         request.headers["user-agent"] = proxy_config.random_ua()
+
+
+def _github_auth(request: httpx.Request) -> None:
+    """GITHUB_TOKEN (optional) on every GitHub API request that has no auth of its own:
+    5,000 requests/hour instead of 60. Only exactly api.github.com; never logged."""
+    if request.url.host != "api.github.com" or "authorization" in request.headers:
+        return
+    from ..config import settings
+
+    token = str(getattr(settings, "github_token", "") or "").strip()
+    if token:
+        request.headers["Authorization"] = f"Bearer {token}"
+        logger.debug("GitHub API request authenticated with GITHUB_TOKEN")
 
 
 def build_client(
@@ -109,6 +123,26 @@ class _MailAccessClient(httpx.AsyncClient):
     """AsyncClient subclass that converts proxy errors into ProxyConnectionError."""
 
     async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        from . import host_politeness
+
+        if not host_politeness.is_active():
+            return await self._send_bounded(request, **kwargs)
+        # UC2: one in-flight request per host for opted-in probing; the host slot is
+        # taken before the global slot so a queued host never idles a global slot.
+        async with host_politeness.host_slot(request.url.host):
+            response = await self._send_bounded(request, **kwargs)
+            wait = (
+                host_politeness.retry_after_seconds(response.headers)
+                if response.status_code == 429
+                else None
+            )
+            if wait is None:
+                return response
+            await response.aclose()
+            await asyncio.sleep(wait)
+            return await self._send_bounded(request, **kwargs)
+
+    async def _send_bounded(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
         sem = _get_request_semaphore()
         try:
             if sem is not None:

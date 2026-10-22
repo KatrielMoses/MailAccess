@@ -237,6 +237,7 @@ class InvestigationEngine:
         no_whoisfreaks: bool = False,
         org_surface_deep: bool = False,
         refresh: bool = False,
+        no_cache: bool = False,
         cached_results: dict[str, ModuleResult] | None = None,
         no_own_index: bool = False,
     ) -> None:
@@ -259,6 +260,8 @@ class InvestigationEngine:
         self._no_own_index = no_own_index
         self._org_surface_deep = org_surface_deep
         self._refresh = refresh
+        # ``--no-cache``: the 7-day probe cache is ignored on read (still written).
+        self._no_cache = no_cache
         self._cached_results = cached_results
         self.status = InvestigationStatus.PENDING
 
@@ -269,8 +272,14 @@ class InvestigationEngine:
         module_names: list[str] | None = None,
         enable_modules: list[str] | None = None,
     ) -> asyncio.Queue[QueueEvent | None]:
-        normalized = normalize_email_address(email)
-        canonical_email = normalized.canonical_email
+        # UC5: a target with no "@" is a username run — the handle-based half of the
+        # pipeline (sweep, pivot, profile parsers, LinkedIn, card), skipping the
+        # email-only modules (breach, domain, DNS, account_discovery, credibility).
+        username_mode = "@" not in str(email)
+        if username_mode:
+            canonical_email = str(email).strip()
+        else:
+            canonical_email = normalize_email_address(email).canonical_email
         emitter = run_events.create(investigation_id)
         queue: asyncio.Queue[QueueEvent | None] = run_events.FanoutQueue(emitter)
         semaphore = asyncio.Semaphore(self._max_concurrency)
@@ -280,6 +289,22 @@ class InvestigationEngine:
         async def _run_and_persist() -> None:
             current_email = canonical_email
             events_token = run_events.set_current(emitter)
+            # UC2: one per-host slot registry per investigation, shared by every
+            # module task that opts into per-host politeness.
+            from . import host_politeness
+
+            host_politeness.new_run()
+            # UC4: the full investigation runs the non-core tail for a bounded time,
+            # and ``--force`` / ``--no-cache`` skip the probe cache on read.
+            from ..config import settings as _settings
+            from ..modules.username_platforms import set_tail_budget
+            from .probe_cache import set_no_cache_read
+
+            # UC5: a username run stays lean (sweep + pivot + profile), so no tail —
+            # the core sweep already yields the true hits; the pivot adds the rest.
+            set_tail_budget(0.0 if username_mode
+                            else float(getattr(_settings, "username_tail_budget_full_seconds", 15.0) or 0))
+            set_no_cache_read(self._no_cache or self._force)
             run_done_sent = False
             run_error: str | None = None
             try:
@@ -309,7 +334,7 @@ class InvestigationEngine:
                     settings as config,
                 )
                 from .investigation_budget import InvestigationBudget
-                from .phases import PHASE_DAG
+                from .phases import PHASE_DAG, _phase_levels
                 from .product_mode import normalize_mode
 
                 # Phase 2B — resolve the product mode (per-run override else the
@@ -333,6 +358,16 @@ class InvestigationEngine:
                 effective_modules = module_names
                 if effective_modules is None and config.investigation_fast_modules:
                     effective_modules = list(config.investigation_fast_modules)
+                if username_mode:
+                    # PrimaryPhase only runs the sweep; the pivot and profile phases run
+                    # their own handle/name-based modules.
+                    effective_modules = ["username_platforms"]
+                    active_dag = tuple(
+                        ph for ph in PHASE_DAG
+                        if ph.name in ("primary", "username_pivot", "profile")
+                    )
+                else:
+                    active_dag = PHASE_DAG
 
                 # First event of the run: sent before any module starts (and before
                 # the status write and DNS gate), so a viewer sees activity at once.
@@ -383,7 +418,7 @@ class InvestigationEngine:
                 # A role/system address (noreply@, info@) is not a person.
                 from .investigation_gate import reset_target_gate, set_target_gate
 
-                domain = current_email.split("@", 1)[1] if "@" in current_email else ""
+                domain = "" if username_mode else (current_email.split("@", 1)[1] if "@" in current_email else "")
                 try:
                     from .name_consensus import is_role_or_system_email
 
@@ -423,65 +458,77 @@ class InvestigationEngine:
                         }],
                         metadata={"domain": domain, "resolves": False},
                     )
-                try:
-                    for phase in PHASE_DAG:
-                        # Native cache hits keep their original evidence. Only
-                        # IP enrichment is refreshed, with no discovery rerun.
-                        if self._cached_results is not None and phase.name not in (
-                            "ip_intel",
-                            "whoisfreaks_intel",
-                        ):
-                            continue
-                        # A provider phase that is off (no key, disabled, or the per-run
-                        # flag) is not announced at all.
-                        announce = provider_module_enabled(phase.name)
-                        emitter.phase = phase.name
-                        if announce:
-                            emitter.emit(
-                                "phase_start",
-                                {
-                                    "phase": phase.name,
-                                    "modules": [m for ph, m in plan if ph == phase.name],
-                                },
-                            )
-                        _phase_t0 = asyncio.get_running_loop().time()
-                        await phase.run(
-                            investigation_id=investigation_id,
-                            email=email,
-                            canonical_email=current_email,
-                            collected=collected,
-                            queue=queue,
-                            semaphore=semaphore,
-                            config=config,
-                            budget=budget,
-                            explicit_modules=(
-                                set(effective_modules)
-                                if effective_modules is not None
-                                else None
-                            ),
-                            enable_modules=(
-                                set(enable_modules) if enable_modules is not None else None
-                            ),
-                            mode=resolved_mode.value,
-                            force=self._force,
+                async def _run_phase(phase: InvestigationPhase) -> None:
+                    # A provider phase that is off (no key, disabled, or the per-run
+                    # flag) is not announced at all.
+                    announce = provider_module_enabled(phase.name)
+                    emitter.phase = phase.name
+                    if announce:
+                        emitter.emit(
+                            "phase_start",
+                            {
+                                "phase": phase.name,
+                                "modules": [m for ph, m in plan if ph == phase.name],
+                            },
                         )
-                        if announce:
-                            emitter.emit(
-                                "phase_end",
-                                {
-                                    "phase": phase.name,
-                                    "duration_ms": int(
-                                        (asyncio.get_running_loop().time() - _phase_t0) * 1000
-                                    ),
-                                },
+                    _phase_t0 = asyncio.get_running_loop().time()
+                    await phase.run(
+                        investigation_id=investigation_id,
+                        email=email,
+                        canonical_email=current_email,
+                        collected=collected,
+                        queue=queue,
+                        semaphore=semaphore,
+                        config=config,
+                        budget=budget,
+                        explicit_modules=(
+                            set(effective_modules) if effective_modules is not None else None
+                        ),
+                        enable_modules=(
+                            set(enable_modules) if enable_modules is not None else None
+                        ),
+                        mode=resolved_mode.value,
+                        force=self._force,
+                    )
+                    if announce:
+                        emitter.emit(
+                            "phase_end",
+                            {
+                                "phase": phase.name,
+                                "duration_ms": int(
+                                    (asyncio.get_running_loop().time() - _phase_t0) * 1000
+                                ),
+                            },
+                        )
+
+                try:
+                    # UC4: run each dependency LEVEL of the phase DAG concurrently. Phases
+                    # at the same level (e.g. username_pivot and permutation_discovery, which
+                    # both depend only on ``primary``) are independent — each writes its own
+                    # module key into ``collected`` — so running them together removes the
+                    # old strictly-sequential tail without changing results. Levels still run
+                    # in order, so every dependency is satisfied before its dependents start.
+                    for level in _phase_levels(active_dag):
+                        runnable = [
+                            phase for phase in level
+                            if not (
+                                self._cached_results is not None
+                                and phase.name not in ("ip_intel", "whoisfreaks_intel")
                             )
-                        if phase.name == "email_credibility":
-                            credibility = collected.get("email_credibility")
-                            if credibility:
-                                current_email = str(
-                                    (credibility.metadata or {}).get("canonical_email")
-                                    or current_email
-                                )
+                        ]
+                        if not runnable:
+                            continue
+                        await asyncio.gather(*(_run_phase(phase) for phase in runnable))
+                        # email_credibility is alone in its level; settle the canonical
+                        # address before any later phase reads it.
+                        for phase in runnable:
+                            if phase.name == "email_credibility":
+                                credibility = collected.get("email_credibility")
+                                if credibility:
+                                    current_email = str(
+                                        (credibility.metadata or {}).get("canonical_email")
+                                        or current_email
+                                    )
 
                     # Compute name consensus before the graph build so
                     # the Phase 6B.2 V2 shadow-profile detector can use
@@ -497,6 +544,14 @@ class InvestigationEngine:
                     # site that rest on different signal types are linked, BEFORE the
                     # graph is built (the graph filters on the label).
                     evidence.annotate_results(collected, current_email)
+                    # UC5: hash avatars (cap 8, host-politeness) so the person card can
+                    # drop duplicate photos. Best-effort; writes into finding metadata.
+                    try:
+                        from .person_card import attach_avatar_hashes
+
+                        await attach_avatar_hashes(collected)
+                    except Exception:  # noqa: BLE001 - photo hashing is additive
+                        logger.debug("avatar hashing skipped", exc_info=True)
                     graph_data = await _build_graph_with_timeout(
                         current_email, collected, name_consensus=name_consensus
                     )

@@ -1,0 +1,22 @@
+{
+ "site_id": "pypi",
+ "username": "sample.person",
+ "snapshot": {
+  "url": "https://pypi.org/pypi",
+  "status": 200,
+  "content_type": "text/xml"
+ },
+ "body": "<?xml version='1.0'?>\n<methodResponse>\n<params>\n<param>\n<value><array><data>\n<value><array><data>\n<value><string>Owner</string></value>\n<value><string>sampletool</string></value>\n</data></array></value>\n<value><array><data>\n<value><string>Owner</string></value>\n<value><string>othertool</string></value>\n</data></array></value>\n</data></array></value>\n</param>\n</params>\n</methodResponse>\n",
+ "follow_ups": {
+  "https://pypi.org/pypi/sampletool/json": "{\"info\": {\"author\": \"Sample Person\", \"maintainer\": null}}"
+ },
+ "expected": {
+  "display_name": "Sample Person",
+  "profile_username": "sample.person",
+  "posts": 2,
+  "links": [
+   "https://pypi.org/project/sampletool/",
+   "https://pypi.org/project/othertool/"
+  ]
+ }
+}

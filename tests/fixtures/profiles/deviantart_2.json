@@ -1,0 +1,20 @@
+{
+ "site_id": "deviantart_2",
+ "username": "sampleperson",
+ "snapshot": {
+  "url": "https://www.deviantart.com/sampleperson",
+  "status": 200,
+  "content_type": "text/html"
+ },
+ "body": "<html><head><meta charSet=\"utf-8\"/>\n<meta name=\"application-name\" content=\"DeviantArt\"/>\n<meta name=\"description\" content=\"sampleperson is an artist on DeviantArt.  · Artworks: 0 · Followers: 0 · Likes: 2\"/>\n<meta name=\"robots\" content=\"max-image-preview:large\"/>\n<meta property=\"og:type\" content=\"website\"/>\n<meta property=\"og:url\" content=\"https://www.deviantart.com/sampleperson\"/>\n<meta property=\"og:title\" content=\"sampleperson on DeviantArt\"/>\n<meta property=\"og:image\" content=\"https://a.deviantart.net/avatars/default_group.gif\"/>\n<meta property=\"og:description\" content=\"sampleperson is an artist on DeviantArt.  · Artworks: 0 · Followers: 0 · Likes: 2\"/>\n<meta property=\"fb:page_id\" content=\"6497553922\"/>\n<meta property=\"twitter:account_id\" content=\"1202720\"/>\n<meta name=\"twitter:site\" content=\"@deviantart\"/>\n<meta name=\"twitter:card\" content=\"summary_large_image\"/>\n<meta name=\"twitter:title\" content=\"sampleperson on DeviantArt\"/>\n<meta name=\"twitter:description\" content=\"sampleperson is an artist on DeviantArt.  · Artworks: 0 · Followers: 0 · Likes: 2\"/>\n<meta name=\"twitter:image\" content=\"https://a.deviantart.net/avatars/default_group.gif\"/>\n<meta name=\"pinterest\" content=\"nopin\"/>\n<meta name=\"theme-color\" content=\"#06070d\"/></head><body>\\\"about\\\",\\\"about\\\":{\\\"username\\\":\\\"sampleperson\\\",\\\"country\\\":\\\"India\\\",\\\"countryId\\\":99,\\\"countrycode\\\":\\\"in\\\",\\\"age\\\":null,\\\"dobYear\\\":null,\\\"dobMonth\\\":11,\\\"dobDay\\\":30,\\\"deviantFor\\\":172326836,\\\"isArtist\\\":false,\\\"level\\\":0,\\\"specialty\\\":0,\\\"website\\\":\\\"\\\",\\\"websiteLabel\\\":null,\\\"tagline\\\":\\\"\\\",\\\"twitterUsername\\\":null,\\\"gen</body></html>",
+ "follow_ups": {},
+ "expected": {
+  "profile_username": "sampleperson",
+  "location": "India",
+  "followers": 0,
+  "posts": 0,
+  "location_normalized": {
+   "country_code": "IN"
+  }
+ }
+}

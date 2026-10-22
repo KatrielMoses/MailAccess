@@ -184,6 +184,34 @@ def enrich_report(data: dict) -> dict:
         findings_by_module.setdefault(f["module_name"], []).append(f["data"])
     data["findings_by_module"] = findings_by_module
 
+    # UC7.1: context-aware corroboration of local-part username matches. Uses the whole
+    # report (confirmed accounts, cross-site handle/name consistency, the subject's own
+    # domain context) to tag each bare @handle match with a corroboration tier, so the
+    # view can promote the corroborated ones and group the rest. Scoring only — never
+    # drops a finding, never probes.
+    try:
+        from .evidence import corroborate_username_matches
+
+        corroborate_username_matches(
+            [(f["module_name"], f["data"]) for f in findings
+             if isinstance(f, dict) and isinstance(f.get("data"), dict)],
+            data.get("original_email") or data.get("email") or "",
+            data.get("name_consensus"),
+        )
+    except Exception:  # noqa: BLE001 - corroboration is additive; never break the report
+        logging.getLogger(__name__).exception("username corroboration failed")
+
+    # UC5: the person card — one summary across the accounts, names, locations, photos,
+    # timeline and links the investigation found. A pure function of the findings above
+    # (any avatar hashing already ran during the investigation); never fatal.
+    try:
+        from .person_card import build_card
+
+        data["person_card"] = build_card(data)
+    except Exception:  # noqa: BLE001 - the card is additive, a failure must not break the report
+        logging.getLogger(__name__).exception("person_card build failed")
+        data.setdefault("person_card", None)
+
     credibility = _email_credibility_from_report(data)
     if isinstance(credibility, dict):
         data["email_credibility"] = credibility
@@ -373,6 +401,7 @@ class InvestigationService:
         org_surface_deep: bool = False,
         refresh: bool = False,
         no_own_index: bool = False,
+        no_cache: bool = False,
     ) -> tuple[str, datetime, asyncio.Queue | None, bool]:
         """
         Persist a new Investigation (PENDING), launch the engine in the
@@ -389,7 +418,10 @@ class InvestigationService:
         """
         from .product_mode import normalize_mode
 
-        canonical_email = normalize_email_address(email).canonical_email
+        # UC5: a target with no "@" is a username run; don't normalise it as an email
+        # and don't serve it from the email cache.
+        username_mode = "@" not in str(email)
+        canonical_email = str(email).strip() if username_mode else normalize_email_address(email).canonical_email
         cached_results = None
         # Resolve the effective mode exactly as the engine does (per-run override
         # else the server default) so the cache key matches the mode actually
@@ -403,6 +435,7 @@ class InvestigationService:
             and settings.enable_investigation_cache
             and module_names is None
             and not enable_modules
+            and not username_mode
         ):
             recent = await self._find_recent_complete(email, canonical_email, mode=resolved_mode)
             if recent is not None:
@@ -438,6 +471,10 @@ class InvestigationService:
                     off_modules.add("ip_intel")
                 if not whoisfreaks_active(no_whoisfreaks=no_whoisfreaks):
                     off_modules.add("whoisfreaks_intel")
+                from .brightdata_client import brightdata_active
+
+                if not brightdata_active():
+                    off_modules.add("linkedin_brightdata")
                 if any(run.module_name in off_modules for run in runs):
                     recent = None
             if recent is not None:
@@ -488,6 +525,7 @@ class InvestigationService:
             no_own_index=no_own_index,
             org_surface_deep=org_surface_deep,
             refresh=refresh,
+            no_cache=no_cache,
             cached_results=cached_results,
         )
         queue = await engine.investigate(email, investigation_id, module_names, enable_modules)

@@ -1,0 +1,25 @@
+{
+ "site_id": "dailymotion",
+ "username": "sample.person",
+ "snapshot": {
+  "url": "https://api.dailymotion.com/user/sample.person?fields=id,username,screenname,description,avatar_720_url,cover_250_url,followers_total,following_total,videos_total,country,created_time,verified,url",
+  "status": 200,
+  "content_type": "application/json"
+ },
+ "body": "{\"id\": \"f4kbk7b\", \"username\": \"sample.person\", \"screenname\": \"Sample Person\", \"description\": \"\", \"avatar_720_url\": \"https://cdn.example.test/avatar_url.png\", \"cover_250_url\": null, \"followers_total\": 0, \"following_total\": 0, \"videos_total\": 0, \"country\": \"IN\", \"created_time\": 1523450935, \"verified\": false, \"url\": \"https://www.dailymotion.com/sample.person\"}",
+ "follow_ups": {},
+ "expected": {
+  "display_name": "Sample Person",
+  "profile_username": "sample.person",
+  "avatar_url": "https://cdn.example.test/avatar_url.png",
+  "location": "IN",
+  "joined_at": "2018-04-11T12:48:55Z",
+  "followers": 0,
+  "following": 0,
+  "posts": 0,
+  "verified": false,
+  "location_normalized": {
+   "country_code": "IN"
+  }
+ }
+}

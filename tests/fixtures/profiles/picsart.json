@@ -1,0 +1,19 @@
+{
+ "site_id": "picsart",
+ "username": "sampleperson",
+ "snapshot": {
+  "url": "https://api.picsart.com/users/show/sampleperson.json",
+  "status": 200,
+  "content_type": "application/json"
+ },
+ "body": "{\"status\": \"success\", \"id\": 310590461247034, \"name\": \"Sample Person\", \"username\": \"sampleperson\", \"photo\": \"https://cdn190.picsart.com/237982610450401.png\", \"default_profile_pic\": true, \"cover\": null, \"status_message\": \"\", \"following_count\": 1, \"followers_count\": 0, \"likes_count\": 0, \"photos_count\": 0, \"stickers_count\": 0, \"video_count\": 0, \"tags\": [], \"tags_count\": 0, \"is_verified\": false, \"is_follow\": false, \"is_followed\": false, \"verified_categories\": [], \"brand\": {\"contacts\": [], \"packages\": []}, \"no_index\": true, \"roles\": [], \"saves_count\": 0, \"remix_score\": 0, \"top_fans_count\": 0, \"locations_count\": 0, \"has_top_fans\": false, \"is_searchable\": true, \"dashboard_visibility\": false, \"subscription\": {\"granted\": false}}",
+ "follow_ups": {},
+ "expected": {
+  "display_name": "Sample Person",
+  "profile_username": "sampleperson",
+  "followers": 0,
+  "following": 1,
+  "posts": 0,
+  "verified": false
+ }
+}

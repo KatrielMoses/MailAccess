@@ -1,0 +1,22 @@
+{
+ "site_id": "chess",
+ "username": "testjuser",
+ "snapshot": {
+  "url": "https://api.chess.com/pub/player/testjuser",
+  "status": 200,
+  "content_type": "application/json"
+ },
+ "body": "{\"player_id\": 452531103, \"@id\": \"https://api.chess.com/pub/player/testjuser\", \"url\": \"https://www.chess.com/member/testjuser\", \"username\": \"testjuser\", \"followers\": 0, \"country\": \"https://api.chess.com/pub/country/IN\", \"last_online\": 1711775631, \"joined\": 1721341745, \"status\": \"basic\", \"is_streamer\": false, \"verified\": false, \"streaming_platforms\": []}",
+ "follow_ups": {},
+ "expected": {
+  "profile_username": "testjuser",
+  "location": "India",
+  "joined_at": "2024-07-18T22:29:05Z",
+  "last_active_at": "2024-03-30T05:13:51Z",
+  "followers": 0,
+  "verified": false,
+  "location_normalized": {
+   "country_code": "IN"
+  }
+ }
+}

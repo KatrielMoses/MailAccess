@@ -282,6 +282,24 @@ class AlternateEmailPhase(InvestigationPhase):
         return kwargs["collected"]
 
 
+class AlternateEmailAnchorPhase(InvestigationPhase):
+    """UC7.3a — re-anchor Class-1 discovery on alternate emails found via a Class-1
+    signal, merged under one person. Runs after alternate_email; bounded depth 1."""
+
+    name = "alternate_email_anchor"
+    dependencies = ("primary", "alternate_email")
+
+    async def run(self, **kwargs: Any) -> dict[str, ModuleResult]:
+        from ..modules.alternate_email_anchor import AlternateEmailAnchorModule
+
+        await _run_and_record(
+            AlternateEmailAnchorModule(),
+            **_runner_kwargs(kwargs),
+            findings_input=kwargs["collected"],
+        )
+        return kwargs["collected"]
+
+
 class DomainClusterPhase(InvestigationPhase):
     """Phase 6B.1 — group platform domains by shared infrastructure.
 
@@ -315,20 +333,27 @@ class ProfilePhase(InvestigationPhase):
         from ..modules.marketplace_profile import MarketplaceProfileModule
         from ..modules.twitter_profile import TwitterProfileModule
 
-        modules = (
-            TwitterProfileModule(),
-            LinkedInSerpModule(),
-            MarketplaceProfileModule(),
-        )
+        from .brightdata_client import brightdata_active
+
+        def _record(mod):
+            return _run_and_record(
+                mod, **_runner_kwargs(kwargs), findings_input=kwargs["collected"]
+            )
+
+        async def _linkedin() -> None:
+            # The LinkedIn card (Bright Data, Pro) runs right after the SERP lookup so it
+            # can use its slug; off (no key) means fully off: never run, never shown.
+            await _record(LinkedInSerpModule())
+            explicit = kwargs.get("explicit_modules")
+            if brightdata_active() and (explicit is None or "linkedin_brightdata" in explicit):
+                from ..modules.linkedin_brightdata import LinkedInBrightDataModule
+
+                await _record(LinkedInBrightDataModule())
+
         await asyncio.gather(
-            *(
-                _run_and_record(
-                    mod,
-                    **_runner_kwargs(kwargs),
-                    findings_input=kwargs["collected"],
-                )
-                for mod in modules
-            ),
+            _record(TwitterProfileModule()),
+            _linkedin(),
+            _record(MarketplaceProfileModule()),
             return_exceptions=True,
         )
         return kwargs["collected"]
@@ -471,12 +496,37 @@ PHASE_DAG: tuple[InvestigationPhase, ...] = (
     PermutationPhase(),
     EmailDiscoveryPhase(),
     AlternateEmailPhase(),
+    AlternateEmailAnchorPhase(),
     DomainClusterPhase(),
     ProfilePhase(),
     PhonePhase(),
     IpIntelPhase(),
     WhoisFreaksPhase(),
 )
+
+
+def _phase_levels(dag: tuple[InvestigationPhase, ...]) -> list[list[InvestigationPhase]]:
+    """Group the DAG into concurrent batches, preserving its order exactly (UC4).
+
+    A batch is a run of *consecutive* phases that share the identical dependency set
+    (e.g. username_pivot, permutation_discovery, email_discovery and alternate_email all
+    depend only on ``primary``). Such phases cannot depend on one another — a phase is
+    never in its own dependency set — so running them together is safe, and because the
+    grouping is strictly adjacent, no phase ever moves ahead of one it follows in the
+    DAG. A phase with a different dependency set starts a new batch and runs after the
+    previous one, so ordering (and every declared dependency) is respected even for a
+    reduced DAG whose intermediate phases are absent.
+    """
+    batches: list[list[InvestigationPhase]] = []
+    current_key: frozenset[str] | None = None
+    for phase in dag:
+        key = frozenset(getattr(phase, "dependencies", ()))
+        if batches and key == current_key:
+            batches[-1].append(phase)
+        else:
+            batches.append([phase])
+            current_key = key
+    return batches
 
 
 _KEY_SETTINGS: dict[str, tuple[str, ...]] = {
@@ -590,7 +640,7 @@ def plan_modules(
         add("email_discovery", "email_discovery")
     add("alternate_email", "alternate_email")
     add("domain_cluster", "domain_cluster")
-    add("profile", "twitter_profile", "linkedin_serp", "marketplace_profile")
+    add("profile", "twitter_profile", "linkedin_serp", "linkedin_brightdata", "marketplace_profile")
     if config.enable_phone_intel:
         add("phone_intel", "phone_intel")
     return planned, unavailable

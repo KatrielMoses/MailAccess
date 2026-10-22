@@ -1,0 +1,18 @@
+{
+ "site_id": "pinterest_2",
+ "username": "demoperson",
+ "snapshot": {
+  "url": "https://widgets.pinterest.com/v3/pidgets/users/demoperson/pins/",
+  "status": 200,
+  "content_type": "application/json"
+ },
+ "body": "{\"status\": \"success\", \"code\": 0, \"message\": \"ok\", \"endpoint_name\": \"v3_pidget_get_user_pins\", \"data\": {\"user\": {\"full_name\": \"Demo Person\", \"id\": \"731837809225215041\", \"pin_count\": 2, \"profile_url\": \"https://www.pinterest.com/demoperson/\", \"follower_count\": 0, \"about\": \"\", \"image_small_url\": \"https://i.pinimg.com/60x60_RS/09/f3/c6/11aa44676b7ad36d8f7a446ac7505eb4.jpg\"}}}",
+ "follow_ups": {},
+ "expected": {
+  "display_name": "Demo Person",
+  "profile_username": "demoperson",
+  "avatar_url": "https://i.pinimg.com/280x280_RS/09/f3/c6/11aa44676b7ad36d8f7a446ac7505eb4.jpg",
+  "followers": 0,
+  "posts": 2
+ }
+}

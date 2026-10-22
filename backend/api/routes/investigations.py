@@ -71,6 +71,8 @@ class InvestigateRequest(BaseModel):
     org_surface_deep: bool = False
     # F8 (``--refresh``): force a Netlas fetch past the 30-day store gate.
     refresh: bool = False
+    # UC4 (``--no-cache``): ignore the 7-day probe cache on read (still written).
+    no_cache: bool = False
 
 
 class InvestigateResponse(BaseModel):
@@ -133,6 +135,7 @@ async def start_investigation(
         no_own_index=body.no_own_index,
         org_surface_deep=body.org_surface_deep,
         refresh=body.refresh,
+        no_cache=body.no_cache,
     )
     if not cached and queue is not None:
         queue_registry.put(investigation_id, queue)

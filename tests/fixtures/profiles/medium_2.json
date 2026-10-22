@@ -1,0 +1,17 @@
+{
+ "site_id": "medium_2",
+ "username": "sample.person",
+ "snapshot": {
+  "url": "https://medium.com/feed/@sample.person",
+  "status": 200,
+  "content_type": "text/xml"
+ },
+ "body": "<title><![CDATA[Stories by Sample Person on Medium]]></title>\n<image>\n            <url>https://cdn.example.test/avatar_url.png</url>\n<pubDate>Mon, 12 Oct 2026 10:52:01 GMT</pubDate>\n<pubDate>Mon, 20 Jul 2026 05:57:23 GMT</pubDate>\n<pubDate>Wed, 24 Jun 2026 06:58:06 GMT</pubDate>\n<pubDate>Mon, 01 Jun 2026 12:53:21 GMT</pubDate>\n<pubDate>Mon, 25 May 2026 10:02:44 GMT</pubDate>\n<pubDate>Thu, 21 May 2026 13:57:26 GMT</pubDate>\n<pubDate>Tue, 19 May 2026 19:47:51 GMT</pubDate>\n<pubDate>Sat, 16 May 2026 13:42:02 GMT</pubDate>\n<pubDate>Wed, 13 May 2026 08:29:45 GMT</pubDate>",
+ "follow_ups": {},
+ "expected": {
+  "display_name": "Sample Person",
+  "profile_username": "sample.person",
+  "avatar_url": "https://cdn.example.test/avatar_url.png",
+  "last_active_at": "2026-10-12T10:52:01Z"
+ }
+}

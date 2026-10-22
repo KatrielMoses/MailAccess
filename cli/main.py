@@ -3195,6 +3195,7 @@ async def _investigate(
     no_whoisfreaks: bool = False,
     org_surface_deep: bool = False,
     refresh: bool = False,
+    no_cache: bool = False,
 ) -> int:
     base_url = get_backend_url()
     managed_proc = await _ensure_server_running(base_url, email)
@@ -3226,6 +3227,7 @@ async def _investigate(
             no_whoisfreaks=no_whoisfreaks,
             org_surface_deep=org_surface_deep,
             refresh=refresh,
+            no_cache=no_cache,
         )
     finally:
         if managed_proc is not None:
@@ -3251,6 +3253,7 @@ async def _investigate_run(
     no_whoisfreaks: bool = False,
     org_surface_deep: bool = False,
     refresh: bool = False,
+    no_cache: bool = False,
 ) -> int:
     _apply_scrapingant_transport_override(scrapingant_transport_override)
     base_url = get_backend_url()
@@ -3291,6 +3294,8 @@ async def _investigate_run(
         payload["org_surface_deep"] = True
     if refresh:
         payload["refresh"] = True
+    if no_cache:
+        payload["no_cache"] = True
     if enable_modules_list:
         payload["enable_modules"] = enable_modules_list
         err_console.print(f"[dim]Opt-in modules enabled: {', '.join(enable_modules_list)}[/dim]")
@@ -5081,7 +5086,10 @@ async def _investigate_run(
 
 @app.command()
 def investigate(
-    email: str = typer.Argument(..., help="Email address to investigate."),
+    email: str | None = typer.Argument(None, help="Email address to investigate."),
+    username: str | None = typer.Option(
+        None, "--username", help="Investigate a username/handle directly instead of an email."
+    ),
     output_format: str = typer.Option(
         "table", "--format", "-f", help="Output format: table|json|jsonl"
     ),
@@ -5166,6 +5174,10 @@ def investigate(
         help="Force fresh Netlas, ipgeolocation.io and WhoisFreaks lookups past their 30-day caches "
              "(needs a key). The store is read either way.",
     ),
+    no_cache: bool = typer.Option(
+        False, "--no-cache",
+        help="Ignore the 7-day probe cache on read (it is still written). For debugging.",
+    ),
 ) -> None:
     """Run a full OSINT investigation against an email address.
     Exit codes: 0=completed 1=failed 2=invalid input 3=server unavailable"""
@@ -5199,14 +5211,32 @@ def investigate(
             "datacenter_proxy" if proxy_type == "datacenter" else "residential_proxy"
         )
 
-    if email == "-":
+    import re as _re
+
+    if username is not None:
+        # UC5: a username run (sweep, pivot, profile parsers, LinkedIn, card) — the
+        # handle is the target; the no-"@" form drives username mode end to end.
+        if email is not None:
+            err_console.print("[red]Error:[/] pass either an email or --username, not both.")
+            raise typer.Exit(2)
+        handle = username.strip().lstrip("@")
+        if not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,63}", handle):
+            err_console.print(f"[red]Error:[/] {username!r} is not a valid username.")
+            raise typer.Exit(2)
+        emails = [handle]
+    elif email == "-":
         emails = [l.strip() for l in sys.stdin if l.strip() and not l.startswith("#")]
+        for target_email in emails:
+            if not validate_email(target_email):
+                _print_invalid_email(target_email)
+                raise typer.Exit(2)
+    elif email is None:
+        err_console.print("[red]Error:[/] provide an email address or --username <handle>.")
+        raise typer.Exit(2)
     else:
         emails = [email]
-
-    for target_email in emails:
-        if not validate_email(target_email):
-            _print_invalid_email(target_email)
+        if not validate_email(email):
+            _print_invalid_email(email)
             raise typer.Exit(2)
 
     if output_file:
@@ -5240,6 +5270,7 @@ def investigate(
                 no_whoisfreaks=no_whoisfreaks,
                 org_surface_deep=org_surface_deep,
                 refresh=refresh,
+                no_cache=no_cache,
             )
         )
         if code > max_code:

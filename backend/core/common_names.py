@@ -53,3 +53,28 @@ def is_common_username(text: str) -> bool:
     names, normalized_names = _load_names()
     lowered = text.strip().lower()
     return lowered in names or _normalize_username(lowered) in normalized_names
+
+
+def is_specific_handle(handle: str) -> bool:
+    """UC7.3: True when a handle is distinctive enough that, for a freemail subject, its
+    Class-2 matches are plausibly the owner — rather than a bare common-first-name
+    collision (``john``, ``sarah``) that behaves like a domain role. Distinctive =
+    contains a digit, a separator (a compound like ``jane.doe``), ends in a known name
+    (a ``first``+``last`` concatenation like ``janedoe``), or is a long single
+    token. A bare common first name / dictionary word scores LOW. No network: the
+    bundled common-names corpus is the only source."""
+    s = (handle or "").strip().lower()
+    core = _SEPARATORS_RE.sub("", s)
+    if not core:
+        return False
+    if any(c.isdigit() for c in s):      # jdoe88
+        return True
+    if s != core:                        # a separator → compound (jane.doe, j-doe)
+        return True
+    if is_common_username(core):         # bare common first name / dictionary word
+        return False
+    names, _ = _load_names()
+    for i in range(3, len(core) - 2):    # first+last concatenation (jane+doe, john+smith)
+        if core[:i] in names or core[i:] in names:
+            return True
+    return len(core) >= 10               # long, distinctive single token

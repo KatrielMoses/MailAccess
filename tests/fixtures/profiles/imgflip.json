@@ -1,0 +1,16 @@
+{
+ "site_id": "imgflip",
+ "username": "demoperson",
+ "snapshot": {
+  "url": "https://imgflip.com/user/DemoPerson",
+  "status": 200,
+  "content_type": "text/html"
+ },
+ "body": "<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/>\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"apple-mobile-web-app-capable\" content=\"yes\">\n<meta name=\"apple-mobile-web-app-status-bar-style\" content=\"black\">\n<meta name=\"apple-mobile-web-app-title\" content=\"Imgflip\">\n<meta name=\"theme-color\" content=\"#333\"/>\n<meta name=\"description\" content=\"User DemoPerson on Imgflip. See their 0 featured images, 0 comments, and other activity.\"/></head><body>8)</span>\r\n\t\t\t</span>\r\n\t\t</div>\r\n\r\n\t\t\t\t\t\t\r\n\t\t<div id=\"user-joined\">Joined 2020-11-27</div>\r\n\r\n\t\t\r\n\t\t<div id=\"user-tagline\"></div>\r\n\r\n\t\t<div class=\"user-stats\">\r\n\t\t\t<div class=\"user-stat\">0 Featured Images</div\r\n\t\t\t><div class=\"user-stat\">17 Creations</div\r\n\t\t\t><div class=\"user-stat\">0 Comments</div\r\n\t\t\t\t\t></div>\r\n\r\n\t\t\r\n\t\t\r\n\t\t\r\n\t\t\r\n\t\t<div id=\"user-comments\">\r\n\t\t\t<h2>\r\n\t\t\t\tLatest Comments\r\n\t\t\t\t\t\t\t</h2>\r\n\t\t\t\t\t</div>\r\n\t</div>\r\n</div>\r\n\r\n<div id=\"footer\">\r\n\t<div id=\"</body></html>",
+ "follow_ups": {},
+ "expected": {
+  "profile_username": "DemoPerson",
+  "joined_at": "2020-11-27T00:00:00Z",
+  "posts": 17
+ }
+}

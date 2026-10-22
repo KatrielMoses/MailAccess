@@ -28,6 +28,33 @@ import httpx
 
 from .account_probe import _empty_record
 
+
+def _retry_after_seconds(response: Any) -> float | None:
+    """UC7.4: parse a ``Retry-After`` header (delta-seconds or HTTP-date) to seconds, or
+    None. Capped to a sane ceiling so a hostile header can't stall a run."""
+    try:
+        raw = response.headers.get("retry-after")
+    except Exception:  # noqa: BLE001 - defensive; a header-less response just has none
+        return None
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    try:
+        return max(0.0, min(float(raw), 60.0))
+    except ValueError:
+        pass
+    try:
+        from datetime import datetime, timezone
+        from email.utils import parsedate_to_datetime
+
+        when = parsedate_to_datetime(raw)
+        if when is not None:
+            delta = (when - datetime.now(timezone.utc)).total_seconds()
+            return max(0.0, min(delta, 60.0))
+    except Exception:  # noqa: BLE001 - unparseable date → no hint
+        return None
+    return None
+
 _LOG = logging.getLogger(__name__)
 
 _SPEC_HANDLER = "ported_spec"
@@ -197,12 +224,14 @@ async def run_spec(
             if verdict == "absent":
                 return _empty_record(defn, exists=False)
             if verdict == "rate_limited":
-                return _empty_record(defn, rate_limited=True)
+                return _empty_record(defn, rate_limited=True,
+                                     retry_after=_retry_after_seconds(response))
             return _empty_record(defn, exists=None)
 
     default = str(spec.get("default") or "inconclusive")
     if default == "rate_limited":
-        return _empty_record(defn, rate_limited=True)
+        return _empty_record(defn, rate_limited=True,
+                             retry_after=_retry_after_seconds(response))
     if default == "absent":
         return _empty_record(defn, exists=False)
     return _empty_record(defn, exists=None)
@@ -214,8 +243,9 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 
 def _site(site_id: str, domain: str, category: str, flow: str, spec: dict[str, Any],
-          *, high_value: bool = False) -> dict[str, Any]:
-    return {
+          *, high_value: bool = False, default_off: bool = False,
+          disabled: bool = False) -> dict[str, Any]:
+    defn = {
         "id": site_id,
         "name": site_id,
         "domain": domain,
@@ -226,6 +256,17 @@ def _site(site_id: str, domain: str, category: str, flow: str, spec: dict[str, A
         "high_value": high_value,
         "spec": spec,
     }
+    # UC2.1: extended registration checks run only when the operator opts in
+    # (settings.enable_extended_registration_checks); off in the OSS default.
+    if default_off:
+        defn["default_off"] = True
+    # UC7.4: a stale def (dead endpoint / DNS gone) is kept for documentation but never
+    # probed — the loader and account_discovery both skip ``disabled``. Only use this for
+    # endpoints that are dead everywhere (NXDOMAIN / 404), NOT ones merely blocked from a
+    # datacenter IP (those still work on prod — leave them enabled).
+    if disabled:
+        defn["disabled"] = True
+    return defn
 
 
 # ---------------------------------------------------------------------------
@@ -442,10 +483,14 @@ _SITES: list[dict[str, Any]] = [
         "params": {"http_envelope": "1", "locale": "fr"},
         "headers": {"User-Agent": _UA},
         "rules": [
+            # The auth-options endpoint returns an ``email_verified`` flag only for a
+            # real account; a genuinely unknown address returns ``unknown_user``. So
+            # ``email_verified: false`` means the account exists but its email is not
+            # verified — still a registered account, not absent.
             {"when": {"json_eq": {"path": ["body", "email_verified"], "value": True}},
              "verdict": "exists"},
             {"when": {"json_eq": {"path": ["body", "email_verified"], "value": False}},
-             "verdict": "absent"},
+             "verdict": "exists"},
             {"when": {"text_contains": "unknown_user"}, "verdict": "absent"},
             {"when": {"text_contains": "email_login_not_allowed"}, "verdict": "absent"},
         ],
@@ -944,7 +989,9 @@ _SITES.extend([
             {"when": {"status": 204}, "verdict": "absent"},
         ],
         "default": "rate_limited",
-    }, high_value=True),
+        # UC7.4: unite.nike.com is DNS NXDOMAIN from multiple resolvers (the auth host was
+        # retired) — dead globally, not a datacenter-IP block. Kept for documentation.
+    }, high_value=True, disabled=True),
 
     _site("teamtreehouse", "teamtreehouse.com", "programing", "register", {
         "prefetch": {"method": "GET",
@@ -1204,7 +1251,7 @@ _SITES.extend([
              "verdict": "absent"},
         ],
         "default": "rate_limited",
-    }),
+    }, disabled=True),  # UC7.4: blip.fm is DNS NXDOMAIN (dead) — kept for documentation
 
     _site("lastfm", "last.fm", "music", "register", {
         "prefetch": {"method": "GET", "url": "https://www.last.fm/join",
@@ -1392,7 +1439,9 @@ _SITES.extend([
             {"when": {"status": 200}, "verdict": "absent"},
         ],
         "default": "rate_limited",
-    }),
+        # UC7.4: consumer-ow-api.deliveroo.com is DNS NXDOMAIN (API host retired) — dead
+        # globally, not a datacenter-IP block. Kept for documentation.
+    }, disabled=True),
 
     _site("dominosfr", "dominos.fr", "shopping", "register", {
         "prefetch": {"method": "GET",
@@ -1586,6 +1635,16 @@ _MYBB_FORUMS: list[tuple[str, str]] = [
 ]
 
 
+# UC7.4: MyBB forums whose endpoint is dead everywhere (NXDOMAIN or 404 on
+# member.php/xmlhttp.php from multiple IPs), confirmed 2026-10-22. Kept for documentation
+# but never probed. badeggsonline = 404 on both forum endpoints; chinaphonearena /
+# cracked_to / nattyornot = DNS NXDOMAIN; cpahero = TLS cert no longer covers the host
+# (parked). These are dead globally, not datacenter-IP blocks.
+_DEAD_MYBB: frozenset[str] = frozenset(
+    {"badeggsonline", "chinaphonearena", "cpahero", "cracked_to", "nattyornot"}
+)
+
+
 def _mybb_site(site_id: str, host: str) -> dict[str, Any]:
     base = f"https://{host}"
     return _site(site_id, host, "forum", "register", {
@@ -1609,7 +1668,7 @@ def _mybb_site(site_id: str, host: str) -> dict[str, Any]:
             {"when": {"status": 200}, "verdict": "absent"},
         ],
         "default": "rate_limited",
-    })
+    }, disabled=site_id in _DEAD_MYBB)
 
 
 _SITES.extend(_mybb_site(i, d) for i, d in _MYBB_FORUMS)
@@ -1798,6 +1857,39 @@ _SITES.extend([
         ],
         "default": "exists",
     }),
+])
+
+
+# ---------------------------------------------------------------------------
+# UC2.1 / UC7.3 — email-anchored registration majors.
+#
+# The ``default_off`` / ``ENABLE_EXTENDED_REGISTRATION_CHECKS`` gate (config.py +
+# account_discovery) exists for a bot-walled long tail. UC7.3 keeps the
+# identity-defining majors ON by default (they are Class-1 anchors), so this set is
+# built-in, not gated. Public, logged-out, non-notifying checks only — no
+# CAPTCHA/bot-check path and nothing that emails or texts the subject.
+# ---------------------------------------------------------------------------
+_SITES.extend([
+    # Adobe — the public account-lookup the adobe.com sign-in uses. A registered
+    # address returns a 200 JSON array of account objects (each with
+    # ``authenticationMethods``); an unknown address returns a 200 empty array
+    # ``[]``. No CSRF prefetch, no CAPTCHA. A major email-anchored check, so it is on
+    # by default (UC7.3), not behind the extended-off gate.
+    _site("adobe", "adobe.com", "software", "login", {
+        "method": "POST",
+        "url": "https://auth.services.adobe.com/signin/v2/users/accounts",
+        # No Origin header: Adobe rejects a cross-origin POST with 403 "Invalid
+        # CORS request". The X-IMS-ClientId alone is what the endpoint keys on.
+        "headers": {"User-Agent": _UA, "Content-Type": "application/json",
+                    "X-IMS-ClientId": "adobedotcom2"},
+        "raw": '{"username":"{email}","accountType":"individual"}',
+        "rules": [
+            {"when": {"status": 200, "text_contains": "authenticationMethods"},
+             "verdict": "exists"},
+            {"when": {"status": 200, "text_equals": "[]"}, "verdict": "absent"},
+        ],
+        "default": "rate_limited",
+    }, high_value=True),
 ])
 
 

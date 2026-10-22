@@ -27,6 +27,7 @@ _SOCIAL_MODULES = frozenset(
         "social",
         "twitter_profile",
         "linkedin_serp",
+        "linkedin_brightdata",
         "marketplace_profile",
         "email_discovery",
     }
@@ -39,6 +40,7 @@ _POST_PRIMARY_ONLY = frozenset(
         "alternate_email",
         "twitter_profile",
         "linkedin_serp",
+        "linkedin_brightdata",
         "marketplace_profile",
         "domain_cluster",
         "breach_aggregator",
@@ -111,6 +113,8 @@ _MODULE_CAP: dict[str, int] = {
     "whoisfreaks_intel": 5,
 }
 _MODULE_DEFAULT_TIMEOUTS: dict[str, int] = {
+    # Bright Data's call is bounded at 25 s; room for the cache and the match.
+    "linkedin_brightdata": 40,
     "breach_deep": 90,
     "github_commits": 90,
     # F6 — Netlas call latency swings 0.4s→>10s under load and the certs lookup
@@ -121,7 +125,9 @@ _MODULE_DEFAULT_TIMEOUTS: dict[str, int] = {
 }
 _MODULE_TIMEOUT_FLOORS: dict[str, int] = {
     "account_discovery": 180,
-    "username_pivot": 120,
+    # UC4: the pivot ends inside username_pivot_budget_seconds (45 s); this is only
+    # the safety net, and the sink keeps its hits if it ever fires.
+    "username_pivot": 60,
     "username_platforms": 180,
 }
 _OPT_IN_FLAG_BY_MODULE: dict[str, str] = {

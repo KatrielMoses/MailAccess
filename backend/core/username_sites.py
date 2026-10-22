@@ -38,7 +38,13 @@ def _is_supported_site(defn: dict[str, Any], include_wave2: bool) -> bool:
         return False
     if not defn.get("uri_check") and not defn.get("url") and not defn.get("handler"):
         return False
-    if _protections(defn) & _WAVE1_BLOCKED_PROTECTIONS and not include_wave2:
+    # UC2: a core site passed a live found/missing validation through the route it
+    # declares, so a protection tag on it no longer describes how we probe it.
+    if (
+        _protections(defn) & _WAVE1_BLOCKED_PROTECTIONS
+        and not include_wave2
+        and not defn.get("core")
+    ):
         return False
     return True
 

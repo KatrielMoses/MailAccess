@@ -1,0 +1,17 @@
+{
+ "site_id": "snapchat_2",
+ "username": "sample.person",
+ "snapshot": {
+  "url": "https://www.snapchat.com/@sample.person",
+  "status": 200,
+  "content_type": "text/html"
+ },
+ "body": "<html><head><meta name=\"next-head-count\" content=\"0\"/>\n<meta data-react-helmet=\"true\" property=\"og:title\" content=\"Snapchat पर Sample Person\"/>\n<meta data-react-helmet=\"true\" property=\"og:type\" content=\"website\"/>\n<meta data-react-helmet=\"true\" property=\"og:url\" content=\"https://www.snapchat.com/@sample.person\"/>\n<meta data-react-helmet=\"true\" property=\"og:image\" content=\"https://www.snapchat.com/web-capture/www.snapchat.com/@sample.person/preview/square.jpeg?xp_id=1\"/>\n<meta data-react-helmet=\"true\" property=\"og:image:width\" content=\"800\"/>\n<meta data-react-helmet=\"true\" property=\"og:image:height\" content=\"800\"/>\n<meta data-react-helmet=\"true\" property=\"og:site_name\" content=\"Snapchat\"/>\n<meta data-react-helmet=\"true\" property=\"og:description\" content=\"Sample Person Snapchat पर हैं!\"/>\n<meta data-react-helmet=\"true\" property=\"fb:app_id\" content=\"397341092828401\"/>\n<meta data-react-helmet=\"true\" property=\"twitter:card\" content=\"summary_large_image\"/>\n<meta data-react-helmet=\"true\" property=\"twitter:site\" content=\"@Snapchat\"/>\n<meta data-react-helmet=\"true\" property=\"twitter:title\" content=\"Snapchat पर Sample Person\"/>\n<meta data-react-helmet=\"true\" property=\"twitter:image\" content=\"https://www.snapchat.com/web-capture/www.snapchat.com/@sample.person/preview/square.jpeg?xp_id=1\"/>\n<meta data-react-helmet=\"true\" property=\"twitter:description\" content=\"Sample Person Snapchat पर हैं!\"/>\n<meta data-react-helmet=\"true\" charSet=\"UTF-8\"/>\n<meta data-react-helmet=\"true\" name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>\n<meta data-react-helmet=\"true\" name=\"description\" content=\"Sample Person Snapchat पर हैं! (@sample.person)\"/>\n<meta data-react-helmet=\"true\" name=\"rating\" content=\"general\"/>\n<meta data-react-helmet=\"true\" name=\"apple-itunes-app\" content=\"app-id=444189522, app-argument=https://www.snapchat.com/@sample.person\"/></head><body><script id=\"__NEXT_DATA__\" type=\"application/json\">{\"props\": {\"pageProps\": {\"userProfile\": {\"$case\": \"userInfo\", \"userInfo\": {\"username\": \"sample.person\", \"displayName\": \"Sample Person\", \"snapcodeImageUrl\": \"https://app.snapchat.com/web/deeplink/snapcode?username=sample.person&type=SVG&bitmoji=enable\", \"bitmoji3d\": {\"avatarImage\": {\"url\": \"https://cdn.example.test/avatar_url.png\", \"fallbackUrl\": \"https://cf-st.sc-cdn.net/aps/bolt/aHR0cHM6Ly9jZi1zdC5zYy1jZG4ubmV0LzNkL3JlbmRlci80NTE5NzgwNTAtOTkwODk2OTU2MDlfMjctczUtdjEud2VicD91YT0y._FMpng\"}, \"backgroundImage\": {\"url\": \"https://cdn.example.test/banner_url.png\", \"fallbackUrl\": \"https://cf-st.sc-cdn.net/aps/bolt/aHR0cHM6Ly9jZi1zdC5zYy1jZG4ubmV0LzNkL2JhY2tncm91bmQvNjg2NDU5NDgwLTEud2VicA._FMpng\"}}}}}}}</script></body></html>",
+ "follow_ups": {},
+ "expected": {
+  "display_name": "Sample Person",
+  "profile_username": "sample.person",
+  "avatar_url": "https://cdn.example.test/avatar_url.png",
+  "banner_url": "https://cdn.example.test/banner_url.png"
+ }
+}

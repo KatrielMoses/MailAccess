@@ -1,0 +1,17 @@
+{
+ "site_id": "codeforces_com",
+ "username": "sampleperson",
+ "snapshot": {
+  "url": "https://codeforces.com/api/user.info?handles=sampleperson",
+  "status": 200,
+  "content_type": "application/json"
+ },
+ "body": "{\"status\": \"OK\", \"result\": [{\"contribution\": 0, \"lastOnlineTimeSeconds\": 1707325024, \"friendOfCount\": 0, \"titlePhoto\": \"https://userpic.codeforces.org/no-title.jpg\", \"handle\": \"sampleperson\", \"avatar\": \"https://userpic.codeforces.org/no-avatar.jpg\", \"registrationTimeSeconds\": 1733923543}]}",
+ "follow_ups": {},
+ "expected": {
+  "profile_username": "sampleperson",
+  "joined_at": "2024-12-11T13:25:43Z",
+  "last_active_at": "2024-02-07T16:57:04Z",
+  "followers": 0
+ }
+}

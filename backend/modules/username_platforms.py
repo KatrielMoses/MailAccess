@@ -14,6 +14,20 @@ from ..core.demotion_log import log_event as log_demotion_event
 from ..core.http_client import build_client
 from ..core.platform_health import PlatformHealthDB, get_health_db
 from ..core.probe_detector import probe_platform, username_matches_regex
+from ..core.profiles import FIELD_KEYS as PROFILE_FIELD_KEYS
+from contextvars import ContextVar
+
+from ..core import probe_cache
+from ..core.profiles import enrich as enrich_profile
+
+# UC4: the engine sets this for a full investigation so the non-core tail runs for
+# ``username_tail_budget_full_seconds``; a direct (sweep-mode) call leaves it unset and
+# the core sweep alone is measured.
+_TAIL_BUDGET: ContextVar[float | None] = ContextVar("mailaccess_username_tail_budget", default=None)
+
+
+def set_tail_budget(seconds: float | None):
+    return _TAIL_BUDGET.set(seconds)
 from ..core.username_sites import load_username_sites
 from .base import BaseModule, ModuleResult, ModuleStatus
 
@@ -58,6 +72,10 @@ def _is_high_precision(defn: dict[str, Any]) -> bool:
     """
     if _alexa_rank(defn) is not None:
         return True
+    # UC2: "validated beats rank" — a site whose check passed a live known-found /
+    # known-missing test discriminates by measurement, ranked or not.
+    if defn.get("core") or defn.get("validated"):
+        return True
     has_two_marker = bool(
         defn.get("presenseStrs") or defn.get("presence_strs")
     ) and bool(defn.get("absenceStrs") or defn.get("absence_strs"))
@@ -73,14 +91,70 @@ def _tags(defn: dict[str, Any]) -> list[str]:
     return []
 
 
-def _username_variants(email: str) -> list[str]:
-    local = email.split("@", 1)[0]
-    variants = [
-        local,
-        re.sub(r"[._-]+", "", local),
-        re.sub(r"[.-]+", "_", local),
-    ]
-    return list(dict.fromkeys(v for v in variants if v))
+_MAX_VARIANTS = 4
+
+
+def _local_part(email: str) -> str:
+    # ``+tag`` subaddressing is mail routing, never part of a handle.
+    return email.split("@", 1)[0].split("+", 1)[0].strip()
+
+
+def _username_variants(email: str, original_email: str | None = None) -> list[str]:
+    """Handles to probe, best first, capped at ``_MAX_VARIANTS``.
+
+    The handle *as written* leads. The orchestrator hands modules the canonical
+    address, and Gmail canonicalisation drops dots (``jane.doe`` →
+    ``janedoe``), so ``original_email`` carries the dotted form the person
+    actually typed. Then the separator-free, hyphen and underscore forms. Each
+    site's ``regexCheck`` still decides which variants reach it.
+    """
+    locals_ = [_local_part(e) for e in (original_email, email) if e]
+    variants: list[str] = []
+    for local in locals_:
+        variants += [
+            local,
+            re.sub(r"[._-]+", "", local),
+            re.sub(r"[._]+", "-", local),
+            re.sub(r"[.-]+", "_", local),
+        ]
+    cap = max(1, int(getattr(settings, "username_max_variants", _MAX_VARIANTS) or _MAX_VARIANTS))
+    return list(dict.fromkeys(v for v in variants if v))[:min(cap, _MAX_VARIANTS)]
+
+
+def _name_split_variant(handle: str, names: list[str]) -> str | None:
+    """A dot-inserted handle (``janedoe`` → ``jane.doe``) from names found on
+    the subject's own profiles, never a blind split.
+
+    Only when the handle has no separator and a found name's words concatenate to
+    exactly the handle. The most common such split wins.
+    """
+    if not handle or re.search(r"[._-]", handle):
+        return None
+    counts: dict[str, int] = {}
+    for name in names:
+        words = [w for w in re.split(r"[^0-9a-z]+", str(name).lower()) if w]
+        # first.last only: an initial ("John Q Doe" → john.q.doe) is not a handle
+        # people pick, and the dotted three-part form hit non-discriminating sites.
+        if len(words) == 2 and min(map(len, words)) >= 2 and "".join(words) == handle.lower():
+            split = ".".join(words)
+            counts[split] = counts.get(split, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=lambda s: (counts[s], -len(s)))
+
+
+def _is_mastodon(defn: dict[str, Any]) -> bool:
+    tags = {tag.lower() for tag in _tags(defn)} | {str(defn.get("category") or "").lower()}
+    host = str(defn.get("uri_check") or defn.get("url") or "").split("/")[2:3]
+    return "mastodon" in tags or any(m in h.lower() for h in host for m in ("mstdn", "masto"))
+
+
+def _variant_allowed(defn: dict[str, Any], variant: str) -> bool:
+    """The site's own username rule, plus: Mastodon handles never contain a dot, and
+    instances answer "found" for dotted paths (UC3: aaron.j.jean-style false hits)."""
+    if "." in variant and _is_mastodon(defn):
+        return False
+    return username_matches_regex(defn, variant)
 
 
 def _is_regional_fragile(defn: dict[str, Any]) -> bool:
@@ -105,6 +179,10 @@ def _wave(defn: dict[str, Any]) -> int:
     * cheap ``status_code`` existence checks stay Wave 1 (the safe corpus backbone), while the
       unranked ``message`` / ``response_url`` long tail stays Wave 2.
     """
+    if defn.get("core"):
+        return 1  # UC2: validated core sites always run first
+    if defn.get("alwaysHit"):
+        return 2  # UC2: "found" a made-up handle in validation; opt-in only
     if defn.get("protection") or _is_regional_fragile(defn):
         return 2
     rank = _alexa_rank(defn)
@@ -134,7 +212,8 @@ def _finding(
     profile_url: str,
     wave: int,
     email: str | None = None,
-    profile: dict[str, str] | None = None,
+    profile: dict[str, Any] | None = None,
+    core_primary: bool = False,
 ) -> dict[str, Any]:
     from ..core.common_names import is_common_username
     from ..core.disposable_domains import is_disposable_email
@@ -167,15 +246,35 @@ def _finding(
             "verification": "unverified",
             "speculative": True,
             "detection_confidence": detection_confidence,
+            # UC1: which probed handle produced this hit (as written, separator
+            # variant, or name-split pivot).
+            "matched_variant": username,
         },
     }
     # Logic upgrade (Phase 3): fold extracted profile data into the finding using the
     # metadata-key convention the identity graph + name-consensus already consume.
     if profile:
-        for key in ("display_name", "bio", "avatar_url", "location"):
+        # UC3 field set (name … verified) + field_sources / location_normalized.
+        for key in (*PROFILE_FIELD_KEYS.values(), "location_normalized", "linkedin_url",
+                    "field_sources"):
             value = profile.get(key)
-            if value:
+            if value not in (None, "", [], {}):
                 finding["metadata"][key] = value
+        # UC2: what the site answered (JSON or HTML <head>), for UC3 parsers.
+        if profile.get("_probe_response"):
+            finding["metadata"]["probe_response"] = profile["_probe_response"]
+        # UC4: served from the 7-day cache (the result's age, for "checked N days ago").
+        if profile.get("cached"):
+            finding["metadata"]["cached"] = True
+            finding["metadata"]["cached_age_days"] = profile.get("cached_age_days")
+    if defn.get("core"):
+        finding["metadata"]["core"] = True
+    # UC2: a validated core site's hit on the handle as written is a measured
+    # existence signal, so "medium" rather than RC1's blanket "low". It stays
+    # speculative/unverified (a matching handle is not proof of ownership); separator
+    # and pivot variants stay "low".
+    if core_primary:
+        finding["confidence"] = "medium"
     if is_common_username(username):
         if finding["confidence"] != "low":
             finding["confidence"] = "low"
@@ -244,6 +343,7 @@ class UsernamePlatformsModule(BaseModule):
         email: str,
         force: bool = False,
         sink: list[dict[str, Any]] | None = None,
+        original_email: str | None = None,
     ) -> ModuleResult:
         from ..config import opt_in_active
 
@@ -257,6 +357,12 @@ class UsernamePlatformsModule(BaseModule):
                 ],
             )
 
+        # UC2: one request in flight per host across all variants (and any other
+        # opted-in module in this run); Retry-After <= 5 s honoured once.
+        from ..core import host_politeness
+
+        host_politeness.activate()
+
         include_wave2 = settings.enable_username_wave2
         try:
             sites, load_meta = await load_username_sites(include_wave2=include_wave2)
@@ -266,8 +372,23 @@ class UsernamePlatformsModule(BaseModule):
                 errors=[f"Failed to load the username platform corpus: {exc}"],
             )
 
-        variants = _username_variants(email)
-        catch_all = await self._detect_catch_all(sites)
+        variants = _username_variants(email, original_email)
+        # UC2: validation already proved every core site reads a made-up handle as
+        # missing, so the catch-all pre-check only covers non-core sites, and only
+        # when they will be probed (tail budget or Wave 2).
+        has_core = any(defn.get("core") for defn in sites.values())
+        probes_non_core = (
+            not has_core
+            or include_wave2
+            or float(getattr(settings, "username_tail_budget_seconds", 0) or 0) > 0
+        )
+        catch_all = (
+            await self._detect_catch_all(
+                {n: d for n, d in sites.items() if not d.get("core")}
+            )
+            if probes_non_core
+            else set()
+        )
 
         health = get_health_db()
 
@@ -342,7 +463,7 @@ class UsernamePlatformsModule(BaseModule):
                 if key in queued:
                     continue
                 queued.add(key)
-                if not username_matches_regex(defn, variant):
+                if not _variant_allowed(defn, variant):
                     regex_skipped += 1
                     continue
                 (wave1_queue if wave == 1 else wave2_queue).append((name, defn, variant))
@@ -359,6 +480,25 @@ class UsernamePlatformsModule(BaseModule):
             _drop_low_precision(wave1_queue), settings.username_wave1_cap
         )
         wave2_queue = _cap_queue_by_rank(wave2_queue, settings.username_wave2_cap)
+
+        # UC2 core list: when the corpus carries validated core sites, the default
+        # sweep is the core list. The rest of Wave 1 becomes the tail, run after the
+        # core only within ``username_tail_budget_seconds`` (0 = off), its hits "low".
+        # UC4: the tail probes only sites that PASSED live validation (``validated``),
+        # never the unvalidated / flappy long tail — UC2 kept those out of the default
+        # sweep to avoid false positives (e.g. Tweakers), and the tail must honour that.
+        tail_queue: list[tuple[str, dict[str, Any], str]] = []
+        if has_core:
+            tail_queue = [
+                item for item in wave1_queue
+                if item[1].get("validated") and not item[1].get("core")
+            ]
+            wave1_queue = [item for item in wave1_queue if item[1].get("core")]
+        tail_override = _TAIL_BUDGET.get()
+        tail_budget = (
+            float(tail_override) if tail_override is not None
+            else float(getattr(settings, "username_tail_budget_seconds", 0) or 0)
+        )
 
         # ── Write one audit-log entry per applied action ──────────────────────
         # Stats are computed from the rolling window. We log AFTER queueing so
@@ -411,31 +551,85 @@ class UsernamePlatformsModule(BaseModule):
             if key in seen_hits:
                 return
             seen_hits.add(key)
-            finding = _finding(name, defn, variant, detail, wave, email=email, profile=profile)
+            finding = _finding(
+                name, defn, variant, detail, wave, email=email, profile=profile,
+                core_primary=bool(defn.get("core")) and variant == variants[0],
+            )
+            if variant == pivot_variant:
+                finding["metadata"]["variant_source"] = "name_split_pivot"
             findings.append(finding)
             if sink is not None:
                 sink.append(finding)
 
         probes_total = len(wave1_queue) + (len(wave2_queue) if include_wave2 else 0)
         probes_done = 0
+        pivot_variant: str | None = None
+        pivot_queue: list[tuple[str, dict[str, Any], str]] = []
 
-        def _tick() -> None:
+        cache_stats = {"served": 0}
+
+        def _tick(*, force: bool = False) -> None:
             nonlocal probes_done
             probes_done += 1
-            run_events.module_progress("username_platforms", probes_done, probes_total)
+            run_events.module_progress(
+                "username_platforms", probes_done, probes_total, found=len(findings), force=force
+            )
 
         async with build_client(timeout=12.0) as client:
             wave1 = await self._run_wave(
                 client, wave1_queue, wave=1, health=health, on_hit=_emit_hit, on_progress=_tick
             )
+            # UC1 name-split pivot: a separator-free handle whose own Wave-1 profiles
+            # carry a name that spells it ("Jane Doe" for janedoe) gets ONE extra
+            # dotted variant, probed on the same Wave-1 platforms. Bounded: at most one
+            # variant, only when the handle produced a single variant to begin with.
+            if len(variants) == 1:
+                pivot_variant = _name_split_variant(
+                    variants[0],
+                    [f["metadata"].get("display_name") for f in findings
+                     if f["username"] == variants[0] and f["metadata"].get("display_name")],
+                )
+            if pivot_variant:
+                seen_platforms: set[str] = set()
+                for name, defn, _variant in wave1_queue:
+                    if name in seen_platforms:
+                        continue
+                    seen_platforms.add(name)
+                    if _variant_allowed(defn, pivot_variant):
+                        pivot_queue.append((name, defn, pivot_variant))
+                probes_total += len(pivot_queue)
+                wave1 += await self._run_wave(
+                    client, pivot_queue, wave=1, health=health, on_hit=_emit_hit,
+                    on_progress=_tick, cache_stats=cache_stats,
+                )
+            tail_probed = 0
+            if tail_queue and tail_budget > 0:
+                tail_results: list[Any] = []
+
+                async def _tail() -> None:
+                    tail_results.extend(await self._run_wave(
+                        client, tail_queue, wave=1, health=health, on_hit=_emit_hit,
+                        on_progress=_tick, cache_stats=cache_stats,
+                    ))
+
+                probes_total += len(tail_queue)
+                try:
+                    await asyncio.wait_for(_tail(), timeout=tail_budget)
+                except asyncio.TimeoutError:
+                    pass  # hits already streamed via _emit_hit; the rest is unprobed
+                tail_probed = len(tail_results)
+                wave1 += tail_results
             wave2 = (
                 await self._run_wave(
                     client, wave2_queue, wave=2, health=health, on_hit=_emit_hit,
-                    on_progress=_tick,
+                    on_progress=_tick, cache_stats=cache_stats,
                 )
                 if include_wave2
                 else []
             )
+
+        if probes_total:
+            _tick(force=True)  # final "N / total checked" for the live view
 
         for name, defn, variant, outcome, detail, profile, wave in [*wave1, *wave2]:
             if outcome == "hit" and detail:
@@ -458,7 +652,9 @@ class UsernamePlatformsModule(BaseModule):
         # `len(wave1_queue)+len(wave2_queue)` inflated "platforms checked" by the variant
         # fan-out. Keep the raw probe count separately as `total_probes_attempted`.
         distinct_platforms_probed = health_tracked
-        total_probes_attempted = len(wave1_queue) + len(wave2_queue)
+        total_probes_attempted = (
+            len(wave1_queue) + len(pivot_queue) + tail_probed + len(wave2_queue)
+        )
         probe_funnel = {
             "corpus_sites": load_meta.get("sites_loaded") or load_meta.get("username_sites"),
             "distinct_platforms_probed": distinct_platforms_probed,
@@ -488,7 +684,13 @@ class UsernamePlatformsModule(BaseModule):
                 "regex_skipped": regex_skipped,
                 "health_skipped": health_skipped,
                 "health_tracked": health_tracked,
-                "username_variants": variants,
+                "username_variants": variants + ([pivot_variant] if pivot_variant else []),
+                "name_split_pivot": {"variant": pivot_variant, "probes": len(pivot_queue)},
+                "core_probes": len(wave1_queue),
+                "cache_served": cache_stats["served"],
+                "tail_budget_seconds": tail_budget,
+                "tail": {"queued": len(tail_queue), "probed": tail_probed,
+                         "budget_seconds": tail_budget},
                 "wave1_probes": len(wave1_queue),
                 "wave2_probes": len(wave2_queue),
                 "wave1_platform_cap": settings.username_wave1_cap,
@@ -512,6 +714,7 @@ class UsernamePlatformsModule(BaseModule):
         health: PlatformHealthDB,
         on_hit: Any = None,
         on_progress: Any = None,
+        cache_stats: dict[str, int] | None = None,
     ) -> list[tuple[str, dict[str, Any], str, str, str | None, dict[str, str] | None, int]]:
         sem = asyncio.Semaphore(_WAVE1_CONCURRENCY if wave == 1 else _WAVE2_CONCURRENCY)
         # R10 (S4): measure latency POST-semaphore. probe_platform acquires its
@@ -525,12 +728,37 @@ class UsernamePlatformsModule(BaseModule):
         async def _timed_probe(
             name: str, defn: dict[str, Any], username: str
         ) -> tuple[str, dict[str, Any], str, str, str | None, dict[str, str] | None]:
+            # UC4 (4a): a site measured as consistently slow carries its own shorter
+            # timeout so it is abandoned faster instead of holding a worker for 6 s.
+            probe_timeout = timeout
+            site_to = defn.get("probe_timeout")
+            if isinstance(site_to, (int, float)) and 0 < site_to < timeout:
+                probe_timeout = float(site_to)
+            # UC4: a fresh cache row answers without any HTTP request. The cached
+            # profile already holds the UC3 parsed fields, so no re-probe, no re-parse.
+            cached = probe_cache.get(defn, name, username)
+            if cached is not None:
+                if cache_stats is not None:
+                    cache_stats["served"] = cache_stats.get("served", 0) + 1
+                fields = dict(cached.get("fields") or {})
+                detail = fields.pop("_url", None)
+                if cached["outcome"] == "hit":
+                    fields["cached"] = True
+                    fields["cached_age_days"] = cached["age_days"]
+                    return name, defn, username, "hit", detail, fields
+                return name, defn, username, cached["outcome"], None, None
             async with sem:
                 t0 = time.perf_counter()
                 outcome, detail, profile = await probe_platform(
-                    client, no_limit, name, defn, username, timeout=timeout
+                    client, no_limit, name, defn, username, timeout=probe_timeout
                 )
                 latency_ms = int((time.perf_counter() - t0) * 1000)
+            if outcome == "hit":
+                # UC3: profile fields from the response the check already received
+                # (plus an official follow-up API for a few sites).
+                await enrich_profile(client, defn, username, profile)
+            elif isinstance(profile, dict):
+                profile.pop("_body", None)
             try:
                 await health.record_probe_async(
                     platform=name,
@@ -541,6 +769,13 @@ class UsernamePlatformsModule(BaseModule):
                 )
             except Exception:
                 pass
+            # UC4: remember this (site, handle) result for 7 days. A hit stores the
+            # parsed fields plus the profile URL so a repeat serves fully from disk.
+            cache_fields = None
+            if outcome == "hit":
+                cache_fields = {k: v for k, v in (profile or {}).items() if k != "_probe_response"}
+                cache_fields["_url"] = detail
+            probe_cache.put(defn, name, username, outcome, fields=cache_fields)
             return name, defn, username, outcome, detail, profile
 
         # Explicit tasks + as_completed so each hit is surfaced to ``on_hit`` the

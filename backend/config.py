@@ -324,6 +324,14 @@ class Settings(BaseSettings):
     # authorized, consented testing only.
     enable_forgot_password_probes: bool = False
 
+    # UC2.1 extended email-registration checks: additional signup/login "is this
+    # email registered" definitions tagged ``default_off``. These are public,
+    # logged-out, non-notifying checks (no password-reset email, no SMS), but they
+    # are OFF by default in the open-source engine so a plain ``pip install`` run
+    # probes only the built-in set. The website/prod config sets this true to run
+    # them. The existing ~130 definitions are unaffected either way.
+    enable_extended_registration_checks: bool = False
+
     # Headless-browser email-existence oracles (email-first login step-transition
     # + forgot-password). Email-first sends NO email and is on by default; it is
     # inert unless the optional `mailaccess[browser]` (Playwright) extra is
@@ -362,6 +370,28 @@ class Settings(BaseSettings):
     # handle enumeration is username_pivot's job.
     username_wave1_cap: int = 2500
     username_wave2_cap: int = 0
+    # Handle variants probed per email, best first: as written, separator-free,
+    # hyphen, underscore (max 4). Each variant is a full Wave-1 pass, so this
+    # multiplies sweep time. 2 by default: on the UC scoreboard the hyphen and
+    # underscore forms found no real profiles and pushed a dotted email's sweep past
+    # its 180 s limit. The name-split pivot (jane.doe from "Jane Doe") is separate.
+    username_max_variants: int = 2
+    # UC2: with a validated core list in the corpus, the default sweep is the core.
+    # The remaining Wave-1 sites (the tail) run after it only within this many
+    # seconds, hits marked "low". 0 = core only.
+    username_tail_budget_seconds: float = 0.0
+    # UC4: the username pivot stops starting probes after this many seconds and
+    # reports what it found (it used to burn its full 120 s module timeout).
+    username_pivot_budget_seconds: float = 35.0
+    # UC4: in a full investigation the engine runs the non-core "tail" of Wave 1 for
+    # this many seconds after the core list (sweep-mode direct calls keep 0 so the
+    # "core sweep <= 30 s" gate measures the core alone).
+    username_tail_budget_full_seconds: float = 15.0
+    # UC4: 7-day probe cache for the username sweep and pivot (one db per engine box).
+    probe_cache_enabled: bool = True
+    probe_cache_path: str = "data/probe_cache.db"
+    probe_cache_ttl_days: int = 7
+    probe_cache_inconclusive_ttl_seconds: float = 3600.0
 
     # GitHub Code Search — surfaces email mentions in public code and gists
     enable_github_code_search: bool = True
@@ -780,6 +810,13 @@ class Settings(BaseSettings):
     ipgeo_harvest_ip_cap: int = 50
     ipgeo_timeout_seconds: float = 10.0
     ipgeo_refresh_ttl_days: int = 30
+
+    # Bright Data (BYOK, Pro): LinkedIn people-profile lookups for the LinkedIn card.
+    # Without a key the module does not exist anywhere (events, report, module list).
+    brightdata_api_key: str | None = None
+    brightdata_disabled: bool = False
+    brightdata_timeout_seconds: float = 25.0
+    brightdata_cache_days: int = 7
 
     # WhoisFreaks (BYOK): WHOIS history, reverse WHOIS, dated subdomains.
     # Without a key nothing changes and no call is made.

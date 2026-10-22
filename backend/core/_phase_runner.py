@@ -157,6 +157,11 @@ async def run_one_module(
         else:
             target_email = canonical_email or email
             if "force" in run_params or accepts_keyword_args:
+                # A module that declares ``original_email`` also gets the address as
+                # typed: canonicalisation drops Gmail dots, and the username sweep
+                # needs ``jane.doe``, not just ``janedoe``.
+                if "original_email" in run_params and target_email != email:
+                    sink_kwargs = {**sink_kwargs, "original_email": email}
                 coroutine = mod.run(
                     target_email, force=(explicit_module or force), **sink_kwargs
                 )

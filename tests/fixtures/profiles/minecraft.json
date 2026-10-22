@@ -1,0 +1,14 @@
+{
+ "site_id": "minecraft",
+ "username": "demoperson",
+ "snapshot": {
+  "url": "https://api.mojang.com/users/profiles/minecraft/demoperson",
+  "status": 200,
+  "content_type": "application/json"
+ },
+ "body": "{\"id\": \"dd3b8fce2ce3cf3fded4a98f4958a7ae\", \"name\": \"Demoperson\"}",
+ "follow_ups": {},
+ "expected": {
+  "profile_username": "Demoperson"
+ }
+}

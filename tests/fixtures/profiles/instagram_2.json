@@ -1,0 +1,19 @@
+{
+ "site_id": "instagram_2",
+ "username": "sample.person",
+ "snapshot": {
+  "url": "https://www.instagram.com/sample.person/",
+  "status": 200,
+  "content_type": "text/html"
+ },
+ "body": "<html><head><meta name=\"bingbot\" content=\"noarchive\" />\n<meta name=\"robots\" content=\"noarchive, noimageindex\" />\n<meta charset=\"utf-8\" />\n<meta name=\"apple-mobile-web-app-status-bar-style\" content=\"default\" />\n<meta name=\"mobile-web-app-capable\" content=\"yes\" />\n<meta id=\"viewport\" name=\"viewport\" content=\"width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=2, viewport-fit=cover\" />\n<meta name=\"theme-color\" content=\"#ffffff\" />\n<meta name=\"theme-color\" content=\"#005401\" media=\"(prefers-color-scheme: dark)\" />\n<meta property=\"og:type\" content=\"profile\" />\n<meta property=\"og:image\" content=\"https://cdn.example.test/avatar_url.png\" />\n<meta property=\"og:title\" content=\"S A M P L E (&#064;sample.person) &#x2022; Instagram photos and videos\" />\n<meta property=\"og:url\" content=\"https://www.instagram.com/sample.person/\" />\n<meta property=\"og:description\" content=\"99 Followers, 103 Following, 3 Posts - See Instagram photos and videos from S A M P L E (&#064;sample.person)\" />\n<meta content=\"99 Followers, 103 Following, 3 Posts - S A M P L E (&#064;sample.person) on Instagram: &quot;22.\nI got nothin&#039; except fluent sarcasm, \nand also I play football sometimes.&quot;\" name=\"description\" />\n<meta property=\"al:ios:app_name\" content=\"Instagram\" />\n<meta property=\"al:ios:app_store_id\" content=\"380659250\" />\n<meta property=\"al:ios:url\" content=\"instagram://user?username=sample.person\" />\n<meta property=\"al:android:app_name\" content=\"Instagram\" />\n<meta property=\"al:android:package\" content=\"com.instagram.android\" />\n<meta property=\"al:android:url\" content=\"https://instagram.com/_u/sample.person/\" />\n<meta name=\"application-title\" content=\"Instagram\" />\n<meta name=\"color-scheme\" content=\"light\" /></head><body></body></html>",
+ "follow_ups": {},
+ "expected": {
+  "display_name": "S A M P L E",
+  "profile_username": "sample.person",
+  "avatar_url": "https://cdn.example.test/avatar_url.png",
+  "followers": 99,
+  "following": 103,
+  "posts": 3
+ }
+}

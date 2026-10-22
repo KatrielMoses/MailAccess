@@ -1,0 +1,16 @@
+{
+ "site_id": "docker_hub",
+ "username": "sampleperson",
+ "snapshot": {
+  "url": "https://hub.docker.com/v2/users/sampleperson/",
+  "status": 200,
+  "content_type": "application/json"
+ },
+ "body": "{\"id\": \"06ff028dd3c4a645abdd8efc966c1106\", \"uuid\": \"kk172073a4073f277kk77k3c7fk07k385729\", \"username\": \"sampleperson\", \"full_name\": \"Sample Person\", \"location\": \"\", \"company\": \"\", \"profile_url\": \"\", \"date_joined\": \"2025-06-05T13:46:54.936832Z\", \"gravatar_url\": \"\", \"gravatar_email\": \"\", \"type\": \"User\"}",
+ "follow_ups": {},
+ "expected": {
+  "display_name": "Sample Person",
+  "profile_username": "sampleperson",
+  "joined_at": "2025-06-05T13:46:54.936832Z"
+ }
+}

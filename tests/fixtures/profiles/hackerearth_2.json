@@ -1,0 +1,15 @@
+{
+ "site_id": "hackerearth_2",
+ "username": "sample.person",
+ "snapshot": {
+  "url": "https://www.hackerearth.com/@sample.person",
+  "status": 200,
+  "content_type": "text/html"
+ },
+ "body": "<html><head><meta charSet=\"utf-8\"/>\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>\n<meta name=\"description\" content=\"View SAMPLE PERSON 1AB00CD000&#x27;s developer profile on HackerEarth\"/>\n<meta name=\"robots\" content=\"noindex\"/>\n<meta property=\"og:title\" content=\"SAMPLE PERSON 1AB00CD000 | Developer Profile on HackerEarth\"/>\n<meta property=\"og:description\" content=\"View SAMPLE PERSON 1AB00CD000&#x27;s developer profile on HackerEarth\"/>\n<meta property=\"og:image\" content=\"https://www.hackerearth.com/community/profile/sample.person/opengraph-image/\"/>\n<meta property=\"og:type\" content=\"profile\"/>\n<meta name=\"twitter:card\" content=\"summary_large_image\"/>\n<meta name=\"twitter:title\" content=\"SAMPLE PERSON 1AB00CD000 | Developer Profile on HackerEarth\"/>\n<meta name=\"twitter:description\" content=\"View SAMPLE PERSON 1AB00CD000&#x27;s developer profile on HackerEarth\"/>\n<meta name=\"twitter:image\" content=\"https://www.hackerearth.com/community/profile/sample.person/opengraph-image/\"/>\n<meta name=\"sentry-trace\" content=\"2fb9d82f9bf4ccb3ef8c1b992322f544-83d0ce1000e952cc-0\"/>\n<meta name=\"baggage\" content=\"sentry-environment=production,sentry-release=4637119f9a6560fecd3904019bd74645e126d8a0,sentry-public_key=4e60722f38391932dc9f00b65c208a29,sentry-trace_id=2fb9d82f9bf4ccb3ef8c1b992322f544,sentry-org_id=555437,sentry-sampled=false,sentry-sample_rand=0.7079917720774156,sentry-sample_rate=0\"/></head><body></body></html>",
+ "follow_ups": {},
+ "expected": {
+  "display_name": "SAMPLE PERSON 1AB00CD000",
+  "profile_username": "sample.person"
+ }
+}

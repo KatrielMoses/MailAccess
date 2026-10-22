@@ -1,0 +1,21 @@
+{
+ "site_id": "freelancer_com",
+ "username": "sampleperson",
+ "snapshot": {
+  "url": "https://www.freelancer.com/api/users/0.1/users?usernames%5B%5D=sampleperson&compact=true",
+  "status": 200,
+  "content_type": "application/json"
+ },
+ "body": "{\"status\": \"success\", \"result\": {\"users\": {\"32660494\": {\"id\": 32660494, \"username\": \"SamplePerson\", \"closed\": false, \"registration_date\": 1520684122, \"limited_account\": false, \"display_name\": \"SamplePerson\", \"location\": {\"country\": {\"name\": \"India\"}, \"city\": \"Testcity\"}, \"role\": \"freelancer\", \"chosen_role\": \"freelancer\", \"status\": {\"email_verified\": true}, \"primary_currency\": {\"id\": 11, \"code\": \"INR\", \"sign\": \"₹\", \"name\": \"Indian Rupee\", \"exchange_rate\": 0.018964, \"country\": \"IN\"}, \"primary_language\": \"en\", \"public_name\": \"SamplePerson\", \"pool_ids\": [], \"enterprise_ids\": [], \"escrowcom_interaction_required\": false, \"enterprises\": [], \"timezone\": {\"id\": 357, \"country\": \"IN\", \"timezone\": \"Asia/Kolkata\", \"offset\": 5.5}, \"oauth_password_credentials_allowed\": false, \"registration_completed\": true, \"is_profile_visible\": true}}}, \"request_id\": \"15c89ccbf7f6a07291b1b719b0872526\"}",
+ "follow_ups": {},
+ "expected": {
+  "display_name": "SamplePerson",
+  "profile_username": "SamplePerson",
+  "location": "Testcity, India",
+  "joined_at": "2018-03-10T12:15:22Z",
+  "location_normalized": {
+   "country_code": "IN",
+   "city": "Testcity"
+  }
+ }
+}
