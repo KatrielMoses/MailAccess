@@ -148,7 +148,7 @@ MODULE_WHOISFREAKS_HISTORY = "whoisfreaks_history"
 # F4 — Netlas indexed HTTP responses + FTP banners; inline source, Netlas-on only.
 MODULE_NETLAS_RESPONSES = "netlas_responses"
 # MailAccess Index (our own index of the public web); inline source, runs FIRST
-# and only when MAILACCESS_INDEX_URL + MAILACCESS_INDEX_KEY are set.
+# and only when MAILACCESS_INDEX_URL + MA_INDEX_SERVICE_KEY are set.
 MODULE_OWN_INDEX = "own_index"
 MODULE_HACKERTARGET = "hackertarget_hosts"
 MODULE_RIPE_STAT_ASN = "ripe_stat_asn"

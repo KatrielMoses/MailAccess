@@ -110,7 +110,7 @@ PROVIDER_KEY_SETTINGS = (
     "slack_webhook_url", "discord_webhook_url", "integration_webhook_url",
     "integration_webhook_secret",
     # The MailAccess Index is a live service: tests that need it set it themselves.
-    "mailaccess_index_url", "mailaccess_index_key",
+    "mailaccess_index_url", "ma_index_service_key",
 )
 for _name in (*PROVIDER_KEY_SETTINGS, "serper_api_key"):
     os.environ[_name.upper()] = ""

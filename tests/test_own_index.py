@@ -1,6 +1,6 @@
 """MailAccess Index (``own_index``) harvest source.
 
-It exists only when BOTH ``MAILACCESS_INDEX_URL`` and ``MAILACCESS_INDEX_KEY`` are
+It exists only when BOTH ``MAILACCESS_INDEX_URL`` and ``MA_INDEX_SERVICE_KEY`` are
 set; ``--no-own-index`` turns it fully off (no calls, no events, no cached rows).
 It runs first, feeds the shared dedup, and when it returns results the live
 Common Crawl module is skipped for the run. Every finding carries a trace.
@@ -101,7 +101,7 @@ def _own_database(monkeypatch, tmp_path):
 @pytest.fixture
 def configured(monkeypatch):
     monkeypatch.setattr(settings, "mailaccess_index_url", URL)
-    monkeypatch.setattr(settings, "mailaccess_index_key", KEY)
+    monkeypatch.setattr(settings, "ma_index_service_key", KEY)
     monkeypatch.setattr(settings, "own_index_disabled", False)
 
 
@@ -181,7 +181,7 @@ async def _harvest(*, cc=None, code_cert=None, **kw):
 )
 def test_module_exists_only_with_both_url_and_key(monkeypatch, url, key, expected):
     monkeypatch.setattr(settings, "mailaccess_index_url", url)
-    monkeypatch.setattr(settings, "mailaccess_index_key", key)
+    monkeypatch.setattr(settings, "ma_index_service_key", key)
     assert oic.own_index_configured() is expected
     assert oic.own_index_active() is expected
     planned = harvest_runner.planned_harvest_modules(own_index=oic.own_index_active())
@@ -192,7 +192,7 @@ def test_module_exists_only_with_both_url_and_key(monkeypatch, url, key, expecte
 
 async def test_absent_without_url_makes_no_call_and_no_trace(monkeypatch, isolated_db):
     monkeypatch.setattr(settings, "mailaccess_index_url", None)
-    monkeypatch.setattr(settings, "mailaccess_index_key", KEY)
+    monkeypatch.setattr(settings, "ma_index_service_key", KEY)
     index = _serve(monkeypatch, Index())
     result, progress, completed = await _harvest()
     assert index.requests == []
@@ -399,7 +399,7 @@ async def _capabilities() -> httpx.Response:
 @pytest.mark.parametrize("url,key,expected", [(URL, KEY, True), (URL, None, False), (None, None, False)])
 async def test_capabilities_shows_it_only_when_enabled(monkeypatch, url, key, expected):
     monkeypatch.setattr(settings, "mailaccess_index_url", url)
-    monkeypatch.setattr(settings, "mailaccess_index_key", key)
+    monkeypatch.setattr(settings, "ma_index_service_key", key)
     response = await _capabilities()
     assert response.status_code == 200
     assert response.json()["providers"]["own_index"] is expected
@@ -524,7 +524,7 @@ async def test_corpus_unchanged_when_own_index_off(monkeypatch, isolated_db):
     from backend.core.corpus_store import read_leads, sanitize_for_persistence, write_back
 
     monkeypatch.setattr(settings, "mailaccess_index_url", None)
-    monkeypatch.setattr(settings, "mailaccess_index_key", None)
+    monkeypatch.setattr(settings, "ma_index_service_key", None)
     native = _lead("native@acme.io", ["code_and_cert_email"])
     full = _result(native)
 

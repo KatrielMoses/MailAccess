@@ -840,7 +840,7 @@ class Settings(BaseSettings):
     # when BOTH the URL and the key are set; otherwise nothing changes and no
     # call is made. Per-run opt-out: ``--no-own-index``.
     mailaccess_index_url: str | None = None
-    mailaccess_index_key: str | None = None
+    ma_index_service_key: str | None = None
     own_index_disabled: bool = False
     own_index_timeout_seconds: float = 10.0  # per HTTP request
     own_index_budget_seconds: float = 30.0  # whole module, all pages

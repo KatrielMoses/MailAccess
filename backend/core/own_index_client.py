@@ -2,7 +2,7 @@
 
 The index is a separate private service (built from Common Crawl and GH Archive).
 It exists for the engine only when BOTH ``MAILACCESS_INDEX_URL`` and
-``MAILACCESS_INDEX_KEY`` are set, the same rule as the other key-gated providers,
+``MA_INDEX_SERVICE_KEY`` are set, the same rule as the other key-gated providers,
 and a per-run ``--no-own-index`` turns it fully off (no calls, no events).
 
 Every failure (bad key, rejected domain, bad input, timeout, unreachable service,
@@ -45,7 +45,7 @@ def own_index_configured(cfg: Any = None) -> bool:
     """Both the URL and the key are set (the module exists for this engine)."""
     cfg = cfg if cfg is not None else settings
     url = str(getattr(cfg, "mailaccess_index_url", "") or "").strip()
-    key = str(getattr(cfg, "mailaccess_index_key", "") or "").strip()
+    key = str(getattr(cfg, "ma_index_service_key", "") or "").strip()
     return bool(url and key)
 
 
@@ -78,7 +78,7 @@ class OwnIndexClient:
 
     def __init__(self, base_url: str | None = None, key: str | None = None) -> None:
         self.base_url = str(base_url or settings.mailaccess_index_url or "").strip().rstrip("/")
-        self._key = str(key or settings.mailaccess_index_key or "").strip()
+        self._key = str(key or settings.ma_index_service_key or "").strip()
         self.calls = 0
 
     def _timeout(self, deadline: float | None) -> float | None:
