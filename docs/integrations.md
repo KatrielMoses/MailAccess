@@ -153,7 +153,7 @@ cat targets.txt | mailaccess investigate - --format jsonl | jq 'select(.severity
 - name: Check email exposure
   run: |
     pip install mailaccess
-    mailaccess investigate ${{ secrets.TARGET_EMAIL }} --format jsonl > findings.jsonl
+    mailaccess --local-only investigate ${{ secrets.TARGET_EMAIL }} --format jsonl > findings.jsonl
     if [ $? -eq 2 ]; then
       echo "::error::Active breaches detected"
       exit 1

@@ -79,6 +79,7 @@ Every setting is optional unless marked required.
 | `LOG_LEVEL` | `INFO` | Python logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated list of allowed CORS origins |
 | `MAILACCESS_API_KEY` | _(unset)_ | When set, all `/api/` routes require `X-API-Key: <value>`. Leave blank for open access. |
+| `MAILACCESS_LOCAL_ONLY` | `false` | Skip unsolicited mailaccess.pro calls (coverage teaser, sponsor feed, founder counter) and the PyPI update check. OSINT modules and a configured Pro key still run. Also: `mailaccess --local-only` or `mailaccess local-only enable`. |
 | `SHOW_DEFENDERS_BRIEF` | `true` | Show Defender's Brief in CLI output. Set `false` to suppress for all investigations. |
 
 ### Worker

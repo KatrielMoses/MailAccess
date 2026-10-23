@@ -189,7 +189,14 @@ def start_background_refresh() -> None:
     Independent of ``MAILACCESS_NO_UPDATE_CHECK`` (which silences only the
     *notice*): the escalation guard needs a fresh cache to work, so the refresh
     keeps running. The current process never waits on this thread.
+
+    Local-only mode skips the refresh entirely so the process makes no PyPI
+    call. The escalation guard then sees no cache and stays silent.
     """
+    from backend.core.local_only import is_enabled as local_only_enabled
+
+    if local_only_enabled():
+        return
 
     def _worker() -> None:
         try:
@@ -212,7 +219,11 @@ def start_background_refresh() -> None:
 
 # ── End-of-command notice (stderr only, from cache) ───────────────────────────
 def _notice_enabled(command: str | None, no_banner: bool) -> bool:
+    from backend.core.local_only import is_enabled as local_only_enabled
+
     if not sys.stderr.isatty():
+        return False
+    if local_only_enabled():
         return False
     if _env_true("MAILACCESS_NO_UPDATE_CHECK"):
         return False

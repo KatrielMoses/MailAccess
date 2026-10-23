@@ -119,6 +119,15 @@ mailaccess upgrade
 
 Silence the check with `MAILACCESS_NO_UPDATE_CHECK=1`. Prefer email? [Get release notes in your inbox](https://mailaccess.pro/updates?src=readme).
 
+To skip unsolicited product-network calls (the harvest coverage teaser, CLI sponsor feed, founder-seat counter, and this update check) in one place:
+
+```bash
+mailaccess --local-only harvest-emails --domain company.com
+mailaccess local-only enable
+```
+
+`MAILACCESS_LOCAL_ONLY=1` does the same. OSINT modules still run. A configured Pro key still calls `/v1/enrich`.
+
 ## Modules
 
 76 modules over a 5,300+ platform corpus. Investigations probe a bounded, evidence-first wave of the highest-signal platforms (~700 vetted by default) rather than the whole corpus. Full module reference in [docs/modules.md](docs/modules.md).

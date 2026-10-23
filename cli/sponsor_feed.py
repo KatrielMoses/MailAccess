@@ -192,7 +192,9 @@ def _refresh_in_background() -> None:
 
 def load_payload() -> dict | None:
     """Cached feed (refreshed in the background once stale); first run fetches once."""
-    if _env_true("MAILACCESS_NO_SPONSORS"):
+    from backend.core.local_only import is_enabled as local_only_enabled
+
+    if local_only_enabled() or _env_true("MAILACCESS_NO_SPONSORS"):
         return None
     cache = _read_cache()
     if os.environ.get("MAILACCESS_SPONSORS_TTL", "").strip() == "0":

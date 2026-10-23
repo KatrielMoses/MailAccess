@@ -1,5 +1,9 @@
 # Changelog
 
+### Unreleased
+
+- Add local-only mode: `mailaccess --local-only`, `MAILACCESS_LOCAL_ONLY=1`, and `mailaccess local-only enable|disable|status`. Skips the free-tier coverage teaser (which sends the harvested domain), the CLI sponsor feed, the founder-seat counter, and the PyPI update check. OSINT modules and keyed Pro enrichment are unchanged. `mailaccess doctor` reports the mode.
+
 ### 0.18.8 (2026-10-17)
 
 - Add optional BYOK WhoisFreaks enrichment: who owned a domain before privacy redaction (WHOIS history), every other domain the same owner registered (reverse WHOIS by exact company and by registrant email), and dated subdomains (first/last seen, active or gone). No key makes no call and changes no output.
