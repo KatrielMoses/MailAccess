@@ -54,6 +54,7 @@ Full install options (Docker, persistent server, self-hosting) in [docs/self-hos
 
 ```bash
 mailaccess investigate you@example.com
+mailaccess investigate you@example.com -o report.html
 mailaccess investigate you@example.com -o report.pdf
 mailaccess harvest-emails --domain company.com
 mailaccess harvest-emails --domain company.com --export harvest.csv
@@ -76,7 +77,7 @@ Pipeline, stdin, JSONL, and CI examples in [docs/integrations.md](docs/integrati
 - **Company email patterns:** `find-email` turns a name plus an employer domain into one honestly-graded likely address, offline from a bundled 384K-domain pattern index. Microsoft 365 mailboxes are verified where the provider allows.
 - **5,300+ platform corpus:** a native username-platform engine over a MailAccess-verified corpus of 5,300+ platform definitions, with two-marker detection and zero runtime dependencies. Plus a native account-existence engine covering **357 email-checkable services** — consumer apps, SaaS, and community forums, checked non-intrusively ([full platform list & methods](docs/account-existence-platforms.md)) — and native Google-account intelligence.
 - **Deep breach mode:** probes the highest-severity breach corpus for account-existence risk.
-- **6 export formats:** JSON, CSV, PDF, Markdown, STIX 2.1, and Maltego XML.
+- **7 export formats:** JSON, CSV, PDF, HTML, Markdown, STIX 2.1, and Maltego XML.
 
 ## MailAccess Pro
 
@@ -131,7 +132,7 @@ Most modules work with zero keys. Optional keys unlock more coverage. Full list 
 
 ## Export Formats
 
-Save reports as JSON, CSV, PDF, Markdown, STIX 2.1, or Maltego XML with `-o`. Full export reference in [docs/exports.md](docs/exports.md).
+Save reports as JSON, CSV, HTML, PDF, Markdown, STIX 2.1, or Maltego XML with `-o`. HTML opens in any browser and needs no extra libraries. Full export reference in [docs/exports.md](docs/exports.md).
 
 ## Self-Hosting
 

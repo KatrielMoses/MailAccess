@@ -1,5 +1,9 @@
 # Changelog
 
+### Unreleased
+
+- Add HTML investigation export (`-o report.html`, `GET /api/report/{id}/export?format=html`). Same sections as the PDF report, with in-page navigation and clickable finding URLs. No weasyprint extra. When PDF extras are not installed, the CLI auto-saves HTML instead of skipping the file, and the save hint points at `.html`.
+
 ### 0.18.8 (2026-10-17)
 
 - Add optional BYOK WhoisFreaks enrichment: who owned a domain before privacy redaction (WHOIS history), every other domain the same owner registered (reverse WHOIS by exact company and by registrant email), and dated subdomains (first/last seen, active or gone). No key makes no call and changes no output.

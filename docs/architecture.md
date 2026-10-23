@@ -57,7 +57,7 @@ backend/
 │   └── models.py    # Investigation, ModuleRun, Finding (SQLAlchemy 2.0)
 └── exporters/
     ├── base.py      # BaseExporter ABC
-    └── *.py         # json, csv, pdf, markdown, stix, maltego
+    └── *.py         # json, csv, pdf, html, markdown, stix, maltego
 ```
 
 ## Module Contract

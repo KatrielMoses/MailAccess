@@ -154,7 +154,7 @@ _SCRAPINGANT_KEYS: list[tuple[str, str, str]] = [
 ]
 _SCRAPINGANT_KEY_NAMES = {key_name for key_name, _, _ in _SCRAPINGANT_KEYS}
 
-_EXPORT_FORMATS = {".json", ".csv", ".md", ".pdf", ".stix", ".mtgx"}
+_EXPORT_FORMATS = {".json", ".csv", ".md", ".pdf", ".html", ".htm", ".stix", ".mtgx"}
 # RC8 (Output-Trust): map a file extension to the API's export FORMAT name. The
 # naive ``ext.lstrip(".")`` produced "md"/"mtgx", which the export endpoint rejects
 # (its formats are markdown/maltego), so .md and .mtgx exports failed silently.
@@ -163,6 +163,8 @@ _EXT_TO_FORMAT = {
     ".csv": "csv",
     ".md": "markdown",
     ".pdf": "pdf",
+    ".html": "html",
+    ".htm": "html",
     ".stix": "stix",
     ".mtgx": "maltego",
 }
@@ -176,6 +178,13 @@ def _pdf_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def _auto_report_format() -> tuple[str, str, str]:
+    """Format used when investigate finishes without `-o`. HTML needs no extras."""
+    if _pdf_available():
+        return "pdf", "pdf", "PDF"
+    return "html", "html", "HTML"
 _SCRAPINGANT_PROXY_TYPES = {"residential", "datacenter"}
 # Phase 2B — product modes selectable via --mode (see backend/core/product_mode.py).
 _PRODUCT_MODES = (
@@ -4212,8 +4221,8 @@ async def _investigate_run(
                     domain=None if _own_domain in _FREE_PROVIDERS else _own_domain,
                 )
             # RC8 (Output-Trust): advertise PDF only when weasyprint is actually
-            # available; otherwise point at a format that will really produce a file.
-            _save_fmt = "report.pdf" if _pdf_available() else "report.md"
+            # available; otherwise point at HTML, which needs no extra libraries.
+            _save_fmt = "report.pdf" if _pdf_available() else "report.html"
             out.print(
                 f"[dim]💾 Save report: mailaccess investigate {email} -o {_save_fmt}[/dim]"
             )
@@ -4379,20 +4388,21 @@ async def _investigate_run(
             return 3
 
         if output_file is None and output_format == "table":
-            auto_pdf_path = (
+            auto_fmt, auto_ext, auto_label = _auto_report_format()
+            auto_report_path = (
                 Path.home()
                 / ".mailaccess"
                 / "results"
-                / f"mailaccess_{email}_{inv_id}.pdf"
+                / f"mailaccess_{email}_{inv_id}.{auto_ext}"
             )
-            auto_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+            auto_report_path.parent.mkdir(parents=True, exist_ok=True)
             await _save_investigate_export(
                 client,
                 inv_id,
-                "pdf",
-                str(auto_pdf_path),
+                auto_fmt,
+                str(auto_report_path),
                 out,
-                success_message=f"[dim]PDF saved: {auto_pdf_path}[/dim]",
+                success_message=f"[dim]{auto_label} saved: {auto_report_path}[/dim]",
             )
 
         if output_file:
@@ -5082,7 +5092,7 @@ def investigate(
         ),
     ),
     output_file: str | None = typer.Option(
-        None, "--output", "-o", help="Save report to file (.json .csv .md .pdf .stix .mtgx)"
+        None, "--output", "-o", help="Save report to file (.json .csv .md .pdf .html .stix .mtgx)"
     ),
     force: bool = typer.Option(
         False, "--force", help="Bypass recent-result cache and re-run all modules."
