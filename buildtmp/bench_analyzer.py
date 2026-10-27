@@ -86,7 +86,7 @@ def scan_log(path: Path, target: str) -> dict:
 if __name__ == "__main__":
     targets = [
         ("ine.com", "results/bench_ine_0.11.3.json", "buildtmp/bench_ine.log"),
-        ("lavellenetworks.com", "results/bench_lavelle_0.11.3.json", "buildtmp/bench_lavelle.log"),
+        ("northwind.example", "results/bench_northwind_0.11.3.json", "buildtmp/bench_northwind.log"),
     ]
     for target, json_p, log_p in targets:
         print(f"\n=== {target} ===")

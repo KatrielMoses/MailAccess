@@ -18,7 +18,7 @@ scorecard shape. (Full artifacts live under `eval/scorecards/<run_id>/`, gitigno
 - **Resilience:** DuckDuckGo returned HTTP 202 CAPTCHA/block for dork queries — the
   known search-engine fragility (Pillar E in the requirements brief).
 
-## Investigate — `lavellenetworks.com` corporate email (keyless, isolated)
+## Investigate — `northwind.example` corporate email (keyless, isolated)
 
 - **Result:** does **not complete within the tool's own hard 120 s completion cap**
   (`cli/main.py` `_MAX_POLL_ATTEMPTS = 60 × 2 s`), so the CLI returns exit code 3
@@ -36,7 +36,7 @@ Because the full default investigate exceeds 120 s, the investigate **scoring pa
 was validated with a restricted fast module set (`--modules gravatar`) against an
 own-domain email: the `--output json` report carries all fields the scorer reads
 (`findings` [129], `module_runs`, `exposure_score` [14], `risk_level` [low],
-`confirmed_name` ["Katriel"], `name_confidence`, `credential_risk_score`).
+`confirmed_name` ["Maya"], `name_confidence`, `credential_risk_score`).
 `score_investigate` produced `name_correct=true` and `precision=0.5` against a
 synthetic 1-TP/1-FP truth — confirming the end-to-end investigate → scorecard path.
 

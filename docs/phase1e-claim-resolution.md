@@ -57,7 +57,7 @@ untouched; a ledger/resolution failure silently omits the block.
   losers: title resolves by recency (VP Engineering beats a stale Engineer),
   name resolves by source weight (`pgp_uid` 1.0 beats a fresher weak snippet),
   corroboration merges + counts support. (`tests/test_claim_resolver.py`, 14.)
-- **Real** multi-source conflict on a baseline target (`katriel@rootaccess.tech`,
+- **Real** multi-source conflict on a baseline target (`maya@example.com`,
   389 ledger observations): `name` resolves across 2 competing values and
   `source_type` across 10 (the native username-platform corpus wins by support) —
   deterministic, with recorded reasoning; losing claims retrievable by

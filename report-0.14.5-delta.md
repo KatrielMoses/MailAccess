@@ -4,13 +4,13 @@
 **Validator pass date:** 2026-09-07 · **Host:** Windows 11, Python 3.10.6, uv 0.12.9 · **Config (primary):** keyless-default.
 **Compared against:** `baseline/v0.14.4/` (keyless, 8 targets × 3 runs, both pipelines).
 
-> Golden rule honored: every check below is exercised through the live CLI/API path unless explicitly marked *(code)* (a source-level invariant confirmed by reading) or *(test)* (a unit/suite result). The headline live proof: lavellenetworks investigate, which was **0/3 exit-3** at v0.14.4, now **completes exit 0**.
+> Golden rule honored: every check below is exercised through the live CLI/API path unless explicitly marked *(code)* (a source-level invariant confirmed by reading) or *(test)* (a unit/suite result). The headline live proof: northwindnetworks investigate, which was **0/3 exit-3** at v0.14.4, now **completes exit 0**.
 
 ---
 
 ## 1. One-line go/no-go
 
-**GO for a 0.14.5 local release.** All bugs found during validation are fixed and verified. Rationale: security-investigation shows zero regression; the refreshed gate is green with zero genuinely-new failures baselined in; migrations, policy suites (111), and phase suites (179) pass; the capstone shows **no default-mode yield/quality regression** and substantial new deliverability/lead coverage; and the headline v0.14.4 hard failure (lavellenetworks investigate, 0/3 exit-3) is fixed (3/3 exit-0). The two harvest-path bugs discovered during validation (BUG-4 4A capture no-op; BUG-5 cold-DB corpus init race) shared one root cause and are fixed by a single `_ensure_schema()` guard, verified live (`score_feature_snapshots` 0→4; 0 table errors) with a regression test. Version bump + commit remain your call.
+**GO for a 0.14.5 local release.** All bugs found during validation are fixed and verified. Rationale: security-investigation shows zero regression; the refreshed gate is green with zero genuinely-new failures baselined in; migrations, policy suites (111), and phase suites (179) pass; the capstone shows **no default-mode yield/quality regression** and substantial new deliverability/lead coverage; and the headline v0.14.4 hard failure (northwindnetworks investigate, 0/3 exit-3) is fixed (3/3 exit-0). The two harvest-path bugs discovered during validation (BUG-4 4A capture no-op; BUG-5 cold-DB corpus init race) shared one root cause and are fixed by a single `_ensure_schema()` guard, verified live (`score_feature_snapshots` 0→4; 0 table errors) with a regression test. Version bump + commit remain your call.
 
 ---
 
@@ -54,9 +54,9 @@ Legend: ✅ live-path pass · ✅(test) suite pass · ✅(code) source invariant
 ### P1 — substrate & migrations
 - ✅ Alembic fresh→head (0001–0009); existing v0.14.4 DB (rev 0002) → head with a seeded row surviving (**no data loss**); downgrade→base→re-apply clean; **ORM matches schema** (autogenerate produced empty up/down).
 - ✅ Async Postgres driver requirement documented correctly (`.env.example` + `docs/self-hosting.md`: `postgresql+asyncpg://`, plain `postgresql://` fails at startup). Live Postgres connect = ⏭️ optional.
-- ✅ **1B budget (live):** lavellenetworks investigate completes **exit 0** (`status: complete`, 333 findings) within the 420s budget — was **0/3 exit-3** at v0.14.4; capstone confirms all 5 emails exit-0 across 3 runs. Forced `--budget 20` → **exit 0** with per-module `status: partial`, `budget_truncated: true`, and listed reasons ("Truncated by investigation time budget after 16s"; "Skipped: budget exhausted") — reported partial, never a silent drop or exit 3.
+- ✅ **1B budget (live):** northwindnetworks investigate completes **exit 0** (`status: complete`, 333 findings) within the 420s budget — was **0/3 exit-3** at v0.14.4; capstone confirms all 5 emails exit-0 across 3 runs. Forced `--budget 20` → **exit 0** with per-module `status: partial`, `budget_truncated: true`, and listed reasons ("Truncated by investigation time budget after 16s"; "Skipped: budget exhausted") — reported partial, never a silent drop or exit 3.
 - ✅ **1C ledger (live):** 333 immutable `observations` with full provenance (source_type, capture_time, deterministic content_hash [333/333 distinct], module_version, source_policy_status, expires_at) — mirrors findings; existing outputs unchanged.
-- ⚠️ **1D corpus (live):** repeat-harvest **parity + speedup confirmed** — lavellenetworks harvested twice into one HOME: cold 114s → **warm 2s (~57×)**, warm diff "+0 new, −0 removed, **4 unchanged**" (identical result). **BUT BUG-5:** on the *cold* run the corpus read-first races DB migration → `no such table: crawl_snapshots` (recovers, "collect fresh", writes back) — first cold read-first is lost, errors logged. No yield/parity impact; server path unaffected.
+- ⚠️ **1D corpus (live):** repeat-harvest **parity + speedup confirmed** — northwindnetworks harvested twice into one HOME: cold 114s → **warm 2s (~57×)**, warm diff "+0 new, −0 removed, **4 unchanged**" (identical result). **BUT BUG-5:** on the *cold* run the corpus read-first races DB migration → `no such table: crawl_snapshots` (recovers, "collect fresh", writes back) — first cold read-first is lost, errors logged. No yield/parity impact; server path unaffected.
 - ✅(code) **1E** deterministic conflict resolution with recorded human+machine reasoning; losing claims retained ("beat" list).
 
 ### P2 — governance
@@ -99,18 +99,18 @@ Run: `eval/scorecards/HEAD_0145_keyless` — 24 records, 23 ok, 1 failed (stripe
 | target | v0.14.4 done | HEAD done | v0.14.4 findings | HEAD yield (mean) | note |
 |---|---|---|---|---|---|
 | corp_own_1 | 3/3 | 3/3 | ~367 | **390.7** [387–394] | slightly higher, very stable (CV 0.007) |
-| **corp_own_2** (lavelle) | **0/3 (exit 3)** | **3/3 (exit 0)** | — | **337.0** [332–340] | ⭐ 1B fix: was the 120s hard-cap failure |
+| **corp_own_2** (northwind) | **0/3 (exit 3)** | **3/3 (exit 0)** | — | **337.0** [332–340] | ⭐ 1B fix: was the 120s hard-cap failure |
 | edu_1 | 3/3 | 3/3 | ~145 | 139.7 | comparable |
 | free_1 | 3/3 | 3/3 | ~129 | 130.3 | comparable |
 | free_2 | 3/3 | 3/3 | ~134 | 136.3 | comparable |
 
-**Investigate completion: 12/15 → 15/15 exit-0.** Wall times comparable (~110–356s; lavelle 250–356s within the 420s budget). No default-mode regression; the one prior hard failure is fixed.
+**Investigate completion: 12/15 → 15/15 exit-0.** Wall times comparable (~110–356s; northwind 250–356s within the 420s budget). No default-mode regression; the one prior hard failure is fixed.
 
 ### 9.2 Harvest (domain → emails) — before → after
 
 | target | v0.14.4 unique (ok) | HEAD unique (ok) | HEAD wall | note |
 |---|---|---|---|---|
-| corp_small_1 (lavelle) | 1 (3/3) | **4** [4,4,4] (3/3) | ~127–198s | 4× yield, perfectly stable (CV 0) |
+| corp_small_1 (northwind) | 1 (3/3) | **4** [4,4,4] (3/3) | ~127–198s | 4× yield, perfectly stable (CV 0) |
 | corp_small_2 (rootaccess) | 48 (**2/3**) | 48 [48,48,48] (**3/3**) | ~891–894s | now completes all 3 runs; identical yield (CV 0) |
 | large_catchall (stripe) | 234 (3/3) | 205 / fail / 404 (2/3) | ~898–900s | high variance (CV 0.33); 1 run hit 900s cap (as v0.14.4) |
 
@@ -130,19 +130,19 @@ Truth labels populated for the verifiable subset, so scoring runs (was "not comp
 
 | target | precision | recall |
 |---|---|---|
-| corp_small_1 (lavelle) | **1.0** | **1.0** |
+| corp_small_1 (northwind) | **1.0** | **1.0** |
 | corp_small_2 (rootaccess) | **1.0** | **1.0** |
 
 Owned-domain known-good mailbox found with no false positive on the labeled set. **Labels-limited:** owner-only fields (names, domain patterns, stripe catch-all) are `PROPOSED — sign-off pending`, so these numbers cover the verifiable subset only; Brier/name-precision await your label sign-off.
 
 ### 9.5 Stability, latency, failure modes, policy posture
 
-- **Stability:** CV ≈ 0.007–0.034 for most targets; rootaccess & lavelle harvest CV = 0 (identical yields across 3 runs); stripe CV 0.33 (one failed run). ≥ v0.14.4 stability.
+- **Stability:** CV ≈ 0.007–0.034 for most targets; rootaccess & northwind harvest CV = 0 (identical yields across 3 runs); stripe CV 0.33 (one failed run). ≥ v0.14.4 stability.
 - **Latency:** comparable to baseline (rootaccess ~893s, stripe ~899s); 5B block-reduction gains are volume-dependent and not expected to show on this small fixed set (documented deferred).
 - **Failure modes:** 1 stripe harvest timeout (identical to v0.14.4); rootaccess reliability improved 2/3 → 3/3.
 - **Policy posture:** sensitive modules (`breach_deep`, `breachdirectory`) skipped 15× (keyless + mode gate); no sensitive module fired; mode + source-policy stamped on every observation/manifest/audit entry.
 
-**Verdict:** no default-mode yield or quality regression; substantial new deliverability/lead coverage; the one prior hard failure (lavelle investigate) is fixed.
+**Verdict:** no default-mode yield or quality regression; substantial new deliverability/lead coverage; the one prior hard failure (northwind investigate) is fixed.
 
 ---
 
@@ -176,7 +176,7 @@ BUG-4 and BUG-5 are both confined to the **in-process harvest path** (the server
 | Every phase check passes via live path | ✅ substrate/governance/lead all live-verified; 4A capture ⚠️ BUG-4 (non-blocking) |
 | security-investigation zero regression vs baseline | ✅ |
 | Full gate green against refreshed baseline; policy suites green | ✅ (63/63, 111 policy + 179 phase passes) |
-| Delta report shows no default-mode yield/quality regression | ✅ (yields stable/up; new deliverability coverage; lavelle fixed) |
+| Delta report shows no default-mode yield/quality regression | ✅ (yields stable/up; new deliverability coverage; northwind fixed) |
 | Deferred items explicitly listed | ✅ (section 10) |
 
 **One-line go/no-go: GO for 0.14.5 local release — security path clean, gate green, no default-mode regression, headline failure fixed; fix BUG-4/BUG-5 (harvest-path, non-blocking) soon after.**

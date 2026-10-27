@@ -18,7 +18,7 @@ class SocialLinksModule(BaseModule):
             parts = username.split(".")
             if len(parts) >= 2:
                 variations.add(parts[0][0] + parts[1]) # e.g. kmoses
-                variations.add(parts[0]) # e.g. katriel
+                variations.add(parts[0]) # e.g. maya
 
         variations_list = list(variations)
         

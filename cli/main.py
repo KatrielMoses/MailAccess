@@ -54,14 +54,14 @@ from backend.config import APP_VERSION
 # This is Rich markup (NOT raw ANSI), so it is printed with the normal Rich
 # markup path — never through ``Text.from_ansi``.
 _BANNER_ART_FALLBACK = """\
-[#820747]
+[#EEEDEC]
 ███╗   ███╗ █████╗ ██╗██╗      █████╗  ██████╗ ██████╗███████╗███████╗███████╗
 ████╗ ████║██╔══██╗██║██║     ██╔══██╗██╔════╝██╔════╝██╔════╝██╔════╝██╔════╝
 ██╔████╔██║███████║██║██║     ███████║██║     ██║     █████╗  ███████╗███████╗
 ██║╚██╔╝██║██╔══██║██║██║     ██╔══██║██║     ██║     ██╔══╝  ╚════██║╚════██║
 ██║ ╚═╝ ██║██║  ██║██║███████╗██║  ██║╚██████╗╚██████╗███████╗███████║███████║
 ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚══════╝╚══════╝╚══════╝
-[/#820747]"""
+[/#EEEDEC]"""
 
 
 @functools.lru_cache(maxsize=1)
@@ -102,7 +102,7 @@ def _render_banner() -> None:
         err_console.print(_BANNER_ART_FALLBACK)
     err_console.print(
         "[link=https://mailaccess.pro/pricing?src=cli]"
-        "[bold #D8455A]mailaccess.pro/pricing?src=cli[/bold #D8455A][/link]\n"
+        "[bold #B86A73]mailaccess.pro/pricing?src=cli[/bold #B86A73][/link]\n"
         "[dim]Explore the live application and MailAccess Pro.[/dim]\n"
         "[dim]Open-source OSINT email intelligence tool[/dim]\n"
         f"[dim]v{APP_VERSION} · pypi.org/project/mailaccess[/dim]"
@@ -942,6 +942,7 @@ def proxy_disable() -> None:
     proxy_show()
 
 
+@configure_app.command(name="set-url")
 @config_app.command(name="set-url")
 def config_set_url(
     url: str = typer.Argument(..., help="Backend URL (e.g. http://localhost:8000)"),
@@ -1292,7 +1293,26 @@ def whoisfreaks_test() -> None:
     if not result["ok"]:
         console.print("Check failed; verify the key, credits and connection.", markup=False)
         raise typer.Exit(1)
-    console.print(f"✓ Key accepted · {result['remaining']:,} credits remaining", markup=False)
+    if result["remaining"] is not None:
+        console.print(
+            f"✓ Key accepted · {result['remaining']:,} of {result['total_credits']:,} credits remaining",
+            markup=False,
+        )
+    else:
+        console.print("✓ Key accepted", markup=False)
+    sub = result.get("subscription")
+    if sub:
+        console.print(
+            f"  Subscription: {sub['status']} · {sub['remaining']:,} of "
+            f"{sub['request_limit']:,} requests remaining",
+            markup=False,
+        )
+        if sub.get("surcharge_limit") is not None:
+            console.print(
+                f"  Surcharge: {sub['surcharge_remaining']:,} of {sub['surcharge_limit']:,} "
+                "requests remaining",
+                markup=False,
+            )
 
 
 @whoisfreaks_app.command("disable")
@@ -1335,10 +1355,23 @@ def whoisfreaks_status() -> None:
     if key:
         # Free endpoint; the response echoes the key, which usage() strips.
         info = asyncio.run(usage(key))
-        table.add_row(
-            "credits_remaining",
-            f"{info['remaining']:,} of {info['total_credits']:,}" if info else "[dim]unavailable[/dim]",
-        )
+        if not info:
+            credits = "[dim]unavailable[/dim]"
+        elif info["remaining"] is None:
+            credits = "[dim]none[/dim]"
+        else:
+            credits = f"{info['remaining']:,} of {info['total_credits']:,}"
+        table.add_row("credits_remaining", credits)
+        sub = info.get("subscription") if info else None
+        if sub:
+            table.add_row("subscription", sub["status"])
+            table.add_row("subscription_requests", f"{sub['remaining']:,} of {sub['request_limit']:,}")
+            if sub.get("surcharge_limit") is not None:
+                table.add_row(
+                    "surcharge_requests", f"{sub['surcharge_remaining']:,} of {sub['surcharge_limit']:,}"
+                )
+        elif info:
+            table.add_row("subscription", "[dim]none[/dim]")
     console.print(table)
 
 
@@ -2238,7 +2271,7 @@ def pro_command() -> None:
     from backend.config import settings as _pro_settings
 
     console.print()
-    console.print("[bold #D8455A]MailAccess Pro[/] · reach the people behind the domain")
+    console.print("[bold #B86A73]MailAccess Pro[/] · reach the people behind the domain")
     console.print(
         "Enrich a lead-gen harvest with business contacts: "
         "[bold]name, role, company, email, LinkedIn[/]."
@@ -2260,7 +2293,7 @@ def pro_command() -> None:
         total = founder.get("seats_total") or 100
         console.print(
             f"[bold]{price} for the first {total:,}[/], then $9/mo · "
-            f"[bold #D8455A]{founder['seats_left']:,} seats left[/]"
+            f"[bold #B86A73]{founder['seats_left']:,} seats left[/]"
         )
     else:
         # Seat count unavailable (offline / service down) — still show the price.
@@ -2270,7 +2303,7 @@ def pro_command() -> None:
 
     console.print(
         "Start → [link=https://mailaccess.pro/pricing?src=cli-pro]"
-        "[bold #D8455A]mailaccess.pro/pricing[/bold #D8455A][/link]"
+        "[bold #B86A73]mailaccess.pro/pricing[/bold #B86A73][/link]"
     )
     if getattr(_pro_settings, "mailaccess_pro_key", None):
         console.print(

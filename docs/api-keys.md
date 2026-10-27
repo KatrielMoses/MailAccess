@@ -7,7 +7,7 @@
 
 # API Keys
 
-Every key is optional. 71 of the 82 modules need no key at all. A module whose
+Every key is optional. 70 of the 82 modules need no key at all. A module whose
 key is missing is skipped, and the run continues without it.
 
 Set a key with `mailaccess keys set <NAME> <value>` (stored in

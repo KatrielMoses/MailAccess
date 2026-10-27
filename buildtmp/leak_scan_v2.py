@@ -66,7 +66,7 @@ def scan_log(path: Path, target: str) -> dict:
 if __name__ == "__main__":
     targets = [
         ("ine.com", "buildtmp/bench_ine.log"),
-        ("lavellenetworks.com", "buildtmp/bench_lavelle.log"),
+        ("northwind.example", "buildtmp/bench_northwind.log"),
     ]
     for target, log_p in targets:
         print(f"\n=== {target} ({log_p}) ===")

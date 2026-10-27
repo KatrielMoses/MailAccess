@@ -6,7 +6,7 @@ cap.
 
 ## The defect (from Phase 0D)
 
-`investigate` on `lavellenetworks.com` timed out 3/3 with **exit 3**. Two
+`investigate` on `northwind.example` timed out 3/3 with **exit 3**. Two
 compounding causes:
 
 1. **Client-side hard cap.** The CLI wait loop had a fixed
@@ -20,7 +20,7 @@ compounding causes:
    run concurrently in the primary phase, so a footprint-poor corporate target
    drives the primary phase to ~200 s+ — over the 120 s client cap.
 
-Measured: with the fix, `lavellenetworks.com` completes in **~257 s**, exit 0,
+Measured: with the fix, `northwind.example` completes in **~257 s**, exit 0,
 320 findings — it was never failing on the server, the client just gave up.
 
 ## What changed
@@ -47,7 +47,7 @@ Measured: with the fix, `lavellenetworks.com` completes in **~257 s**, exit 0,
   Phase-0 fast-run workaround, persisted). When non-empty and no explicit
   `--modules` is given, the primary phase is restricted to those names.
 
-Why **420 s** default: the slowest baseline target (`lavellenetworks.com`)
+Why **420 s** default: the slowest baseline target (`northwind.example`)
 completes naturally in ~257 s; 420 s gives ~63% headroom for run-to-run network
 variance so the **full default module set completes** on every baseline target
 without truncation. The budget is a safety ceiling that only bites pathological
@@ -94,5 +94,5 @@ this landed.
       record; no silent drops; no exit 3 on a successful partial.
 - [x] Sane default (420 s) lets the default module set complete on all baseline
       targets; fast module set pinnable via `investigation_fast_modules`.
-- [x] `lavellenetworks.com` completes exit 0 (~257 s); truncation is reported
+- [x] `northwind.example` completes exit 0 (~257 s); truncation is reported
       when forced with a low budget (tested); `gate check` green.

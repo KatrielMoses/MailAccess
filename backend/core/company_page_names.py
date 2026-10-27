@@ -84,7 +84,7 @@ _JSON_LD_RE = re.compile(
 # Page furniture extraction — title and meta description frequently
 # mirror nav / heading copy verbatim, so any candidate name that
 # appears as an exact substring of either is page furniture, not a
-# person.  The QA pass on ine.com / lavellenetworks.com surfaced
+# person.  The QA pass on ine.com / northwind.example surfaced
 # this as the primary source of garbage "name" extractions.
 _TITLE_RE = re.compile(
     r"<title[^>]*>(.*?)</title>",

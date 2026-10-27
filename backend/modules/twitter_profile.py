@@ -48,16 +48,16 @@ def clean_twitter_display_name(value: str | None) -> str:
 
     Examples
     --------
-    >>> clean_twitter_display_name("Katriel Moses (@katriel) / X")
-    'Katriel Moses'
+    >>> clean_twitter_display_name("Maya Lindqvist (@maya) / X")
+    'Maya Lindqvist'
     >>> clean_twitter_display_name("Jane Smith (@jsmith) on Twitter")
     'Jane Smith'
     >>> clean_twitter_display_name("Some User | Twitter")
     'Some User'
     >>> clean_twitter_display_name("Real Name @rehandle")
     'Real Name'
-    >>> clean_twitter_display_name("Katriel Moses")
-    'Katriel Moses'
+    >>> clean_twitter_display_name("Maya Lindqvist")
+    'Maya Lindqvist'
     """
     cleaned = str(value or "").strip()
     if not cleaned:

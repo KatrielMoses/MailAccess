@@ -396,7 +396,7 @@ class LiveHarvestDisplay:
         ticker = Text()
         ticker.append(
             f"Emails found: {self.counts['email']}  ·  Names: {self.counts['name']}  ·  "
-            f"Subdomains: {self.counts['subdomain']}  ·  Elapsed: {int(elapsed // 60)}m"
+            f"Elapsed: {int(elapsed // 60)}m"
             f"{int(elapsed % 60):02d}s  ·  {eta_text}\n\n"
         )
         ticker.append("Latest finds:\n", style="bold")
@@ -1607,7 +1607,7 @@ def run_harvest_emails(
     # business contacts Pro would add for this domain, fetched count-only (no data)
     # from the public /v1/coverage endpoint, plus the live founder-pricing counter
     # from /v1/founder. The block reads "<found> · <found+corpus> available with
-    # Pro" then the seats line. Themed in the banner-art maroon (#D8455A). The
+    # Pro" then the seats line. Themed in the brand accent, dusty rose (#B86A73, design/DESIGN.md). The
     # ?src=cli tag on the link attributes CLI-driven upgrades. Best-effort: any
     # failure (dead API, tier dark, suppressed subject) simply omits the line — it
     # never blocks or errors the harvest.
@@ -1630,12 +1630,12 @@ def run_harvest_emails(
         if corpus_count and corpus_count > 0:
             available = n_emails + corpus_count
             console.print(
-                f"\n[bold #D8455A]{n_emails:,} found[/] · "
+                f"\n[bold #B86A73]{n_emails:,} found[/] · "
                 f"[bold]{available:,} available with Pro[/]\n"
                 f"[dim]Pro appends {corpus_count:,} business contacts — name, role, "
                 f"company, source. Upgrade → [/dim]"
                 f"[link=https://mailaccess.pro/pricing?src=cli]"
-                f"[bold #D8455A]mailaccess.pro/pricing?src=cli[/bold #D8455A][/link]"
+                f"[bold #B86A73]mailaccess.pro/pricing?src=cli[/bold #B86A73][/link]"
             )
             if founder and isinstance(founder.get("seats_left"), int):
                 price = founder.get("price_label") or "$5/mo"
@@ -1643,7 +1643,7 @@ def run_harvest_emails(
                 seats_left = founder["seats_left"]
                 console.print(
                     f"[bold]{price} for the first {total:,}[/], then $9/mo · "
-                    f"[bold #D8455A]{seats_left:,} seats left[/]"
+                    f"[bold #B86A73]{seats_left:,} seats left[/]"
                 )
     return 0
 

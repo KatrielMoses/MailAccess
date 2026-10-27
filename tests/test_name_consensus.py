@@ -22,24 +22,24 @@ PERSON_RE = _MODULE.PERSON_RE
 
 
 def test_normalize_name_handles_common_profile_shapes() -> None:
-    normalized, flags, username_class = normalize_name("KatrielMoses, PhD")
+    normalized, flags, username_class = normalize_name("MayaLindqvist, PhD")
 
-    assert normalized == "Katriel Moses"
+    assert normalized == "Maya Lindqvist"
     assert flags == []
     assert username_class is False
 
 
 def test_consensus_confirms_independent_agreement() -> None:
-    result = NameConsensusEngine("katriel.moses@gmail.com").resolve(
+    result = NameConsensusEngine("maya.lindqvist@gmail.com").resolve(
         [
-            {"raw_name": "Katriel Moses", "source": "github_profile"},
-            {"raw_name": "Katriel Moses", "source": "gravatar"},
-            {"raw_name": "Katriel Moses", "source": "keybase"},
-            {"raw_name": "katriel.moses", "source": "email_localpart"},
+            {"raw_name": "Maya Lindqvist", "source": "github_profile"},
+            {"raw_name": "Maya Lindqvist", "source": "gravatar"},
+            {"raw_name": "Maya Lindqvist", "source": "keybase"},
+            {"raw_name": "maya.lindqvist", "source": "email_localpart"},
         ]
     )
 
-    assert result.confirmed_name == "Katriel Moses"
+    assert result.confirmed_name == "Maya Lindqvist"
     assert result.name_confidence == "confirmed"
     assert set(result.name_sources) == {
         "email_localpart",
@@ -99,8 +99,8 @@ def test_org_and_bot_names_are_discarded() -> None:
 
 
 def test_module_artifact_tokens_are_rejected() -> None:
-    result = NameConsensusEngine("katrield.moses@lavellenetworks.com").resolve(
-        [{"raw_name": "Katrieldmoses Sec", "source": "sec_edgar"}]
+    result = NameConsensusEngine("mayal.lindqvist@northwind.example").resolve(
+        [{"raw_name": "Mayallindqvist Sec", "source": "sec_edgar"}]
     )
 
     assert result.confirmed_name is None
@@ -111,35 +111,35 @@ def test_module_artifact_tokens_are_rejected() -> None:
 def test_extract_name_candidates_reads_profile_platform_fields() -> None:
     collected = {
         "github_commits": SimpleNamespace(findings=[
-            {"platform": "github_user", "metadata": {"name": "Katriel Moses"}},
+            {"platform": "github_user", "metadata": {"name": "Maya Lindqvist"}},
         ]),
         "gravatar": SimpleNamespace(findings=[
             {
                 "platform": "gravatar_profile",
-                "metadata": {"display_name": "Katriel Moses"},
+                "metadata": {"display_name": "Maya Lindqvist"},
             },
         ]),
         "keybase": SimpleNamespace(findings=[
             {
                 "platform": "keybase_profile",
-                "metadata": {"full_name": "Katriel Moses"},
+                "metadata": {"full_name": "Maya Lindqvist"},
             },
         ]),
         "twitter_profile": SimpleNamespace(findings=[
             {
                 "platform": "twitter_profile",
-                "metadata": {"display_name": "Katriel Moses"},
+                "metadata": {"display_name": "Maya Lindqvist"},
             },
         ]),
         "linkedin_serp": SimpleNamespace(findings=[
             {
                 "platform": "linkedin_snippet",
-                "metadata": {"display_name": "Katriel Moses"},
+                "metadata": {"display_name": "Maya Lindqvist"},
             },
         ]),
     }
 
-    candidates = extract_name_candidates(collected, "katriel.moses@gmail.com")
+    candidates = extract_name_candidates(collected, "maya.lindqvist@gmail.com")
     sources = {candidate["source"] for candidate in candidates}
 
     assert sources >= {
@@ -164,14 +164,14 @@ def test_extract_name_candidates_reads_google_account_intel() -> None:
                 "platform": "google_account",
                 "metadata": {
                     "source": "google_account_intel",
-                    "display_name": "Katriel Moses",
+                    "display_name": "Maya Lindqvist",
                 },
             },
         ]),
     }
-    candidates = extract_name_candidates(collected, "katriel.moses@gmail.com")
+    candidates = extract_name_candidates(collected, "maya.lindqvist@gmail.com")
     google = [c for c in candidates if c["source"] == "google_account_intel"]
-    assert google and google[0]["raw_name"] == "Katriel Moses"
+    assert google and google[0]["raw_name"] == "Maya Lindqvist"
     weight, source_class = SOURCE_WEIGHTS["google_account_intel"]
     assert weight <= 0.50 and source_class == "social"
 
@@ -181,18 +181,18 @@ def test_extract_name_candidates_accepts_flat_finding_list() -> None:
         [
             {
                 "platform": "github_user",
-                "metadata": {"name": "Katriel Moses"},
+                "metadata": {"name": "Maya Lindqvist"},
             },
             {
                 "platform": "twitter_profile",
-                "metadata": {"display_name": "Katriel Moses"},
+                "metadata": {"display_name": "Maya Lindqvist"},
             },
         ],
-        "katriel.moses@gmail.com",
+        "maya.lindqvist@gmail.com",
     )
 
-    assert {"raw_name": "Katriel Moses", "source": "github_profile"} in candidates
-    assert {"raw_name": "Katriel Moses", "source": "twitter_profile"} in candidates
+    assert {"raw_name": "Maya Lindqvist", "source": "github_profile"} in candidates
+    assert {"raw_name": "Maya Lindqvist", "source": "twitter_profile"} in candidates
 
 
 def test_extract_name_candidates_accepts_findings_by_module_lists() -> None:
@@ -201,35 +201,35 @@ def test_extract_name_candidates_accepts_findings_by_module_lists() -> None:
             "github_commits": [
                 {
                     "platform": "github_user",
-                    "metadata": {"name": "Katriel Moses"},
+                    "metadata": {"name": "Maya Lindqvist"},
                 }
             ],
             "gravatar": [
                 {
                     "platform": "gravatar_profile",
-                    "metadata": {"display_name": "Katriel Moses"},
+                    "metadata": {"display_name": "Maya Lindqvist"},
                 }
             ],
             "keybase": [
                 {
                     "platform": "keybase_profile",
-                    "metadata": {"full_name": "Katriel Moses"},
+                    "metadata": {"full_name": "Maya Lindqvist"},
                 }
             ],
             "twitter_profile": [
                 {
                     "platform": "twitter_profile",
-                    "metadata": {"display_name": "Katriel Moses"},
+                    "metadata": {"display_name": "Maya Lindqvist"},
                 }
             ],
         },
-        "katriel.moses@gmail.com",
+        "maya.lindqvist@gmail.com",
     )
 
-    assert {"raw_name": "Katriel Moses", "source": "github_profile"} in candidates
-    assert {"raw_name": "Katriel Moses", "source": "gravatar"} in candidates
-    assert {"raw_name": "Katriel Moses", "source": "keybase"} in candidates
-    assert {"raw_name": "Katriel Moses", "source": "twitter_profile"} in candidates
+    assert {"raw_name": "Maya Lindqvist", "source": "github_profile"} in candidates
+    assert {"raw_name": "Maya Lindqvist", "source": "gravatar"} in candidates
+    assert {"raw_name": "Maya Lindqvist", "source": "keybase"} in candidates
+    assert {"raw_name": "Maya Lindqvist", "source": "twitter_profile"} in candidates
 
 
 def test_github_profile_with_dotted_email_localpart_is_probable() -> None:
@@ -238,19 +238,19 @@ def test_github_profile_with_dotted_email_localpart_is_probable() -> None:
             "github_commits": [
                 {
                     "platform": "github_user",
-                    "metadata": {"name": "KatrielMoses"},
+                    "metadata": {"name": "MayaLindqvist"},
                 },
                 {
-                    "metadata": {"real_name_from_git": "KatrielMoses"},
+                    "metadata": {"real_name_from_git": "MayaLindqvist"},
                 },
             ]
         },
-        "katriel.moses@gmail.com",
+        "maya.lindqvist@gmail.com",
     )
 
-    result = NameConsensusEngine("katriel.moses@gmail.com").resolve(candidates)
+    result = NameConsensusEngine("maya.lindqvist@gmail.com").resolve(candidates)
 
-    assert result.confirmed_name == "Katriel Moses"
+    assert result.confirmed_name == "Maya Lindqvist"
     assert result.name_confidence == "probable"
     assert "github_profile" in result.name_sources
 
@@ -534,17 +534,17 @@ def test_diacritic_normalization_clusters_francois_variants() -> None:
 
 
 def test_fuzzy_merge_double_space_collapses_to_one_cluster() -> None:
-    # "Katriel Moses" and "Katriel  Moses" (double space) must cluster
+    # "Maya Lindqvist" and "Maya  Lindqvist" (double space) must cluster
     # together. The whitespace is collapsed in canonical_name so the
     # canonicals are identical — the merge is exact, not fuzzy, but the
     # brief's test phrasing asserts the clustering outcome.
     result = NameConsensusEngine("test@example.com").resolve(
         [
-            {"raw_name": "Katriel Moses", "source": "github_profile"},
-            {"raw_name": "Katriel  Moses", "source": "gravatar"},
+            {"raw_name": "Maya Lindqvist", "source": "github_profile"},
+            {"raw_name": "Maya  Lindqvist", "source": "gravatar"},
         ]
     )
-    assert result.confirmed_name == "Katriel Moses"
+    assert result.confirmed_name == "Maya Lindqvist"
     # No conflicting cluster should have formed.
     assert result.conflicting_names == []
 
@@ -741,13 +741,13 @@ def test_reasoning_mentions_fuzzy_merge() -> None:
 
 
 def test_reasoning_no_fuzzy_note_for_exact_canonical_match() -> None:
-    # "Katriel Moses" and "Katriel  Moses" — exact canonical match (whitespace
+    # "Maya Lindqvist" and "Maya  Lindqvist" — exact canonical match (whitespace
     # collapsed). The merge is trivial equality, not fuzzy. No "Fuzzy match"
     # note should fire.
     result = NameConsensusEngine("test@example.com").resolve(
         [
-            {"raw_name": "Katriel Moses", "source": "github_profile"},
-            {"raw_name": "Katriel  Moses", "source": "gravatar"},
+            {"raw_name": "Maya Lindqvist", "source": "github_profile"},
+            {"raw_name": "Maya  Lindqvist", "source": "gravatar"},
         ]
     )
     assert "Fuzzy match" not in result.name_reasoning

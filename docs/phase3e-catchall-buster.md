@@ -33,7 +33,7 @@ graded Catch-all.
 ## Own-domain SMTP validation — deferred (documented)
 
 The real SMTP + catch-all path is exercised in `org-authorized-verification` mode
-against a domain the operator controls (lavellenetworks / rootaccess), run from a
+against a domain the operator controls (northwindnetworks / rootaccess), run from a
 host with outbound port 25. **The eval/dev host blocks port 25 (Phase-0 finding),
 and no $0 outbound-25 host is currently available, so this live validation is
 deferred** — as the brief permits. The product path (3C/3D) does not block on it:

@@ -1,5 +1,24 @@
 # Changelog
 
+### 0.19.2 (2026-10-28)
+
+#### Fixed
+
+- **`breach_aggregator` showed FAILED on every run without breach keys.** Its only keyless source, Scylla.so, now answers automated clients with a JavaScript challenge page instead of results, so the lookup errored every time. With no `HIBP_API_KEY`, `DEHASHED_API_KEY` or `SNUSBASE_API_KEY` set, the module now reports skipped and makes no request. It now counts as a keyed module: 70 of the 82 modules need no key.
+- **`mailaccess configure set-url`.** The `commands` panel listed it, but only the older `mailaccess config set-url` existed. Both now work.
+- **Harvest live view.** Removed the "Subdomains" counter, which never counted anything and always read 0.
+- **No private default for the Pro engine URL.** `MAILACCESS_PRO_BASE_URL` (used only by a hosted backend serving `/v1/enrich`) no longer defaults to a private network address; unset, `/v1/enrich` reports the engine unavailable.
+
+#### Changed
+
+- **`mailaccess whoisfreaks test` and `status` show your subscription.** When the WhoisFreaks account has an active subscription, the usage endpoint also returns `apiSubscription`; both commands now show its status, requests remaining of the limit, and surcharge requests remaining, next to the credits. A key with only a subscription (no credits block) now passes `test`. Thanks to the WhoisFreaks team for the report.
+- **CLI accent colour** now matches the website design system (dusty rose `#B86A73`) in the banner, the pricing link and the Pro teaser.
+- **Leaner source package.** The sdist no longer ships eval harnesses, research notes, old reports or README media. Tests, fixtures, docs and research notes use fictional people and companies.
+
+#### Removed
+
+- **Scylla.so breach source.** Removed because the site gates automated clients; MailAccess does not work around bot checks. A leftover `ENABLE_SCYLLA` in `.env` is ignored.
+
 ### 0.19.1 (2026-10-27)
 
 #### Fixed

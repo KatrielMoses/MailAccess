@@ -9,8 +9,8 @@ federation layer.
 
 **Test queries.**
 
-1. `"@lavellenetworks.com"`
-2. `site:linkedin.com/in/ "lavellenetworks.com"`
+1. `"@northwind.example"`
+2. `site:linkedin.com/in/ "northwind.example"`
 3. `"@rootaccess.tech" "security"`
 
 **Test methodology.** All three queries were sent to each engine's HTML
@@ -64,11 +64,11 @@ https://search.brave.com/search?q={URL-encoded query}
 Tested with all three queries via both `webfetch` and `Invoke-WebRequest`
 with a Chrome UA. All three returned 200 with a real result list:
 
-- Q1: 6 result blocks, snippet text contains `contact@lavellenetworks.com`,
+- Q1: 6 result blocks, snippet text contains `contact@northwind.example`,
   `sales@...`, `helpdesk@...`, `pr@...`, plus a Tracxn and ZoomInfo result
-  (the latter with a redacted `s***@lavellenetworks.com`).
+  (the latter with a redacted `s***@northwind.example`).
 - Q2: 4 result blocks, all `linkedin.com/in/`, snippet text contains
-  `www.lavellenetworks.com`. The `site:` filter was respected ("Only showing
+  `www.northwind.example`. The `site:` filter was respected ("Only showing
   results from linkedin.com/in/").
 - Q3: 10+ result blocks, `rootaccess.tech` itself appears, plus a Huntress
   explainer, a `rootaccess.technology` About page, and several
@@ -211,7 +211,7 @@ self-documented "Search Help / Syntax" page served alongside the challenge:
 > title. Using quotes will also cause the search engine to be as literal
 > as possible in interpreting the query."*
 
-So `"@lavellenetworks.com"` is matched against **page titles only**, not
+So `"@northwind.example"` is matched against **page titles only**, not
 body content. For an OSINT email dork this is the wrong tool — the email
 is almost never in the title of the page where it appears.
 

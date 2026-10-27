@@ -134,7 +134,7 @@ def _extract_value(obs: dict[str, Any], field: str) -> Any:
 
 
 def _normalize_value(value: Any) -> str:
-    """Grouping key: case/space-insensitive so 'Katriel Moses' == 'katriel  moses'."""
+    """Grouping key: case/space-insensitive so 'Maya Lindqvist' == 'maya  lindqvist'."""
     return " ".join(str(value).split()).casefold()
 
 

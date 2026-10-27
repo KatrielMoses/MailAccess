@@ -15,7 +15,7 @@ compound.
 Run (keyless, isolated, mirrors the baseline harness)::
 
     uv run python -m eval.harness.corpus_parity --timeout 240 \
-        lavellenetworks.com rootaccess.tech stripe.com
+        gitlab.com rootaccess.tech stripe.com
 """
 from __future__ import annotations
 

@@ -24,7 +24,7 @@ Investigation modules:
 | breachdirectory | Second breach source | Yes (`BREACHDIRECTORY_API_KEY`) | No |
 | xposedornot | Email-to-breach lookup with breach names, data classes and risk indicators | No | No |
 | leakcheck | Public breach lookup with regional coverage and stealer routing | No | No |
-| breach_aggregator | Scylla, HIBP Pastes, Dehashed, Snusbase (existence flags only) | No (paid sources optional) | No |
+| breach_aggregator | HIBP Pastes, Dehashed, Snusbase (existence flags only) | Yes (any one of the three) | No |
 | breach_deep | Account existence on the top 100 highest-severity breached sites | No | Yes |
 | hudson_rock | Infostealer logs (free) | No | No |
 | intelx_lookup | IntelligenceX leak and paste records | Yes (`INTELX_API_KEY`, free tier) | No |
@@ -78,7 +78,7 @@ Investigation modules:
 
 The remaining modules are domain-harvest sources for `mailaccess harvest-emails`; see [Domain Email Harvesting Modules](#domain-email-harvesting-modules). Reasoning components such as `identity_graph`, `platform_health` and `name_consensus` are not modules; see [Reasoning components](#reasoning-components).
 
-The count of 71 keyless modules follows each module's `requires_key` flag. `ip_intel` and `whoisfreaks_intel` count as keyless but do nothing until their key is set, so the table lists that key. `permutation_discovery` is a pipeline phase rather than a registered module; it is listed here because it runs on every investigation.
+The count of 70 keyless modules follows each module's `requires_key` flag. `ip_intel` and `whoisfreaks_intel` count as keyless but do nothing until their key is set, so the table lists that key. `permutation_discovery` is a pipeline phase rather than a registered module; it is listed here because it runs on every investigation.
 
 ### Platform Coverage
 
@@ -1755,11 +1755,11 @@ Re-runs the cheap email-anchored checks (registration and Gravatar) on alternate
 
 ## `breach_aggregator`
 
-Post-primary breach lookup across Scylla (free), HIBP Pastes, Dehashed and Snusbase. Each source runs only when it is enabled or keyed, and one failing source never stops the others. Only existence flags are kept (`has_plaintext_password`, `has_hash`); passwords, hashes and salts are discarded at parse time.
+Post-primary breach lookup across HIBP Pastes, Dehashed and Snusbase. Each source runs only when it is keyed, and one failing source never stops the others. With no key set, the module reports skipped and makes no request. Scylla.so was removed on 2026-10-28: it now serves automated clients a JavaScript challenge instead of results. Only existence flags are kept (`has_plaintext_password`, `has_hash`); passwords, hashes and salts are discarded at parse time.
 
 | | |
 |--|--|
-| **Requires key** | No for Scylla. Optional: `HIBP_API_KEY`, `DEHASHED_API_KEY` + `DEHASHED_ACCOUNT_EMAIL`, `SNUSBASE_API_KEY` |
+| **Requires key** | At least one of `HIBP_API_KEY`, `DEHASHED_API_KEY` + `DEHASHED_ACCOUNT_EMAIL`, `SNUSBASE_API_KEY` |
 | **Runs** | Post-primary |
 | **Status** | Implemented |
 

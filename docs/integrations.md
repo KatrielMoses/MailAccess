@@ -12,7 +12,7 @@
 The fastest integration: install the CLI and point it at any MailAccess instance.
 
 ```bash
-export MAILACCESS_URL=http://your-instance:8000   # or: mailaccess config set-url http://your-instance:8000
+export MAILACCESS_URL=http://your-instance:8000   # or: mailaccess configure set-url http://your-instance:8000
 mailaccess doctor
 mailaccess configure proxy show
 mailaccess investigate jane@example.com -o report.stix
@@ -21,9 +21,8 @@ mailaccess harvest-emails --domain example.com --use-proxies
 
 The CLI talks to `http://localhost:8000` unless `MAILACCESS_URL` is set or a
 URL is saved in `~/.mailaccess/config.json`. To save one, use
-`mailaccess config set-url <url>`. In 0.19.0 `set-url` lives only on the
-older `config` command, not on `configure`. `configure` is the canonical form
-for everything else. ScrapingAnt proxy routing is managed separately with
+`mailaccess configure set-url <url>` (the older `mailaccess config set-url`
+still works). ScrapingAnt proxy routing is managed separately with
 `mailaccess configure proxy enable residential|datacenter` and
 `mailaccess configure proxy disable`.
 

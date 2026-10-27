@@ -372,7 +372,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--domains-only", action="store_true")
     # Must exceed the CLI's budget-derived wait ceiling
     # (investigation_budget_seconds + margin ~= 510s at the 420s default) so a
-    # healthy long run (e.g. lavellenetworks ~257s) is never killed by the
+    # healthy long run (e.g. northwindnetworks ~257s) is never killed by the
     # subprocess timeout before it completes. Phase 1B raised this from 240.
     ap.add_argument("--investigate-timeout", type=int, default=600)
     ap.add_argument("--harvest-timeout", type=int, default=720)

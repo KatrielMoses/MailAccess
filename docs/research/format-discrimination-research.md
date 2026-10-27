@@ -6,7 +6,7 @@ data exists for the domain, no external corroboration appears in CC/Wayback, and
 passive signal model scores all 6 candidates similarly. The problem is **format
 discrimination** — which of N candidates is correct without network verification.
 
-The actual emails are `katriel@` and `aaron@` (the `{first}@` format), but the
+The actual emails are `maya@` and `aaron@` (the `{first}@` format), but the
 current Interseller-ordered template list puts `{first}.{last}@` first by default
 and only re-orders to a confirmed pattern when SMTP catches one (which it does
 not on Hostinger).
@@ -236,7 +236,7 @@ def _ingest(engine: str, summary: DorkRunSummary) -> None:
 ```
 
 So if a DDG/Bing/CSE result snippet contains
-`"contact katriel@rootaccess.tech for..."`, the email is extracted and
+`"contact maya@example.com for..."`, the email is extracted and
 emitted as a `search_snippet_ddg` (0.35), `search_snippet_bing` (0.25),
 or `search_snippet_google_cse` (0.55) finding — see
 `email_confidence.py:19-21`.
@@ -244,7 +244,7 @@ or `search_snippet_google_cse` (0.55) finding — see
 ### b) Is the discovered email fed back into format inference?
 
 **No — only into the email confidence pipeline.** When
-`email_search_dork` finds `katriel@rootaccess.tech` via a DDG
+`email_search_dork` finds `maya@example.com` via a DDG
 snippet, the email becomes a `search_snippet_ddg`-weighted finding in
 `_aggregate` (`domain_harvest_orchestrator.py:692-905`). It does NOT
 get fed to `pattern_and_verify` for template re-prioritization.
@@ -258,9 +258,9 @@ read by `pattern_and_verify.py:155-158` to reorder its top-3
 templates.
 
 **For `rootaccess.tech`, if a snippet returned
-`"Katriel Moses katriel@rootaccess.tech"`, the chain would be:**
+`"Maya Lindqvist maya@example.com"`, the chain would be:**
 
-1. `email_search_dork` extracts `katriel@rootaccess.tech`
+1. `email_search_dork` extracts `maya@example.com`
 2. Finding enters `_aggregate` with source_type `search_snippet_ddg`
 3. Compute confidence: base = 0.35, single source → multiplier 1.0,
    no fresh timestamp → freshness 0.50 → final ≈ 0.175 → LOW
@@ -327,9 +327,9 @@ as roles, but the inferred shape logic at
 `{first}.{last}` / `{first}_{last}` / bare-name. A role email that
 slips through will mis-train the dominant-format inference.
 
-**Why #3 is third for `rootaccess.tech` specifically.** Katriel
-Moses's LinkedIn bio literally says "Lead Security Researcher @
-rootaccess" (verified via web search on 2026-07-14). Aaron Joseph
+**Why #3 is third for `rootaccess.tech` specifically.** Maya
+Lindqvist's LinkedIn bio literally says "Lead Security Researcher @
+rootaccess" (verified via web search on 2026-07-14). Daniel Joseph
 Jean's bio says "Co-Founder @ rootaccess" with the explicit phrase
 `Building rootaccess.tech`. A search for `"rootaccess.tech" "founder"`
 would likely surface one of those LinkedIn bios with the work email
@@ -366,11 +366,11 @@ The blog URL is enqueued as a `fetch_page` work item, processed by
 function runs the standard content extractors on the fetched page,
 which include `extract_emails` via the structured-data pipeline. If
 the personal site lists a work email like
-`Contact: katriel@rootaccess.tech`, it would surface as a
+`Contact: maya@example.com`, it would surface as a
 `structured_page` finding (0.70 weight, `email_confidence.py:51`).
 
 **For `rootaccess.tech`:** the founders' GitHub profiles
-(`KatrielMoses`, `aaronjjean` likely) would need to have a `blog:`
+(`MayaLindqvist`, `danielholm` likely) would need to have a `blog:`
 field pointing to a personal site that lists their work email. This
 is a long shot for security engineers but not impossible.
 
@@ -383,7 +383,7 @@ targets conference speaker pages. The closest is
 which does harvest from press release pages but doesn't extract
 speaker bio emails.
 
-**For `rootaccess.tech`:** zero yield today. Katriel's LinkedIn
+**For `rootaccess.tech`:** zero yield today. Maya's LinkedIn
 shows "Tamasha.live" and "GamePe" as prior employers — those speaker
 pages (if any exist) would be the realistic source. Not worth
 building for this case specifically.
@@ -417,7 +417,7 @@ target_domain=domain)` after the title/snippet parse and surface
 hits as new findings. Even a single hit would feed into
 `_infer_confirmed_pattern_from_emails` via the existing pipeline.
 
-**For `rootaccess.tech`:** Aaron Jean's LinkedIn bio is public and
+**For `rootaccess.tech`:** Daniel Jean's LinkedIn bio is public and
 the snippet is: `• Co-Founder @ RootAccess.tech • AWS Security
 Specialist • Building a holistic…` (verified via web search). The
 "Contact info" section rarely shows in DDG/Bing snippets, but it
@@ -454,7 +454,7 @@ confidence and the inference skips them.
 
 **For `rootaccess.tech`:** `author-email:@rootaccess.tech` would
 only return results if the founders pushed public commits with that
-email. Looking at `KatrielMoses`'s GitHub, his commit email is
+email. Looking at `MayaLindqvist`'s GitHub, his commit email is
 typically the GitHub-provided `noreply` address. Real-world yield
 for the GitHub commit path on a 2-person security startup:
 **low** unless they have a public open-source repo where they
@@ -471,7 +471,7 @@ committed with their work email (e.g. the `MailAccess` repo itself).
 `title_or_role: str | None = None`. It's populated by:
 
 - `linkedin_name_discovery` — parses LinkedIn result titles like
-  "Katriel Moses - Founding Security Engineer - rootaccess |
+  "Maya Lindqvist - Founding Security Engineer - rootaccess |
   LinkedIn" (`linkedin_name_discovery.py:59-91`). **Real
   coverage: HIGH for engineering roles, MEDIUM for executives
   (LinkedIn titles truncate).**
@@ -486,9 +486,9 @@ committed with their work email (e.g. the `MailAccess` repo itself).
 It is currently a passive label that appears in finding metadata
 only.
 
-**For `rootaccess.tech` specifically:** Katriel's LinkedIn shows
+**For `rootaccess.tech` specifically:** Maya's LinkedIn shows
 "Lead Security Researcher @ rootaccess" and "Founding Security
-Engineer" (prior role at Tamasha.live). Aaron's LinkedIn shows
+Engineer" (prior role at Tamasha.live). Daniel's LinkedIn shows
 "Co-Founder @ rootaccess". Both have role data attached at the
 discovery stage.
 
@@ -562,7 +562,7 @@ signal exist:
   echo). Demote `{first}@` for this case.
 
 **For `rootaccess.tech`:** role-aware inference alone (no Hunter)
-would boost `{first}@` for both Katriel and Aaron by +0.20 each
+would boost `{first}@` for both Maya and Daniel by +0.20 each
 (Tier 1 for both). This gets their `{first}@` candidate to roughly
 0.30 + 0.20 = **0.50** — borderline MEDIUM, not HIGH. Combined
 with the weak "name matches local" signal already in
@@ -849,7 +849,7 @@ yield** for this specific domain:
 | -------------------------------------- | ----------------------------------- | ----------- |
 | **Hunter.io `data.pattern`**            | Likely 0 (small domain, not in Hunter's index) | n/a |
 | **Email search dork** (existing)        | Possibly 1 LinkedIn bio with email | LOW if hit |
-| **LinkedIn SERP email extraction** (NEW patch) | Possibly 1 — Aaron's bio is public | LOW if hit |
+| **LinkedIn SERP email extraction** (NEW patch) | Possibly 1 — Daniel's bio is public | LOW if hit |
 | **GitHub commit author for domain**     | ~0 (no public commits under `@rootaccess.tech`) | n/a |
 | **GitHub blog URL pivot**              | ~0 (security engineers rarely link personal blogs) | n/a |
 | **WHOIS / RDAP**                       | 0 (Hostinger privacy protection)    | n/a |
@@ -862,7 +862,7 @@ yield** for this specific domain:
 
 **The single highest-yield realistic improvement for this domain:
 role-aware tier adjustment.** It's a 2-3 hour build that surfaces
-`{first}@` as the top candidate for both Katriel and Aaron purely
+`{first}@` as the top candidate for both Maya and Daniel purely
 on the basis of "Co-Founder / Lead Security Researcher" titles.
 
 **The complementary fallback:** LinkedIn SERP email extraction
@@ -933,7 +933,7 @@ STEP 6: RE-RANK BY COMBINED SCORE (already exists)
 [Output to HarvestedEmail list, JSON export, CLI report]
 ```
 
-### c) Realistic confidence score for `katriel@rootaccess.tech`
+### c) Realistic confidence score for `maya@example.com`
 
 Step-by-step math under the best passive signal combination
 (role-aware enabled, Hunter returns null pattern, no breach data,
@@ -950,7 +950,7 @@ After Step 4 (role-aware tier adjustment for "Co-Founder"):
 After Step 6 (re-rank):
   base_score = 0.13
   + 0.20 (role boost) = 0.33
-  + 0.10 (name_boost — local "katriel" matches first name "katriel")  ← from existing code
+  + 0.10 (name_boost — local "maya" matches first name "maya")  ← from existing code
   = 0.43 base
 
 multiplier (single source, no SMTP, no PGP/CA): 1.00
@@ -966,12 +966,12 @@ label_for_score(0.215) = LOW
 one more signal. Realistic options:
 
 **Path A — add LinkedIn SERP email extraction (the 5-line
-patch).** If Aaron's bio snippet shows his work email (even
-indirectly — e.g. "Contact: aaron@rootaccess.tech" in the
-snippet), then `aaron@rootaccess.tech` becomes a
+patch).** If Daniel's bio snippet shows his work email (even
+indirectly — e.g. "Contact: daniel@example.com" in the
+snippet), then `daniel@example.com` becomes a
 `search_snippet_ddg` finding with confidence 0.35. After the
 chain in (b) above, `_infer_confirmed_pattern_from_emails`
-infers `{first}@` and emits a confirmed pattern. Katriel's
+infers `{first}@` and emits a confirmed pattern. Maya's
 candidate now gets:
 
 ```
@@ -1063,7 +1063,7 @@ freshness = 1.0 (after the fix)
 final = 0.85 — HIGH
 ```
 
-This is the realistic ceiling for `katriel@rootaccess.tech` under
+This is the realistic ceiling for `maya@example.com` under
 the role-aware passive stack with no network verification. **It
 requires: (1) the tier-1 passive source type, (2) the role-aware
 boost, (3) the freshness fix, (4) the name-match boost — all
@@ -1078,7 +1078,7 @@ Current thresholds (`email_confidence.py:113-115`):
 - MEDIUM ≥ 0.55
 - LOW < 0.55
 
-Current state for `katriel@rootaccess.tech`: 0.516 with the path
+Current state for `maya@example.com`: 0.516 with the path
 A patch, or 0.85 with the path B+C combination. There's a band
 between 0.55 and 0.85 where the candidate has strong passive
 signals but no confirmation. This is the "LIKELY" band.
@@ -1091,7 +1091,7 @@ signals but no confirmation. This is the "LIKELY" band.
 - MEDIUM ≥ 0.50 (was 0.55, slightly relaxed)
 - LOW < 0.50
 
-`katriel@rootaccess.tech` at 0.78 (with all three patches:
+`maya@example.com` at 0.78 (with all three patches:
 tier-1 source + role boost + freshness fix + name match) would
 land in **LIKELY**. The report could render it with a yellow
 chip instead of red.
@@ -1132,7 +1132,7 @@ Sorted by **realistic yield for `rootaccess.tech` specifically**
 |15 | **Breach format inference fix** (Q1/Q6)                 | 0 for rootaccess       | 2-3                | Yes — general | Make _format_for_local recognize {first}@ format. |
 
 **Recommended order of work:** 1 → 2 → 3 (these three are the
-realistic path to LIKELY for `katriel@rootaccess.tech`); then 7
+realistic path to LIKELY for `maya@example.com`); then 7
 (the new label) once 1-3 are merged; then 5/6 (Hunter pattern
 extraction) for the general case; then 4 (LinkedIn SERP email
 patch) as a low-risk speculative bet; everything else is
@@ -1234,10 +1234,10 @@ if entry.confidence_label == "LOW" and not entry.is_role:
         continue
 ```
 
-**Effect:** if `aaron@rootaccess.tech` is found via a DDG
+**Effect:** if `daniel@example.com` is found via a DDG
 snippet, even at LOW confidence, the `{first}@` template gets
 emitted as a confirmed pattern. `pattern_and_verify` reorders
-top-3 templates so `katriel@rootaccess.tech` is generated
+top-3 templates so `maya@example.com` is generated
 first.
 
 ### Step 3: Breach format inference (EXISTING — needs tiny patch)
@@ -1342,19 +1342,19 @@ def role_template_boost(tier: int, template: str) -> float:
     return 0.0
 ```
 
-**For `rootaccess.tech`:** both Katriel ("Lead Security
-Researcher") and Aaron ("Co-Founder") are classified as Tier 1
+**For `rootaccess.tech`:** both Maya ("Lead Security
+Researcher") and Daniel ("Co-Founder") are classified as Tier 1
 (co-founder matches the executive regex; lead security researcher
 matches the senior regex → Tier 2 — actually, careful here, the
-regex `\b(lead|...)\b` would match "Lead" → Tier 2 for Katriel).
-For Aaron, "Co-Founder @ rootaccess" matches Tier 1.
+regex `\b(lead|...)\b` would match "Lead" → Tier 2 for Maya).
+For Daniel, "Co-Founder @ rootaccess" matches Tier 1.
 
 **Recheck:**
-- Katriel — "Lead Security Researcher @ rootaccess" → Tier 2
+- Maya — "Lead Security Researcher @ rootaccess" → Tier 2
   (senior staff) → +0.10 on `{first}.{last}@`, +0.05 on
   `{first}@`. Wait — this BACKWARDS-ranks `{first}.{last}@`
   above `{first}@`, even though the real format is `{first}@`!
-- Aaron — "Co-Founder @ rootaccess" → Tier 1 → +0.20 on
+- Daniel — "Co-Founder @ rootaccess" → Tier 1 → +0.20 on
   `{first}@`, -0.10 on `{first}.{last}@`. ✓ Correct.
 
 **The issue:** "Lead Security Researcher" is classified as
@@ -1406,7 +1406,7 @@ _EXECUTIVE_RE = re.compile(
 "Founding" alone — doesn't match. **This is a real edge case
 to handle in tests.**
 
-For Katriel's case, the practical fix is to add "founding" to
+For Maya's case, the practical fix is to add "founding" to
 the regex:
 
 ```python
@@ -1460,7 +1460,7 @@ candidate's tier from the signal pool and return the right key.)
 ## HONEST CEILING
 
 What is the maximum achievable confidence for
-`katriel@rootaccess.tech` under the best passive signal
+`maya@example.com` under the best passive signal
 combination, with math?
 
 ### Inputs
@@ -1472,9 +1472,9 @@ combination, with math?
   GitHub commit).
 - LinkedIn SERP email extraction patch may or may not find an
   email — assume the worst case (no).
-- Two employees discovered: Katriel Moses (Lead Security
+- Two employees discovered: Maya Lindqvist (Lead Security
   Researcher / Founding Security Engineer — Tier 1 after the
-  "founding" fix) and Aaron Joseph Jean (Co-Founder — Tier 1).
+  "founding" fix) and Daniel Joseph Jean (Co-Founder — Tier 1).
 - Both employees appear as pattern candidates with 11 default
   templates.
 
@@ -1487,16 +1487,16 @@ Assumes the three required patches are merged:
    `_apply_passive_pattern_signals` (Q4d).
 3. Tier-1-aware passive source type (Q4c, Path B).
 
-### Math for `katriel@rootaccess.tech`
+### Math for `maya@example.com`
 
 ```
-Template: {first}@  (e.g. "katriel")
+Template: {first}@  (e.g. "maya")
 Source types:
   - permutation_unverified_{first}_tier1 (0.55)  ← new
 base_score = 0.55
 
 Boosts in _apply_passive_pattern_signals:
-  name_boost:   +0.10  (local "katriel" contains first name token "katriel")
+  name_boost:   +0.10  (local "maya" contains first name token "maya")
   role_boost:   +0.20  (Tier 1, {first}@ template)
   format_boost:  0.00  (no confirmed format from any source)
 max_boost = 0.20  (take max, not sum, per existing code line 583)
@@ -1520,7 +1520,7 @@ final = min(0.75 × 1.00 × 1.0, MAX_SCORE) = 0.75
 - LIKELY ≥ 0.70 → **yes**
 - 0.75 ∈ LIKELY ✓
 
-### Math for `katriel.moses@rootaccess.tech` (wrong candidate, same name)
+### Math for `maya.lindqvist@example.com` (wrong candidate, same name)
 
 ```
 Template: {first}.{last}@
@@ -1529,7 +1529,7 @@ Source types:
 base_score = 0.15
 
 Boosts:
-  name_boost:   +0.25  (both first "katriel" AND last "moses" in local)
+  name_boost:   +0.25  (both first "maya" AND last "lindqvist" in local)
   role_boost:   -0.10  (Tier 1, {first}.{last}@ demoted)
   format_boost:  0.00
 max_boost = 0.25
@@ -1547,10 +1547,10 @@ LIKELY ≥ 0.70, MEDIUM ≥ 0.50). 0.40 < 0.50 → **LOW**.
 
 ### Ranking outcome
 
-1. `katriel@rootaccess.tech` → **LIKELY (0.75)** ✓
-2. `katriel.moses@rootaccess.tech` → **LOW (0.40)** ✗
+1. `maya@example.com` → **LIKELY (0.75)** ✓
+2. `maya.lindqvist@example.com` → **LOW (0.40)** ✗
 3. `kmoses@rootaccess.tech` → **LOW (0.30)** ✗
-4. `aaron@rootaccess.tech` → **LIKELY (0.75)** ✓ (same math as Katriel)
+4. `daniel@example.com` → **LIKELY (0.75)** ✓ (same math as Maya)
 5. `aaron.jean@rootaccess.tech` → **LOW (0.30)** ✗
 6. `ajean@rootaccess.tech` → **LOW (0.25)** ✗
 
@@ -1564,10 +1564,10 @@ hit rate (2 of 4 top-2 candidates correct) at LIKELY confidence.**
 
 The gap from 0.75 to 0.85 is +0.10. Realistic additions:
 
-- **One corroborating snippet email** (Aaron's bio mentioning
-  `aaron@rootaccess.tech` in the snippet) → adds 0.35 base +
+- **One corroborating snippet email** (Daniel's bio mentioning
+  `daniel@example.com` in the snippet) → adds 0.35 base +
   multi_source_2 multiplier 1.20 → +0.07 effective.
-- **PGP UID** for `katriel@rootaccess.tech` → adds 1.00 base
+- **PGP UID** for `maya@example.com` → adds 1.00 base
   (very rare, not happening here).
 - **Ca-attested email** in a crt.sh cert subject → 0.95 base
   (not happening for Hostinger-default certs).
@@ -1583,8 +1583,8 @@ this domain under passive signals.
 
 Among the 6 candidates, the top-1 ranked is the highest-scoring.
 With the math above:
-- `katriel@rootaccess.tech` (LIKELY 0.75) and
-  `aaron@rootaccess.tech` (LIKELY 0.75) are tied for top.
+- `maya@example.com` (LIKELY 0.75) and
+  `daniel@example.com` (LIKELY 0.75) are tied for top.
 - The existing `_sort_key` at
   `domain_harvest_orchestrator.py:1706-1712` sorts by
   (tier_label, is_role, on_domain) — doesn't break the tie

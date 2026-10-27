@@ -1066,7 +1066,7 @@ def _extract_dom_team_card_records(
     mailto-derived record (with a guessed local-part name) and
     the email would not link back to the structured identity.
 
-    The live Lavelle Networks page uses ``h3`` for the name and
+    The live Northwind Networks page uses ``h3`` for the name and
     ``h4`` for the role inside each repeated card, so the detector
     treats the first plausible person heading as the name and the
     following role-like text as the title even when it is not in a

@@ -3417,7 +3417,24 @@ async def _attach_breach_enrichment(
     populated with privacy-safe finding dicts.
     """
     try:
-        from ..modules.breach_aggregator import enrich_confirmed_emails
+        from ..modules.breach_aggregator import (
+            NO_SOURCE_MESSAGE,
+            SOURCE_NAMES,
+            configured_sources,
+            enrich_confirmed_emails,
+        )
+
+        if not configured_sources(settings):
+            if module_results is not None:
+                result = ModuleResult(
+                    status=ModuleStatus.SKIPPED,
+                    errors=[NO_SOURCE_MESSAGE],
+                    metadata={"skip_reason": "no_breach_source"},
+                )
+                module_results["breach_aggregator"] = result
+                if ctx is not None:
+                    _emit_module_complete(ctx, "breach_aggregator", result)
+            return
 
         telemetry_by_email: dict[str, dict[str, dict[str, Any]]] = {}
         enrichment = await enrich_confirmed_emails(
@@ -3444,9 +3461,8 @@ async def _attach_breach_enrichment(
     if module_results is None:
         return
 
-    source_names = ("scylla", "hibp_paste", "dehashed", "snusbase")
     source_rows: dict[str, dict[str, Any]] = {}
-    for source in source_names:
+    for source in SOURCE_NAMES:
         rows = [
             per_email.get(source, {})
             for per_email in telemetry_by_email.values()

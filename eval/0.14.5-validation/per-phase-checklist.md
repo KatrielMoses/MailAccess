@@ -42,7 +42,7 @@ Legend: ✅ pass · ❌ fail · ⚠️ partial/caveat · ⏳ pending live run ·
 - ✅ ENV-1 harness hardening: pytest_baseline._run_one isolates TEMP/TMP/TMPDIR per file (gate robust to host temp ACLs)
 
 ## Live-path checks (all PASS)
-- ✅ 1B budget (lavelle exit-0) + forced-low-budget partial (exit-0, modules truncated listed, no exit-3)
+- ✅ 1B budget (northwind exit-0) + forced-low-budget partial (exit-0, modules truncated listed, no exit-3)
 - ✅ 1C ledger (333 obs, full provenance) · 1D parity + 57× speedup · 1E reasoning
 - ✅ 2E audit tamper detected (broken_at_seq=1) · 2F api_auth 9/9 · 4B calibrate (powered promotes / underpowered refuses)
 - ✅ 3C score + 3D grade 100% coverage · 3A person evidence-or-null · 2D verdicts independent of confidence

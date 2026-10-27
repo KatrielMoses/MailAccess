@@ -19,7 +19,7 @@ Proves the 5A "Done when" criteria against real harvests, keyless and isolated
 Run (keyless, isolated)::
 
     uv run python -m eval.harness.bulk_parity --timeout 240 \
-        lavellenetworks.com rootaccess.tech stripe.com
+        gitlab.com rootaccess.tech stripe.com
 """
 from __future__ import annotations
 

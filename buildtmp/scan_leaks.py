@@ -25,7 +25,7 @@ LEAK_PATTERNS = [
     ("example_com", re.compile(r"@example\.com", re.IGNORECASE)),
     ("test_com", re.compile(r"@test\.com", re.IGNORECASE)),
     ("yourdomain", re.compile(r"yourdomain", re.IGNORECASE)),
-    ("off_target_domain", re.compile(r"@(?!ine\.com|lavellenetworks\.com)([a-z0-9.-]+\.[a-z]{2,})", re.IGNORECASE)),
+    ("off_target_domain", re.compile(r"@(?!ine\.com|northwindnetworks\.com)([a-z0-9.-]+\.[a-z]{2,})", re.IGNORECASE)),
 ]
 
 DOMAIN_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+")
@@ -62,7 +62,7 @@ def scan_file(path: Path) -> dict:
 if __name__ == "__main__":
     paths = [Path(p) for p in sys.argv[1:]] or [
         Path("results/bench_ine_0.11.3.json"),
-        Path("results/bench_lavelle_0.11.3.json"),
+        Path("results/bench_northwind_0.11.3.json"),
     ]
     for p in paths:
         print(f"=== {p} ===")

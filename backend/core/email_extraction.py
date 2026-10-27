@@ -105,7 +105,7 @@ PLACEHOLDER_FULL_DOMAINS = frozenset(
         "domain.com",
         "site.com",
         "email.com",
-        "demo.com",  # FIX 2: QA pass on lavellenetworks.com surfaced
+        "demo.com",  # FIX 2: QA pass on northwind.example surfaced
         "sample.com",  # contact@demo.com / contact@sample.com leaked
         "placeholder.com",  # through the legacy filter.
         "localhost",  # Common doc / dev-server placeholders.

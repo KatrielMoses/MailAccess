@@ -96,7 +96,7 @@ grades identically (parity preserved), and a bulk run accrues the
   completes fast), and 4A capture populated. Run:
 
       uv run python -m eval.harness.bulk_parity --timeout 240 \
-          lavellenetworks.com rootaccess.tech stripe.com
+          northwind.example rootaccess.tech stripe.com
 
   A single-domain smoke (`rootaccess.tech`) confirmed end-to-end: 45 contacts,
   all graded, 45 4A feature snapshots, merged export + checkpoint written, resume

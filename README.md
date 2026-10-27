@@ -105,7 +105,7 @@ Pro contacts stay in their own view. They never enter your exports, local databa
 
 ## Modules and API keys
 
-82 modules, and 71 of them need no API key. Investigations probe a bounded, evidence-first set of the highest-signal platforms rather than the whole corpus. Optional keys (HIBP, Netlas, ipgeolocation.io, WhoisFreaks, Oxylabs and others) add coverage: set them with `mailaccess keys set`.
+82 modules, and 70 of them need no API key. Investigations probe a bounded, evidence-first set of the highest-signal platforms rather than the whole corpus. Optional keys (HIBP, Netlas, ipgeolocation.io, WhoisFreaks, Oxylabs and others) add coverage: set them with `mailaccess keys set`.
 
 [Module reference](https://github.com/KatrielMoses/MailAccess/blob/main/docs/modules.md) · [API keys](https://github.com/KatrielMoses/MailAccess/blob/main/docs/api-keys.md) · [Export formats](https://github.com/KatrielMoses/MailAccess/blob/main/docs/exports.md) · [Self-hosting](https://github.com/KatrielMoses/MailAccess/blob/main/docs/self-hosting.md)
 

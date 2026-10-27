@@ -333,21 +333,64 @@ async def subdomains(
     return await _call("subdomains", params, deadline, no_whoisfreaks)
 
 
+def _parse_credits(block: Any) -> dict | None:
+    if not isinstance(block, dict):
+        return None
+    try:
+        total, served = int(block["totalCredits"]), int(block["servedRequest"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {"total_credits": total, "served": served, "remaining": total - served}
+
+
+def _parse_subscription(block: Any) -> dict | None:
+    """The ``apiSubscription`` block, present when the account has a subscription."""
+    if not isinstance(block, dict):
+        return None
+    try:
+        limit, served = int(block["requestLimit"]), int(block["servedRequests"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    sub = {
+        "status": str(block.get("subscriptionStatus") or "unknown"),
+        "request_limit": limit,
+        "served": served,
+        "remaining": limit - served,
+        "surcharge_limit": None,
+        "surcharge_served": None,
+        "surcharge_remaining": None,
+    }
+    try:
+        s_limit = int(block["surchargeRequestLimit"])
+        s_served = int(block.get("servedSurchargeRequests") or 0)
+    except (KeyError, TypeError, ValueError):
+        return sub
+    sub.update(surcharge_limit=s_limit, surcharge_served=s_served,
+               surcharge_remaining=s_limit - s_served)
+    return sub
+
+
 async def usage(key: str | None = None) -> dict | None:
-    """Remaining credits from the free usage endpoint; the echoed key is dropped."""
+    """Credits and subscription from the free usage endpoint; the echoed key is dropped.
+
+    ``total_credits``/``served``/``remaining`` describe ``apiCredits`` (None when the
+    response has no credits block); ``subscription`` describes ``apiSubscription``
+    (None without an active subscription). None when neither block is readable.
+    """
     key = str(key or settings.whoisfreaks_api_key or "").strip()
     if not key:
         return None
     result = await _request("usage", {}, key=key)
-    credits = result.data.get("apiCredits") if result.status == "ok" else None
-    if not isinstance(credits, dict):
+    if result.status != "ok":
         return None
-    try:
-        total, served = int(credits["totalCredits"]), int(credits["servedRequest"])
-    except (KeyError, TypeError, ValueError):
+    credits = _parse_credits(result.data.get("apiCredits"))
+    subscription = _parse_subscription(result.data.get("apiSubscription"))
+    if credits is None and subscription is None:
         return None
-    # Only the two counters survive; the response's apiKey field is never kept.
-    return {"total_credits": total, "served": served, "remaining": total - served}
+    # Only the counters survive; the response's apiKey field is never kept.
+    info: dict[str, Any] = credits or {"total_credits": None, "served": None, "remaining": None}
+    info["subscription"] = subscription
+    return info
 
 
 async def check_key(key: str) -> dict:
@@ -355,4 +398,9 @@ async def check_key(key: str) -> dict:
     state = _state(key)
     state["blocked"], state["blocked_until"] = False, None
     info = await usage(key)
-    return {"ok": info is not None, "remaining": info["remaining"] if info else None}
+    return {
+        "ok": info is not None,
+        "remaining": info["remaining"] if info else None,
+        "total_credits": info["total_credits"] if info else None,
+        "subscription": info["subscription"] if info else None,
+    }

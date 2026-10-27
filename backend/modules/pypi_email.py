@@ -277,7 +277,7 @@ class PyPIEmailModule(BaseModule):
         # results as a failure.  Per the audit follow-up, zero results
         # is a valid outcome: PyPI legitimately has no packages whose
         # author / maintainer email matches the target domain for most
-        # non-Python-shop targets (e.g. lavellenetworks.com, ine.com).
+        # non-Python-shop targets (e.g. northwind.example, ine.com).
         #
         # The outer ``try``/``except`` already returns ``FAILED`` for
         # catastrophic errors (build_client failure, context-manager

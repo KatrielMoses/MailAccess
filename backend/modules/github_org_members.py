@@ -52,7 +52,7 @@ _TAG_RE = re.compile(r"<[^>]+>")
 def _strip_tld(domain: str) -> str:
     """Strip the TLD from a domain, returning the organisational name.
 
-    ``lavellene.net`` → ``lavellene``
+    ``northwind.net`` → ``northwind``
     ``acmecorp.co.uk`` → ``co``  (two-label TLD: co is the domain, .uk is TLD)
     ``www.example.com`` → ``example``
     ``foo.bar.acmecorp.net`` → ``acmecorp``

@@ -1,16 +1,21 @@
-"""Phase 5 — breach aggregation across four sources.
+"""Phase 5 — breach aggregation across three keyed sources.
 
-Four independent breach sources, each an ``async`` function that never
+Three independent breach sources, each an ``async`` function that never
 raises and always returns a (possibly empty) list of :class:`BreachFinding`:
 
-* **Scylla.so**   — free, no key (``scylla_breach``).
 * **HIBP Pastes** — requires ``HIBP_API_KEY`` (``hibp_paste``).
 * **Dehashed**    — paid, requires ``DEHASHED_API_KEY`` (``dehashed_breach``).
 * **Snusbase**    — paid, requires ``SNUSBASE_API_KEY`` (``snusbase_breach``).
 
 :func:`run_breach_aggregator` fans the configured sources out concurrently
 and folds their partial results together — a single failing source never
-stops the others.
+stops the others.  With no source configured the module reports
+``skipped`` (``skip_reason: no_breach_source``) and makes no request.
+
+Scylla.so (free, no key) was retired on 2026-10-28: ``/search`` now
+answers automated clients with a JavaScript challenge page, then 429s and
+stalled connections, never JSON, so it failed on every run.  We don't work
+around bot gates.
 
 Privacy contract
 ----------------
@@ -195,76 +200,7 @@ def _has_value(item: dict[str, Any], *keys: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# SOURCE 1 — Scylla.so (free, no key)
-# ---------------------------------------------------------------------------
-
-
-async def search_scylla(
-    email: str,
-    *,
-    timeout: float = 10.0,
-    telemetry: dict[str, Any] | None = None,
-) -> list[BreachFinding]:
-    """Query Scylla.so for breach records mentioning *email*.
-
-    Never raises.  Returns ``[]`` on 429, network error, or malformed data.
-    """
-    url = "https://scylla.so/search"
-    params = {"q": f'email:"{email}"'}
-    headers = {"User-Agent": _STANDARD_UA, "Accept": "application/json"}
-    try:
-        async with build_client(timeout=timeout) as client:
-            res = await client.get(url, params=params, headers=headers)
-        if res.status_code == 429:
-            _set_source_telemetry(telemetry, "rate_limited", http_status=429)
-            logger.warning("scylla_breach: rate limited (429); returning empty")
-            return []
-        if res.status_code != 200:
-            _set_source_telemetry(telemetry, "error", http_status=res.status_code)
-            logger.debug("scylla_breach: unexpected status %s", res.status_code)
-            return []
-        data = res.json()
-    except Exception as exc:  # noqa: BLE001 — sources must never raise
-        _set_source_telemetry(telemetry, "error", error=str(exc))
-        if telemetry is not None:
-            telemetry["error_detail"] = str(exc)
-        logger.debug("scylla_breach: error, returning empty (%s)", exc)
-        return []
-
-    if not isinstance(data, list):
-        _set_source_telemetry(telemetry, "error", error="malformed_response")
-        return []
-
-    findings: list[BreachFinding] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        # Scylla nests the interesting bits under "fields" on some
-        # deployments and flattens them on others — read both.
-        fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
-        merged: dict[str, Any] = {**fields, **item}
-        findings.append(
-            BreachFinding(
-                platform="scylla.so",
-                source_type="scylla_breach",
-                confidence=0.55,
-                breach_source=(
-                    _truthy_str(merged.get("breach_source"))
-                    or _truthy_str(merged.get("source"))
-                    or _truthy_str(merged.get("database_name"))
-                ),
-                has_plaintext_password=_has_value(merged, "password"),
-                has_hash=_has_value(merged, "hash", "hashed_password"),
-                has_name=_has_value(merged, "name"),
-                username=_truthy_str(merged.get("username")),
-                ip_address=_truthy_str(merged.get("ip_address") or merged.get("ip")),
-            )
-        )
-    return findings
-
-
-# ---------------------------------------------------------------------------
-# SOURCE 2 — HIBP Pastes (HIBP key required)
+# SOURCE 1 — HIBP Pastes (HIBP key required)
 # ---------------------------------------------------------------------------
 
 
@@ -347,7 +283,7 @@ async def search_hibp_pastes(
 
 
 # ---------------------------------------------------------------------------
-# SOURCE 3 — Dehashed (paid key required)
+# SOURCE 2 — Dehashed (paid key required)
 # ---------------------------------------------------------------------------
 
 
@@ -424,7 +360,7 @@ async def search_dehashed(
 
 
 # ---------------------------------------------------------------------------
-# SOURCE 4 — Snusbase (paid key required)
+# SOURCE 3 — Snusbase (paid key required)
 # ---------------------------------------------------------------------------
 
 
@@ -533,8 +469,6 @@ async def _run_breach_source(
         result = await func(*args, **kwargs)
     except Exception as exc:  # noqa: BLE001 - one source cannot stop others
         _set_source_telemetry(telemetry, "error", error=str(exc))
-        if source == "scylla":
-            telemetry["error_detail"] = str(exc)
         logger.debug("breach source %s raised: %s", source, exc)
         result = []
 
@@ -551,6 +485,31 @@ async def _run_breach_source(
     return result
 
 
+SOURCE_NAMES = ("hibp_paste", "dehashed", "snusbase")
+
+# Shown when no breach source can run; mentions the keys so the run
+# stream classifies the skip as ``no_key``.
+NO_SOURCE_MESSAGE = (
+    "No breach source configured: set HIBP_API_KEY, DEHASHED_API_KEY "
+    "or SNUSBASE_API_KEY"
+)
+
+
+def configured_sources(settings: Settings | None = None) -> list[str]:
+    """Names of the breach sources that will run under *settings*."""
+    settings = settings or _global_settings
+    sources: list[str] = []
+    if getattr(settings, "hibp_api_key", None) and getattr(
+        settings, "enable_hibp_pastes", False
+    ):
+        sources.append("hibp_paste")
+    if getattr(settings, "dehashed_api_key", None):
+        sources.append("dehashed")
+    if getattr(settings, "snusbase_api_key", None):
+        sources.append("snusbase")
+    return sources
+
+
 async def run_breach_aggregator(
     email: str,
     settings: Settings | None = None,
@@ -561,7 +520,6 @@ async def run_breach_aggregator(
 
     A source is included only when its enabling condition holds:
 
-    * Scylla    — ``settings.enable_scylla``
     * HIBP paste — ``settings.hibp_api_key and settings.enable_hibp_pastes``
     * Dehashed  — ``settings.dehashed_api_key``
     * Snusbase  — ``settings.snusbase_api_key``
@@ -576,7 +534,7 @@ async def run_breach_aggregator(
 
     timeout = float(getattr(settings, "breach_aggregator_timeout", 15.0))
     source_telemetry = telemetry if telemetry is not None else {}
-    for source in ("scylla", "hibp_paste", "dehashed", "snusbase"):
+    for source in SOURCE_NAMES:
         source_telemetry.setdefault(
             source,
             {
@@ -590,18 +548,6 @@ async def run_breach_aggregator(
         )
 
     tasks: list[Any] = []
-    if getattr(settings, "enable_scylla", False):
-        tasks.append(
-            _run_breach_source(
-                "scylla",
-                search_scylla,
-                (cleaned,),
-                timeout=min(timeout, 10.0),
-                telemetry=source_telemetry["scylla"],
-            )
-        )
-    else:
-        source_telemetry["scylla"]["status"] = "skipped"
     if getattr(settings, "hibp_api_key", None) and getattr(
         settings, "enable_hibp_pastes", False
     ):
@@ -732,15 +678,21 @@ class BreachAggregatorModule(BaseModule):
     name = "breach_aggregator"
     email_linked = True
     description = (
-        "Aggregates breach records for an email across Scylla.so, HIBP pastes, "
-        "Dehashed and Snusbase. Password/hash existence is recorded as boolean "
-        "flags only — plaintext secrets are never stored or displayed."
+        "Aggregates breach records for an email across HIBP pastes, Dehashed "
+        "and Snusbase. Password/hash existence is recorded as boolean flags "
+        "only — plaintext secrets are never stored or displayed."
     )
-    requires_key = False
+    requires_key = True
     priority = 60
 
     async def run(self, email: str, force: bool = False) -> ModuleResult:
         del force
+        if not configured_sources(_global_settings):
+            return ModuleResult(
+                status=ModuleStatus.SKIPPED,
+                errors=[NO_SOURCE_MESSAGE],
+                metadata={"skip_reason": "no_breach_source"},
+            )
         telemetry: dict[str, dict[str, Any]] = {}
         try:
             try:

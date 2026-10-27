@@ -542,8 +542,8 @@ SIBLING_TLDS = (
 def core_name(name: str | None) -> str:
     """Company name without punctuation, a leading "the" and trailing legal suffixes.
 
-    "Lavelle Networks India Pvt. Ltd." and "Lavelle Networks India Limited" both
-    give ``lavelle networks india``; "Stripe, LLC" gives ``stripe``. Suffix words
+    "Northwind Networks India Pvt. Ltd." and "Northwind Networks India Limited" both
+    give ``northwind networks india``; "Stripe, LLC" gives ``stripe``. Suffix words
     are only stripped from the END, so "AB Networks India Ltd" stays distinct from
     "Networks India Ltd" and "The Co-operative Bank" keeps its words.
     """

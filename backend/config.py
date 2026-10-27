@@ -485,10 +485,11 @@ class Settings(BaseSettings):
     enable_domain_cluster: bool = True
     domain_cluster_cap: int = 20
 
-    # Phase 5 — breach aggregation. Four sources: Scylla.so (free), HIBP
-    # pastes (needs HIBP_API_KEY), Dehashed and Snusbase (both paid). Each
-    # source is skipped gracefully when its key/toggle is absent.
-    enable_scylla: bool = True
+    # Phase 5 — breach aggregation. Three keyed sources: HIBP pastes (needs
+    # HIBP_API_KEY), Dehashed and Snusbase (both paid). Each source is
+    # skipped gracefully when its key/toggle is absent; with none set the
+    # module reports skipped. Scylla.so was retired 2026-10-28 (bot-gated);
+    # a leftover ENABLE_SCYLLA in .env is ignored.
     enable_hibp_pastes: bool = True
     dehashed_api_key: str = ""
     # Dehashed Basic auth uses the account holder's login email, not the
@@ -909,8 +910,9 @@ class Settings(BaseSettings):
     # box later — the move is a config change, never a code change). See
     # backend/core/mailaccess_pro_client.py and backend/api/routes/enrich.py.
     #
-    # Default the Pi5 homelab origin for dev; override in prod via env.
-    mailaccess_pro_base_url: str = "http://192.168.0.106:3001"
+    # Unset by default: only the hosted backend that serves /v1/enrich sets it (env
+    # MAILACCESS_PRO_BASE_URL). Unset, /v1/enrich reports the engine unavailable.
+    mailaccess_pro_base_url: str = ""
     # The hosted /v1 base the LOCAL connector calls (Phase 2). Distinct from
     # ``mailaccess_pro_base_url`` (the engine location, used only by the hosted
     # backend): the user's pipeline reaches the website's narrowly scoped /v1

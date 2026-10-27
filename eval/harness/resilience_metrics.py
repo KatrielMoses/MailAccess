@@ -11,7 +11,7 @@ The done-when for 5B's block-reduction bullet is: the resilient run shows
 measurably fewer hard-blocks than the legacy baseline. Run::
 
     uv run python -m eval.harness.resilience_metrics --timeout 180 \
-        lavellenetworks.com rootaccess.tech stripe.com
+        gitlab.com rootaccess.tech stripe.com
 """
 from __future__ import annotations
 
