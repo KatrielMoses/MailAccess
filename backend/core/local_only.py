@@ -34,6 +34,31 @@ def is_enabled() -> bool:
         return False
 
 
+def pro_key_set() -> bool:
+    try:
+        from backend.config import settings
+
+        return bool((getattr(settings, "mailaccess_pro_key", "") or "").strip())
+    except Exception:
+        return False
+
+
+def pro_notice(target: str) -> str | None:
+    """The line to print before keyed Pro enrichment sends ``target`` in local-only mode.
+
+    Local-only stops the calls MailAccess makes on its own; a Pro key is an explicit
+    opt-in, so its enrichment still runs, but the user is told first. ``None`` when
+    local-only is off or no Pro key is set.
+    """
+    if not (is_enabled() and pro_key_set()):
+        return None
+    return (
+        f"Local-only mode is on, but your Pro key is set: this run sends {target} to "
+        "MailAccess Pro (mailaccess.pro) to add business contacts. To keep everything "
+        "local, run `mailaccess keys unset MAILACCESS_PRO_KEY`."
+    )
+
+
 def activate() -> None:
     """Turn local-only on for this process (``--local-only`` / CLI enable)."""
     os.environ[ENV_VAR] = "1"

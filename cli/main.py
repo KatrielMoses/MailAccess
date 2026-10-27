@@ -351,7 +351,10 @@ def main_callback(
         raise typer.Exit()
     from cli import partners
 
-    if local_only:
+    # A per-command `--local-only` (e.g. `harvest-emails --local-only`) is parsed only
+    # after this callback has drawn the banner and started the update check, so
+    # honour it here too.
+    if local_only or "--local-only" in sys.argv[1:]:
         from backend.core.local_only import activate as activate_local_only
 
         activate_local_only()
@@ -1047,7 +1050,12 @@ def local_only_status() -> None:
     table.add_row("founder counter", "skipped" if on else "runs")
     table.add_row("PyPI update check", "skipped" if on else "runs")
     table.add_row("OSINT modules", "unchanged")
-    table.add_row("Pro enrich (keyed)", "unchanged")
+    from backend.core.local_only import pro_key_set
+
+    table.add_row(
+        "Pro enrich (keyed)",
+        "runs, with a notice before it sends the domain" if pro_key_set() else "off (no Pro key)",
+    )
     console.print(table)
 
 
@@ -1509,6 +1517,11 @@ def _resolve_company_domain_cli(company: str, mode: str | None, console) -> str:
         console.print(_PRO_COMPANY_SECURITY_MODE)
         raise typer.Exit(0)
 
+    from backend.core.local_only import pro_notice
+
+    notice = pro_notice(f'"{company}"')
+    if notice:
+        console.print(notice, style="yellow", markup=False)
     env = asyncio.run(mailaccess_pro_connector.resolve_company(company))
     status = env.get("status")
     if status == "ok":
@@ -2604,16 +2617,18 @@ async def _collect_doctor_checks() -> list[DoctorCheck]:
             )
         )
         from backend.core.local_only import is_enabled as local_only_enabled
+        from backend.core.local_only import pro_key_set
 
         local_on = local_only_enabled()
+        pro_note = "; your Pro key is set, so Pro enrichment still sends the domain (with a notice)"
         checks.append(
             DoctorCheck(
                 "Privacy",
                 "local-only mode",
                 True,
                 (
-                    "on — coverage teaser, sponsor feed, founder counter, "
-                    "and PyPI update check skipped"
+                    "on: coverage teaser, sponsor feed, founder counter and PyPI update "
+                    "check skipped" + (pro_note if pro_key_set() else "")
                     if local_on
                     else "off"
                 ),

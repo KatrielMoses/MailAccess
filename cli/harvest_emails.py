@@ -934,6 +934,19 @@ def run_harvest_emails(
     if _pro_hint:
         console.print(f"[cyan]{_pro_hint}[/cyan]")
 
+    # Local-only with a Pro key: keyed Pro enrichment still runs (an explicit opt-in),
+    # so say so before anything is sent.
+    from backend.core.domain_harvest_orchestrator import _pro_injection_active
+    from backend.core.local_only import pro_notice
+
+    if _pro_injection_active(
+        mode or getattr(settings, "product_mode", None),
+        getattr(settings, "mailaccess_pro_key", None),
+    ):
+        _local_notice = pro_notice(cleaned_domain)
+        if _local_notice:
+            console.print(_local_notice, style="yellow", markup=False)
+
     # ------------------------------------------------------------------
     # 4. Run the orchestrator with a live progress display.
     # MUST-FIX S5: states are mutated INCREMENTALLY — each module's

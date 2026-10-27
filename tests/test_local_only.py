@@ -20,7 +20,10 @@ from cli.main import DoctorCheck, app
 
 @pytest.fixture(autouse=True)
 def _reset_local_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(local_only.ENV_VAR, raising=False)
+    # setenv (not delenv): pytest only restores what it recorded, and delenv on an
+    # unset variable records nothing, so activate()'s MAILACCESS_LOCAL_ONLY=1 leaked
+    # into every later test file.
+    monkeypatch.setenv(local_only.ENV_VAR, "0")
     monkeypatch.setattr(settings, "mailaccess_local_only", False)
     monkeypatch.setattr(settings, "mailaccess_pro_api_url", "https://mailaccess.pro")
 
@@ -169,3 +172,80 @@ async def test_coverage_still_calls_when_off(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
     assert await fetch_coverage_count("acme.com") is None
     assert called == ["init", "https://mailaccess.pro/v1/coverage"]
+
+
+
+# --- Pro-key notice (local-only keeps keyed Pro enrichment, but says so first) ---
+
+def test_pro_notice_only_with_local_only_and_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "mailaccess_pro_key", "", raising=False)
+    assert local_only.pro_notice("example.com") is None  # off, no key
+    local_only.activate()
+    assert local_only.pro_notice("example.com") is None  # on, no key
+    monkeypatch.setattr(settings, "mailaccess_pro_key", "map_" + "0" * 40, raising=False)
+    notice = local_only.pro_notice("example.com")
+    assert notice and "example.com" in notice and "keys unset MAILACCESS_PRO_KEY" in notice
+
+
+def _harvest_output(monkeypatch: pytest.MonkeyPatch, tmp_path, *, key: str) -> str:
+    from io import StringIO
+
+    from rich.console import Console
+
+    from backend.core.domain_harvest_orchestrator import DomainHarvestResult
+    from cli import harvest_emails as command
+
+    result = DomainHarvestResult(
+        domain="example.com", started_at="2026-07-16T10:00:00Z", completed_at="2026-07-16T10:00:01Z",
+        duration_seconds=1.0, module_results={}, unique_emails=[], total_unique_emails=0,
+        high_confidence_count=0, likely_confidence_count=0, medium_confidence_count=0,
+        low_confidence_count=0, role_account_count=0, personal_email_count=0,
+    )
+    sent: list[str] = []
+
+    async def fake_run(*_a: Any, **kwargs: Any) -> DomainHarvestResult:
+        sent.append("network")  # stands in for the first call that could send the domain
+        return result
+
+    monkeypatch.setattr(settings, "harvest_results_dir", tmp_path)
+    monkeypatch.setattr(settings, "mailaccess_pro_key", key, raising=False)
+    monkeypatch.setattr(command, "_CFFI_AVAILABLE", True)
+    monkeypatch.setattr(command, "run_domain_harvest", fake_run)
+    monkeypatch.setattr(command, "format_harvest_cli_output", lambda *a, **k: "")
+    stream = StringIO()
+    console = Console(file=stream, force_terminal=False, width=200)
+    printed_before_network: list[bool] = []
+    real_print = console.print
+
+    def spy(*args: Any, **kwargs: Any) -> None:
+        if args and "Local-only mode is on" in str(args[0]):
+            printed_before_network.append(not sent)
+        real_print(*args, **kwargs)
+
+    console.print = spy  # type: ignore[method-assign]
+    local_only.activate()
+    command.run_harvest_emails("example.com", no_verify=True, no_export=True,
+                               mode="public-business-contact", console=console)
+    out = stream.getvalue()
+    if printed_before_network:
+        assert printed_before_network == [True]
+    return out
+
+
+def test_harvest_prints_notice_before_sending_when_key_set(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    out = _harvest_output(monkeypatch, tmp_path, key="map_" + "0" * 40)
+    assert "Local-only mode is on, but your Pro key is set" in out and "example.com" in out
+
+
+def test_harvest_no_notice_without_key(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    out = _harvest_output(monkeypatch, tmp_path, key="")
+    assert "Local-only mode is on" not in out
+
+
+def test_per_command_flag_applies_before_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[bool] = []
+    monkeypatch.setattr(update_check, "start_background_refresh", lambda: seen.append(local_only.is_enabled()))
+    monkeypatch.setattr(update_check, "register_exit_notice", lambda *a, **k: None)
+    monkeypatch.setattr(cli_main.sys, "argv", ["mailaccess", "harvest-emails", "--local-only"])
+    CliRunner().invoke(app, ["--no-banner", "commands"])
+    assert seen == [True]
