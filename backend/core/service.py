@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
@@ -285,7 +286,6 @@ def enrich_report(data: dict) -> dict:
         # blanket ``except Exception`` swallowed this into a fail-open skip.)
         raise
     except Exception:  # any OTHER assembly hiccup must not crash the report
-        import logging
 
         logging.getLogger(__name__).exception("suppression redaction skipped")
 
@@ -311,7 +311,6 @@ def enrich_report(data: dict) -> dict:
             data["eligibility"] = verdict.verdict.value
             data["eligibility_reason"] = verdict.reason
     except Exception:
-        import logging
 
         logging.getLogger(__name__).exception("eligibility verdict skipped")
 
@@ -332,7 +331,6 @@ def enrich_report(data: dict) -> dict:
                 mode=str(data.get("mode") or "security-investigation"),
             )
     except Exception:
-        import logging
 
         logging.getLogger(__name__).exception("watermark skipped")
 
@@ -471,10 +469,6 @@ class InvestigationService:
                     off_modules.add("ip_intel")
                 if not whoisfreaks_active(no_whoisfreaks=no_whoisfreaks):
                     off_modules.add("whoisfreaks_intel")
-                from .brightdata_client import brightdata_active
-
-                if not brightdata_active():
-                    off_modules.add("linkedin_brightdata")
                 if any(run.module_name in off_modules for run in runs):
                     recent = None
             if recent is not None:

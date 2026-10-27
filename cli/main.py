@@ -2167,6 +2167,219 @@ def pro_command() -> None:
         )
 
 
+def _cli_provision_and_store(base: str, token: str) -> None:
+    """Exchange a CLI session token for the user's key and write it to ~/.mailaccess/.env."""
+    try:
+        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+            r = client.post(f"{base}/api/cli/provision", headers={"Authorization": f"Bearer {token}"})
+    except httpx.HTTPError as exc:
+        err_console.print(f"[red]Network error reaching {base}: {exc}[/]")
+        raise typer.Exit(1)
+    if r.status_code != 200:
+        err_console.print(f"[red]Couldn't fetch your key (HTTP {r.status_code}).[/]")
+        raise typer.Exit(1)
+    prov = r.json()
+    if prov.get("tier") == "pro":
+        console.print(f"[green]Signed in as {prov.get('email')}[/] — you're [bold]Pro[/].")
+        if prov.get("message"):
+            console.print(f"[dim]{prov['message']}[/]")
+        return
+    api_key = prov.get("api_key")
+    env_var = prov.get("env_var") or "MAILACCESS_PRO_KEY"
+    if not api_key:
+        err_console.print("[red]No key returned by the server.[/]")
+        raise typer.Exit(1)
+    _set_env_key(env_var, api_key)
+    console.print(
+        f"[green]Signed in as {prov.get('email')}.[/] Key saved to ~/.mailaccess/.env — you're all set."
+    )
+
+
+def _google_cli_login(base: str) -> str | None:
+    """Browser Google sign-in captured via a localhost loopback. Returns the CLI session
+    token, or None on timeout/failure. The token only ever travels over 127.0.0.1."""
+    import http.server
+    import secrets
+    import threading
+    import webbrowser
+    from urllib.parse import parse_qs, urlencode, urlparse
+
+    state = secrets.token_urlsafe(24)
+    captured: dict[str, str] = {}
+    done = threading.Event()
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_a):  # silence default request logging
+            return
+
+        def do_GET(self):  # noqa: N802 — BaseHTTPRequestHandler API
+            params = parse_qs(urlparse(self.path).query)
+            tok = (params.get("token") or [""])[0]
+            st = (params.get("state") or [""])[0]
+            ok = bool(tok) and st == state
+            if ok:
+                captured["token"] = tok
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            msg = (
+                "<h2>Signed in to MailAccess ✓</h2><p>You can close this tab and return to the terminal.</p>"
+                if ok
+                else "<h2>Sign-in failed</h2><p>Please try again from the terminal.</p>"
+            )
+            self.wfile.write(
+                f"<html><body style='font-family:system-ui;max-width:32rem;margin:4rem auto;text-align:center'>{msg}</body></html>".encode()
+            )
+            done.set()
+
+    try:
+        server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    except OSError as exc:
+        err_console.print(f"[red]Couldn't start the local sign-in listener: {exc}[/]")
+        return None
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    redirect = f"http://localhost:{port}/cb"
+    auth_url = f"{base}/api/auth/google?" + urlencode({"cli_redirect": redirect, "cli_state": state})
+    console.print("Opening your browser to sign in with Google…")
+    console.print(f"[dim]If it doesn't open automatically, visit:[/]\n{auth_url}")
+    with contextlib.suppress(Exception):
+        webbrowser.open(auth_url)
+
+    got = done.wait(timeout=180)
+    with contextlib.suppress(Exception):
+        server.shutdown()
+    if not got or "token" not in captured:
+        err_console.print("[red]Timed out waiting for Google sign-in (3 min).[/]")
+        return None
+    return captured["token"]
+
+
+@app.command(name="login")
+def login_command(
+    url: str = typer.Option(
+        "", "--url", help="Auth base URL (default https://mailaccess.pro; http://localhost:3000 for dev)."
+    ),
+    google: bool = typer.Option(
+        False, "--google", help="Sign in with Google in your browser (loopback)."
+    ),
+) -> None:
+    """Sign in and fetch your MailAccess key automatically — no manual key paste.
+
+    Email-code (default): enter your email, type the 6-digit code we send you.
+    Google (--google): one click in your browser. Either way the key is written to
+    ~/.mailaccess/.env. Works for free and Pro accounts.
+    """
+    from backend.config import settings as _s
+
+    base = (url or getattr(_s, "mailaccess_pro_api_url", "") or "https://mailaccess.pro").rstrip("/")
+
+    if google:
+        token = _google_cli_login(base)
+        if not token:
+            raise typer.Exit(1)
+        _cli_provision_and_store(base, token)
+        return
+
+    email = typer.prompt("Email")
+    try:
+        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+            r = client.post(f"{base}/api/auth/otp/start", json={"email": email})
+            if r.status_code not in (200, 202):
+                err_console.print(f"[red]Couldn't send a code (HTTP {r.status_code}).[/]")
+                raise typer.Exit(1)
+            start = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            if start.get("dev_code"):
+                console.print(f"[dim]dev code: {start['dev_code']}[/]")
+            console.print(f"[green]Code sent to {email}.[/] Check your inbox.")
+            code = typer.prompt("6-digit code").strip()
+
+            r = client.post(
+                f"{base}/api/auth/otp/verify", json={"email": email, "code": code, "cli": True}
+            )
+            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            if r.status_code != 200 or not body.get("token"):
+                err_console.print(f"[red]Sign-in failed: {body.get('message') or f'HTTP {r.status_code}'}[/]")
+                raise typer.Exit(1)
+            token = body["token"]
+    except httpx.HTTPError as exc:
+        err_console.print(f"[red]Network error reaching {base}: {exc}[/]")
+        raise typer.Exit(1)
+
+    _cli_provision_and_store(base, token)
+
+
+@app.command(name="logout")
+def logout_command() -> None:
+    """Remove the stored MailAccess key from ~/.mailaccess/.env."""
+    removed = False
+    if ENV_FILE.exists():
+        for var in ("MAILACCESS_PRO_KEY",):
+            with contextlib.suppress(Exception):
+                if unset_key(str(ENV_FILE), var)[0]:
+                    removed = True
+    console.print(
+        "[green]Logged out — key removed.[/]" if removed else "[dim]No stored key to remove.[/]"
+    )
+
+
+@app.command(name="google-auth")
+def google_auth_command(
+    email: str | None = typer.Option(None, "--email", help="The operator Google account's email (setup)."),
+    check: bool = typer.Option(
+        False, "--check",
+        help="Test the stored credential now and report the result to the admin alert, if one is set.",
+    ),
+) -> None:
+    """Set up, or check, durable Google enrichment from an Android master token.
+
+    Setup: in a browser, open https://accounts.google.com/EmbeddedSetup, sign in with the
+    operator account, click "I agree", then copy the `oauth_token` cookie value. Run this
+    with --email and paste it when prompted. It's exchanged for a long-lived master token
+    stored in ~/.mailaccess/.env (copy that value to each engine box; it lasts until the
+    password changes). The oauth_token is single-use and short-lived, so paste it promptly.
+
+    Check: `mailaccess google-auth --check` mints a fresh session and looks up the operator
+    account, so you know the credential works on this box.
+    """
+    import asyncio
+
+    from backend.core import google_auth
+
+    if check:
+        from backend.modules.google_account_intel import check_credential
+
+        ok, message = asyncio.run(check_credential())
+        (console if ok else err_console).print(message, style="green" if ok else "red", markup=False)
+        raise typer.Exit(0 if ok else 1)
+    if not email:
+        err_console.print("Setup needs the operator account: mailaccess google-auth --email <address>", markup=False)
+        raise typer.Exit(2)
+
+    console.print(
+        "Open [bold]https://accounts.google.com/EmbeddedSetup[/], sign in, click "
+        "[bold]I agree[/], then copy the [bold]oauth_token[/] cookie."
+    )
+    oauth_token = typer.prompt("Paste oauth_token", hide_input=True).strip()
+    if not oauth_token:
+        err_console.print("[red]No token provided.[/]")
+        raise typer.Exit(1)
+    try:
+        master = asyncio.run(google_auth.exchange_oauth_token(oauth_token, email))
+    except Exception as exc:  # noqa: BLE001
+        err_console.print(f"[red]Exchange failed:[/] {exc}")
+        err_console.print("[dim]oauth_token is single-use + short-lived — re-grab it and retry promptly.[/]")
+        raise typer.Exit(1)
+    _set_env_key("GOOGLE_MASTER_TOKEN", master)
+    _set_env_key("GOOGLE_MASTER_EMAIL", email)
+    console.print(f"[green]Master token stored[/] for {email} — Google name/photo enrichment is durable now.")
+    console.print(
+        "[dim]Copy GOOGLE_MASTER_TOKEN + GOOGLE_MASTER_EMAIL from ~/.mailaccess/.env to each "
+        "engine box. Valid until the account password changes.[/]"
+    )
+
+
 @app.command(name="upgrade")
 def upgrade_command(
     yes: bool = typer.Option(

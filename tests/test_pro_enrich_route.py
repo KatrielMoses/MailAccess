@@ -614,6 +614,11 @@ def pro_keys_db() -> Iterator[Any]:
         yield pk
     finally:
         config_mod.settings.database_url = saved
+        # Rebind both modules to the original DB, or later test files keep an engine
+        # pointed at the temp DB deleted below.
+        asyncio.run(db.engine.dispose())
+        importlib.reload(db)
+        importlib.reload(pk)
         shutil.rmtree(path, ignore_errors=True)
 
 

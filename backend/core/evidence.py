@@ -677,6 +677,45 @@ def _names_agree(a: Any, b: Any) -> bool:
     return fa == fb or (len(fa) == 1 and fb.startswith(fa)) or (len(fb) == 1 and fa.startswith(fb))
 
 
+def _first_name_collision(name: Any, others: list[str]) -> bool:
+    """True when ``name`` shares a first name (or initial) with one of ``others`` but
+    carries a DIFFERENT, real surname — a first-name-only handle collision (a different
+    person who happens to share the handle string), not the same person under a nickname.
+
+    Used to stop such a hit from borrowing the handle's cross-site name consistency: a
+    page that names "Maya Reichman" is not corroborated by the other "Maya Lindqvist"
+    accounts sharing the ``maya.lindqvist`` handle. Messy or partial names (a single
+    token, spaced-out initials, an id where the surname should be) are treated as
+    ambiguous, never a collision, so a real account with an oddly-rendered name is not
+    demoted on this signal.
+    """
+    wa = [w for w in re.split(r"[^a-z]+", str(name or "").lower()) if w]
+    if len(wa) < 2:
+        return False
+    first, last = wa[0], wa[-1]
+    if not last.isalpha() or len(last) < 2:
+        return False  # no clear surname (initials, ids) → ambiguous, never a veto
+    for other in others:
+        wb = [w for w in re.split(r"[^a-z]+", str(other or "").lower()) if w]
+        if len(wb) < 2:
+            continue
+        ofirst, olast = wb[0], wb[-1]
+        if not olast.isalpha() or len(olast) < 2:
+            continue  # reference name has no real surname (spaced initials like
+            # "M A Y A") → unusable, or every real surname looks "different" from it
+        first_same = (
+            first == ofirst
+            or (len(first) == 1 and ofirst.startswith(first))
+            or (len(ofirst) == 1 and first.startswith(ofirst))
+        )
+        # A collision only when this name does NOT also carry the consensus surname: a
+        # longer form that still contains it ("Maya Ann Lindqvist", or a name with a
+        # student id appended) is the same person, not a different one.
+        if first_same and olast not in wa:
+            return True
+    return False
+
+
 def subject_is_freemail(email: str) -> bool:
     """True when the subject address is a freemail account (local part = a chosen
     handle), False for a domain address (local part = a role on that domain)."""
@@ -787,9 +826,17 @@ def corroborate_username_matches(
 
         name_agree = bool(confirmed_name) and _names_agree(name, confirmed_name)
         # Same handle, same name, on >= 2 distinct sites (including this one).
-        cross_site = any(
-            len(hosts) >= 2 for hosts in handle_name_hosts.get(handle, {}).values()
-        )
+        consensus_names = [
+            n for n, hosts in handle_name_hosts.get(handle, {}).items() if len(hosts) >= 2
+        ]
+        cross_site = bool(consensus_names)
+        # Identity gate: the handle's cross-site name consistency belongs to ONE person.
+        # A hit whose own page names a first-name-only collision (same first name, a
+        # different real surname — DIBIZ's "Maya Reichman" on the ``maya.lindqvist``
+        # handle that is "Maya Lindqvist" everywhere else) is a different account, and must
+        # not ride that consistency up to possible/medium without its own corroboration.
+        if name and _first_name_collision(name, consensus_names):
+            cross_site = False
         mine_link_hosts = _link_hosts(meta)
         oh_handles, oh_hosts = _parse_other_handles(meta)
         link_back = bool(

@@ -5,7 +5,7 @@
 
 # Sponsor MailAccess
 
-**MailAccess is a self-hostable OSINT platform for investigating email addresses** — used by OSINT practitioners, penetration testers, and security researchers to fan out across breach corpora, 5,300+ social platforms, DNS/mail infrastructure, and the open web.
+**MailAccess is a self-hostable OSINT platform for investigating email addresses.** OSINT practitioners, penetration testers and security researchers use it to fan out across breach corpora, 5,300+ platforms, DNS/mail infrastructure, and the open web.
 
 ---
 
@@ -50,10 +50,12 @@ Multiple providers can be featured per category. Placement priority — order, p
 
 | # | Category | Featured partners | Integration surface |
 |---|---|---|---|
-| 1 | **Proxies / Residential IPs** | ScrapingAnt | `SCRAPINGANT_API_KEY`, residential + datacenter proxy routing |
-| 2 | **Breach / Compromised-Credential Data** | *Accepting partners* | `breach_aggregator` module (`DEHASHED_API_KEY`, `SNUSBASE_API_KEY` keys) |
-| 3 | **IP Intelligence** | *Accepting partners* | `domain_intel` / enterprise network intel modules |
-| 4 | **Email / Identity Verification** | *Accepting partners* | SMTP + deliverability verification pipeline |
+| 1 | **Attack Surface / Internet Scan Data** | Netlas | `NETLAS_API_KEY`, `netlas_email_footprint` and `netlas_org_surface` modules, subdomain enumeration |
+| 2 | **IP Intelligence** | ipgeolocation.io | `IPGEOLOCATION_API_KEY`, `ip_intel` module |
+| 3 | **Domain / WHOIS Intelligence** | WhoisFreaks | `WHOISFREAKS_API_KEY`, `whoisfreaks_intel` module (WHOIS history, reverse WHOIS) |
+| 4 | **Proxies / Residential IPs** | IPBurger, Mango Proxy, Swiftproxy, Rapidproxy | CLI proxy prompts (`harvest-emails --use-proxies`, bulk runs); any HTTP or SOCKS proxy plugs in via `PROXY_URL` or `EGRESS_PROXIES` |
+| 5 | **Breach / Compromised-Credential Data** | *Accepting partners* | `breach_aggregator` module (`DEHASHED_API_KEY`, `SNUSBASE_API_KEY` keys) |
+| 6 | **Email / Identity Verification** | *Accepting partners* | SMTP + deliverability verification pipeline |
 
 Every category is accepting new partners, including those already featured. Current partners: [docs/sponsors.md](docs/sponsors.md).
 

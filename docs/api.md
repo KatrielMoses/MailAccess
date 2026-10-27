@@ -11,10 +11,9 @@
 
 ## Base URL
 
-> **Note:** The `mailaccess harvest-emails` command is **CLI-only in 0.10.2**.
-> The underlying `run_domain_harvest()` orchestrator is designed to be
-> callable from an API layer in a future release, but no HTTP endpoint
-> exists for it yet. Run `mailaccess harvest-emails --help` for the full
+> **Note:** Running a harvest is **CLI-only in 0.19.0**: there is no HTTP
+> endpoint that starts `mailaccess harvest-emails`. The read-only
+> [Lead endpoints](#get-apileadsdomain) serve the results of earlier harvests. Run `mailaccess harvest-emails --help` for the full
 > flag list, and see [docs/harvest-emails.md](harvest-emails.md) for
 > usage. Proxy routing for `harvest-emails` is also CLI-only: configure it
 > with `mailaccess configure proxy ...` and pass `--use-proxies` on the
@@ -46,7 +45,7 @@ Health check. Always unauthenticated.
 ```json
 {
 "status": "ok",
-  "version": "0.10.2",
+  "version": "0.19.0",
   "uptime": 1842.7,
   "modules_loaded": ["hibp", "emailrep", "gravatar", "domain_intel", "social"],
   "db": "connected"
@@ -389,6 +388,53 @@ List all registered modules.
 
 ---
 
+### `GET /api/leads/{domain}`
+
+Read-only. Returns the leads saved by earlier `harvest-emails` runs for a
+domain. It never starts a harvest. Suppressed subjects are left out; if the
+suppression store can't be read the route returns `503` rather than an
+unfiltered list.
+
+| Query | Default | Meaning |
+|---|---|---|
+| `seniority` | _(none)_ | `c-level`, `vp`, `director`, `manager` or `ic` |
+| `grade` | _(none)_ | Deliverability grade: `Valid`, `Risky`, `Catch-all`, `Invalid`, `Unknown` |
+| `has_person` | _(none)_ | `true` for leads with a resolved name, `false` for those without |
+| `mode` | configured product mode | Serving mode used for each lead's eligibility verdict. An invalid mode returns `400`. |
+| `limit` / `offset` | `100` / `0` | Paging. `limit` is 1 to 1,000. |
+
+**Response `200`**
+```json
+{ "domain": "example.com", "total": 42, "limit": 100, "offset": 0, "leads": [ ... ] }
+```
+
+`total` is the match count before suppression filtering, so a page can hold
+fewer rows than `total` suggests.
+
+### `GET /api/leads/{domain}/changes`
+
+Change signals from the domain's two most recent harvests: likely new hires
+and departures, title changes, verification drift and likely-stale addresses.
+
+```json
+{ "domain": "example.com", "previous_at": "...", "current_at": "...", "counts": { ... },
+  "signals": [ { "type": "...", "email": "jane@example.com", "detail": "...", "evidence": { ... } } ] }
+```
+
+### `GET /api/leads/{domain}/verification-history`
+
+Verification outcomes recorded for a domain. Pass `email` to narrow it to one
+address; `limit` is 1 to 1,000 (default 200).
+
+```json
+{ "domain": "example.com", "email": null, "count": 3, "history": [ ... ] }
+```
+
+All three Lead routes use the same API-key auth and per-key quota as the
+rest of `/api`.
+
+---
+
 ### `POST /maltego/email_investigate`
 
 Maltego TRX local transform. Accepts an XML POST body in the Maltego TRX protocol, runs a full investigation, and returns Maltego entity XML. No API key required.
@@ -464,7 +510,7 @@ Any number of clients can connect to the same run; each receives the full stream
 
 ### `GET /api/investigations/{id}/events?since=N`
 
-The run's saved event log as server-sent events ("show your work"). Same API-key auth as the rest of `/api`. It replays every saved event with `seq > N` (default 0), then follows the run live until `run_done`, then closes. It works after the run has finished (full replay) and for any number of viewers. Each message sets `id: <seq>`, so a reconnecting client resumes with the `Last-Event-ID` header. A `: keep-alive` comment goes out every 15 seconds.
+The run's saved event log as server-sent events ("show your work"). Same API-key auth as the rest of `/api`. It replays every saved event with `seq > N` (default 0), then follows the run live until `run_done`, then closes. It works after the run has finished (full replay) and for any number of viewers. Each message sets `id: <seq>`, so a reconnecting client resumes with the `Last-Event-ID` header. A `: hb` comment goes out every 15 seconds.
 
 ```
 id: 12
@@ -472,7 +518,7 @@ event: finding
 data: {"seq":12,"ts":"2026-10-17T09:30:01.512Z","finding_id":3,"module":"account_discovery",...}
 ```
 
-`seq` is per run, gap-free from 1. `ts` is UTC with milliseconds. `data` is the event's own fields at the top level plus `seq` and `ts`: there is no `payload` wrapper, and the event type is only on the `event:` line. A `: hb` comment goes out every 15 seconds. Payloads are small: a platform hit is one event, never a whole module result. The full contract, shared with the website, is [dev/SHOW-YOUR-WORK-EVENTS.md](../dev/SHOW-YOUR-WORK-EVENTS.md).
+`seq` is per run, gap-free from 1. `ts` is UTC with milliseconds. `data` is the event's own fields at the top level plus `seq` and `ts`: there is no `payload` wrapper, and the event type is only on the `event:` line. Payloads are small: a platform hit is one event, never a whole module result. Clients should ignore event types they don't know, so new events can be added without breaking them. The table below is the full contract; the website reads the same stream.
 
 | event | data (besides `seq`, `ts`) |
 |---|---|
@@ -490,7 +536,7 @@ data: {"seq":12,"ts":"2026-10-17T09:30:01.512Z","finding_id":3,"module":"account
 
 `label` answers one question, whether a finding is linked to this person: `username_match` (the username exists on a site, never that this person owns it), `possible` (one signal tied to the email) or `confirmed` (two independent signal types). Records read directly (DNS, WHOIS, the address check) are `null`: they get no badge and their `trace.reason` states what was read. Every finding's `trace` is `{technique_id, technique, signal, derived_from, corroborated_by, independent_signals, reason}`, and the reason names the real site or record. Traces never contain keys, tokens or raw responses. The same `trace` and `label` are saved on each finding in the report (`data.trace`, `data.label`).
 
-`mailaccess harvest-emails --events-jsonl PATH` writes the same events (a harvest streams value-less `candidate` events while it runs and emits `finding` events only from its final result, with `run_done` counts equal to the export; see the event contract) for a harvest, one JSON object per line: the same top-level fields plus `type` (an edge's own `type` is written as `edge_type`).
+`mailaccess harvest-emails --events-jsonl PATH` writes the same events (a harvest streams value-less `candidate` events while it runs and emits `finding` events only from its final result, with `run_done` counts equal to the export; see the table above) for a harvest, one JSON object per line: the same top-level fields plus `type` (an edge's own `type` is written as `edge_type`).
 
 ---
 

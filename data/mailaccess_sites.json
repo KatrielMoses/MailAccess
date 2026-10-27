@@ -1783,6 +1783,7 @@
    "category": "mails",
    "check_type": "email-existence",
    "flow": "password-recovery",
+   "intrusive": true,
    "recovery": true,
    "high_value": true,
    "uri_check": "https://account.mail.ru/api/v1/user/password/restore",
@@ -2093,6 +2094,7 @@
    "category": "social_media",
    "check_type": "email-existence",
    "flow": "password-recovery",
+   "intrusive": true,
    "recovery": true,
    "high_value": true,
    "handler": "odnoklassniki_recovery",
@@ -3945,6 +3947,7 @@
    "category": "dev",
    "check_type": "email-existence",
    "flow": "password-recovery",
+   "intrusive": true,
    "uri_check": "https://luarocks.org/user/forgot_password",
    "requestMethod": "POST",
    "headers": {
@@ -4135,6 +4138,7 @@
    "category": "entertainment",
    "check_type": "email-existence",
    "flow": "password-recovery",
+   "intrusive": true,
    "uri_check": "https://anilist.co/graphql",
    "requestMethod": "POST",
    "headers": {
@@ -6342,6 +6346,7 @@
    "category": "sport",
    "check_type": "email-existence",
    "flow": "password-recovery",
+   "intrusive": true,
    "uri_check": "https://api.unik8s.com/api/v2/account/auth/forgot-password?language=en",
    "requestMethod": "POST",
    "headers": {
@@ -40699,6 +40704,7 @@
    "uri_check": "https://api.omg.lol/address/{username}/availability",
    "url": "https://{username}.omg.lol",
    "checkType": "message",
+   "regexCheck": "^[A-Za-z0-9-]+$",
    "presenseStrs": [
     "\"available\": false"
    ],
@@ -88519,7 +88525,14 @@
    "flow": "other",
    "uri_check": "https://wiki-es.guildwars2.com/wiki/User:{username}",
    "url": "https://wiki-es.guildwars2.com/wiki/User:{username}",
-   "checkType": "status_code",
+   "checkType": "message",
+   "presenseStrs": [
+    "ns-2",
+    "mw-body-content"
+   ],
+   "absenceStrs": [
+    "mw-userpage-userdoesnotexist"
+   ],
    "tags": [
     "es",
     "gaming",

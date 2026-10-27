@@ -333,26 +333,31 @@ class ProfilePhase(InvestigationPhase):
         from ..modules.marketplace_profile import MarketplaceProfileModule
         from ..modules.twitter_profile import TwitterProfileModule
 
-        from .brightdata_client import brightdata_active
-
         def _record(mod):
             return _run_and_record(
                 mod, **_runner_kwargs(kwargs), findings_input=kwargs["collected"]
             )
 
         async def _linkedin() -> None:
-            # The LinkedIn card (Bright Data, Pro) runs right after the SERP lookup so it
-            # can use its slug; off (no key) means fully off: never run, never shown.
+            # Keyless LinkedIn SERP (free tier). The Pro LinkedIn card comes from Oxylabs
+            # (social_discovery).
             await _record(LinkedInSerpModule())
-            explicit = kwargs.get("explicit_modules")
-            if brightdata_active() and (explicit is None or "linkedin_brightdata" in explicit):
-                from ..modules.linkedin_brightdata import LinkedInBrightDataModule
 
-                await _record(LinkedInBrightDataModule())
+        async def _social() -> None:
+            # Instagram/Facebook/LinkedIn discovery via Oxylabs Web Search (Pro, BYOK).
+            # Off (no token) means fully off.
+            from .oxylabs_client import oxylabs_active
+
+            explicit = kwargs.get("explicit_modules")
+            if oxylabs_active() and (explicit is None or "social_discovery" in explicit):
+                from ..modules.social_discovery import SocialDiscoveryModule
+
+                await _record(SocialDiscoveryModule())
 
         await asyncio.gather(
             _record(TwitterProfileModule()),
             _linkedin(),
+            _social(),
             _record(MarketplaceProfileModule()),
             return_exceptions=True,
         )
@@ -544,6 +549,12 @@ _COMPANY_DOMAIN_MODULES = frozenset(
         "companies_house", "domain_intel", "netlas_org_surface", "opencorporates",
         "ransomware_intel", "sec_edgar", "whois_lookup", "domain_harvester",
         "github_domain_commits", "github_org_members", "subdomain_intel",
+        # Domain-wide email harvest: nothing to read behind a free provider, so
+        # they burn ~100s on gmail.com and return 0. (Email-scoped siblings like
+        # pgp_keyserver / github_commits still run.)
+        "commoncrawl_email", "employee_name_discovery", "pgp_domain_email",
+        "npm_email", "code_and_cert_email", "email_search_dork",
+        "wayback_domain_harvest", "wordpress_rest", "syndication_feed_sweeper",
     }
 )
 _NETLAS_MODULES = frozenset({"netlas_email_footprint", "netlas_org_surface"})
@@ -640,7 +651,7 @@ def plan_modules(
         add("email_discovery", "email_discovery")
     add("alternate_email", "alternate_email")
     add("domain_cluster", "domain_cluster")
-    add("profile", "twitter_profile", "linkedin_serp", "linkedin_brightdata", "marketplace_profile")
+    add("profile", "twitter_profile", "linkedin_serp", "marketplace_profile")
     if config.enable_phone_intel:
         add("phone_intel", "phone_intel")
     return planned, unavailable

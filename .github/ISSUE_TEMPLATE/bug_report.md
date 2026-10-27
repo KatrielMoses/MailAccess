@@ -18,10 +18,17 @@ assignees: ''
 
 ## Environment
 
-- MailAccess version / commit:
-- Deployment: [ ] Docker Compose  [ ] Manual
+- MailAccess version / commit (`mailaccess version`):
+- Deployment: [ ] pip / CLI  [ ] Docker Compose  [ ] Manual
 - Database: [ ] SQLite  [ ] PostgreSQL
 - OS:
+- Python version:
+
+## `mailaccess doctor` output
+
+```
+paste the output of `mailaccess doctor` here (it shows which keys are set, never their values)
+```
 
 ## Relevant logs or output
 

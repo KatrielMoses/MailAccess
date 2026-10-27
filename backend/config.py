@@ -460,6 +460,18 @@ class Settings(BaseSettings):
     # without it, and the enrichment source is health-registered so any endpoint
     # change degrades gracefully rather than erroring.
     google_intel_api_key: str = ""
+    # Operator-owned Google service-account session (owner decision 2026-10-22):
+    # a dummy Google account's cookies, used to read a subject's PUBLIC people-pa
+    # profile (name/photo/gaia) via sapisidhash. Never a subject's or user's
+    # session. Both are captured from one logged-in people-pa request.
+    google_session_cookie: str = ""
+    google_people_api_key: str = ""
+    # Durable alternative to the fragile cookie: an Android master token (long-lived,
+    # ~until password change) for the same dummy account. The engine mints fresh session
+    # cookies from it on demand (backend/core/google_auth.py), so it survives process/box
+    # restarts and copies to every engine box as one value. Preferred over the cookie.
+    google_master_token: str = ""
+    google_master_email: str = ""
 
     # Phone intel: validates recovered phones and probes WhatsApp/Telegram (post-primary)
     enable_phone_intel: bool = True
@@ -811,12 +823,11 @@ class Settings(BaseSettings):
     ipgeo_timeout_seconds: float = 10.0
     ipgeo_refresh_ttl_days: int = 30
 
-    # Bright Data (BYOK, Pro): LinkedIn people-profile lookups for the LinkedIn card.
-    # Without a key the module does not exist anywhere (events, report, module list).
-    brightdata_api_key: str | None = None
-    brightdata_disabled: bool = False
-    brightdata_timeout_seconds: float = 25.0
-    brightdata_cache_days: int = 7
+    # Oxylabs Web Search API (BYOK, Pro): Bearer token used to discover a subject's public
+    # IG/FB/LinkedIn profiles (name, handle, URL, follower stats, LinkedIn title/company)
+    # from search results — no bot-evasion, just a query. Token never logged.
+    oxylabs_search_token: str | None = None
+    oxylabs_cache_days: int = 7
 
     # WhoisFreaks (BYOK): WHOIS history, reverse WHOIS, dated subdomains.
     # Without a key nothing changes and no call is made.
@@ -926,6 +937,11 @@ class Settings(BaseSettings):
     # is empty the endpoint rejects every request, so the route is inert until it is
     # deliberately configured. Never logged.
     mailaccess_pro_internal_secret: str = ""
+    # Optional website internal endpoint the engine POSTs to when an operator credential
+    # goes unhealthy (e.g. the Google people-pa session expired), so the admin panel can
+    # raise a notification. Authenticated with mailaccess_pro_internal_secret. Empty ->
+    # the engine only writes the local health beacon file (co-located admin reads it).
+    engine_alert_url: str = ""
     # 0.17.6 — founder-pricing counter surfaced in the free-tier CLI upsell. The
     # seat total and price label are operator-configurable; ``seats_left`` is derived
     # LIVE from the entitlement store (count of provisioned Pro keys) so the

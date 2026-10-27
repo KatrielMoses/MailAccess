@@ -236,8 +236,8 @@ _UGLY = re.compile(r"\b[a-z0-9]+_[a-z0-9_]+\b|\(source\)|\bsource\)", re.I)
 def test_no_reason_contains_an_internal_identifier_or_bracketed_source() -> None:
     gh_commit = {"platform": "github_commit", "profile_url": "https://github.com/o/r/commit/abc",
                  "metadata": {"repo": "owner/name", "commit_sha": "abc"}}
-    gh_user = {"platform": "Katriel Moses", "profile_url": "https://github.com/KatrielMoses",
-               "metadata": {"login": "KatrielMoses"}}
+    gh_user = {"platform": "Maya Lindqvist", "profile_url": "https://github.com/MayaLindqvist",
+               "metadata": {"login": "MayaLindqvist"}}
     google = {"platform": "google_account", "metadata": {"google_hosted": True, "hosting_kind": "gmail"}}
     hn = {"platform": "hackernews_profile", "profile_url": "https://news.ycombinator.com/user?id=alice",
           "metadata": {"username": "alice"}}
@@ -267,7 +267,7 @@ def test_no_reason_contains_an_internal_identifier_or_bracketed_source() -> None
     assert texts["github_commit"] == (
         "A public commit on GitHub lists this email as its author (repo owner/name)."
     )
-    assert texts["Katriel Moses"].startswith("A GitHub profile (KatrielMoses) is tied")
+    assert texts["Maya Lindqvist"].startswith("A GitHub profile (MayaLindqvist) is tied")
     assert texts["hackernews_profile"] == (
         "Hacker News has a user named alice, a guess from the email's local part; "
         "nothing tied to the email agrees yet."
@@ -475,8 +475,8 @@ def test_a_hit_the_random_control_also_gets_is_withheld() -> None:
     assert apply_control("exists", "not_exists") == "exists"
     assert apply_control("exists", "inconclusive") == "exists"
     assert apply_control("not_exists", "exists") == "not_exists"
-    a, b = control_email_for("katriel@mailaccess.pro"), control_email_for("katriel@mailaccess.pro")
-    assert a != b and a.endswith("@mailaccess.pro") and not a.startswith("katriel")
+    a, b = control_email_for("maya@mailaccess.pro"), control_email_for("maya@mailaccess.pro")
+    assert a != b and a.endswith("@mailaccess.pro") and not a.startswith("maya")
 
 
 async def test_browser_probe_module_skips_disabled_oracles_and_reports_withheld(monkeypatch) -> None:
@@ -495,3 +495,39 @@ async def test_browser_probe_module_skips_disabled_oracles_and_reports_withheld(
     result = await BrowserAccountProbeModule().run("a@b.example")
     assert not {"paypal", "docusign", "gemini", "box", "docker", "vivino", "subscribestar"} & set(seen)
     assert result.metadata["withheld_non_discriminating"] == ["x.example"]
+
+
+def test_first_name_collision_does_not_borrow_a_shared_handle_consistency() -> None:
+    # BUG B (identity gate): DIBIZ really hosts an account at the probed handle, but the
+    # page names a DIFFERENT person — same first name, different surname. It must not ride
+    # the cross-site "Maya Lindqvist" consistency of the ``maya.lindqvist`` handle up to a
+    # corroborated/medium account; without its own corroboration it stays a username match.
+    def sweep(platform: str, url: str, name: str) -> dict[str, Any]:
+        return {"platform": platform, "profile_url": url, "username": "maya.lindqvist",
+                "confidence": "low",
+                "metadata": {"source": "username_platforms", "verification": "unverified",
+                             "speculative": True, "display_name": name}}
+
+    by_module = {"username_platforms": _res(
+        sweep("GitLab", "https://gitlab.com/maya.lindqvist", "Maya Lindqvist"),
+        sweep("Medium", "https://medium.com/@maya.lindqvist", "Maya Lindqvist"),
+        sweep("DIBIZ", "https://www.dibiz.com/maya.lindqvist", "Maya Reichman"),
+        # Spaced-out initials are a cross-site name too; they have no real surname and
+        # must NOT be read as a surname that makes every "Maya Lindqvist" look foreign.
+        sweep("Instagram", "https://instagram.com/maya.lindqvist", "M A Y A"),
+        sweep("Facebook", "https://facebook.com/maya.lindqvist", "M A Y A"),
+    )}
+    evidence.annotate_results(by_module, "maya@gmail.com")
+    rows = [("username_platforms", f) for f in by_module["username_platforms"].findings]
+    evidence.corroborate_username_matches(rows, "maya@gmail.com", None)
+    by_plat = {f["platform"]: f for f in by_module["username_platforms"].findings}
+
+    # the consistent "Maya Lindqvist" hits — and the oddly-rendered real ones — stay
+    # corroborated at possible / medium; only the wrong surname is demoted.
+    for p in ("GitLab", "Medium", "Instagram", "Facebook"):
+        assert by_plat[p]["label"] == "possible"
+        assert by_plat[p]["confidence"] == "medium"
+    # the wrong-person hit stays an uncorroborated username match at low confidence.
+    assert by_plat["DIBIZ"]["label"] == "username_match"
+    assert by_plat["DIBIZ"]["confidence"] == "low"
+    assert not is_confirmed_account_hit(by_plat["DIBIZ"])

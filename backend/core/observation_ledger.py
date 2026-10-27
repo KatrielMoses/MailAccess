@@ -77,7 +77,6 @@ _CLAIM_KEY_KEYS = ("email", "profile_url", "url", "username", "platform", "value
 _PROVIDER_BY_METHOD = {
     "ip_intel": "ipgeolocation",
     "whoisfreaks_intel": "whoisfreaks",
-    "linkedin_brightdata": "brightdata",
     "whoisfreaks_history": "whoisfreaks",
     "whoisfreaks_subdomains": "whoisfreaks",
 }

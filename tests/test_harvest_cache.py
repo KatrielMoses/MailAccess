@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 
+import pytest
 from rich.console import Console
 
 from backend.core.domain_harvest_orchestrator import DomainHarvestResult, run_domain_harvest
@@ -74,16 +75,38 @@ def test_force_flag_bypasses_cache(monkeypatch, tmp_path):
     assert calls and not result.from_cache
 
 
-def test_cache_written_after_harvest(monkeypatch, tmp_path):
-    cache = HarvestCache(tmp_path)
+@pytest.fixture
+def corpus_db(tmp_path):
+    """A migrated temp DB for the corpus, rebound to the original DB afterwards."""
+    import importlib
+
+    import backend.db.database as db
+    from backend.config import settings
+
+    saved = settings.database_url
+    settings.database_url = f"sqlite+aiosqlite:///{(tmp_path / 'corpus.db').as_posix()}"
+    importlib.reload(db)
+    asyncio.run(db.init_db())
+    asyncio.run(db.engine.dispose())
+    try:
+        yield db
+    finally:
+        settings.database_url = saved
+        asyncio.run(db.engine.dispose())
+        importlib.reload(db)
+
+
+def test_harvest_written_to_corpus(monkeypatch, corpus_db):
+    # Phase 1D: the corpus DB replaced the per-domain JSON cache as the source of truth
+    # (the CLI's --clear-cache clears both), so a finished harvest lands in the corpus.
+    from backend.core import corpus_store
 
     async def fake_run(**kwargs):
         return _result()
 
-    monkeypatch.setattr("backend.core.harvest_cache.HarvestCache", lambda: cache)
     monkeypatch.setattr("backend.core.harvest_runner.run_adaptive_harvest", fake_run)
     asyncio.run(run_domain_harvest("example.com"))
-    assert cache.get("example.com") is not None
+    assert "example.com" in asyncio.run(corpus_store.list_domains())
 
 
 def test_atomic_write_no_partial_reads(tmp_path):

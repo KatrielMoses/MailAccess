@@ -1,5 +1,58 @@
 # Changelog
 
+### 0.19.0 (Unreleased)
+
+#### Added
+
+- **MailAccess Index harvest source (`own_index`).** `harvest-emails` can look up our own index of emails seen on the public web, built from Common Crawl and GH Archive. It runs on the hosted service only: it exists when the operator sets `MAILACCESS_INDEX_URL` and `MA_INDEX_SERVICE_KEY`, and the index itself is never public. Results last seen more than 24 months ago are labelled "older source". Per-run opt-out: `--no-own-index`. Self-hosted installs are unchanged.
+- **`mailaccess login` / `mailaccess logout`.** Sign in with an emailed 6-digit code, or `--google` in your browser. The CLI fetches your MailAccess key and writes it to `~/.mailaccess/.env` (`MAILACCESS_PRO_KEY`), so there is no key to copy and paste. Works for free and Pro accounts. `logout` removes the key.
+- **Free tier.** `mailaccess login` signs in free accounts as well as Pro and stores a free key. Limits for free keys are set and enforced by the hosted service.
+- **Google profile enrichment via an operator credential.** `google_account_intel` reads the public profile name and photo for an address using a dedicated operator Google account. Set it once with `mailaccess google-auth --email <operator-account>`; it stores `GOOGLE_MASTER_TOKEN` and `GOOGLE_MASTER_EMAIL`, which last until that account's password changes and copy to every engine host. Without them the module still returns its MX and domain signal, and enrichment returns nothing. An unhealthy credential raises an operator alert.
+- **`social_discovery` module.** Finds Instagram, Facebook and LinkedIn profiles through the Oxylabs Web Search API (`OXYLABS_SEARCH_TOKEN`): name, handle, URL, Instagram follower counts and LinkedIn title and company. A result is kept only when it matches a handle variant of the address, a handle from the email-anchored accounts, or the subject's name on a freemail address.
+- **Names from account pages, with no key.** Any account-page hit can now supply a display name and photo (`account_page` source, weight 0.50). A single email-anchored name reads as "possible".
+- **Direct username search:** `mailaccess investigate --username <handle>`. The handle is searched as typed, plus a name-split variant.
+- **Person summary card** across an investigation's accounts, names, locations and photos, with a frozen output schema.
+- **Profile details for username hits** (display name, bio, location, avatar where the page shows them).
+- **Seven-day probe cache** for repeat searches. `--force` re-probes.
+- **Validated core site list.** The default username sweep probes the 746 `core` sites, with JSON checks and one request at a time per host.
+- **GitHub login derivation.** `github_commits` derives candidate logins from the email and keeps one only when an email-anchored fact confirms it. A `GITHUB_TOKEN` is supported for the lookups.
+- **Opt-in extended registration checks** (`ENABLE_EXTENDED_REGISTRATION_CHECKS`, off by default) for future checks that should not run by default. None use it today.
+- **Adobe account-existence check**, on by default. It uses the public account lookup behind the Adobe sign-in page and sends no email.
+
+#### Changed
+
+- **Identity is anchored on the email (Phase UC).** An account belongs to the subject only when an email-anchored signal ties it there (registration check, breach, commit email, Gravatar). Username matches on the local part no longer merge strangers into one person, and the person card no longer blends their names and locations.
+- **Alternate emails are followed.** A linked address found through an email-anchored signal is itself checked for registrations (bounded), and its accounts merge under the same person.
+- **Handles come from the email-anchored accounts.** The username pivot and LinkedIn lookups start from handles proven by email-anchored accounts, not from the raw local part, so a domain address no longer sweeps strangers who share it.
+- **Specificity gate.** On a freemail address, a bare common first name as the local part (for example `john@`) no longer promotes username matches to the subject.
+- **Username corroboration uses the whole report.** A username match takes its label and confidence from how well it is corroborated (name agreement, same-site confirmation), not from how many sites have the handle.
+- **Throttled checks are retried.** A rate-limited or timed-out registration check gets up to 2 retries with backoff, honours `Retry-After`, and stays "unknown" if it still can't decide. It is never counted as a miss.
+- **Initials in names.** Names such as "A.K. Sharma" or "J.R. Smith" are kept instead of dropped, and a known acronym is never read as initials.
+- **Live ETA in the email scraper.** The `harvest-emails` ETA no longer sits at a tiny stuck number. It is floored by the slowest running module, only counts down, shows how many modules have finished and says "finishing up" only at the very end.
+- **Username pivot** gains a budget, priority ordering and duplicate skipping.
+- **Live sweep counter**, a tail budget, concurrent phases and per-site timeouts in `investigate`.
+- `harvest-emails --timeout` is now a hard limit.
+- Module count is 82 (71 need no API key). The site corpus is 5,360 sites (5,300+ platforms).
+- Python 3.10+ is the documented minimum, matching `pyproject.toml`.
+- Docs updated for 0.19.0: key tables (Netlas, ipgeolocation.io, WhoisFreaks, Oxylabs, Google operator credential, `MAILACCESS_PRO_KEY`), module defaults, account-existence list and the sponsor list.
+
+#### Fixed
+
+- **Username-pivot false positives.**
+  - Sites whose absence marker has gone stale now treat a 404 as a miss, so they no longer report every handle as found.
+  - A soft-200 page that redirects to a shorter handle is inconclusive.
+  - MediaWiki user pages that answer 200 for any handle now need the real profile markers.
+  - Handles a site rejects as invalid are no longer probed there.
+- **First-name collisions.** A username hit whose page names someone with the same first name but a different surname no longer borrows the subject's cross-site name agreement.
+- **OK.ru** recovery check no longer reports every address as registered.
+- **WordPress** check now reports an account whose email is unverified as existing (it was a false negative).
+- The internal index credential is renamed to `MA_INDEX_SERVICE_KEY`, so it can't be confused with a user's MailAccess key.
+
+#### Removed
+
+- **8 dead account-existence checks disabled** (retired hosts or permanently broken endpoints): Nike, Deliveroo, blip.fm, cracked.to, badeggsonline, chinaphonearena, cpahero and nattyornot. 349 checks are enabled; checks blocked only from datacenter IPs are kept.
+- **Bright Data.** The Bright Data LinkedIn card and its key are removed. LinkedIn, Instagram and Facebook profiles now come from `social_discovery`.
+
 ### 0.18.8 (2026-10-17)
 
 - Add optional BYOK WhoisFreaks enrichment: who owned a domain before privacy redaction (WHOIS history), every other domain the same owner registered (reverse WHOIS by exact company and by registrant email), and dated subdomains (first/last seen, active or gone). No key makes no call and changes no output.
@@ -302,6 +355,31 @@ from the package.
   independently-verifiable compilation; the corpus `_meta` is source-agnostic and carries
   no external references.
 
+#### Also in this release
+
+- Native account-existence engine (0.15.0): email→account existence checks are
+  reimplemented as a native, data-driven engine (`backend/core/account_probe.py`)
+  over a single unified site corpus (`data/mailaccess_sites.json`), with no external
+  runtime dependencies. The former standalone account-scanner module was folded into
+  `account_discovery` (deduped to one row per platform), which now covers 250+
+  platforms.
+- New `enterprise_net_intel` module (Enterprise Network Intelligence — Phase 2):
+  two unauthenticated, domain-level passive checks that extract internal
+  infrastructure without any auth attempt or lockout risk.
+  - NTLM NetBIOS challenge reader (`ntlm_challenge`): POSTs a standard Type-1
+    NTLM negotiation to `autodiscover.{domain}` (OWA fallback) and parses the
+    server's Type-2 challenge for NetBIOS domain/host, DNS domain/host, and the
+    AD forest name.
+  - Lync / Skype for Business discovery (`lync_discovery`): probes
+    `lyncdiscover.{domain}` (HTTPS then HTTP) and classifies the UC deployment
+    (onprem/hybrid/cloud) from the exposed pool FQDNs.
+  Both run concurrently under a combined budget (`enterprise_net_intel_budget_seconds`,
+  default 15s), gated by `enable_ntlm_challenge` / `enable_lync_discovery`, on
+  every domain regardless of provider. Results surface in the JSON export under
+  `infrastructure.active_directory` and `infrastructure.unified_communications`.
+  Both source types carry weight `0.0` (infrastructure metadata, not email
+  existence) in the `infrastructure` confidence family.
+
 **BREAKING (0.15.0):** legacy per-source platform toggles are consolidated into
 `ENABLE_USERNAME_PLATFORMS` and `ENABLE_USERNAME_WAVE2`, and the per-platform force
 override is `USERNAME_FORCE_<PLATFORM>`. Google-account intelligence is controlled by
@@ -447,31 +525,6 @@ Fixes:
   two remaining and reset on a month boundary. A 401 latches an
   invalid-key flag that skips all remaining Hunter calls.
 - Dehashed auth fix: account login email separate from target email
-
-### Unreleased
-
-- Native account-existence engine (0.15.0): email→account existence checks are
-  reimplemented as a native, data-driven engine (`backend/core/account_probe.py`)
-  over a single unified site corpus (`data/mailaccess_sites.json`), with no external
-  runtime dependencies. The former standalone account-scanner module was folded into
-  `account_discovery` (deduped to one row per platform), which now covers 250+
-  platforms.
-- New `enterprise_net_intel` module (Enterprise Network Intelligence — Phase 2):
-  two unauthenticated, domain-level passive checks that extract internal
-  infrastructure without any auth attempt or lockout risk.
-  - NTLM NetBIOS challenge reader (`ntlm_challenge`): POSTs a standard Type-1
-    NTLM negotiation to `autodiscover.{domain}` (OWA fallback) and parses the
-    server's Type-2 challenge for NetBIOS domain/host, DNS domain/host, and the
-    AD forest name.
-  - Lync / Skype for Business discovery (`lync_discovery`): probes
-    `lyncdiscover.{domain}` (HTTPS then HTTP) and classifies the UC deployment
-    (onprem/hybrid/cloud) from the exposed pool FQDNs.
-  Both run concurrently under a combined budget (`enterprise_net_intel_budget_seconds`,
-  default 15s), gated by `enable_ntlm_challenge` / `enable_lync_discovery`, on
-  every domain regardless of provider. Results surface in the JSON export under
-  `infrastructure.active_directory` and `infrastructure.unified_communications`.
-  Both source types carry weight `0.0` (infrastructure metadata, not email
-  existence) in the `infrastructure` confidence family.
 
 ### 0.13.5
 

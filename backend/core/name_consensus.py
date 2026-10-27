@@ -46,6 +46,13 @@ SOURCE_WEIGHTS: dict[str, tuple[float, str]] = {
     "npm_discovery": (0.55, "developer"),
     "gravatar": (0.50, "social"),
     "google_account_intel": (0.45, "social"),
+    # Email-anchored account-page display name (an existence/recovery hit whose
+    # page leaked a person name — generic OG/JSON-LD/title or a site extract rule).
+    # Class-1-ish: tied to THIS email (the site confirmed the mailbox is registered
+    # AND showed this name), so it is at least as trustworthy as a gravatar — a lone
+    # hit should reach "possible", not stay silent. Own class so it can also act as
+    # an independent corroborator of a social/dev name.
+    "account_page": (0.50, "account"),
     "email_localpart": (0.50, "inferred"),
     "about_me": (0.45, "social"),
     "twitter_profile": (0.35, "social"),
@@ -222,6 +229,11 @@ def _strip_symbol_chars(value: str) -> tuple[str, bool]:
 def _title_word(word: str) -> str:
     if len(word) == 1:
         return word.upper()
+    # Keep an initials cluster ("MKL", "A.K.") uppercase instead of title-casing to "Mkl" —
+    # fingerprint surfaces these and lowercasing them reads wrong.
+    bare = word.replace(".", "")
+    if 2 <= len(bare) <= 3 and bare.isalpha() and bare.isupper():
+        return word.upper()
     return word[:1].upper() + word[1:].lower()
 
 
@@ -267,7 +279,7 @@ def normalize_name(raw_name: str) -> tuple[str, list[str], bool]:
     value = transliterated
 
     # Strip " (@handle)" suffixes that aggregators and social platforms append
-    # to display names (e.g. "Katriel Moses (@katriel)" → "Katriel Moses").
+    # to display names (e.g. "Maya Lindqvist (@maya)" → "Maya Lindqvist").
     # Applied before scoring so it cannot pull in a handle as a name token.
     value = re.sub(r'\s*\(@[^)]+\)', '', value).strip()
 
@@ -716,6 +728,9 @@ class NameConsensusEngine:
                         key=lambda c: (
                             c.final_score,
                             c.base_weight,
+                            # Prefer an OBSERVED name's casing over the lowercase local-part
+                            # guess, so "MKL Lindqvist" (from an account) wins over "Mkl Lindqvist".
+                            c.source != "email_localpart",
                             c.source_class,
                             c.normalized_name,
                         ),
@@ -927,6 +942,18 @@ def extract_name_candidates(
             elif module_name == "github_commits":
                 name = metadata.get("author_name") or metadata.get("real_name_from_git")
                 add(name, "git_commit", ts)
+            elif module_name == "account_discovery":
+                # An email-anchored account hit that carried a profile display name
+                # (hoisted to ``metadata.name`` either by the probe's generic page
+                # extractor — which already gates through the person-name quality check,
+                # so a "Log in - <Site>" title never reaches here — or by a site's own
+                # trusted ``extract_fields`` rule). The name is tied to the probed email,
+                # so unlike the speculative username sweep it does NOT need a dual-confirmed
+                # hit to contribute: a lone candidate lands at low ("possible") confidence
+                # via its 0.40 weight, and the authoritative scorer's quality multiplier
+                # keeps a weak string from winning. This is the universal, keyless name
+                # path for non-developer mailboxes with no github/pypi/pgp footprint.
+                add(metadata.get("name"), "account_page", ts)
             elif (
                 module_name == "username_platforms"
                 or metadata.get("source") == "username_platforms"

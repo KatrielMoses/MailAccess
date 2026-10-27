@@ -133,7 +133,7 @@ def _confirmed_accounts(collected: dict[str, Any]) -> set[tuple[str, str]]:
 _THIRD_PARTY_MODULES = frozenset({
     "email_search_dork", "employee_name_discovery", "github_org_members", "commoncrawl_email",
     "code_and_cert_email", "domain_harvester", "permutation_discovery", "google_dork",
-    "linkedin_serp", "linkedin_brightdata",
+    "linkedin_serp",
 })
 _HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,38}$")
 
@@ -148,7 +148,7 @@ def ranked_usernames(email: str, collected: dict[str, Any]) -> list[tuple[str, i
     Tier 3: slugs of names found for this person.
     """
     from ..core.evidence import subject_is_freemail
-    from .linkedin_brightdata import known_names, names_match
+    from ..core.identity_match import known_names, names_match
 
     names = known_names(collected)
     out: dict[str, tuple[int, dict[str, Any]]] = {}

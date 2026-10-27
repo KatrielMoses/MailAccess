@@ -362,6 +362,7 @@ def test_aggregator_is_order_independent(index: CompanyPatternIndex) -> None:
 @pytest.fixture
 def corpus_db() -> Iterator[Any]:
     path = Path(tempfile.mkdtemp(prefix="cpi-wiring-"))
+    saved = config_mod.settings.database_url
     config_mod.settings.database_url = f"sqlite+aiosqlite:///{(path / 'c.db').as_posix()}"
     import backend.db.database as db
 
@@ -375,6 +376,10 @@ def corpus_db() -> Iterator[Any]:
     try:
         yield db
     finally:
+        config_mod.settings.database_url = saved
+        # Rebind to the original DB so later test files don't use the deleted temp DB.
+        asyncio.run(db.engine.dispose())
+        importlib.reload(db)
         shutil.rmtree(path, ignore_errors=True)
 
 

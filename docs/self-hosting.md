@@ -25,7 +25,7 @@ mailaccess serve
 ## Requirements
 
 - Docker and Docker Compose v2 (for the container path)
-- Python 3.11+ and Node 18+ (for the manual path)
+- Python 3.10+ and Node 18+ (for the manual path)
 - 512 MB RAM minimum; 1 GB recommended when running all modules concurrently
 
 ---
@@ -98,15 +98,17 @@ Every setting is optional unless marked required.
 | `ENABLE_BREACH_DEEP` | `false` | Opt-in deep breach probe |
 | `BREACH_DEEP_LIMIT` | `100` | Sites to probe; max 750 |
 | `BREACH_DEEP_FULL` | `false` | Probe all 750 HIBP sites |
-| `ENABLE_EMAIL_DISCOVERY` | `true` | Name-to-email dorks |
-| `ENABLE_USERNAME_PLATFORMS` | `true` | Default true. Set to false to disable the ~700-platform default wave and reduce investigation time by ~35-90s. |
+| `ENABLE_EMAIL_DISCOVERY` | `false` | Opt-in. Name-to-email dorks (needs `SERPAPI_KEY`). |
+| `ENABLE_ACCOUNT_DISCOVERY` | `true` | Account-existence checks (about 350 enabled). |
+| `ENABLE_USERNAME_PIVOT` | `true` | Pivot on usernames found during the run. |
+| `ENABLE_PERMUTATION_DISCOVERY` | `true` | Try likely username variants of the local part. |
+| `ENABLE_USERNAME_PLATFORMS` | `true` | Default true. Set to false to disable the default sweep of the 746 core platforms and reduce investigation time by ~35-90s. |
 | `ENABLE_USERNAME_WAVE2` | `false` | Optional. Enable Wave 2 slow/fragile platform sweep. Requires `ENABLE_USERNAME_PLATFORMS=true`. Adds ~90-150s. |
 | `MAILACCESS_DISABLE_HEALTH` | `0` | Set to `1` to bypass platform-health skip decisions without deleting the SQLite probe history. |
 | `USERNAME_FORCE_{PLATFORM}` | _(unset)_ | Per-platform demotion override. Replace `{PLATFORM}` with the uppercase, non-alphanumeric-stripped name. Example: `USERNAME_FORCE_GITHUBCOM=true`. Any truthy value (`true`, `1`, `yes`, `on`) wins. |
-
 | `MAILACCESS_SHARE_HEALTH` | `false` | Phase 6D.3 documentation-only flag for `mailaccess platform-health --share`. The CLI requires the explicit `--share` flag — this env var is documentation only and never triggers sharing. |
 | `DOMAIN_CLUSTER_CAP` | `20` | Maximum platform domains checked for infrastructure clustering. |
-| `enable_domain_cluster` | `true` | Enable or disable domain infrastructure clustering. |
+| `ENABLE_DOMAIN_CLUSTER` | `true` | Enable or disable domain infrastructure clustering. |
 | `GITHUB_TOKEN` | _(unset)_ | Optional. Required for GitHub commit author-email search. Without it, `github_commits` runs user profile search only. Get at: [github.com/settings/tokens](https://github.com/settings/tokens) |
 | `COMPANIES_HOUSE_API_KEY` | _(unset)_ | Optional. UK Companies House officer/address lookup. Free, no CC. Get at: [developer.company-information.service.gov.uk](https://developer.company-information.service.gov.uk) |
 | `ENABLE_COMMONCRAWL_EMAIL` | `true` | Master kill switch for the Common Crawl email module (domain harvest mode only). |
@@ -153,7 +155,7 @@ The username-platform site data ships with MailAccess in the unified `data/maila
 
 To add custom platforms, add them to the unified `data/mailaccess_sites.json` corpus (schema in [docs/mailaccess-sites-schema.md](mailaccess-sites-schema.md)). These custom additions are loaded at runtime alongside the shipped sites.
 
-Enabling `ENABLE_USERNAME_PLATFORMS` adds 35-90 seconds to investigation time for Wave 1. Wave 2 adds a further 90-150 seconds. For automated or batch use, consider whether the extended coverage is worth the runtime cost for your use case.
+`ENABLE_USERNAME_PLATFORMS` (on by default) adds 35-90 seconds to investigation time for Wave 1. Wave 2 adds a further 90-150 seconds. For automated or batch use, consider whether the extended coverage is worth the runtime cost for your use case.
 
 The Defender's Brief is generated automatically for every investigation. Suppress it with the CLI `--no-brief` flag or by setting `SHOW_DEFENDERS_BRIEF=false` in `.env`.
 
@@ -161,7 +163,7 @@ The Defender's Brief is generated automatically for every investigation. Suppres
 
 > **Note:** `mailaccess platform-audit` shows platforms that have been probed
 > in your local investigations. This number grows over time. The full platform
-> database (4,000+) is checked during every investigation regardless of how many
+> database (5,300+) is available to every investigation regardless of how many
 > appear in the health DB.
 
 After every investigation, MailAccess automatically adjusts which platforms it
@@ -285,44 +287,63 @@ All API keys are optional. Modules that require a missing key skip themselves wi
 
 | Variable | Used by | Where to get |
 |----------|---------|-------------|
-| `HIBP_API_KEY` | `hibp` module | https://haveibeenpwned.com/API/Key |
-| `SERPAPI_KEY` | `google_dork` module | https://serpapi.com |
-| `GITHUB_TOKEN` | `github_commits` module (optional) | https://github.com/settings/tokens |
-| `COMPANIES_HOUSE_API_KEY` | `companies_house` module | https://developer.company-information.service.gov.uk |
-| `SHODAN_API_KEY` | `domain_intel` (optional), `shodan` module | https://account.shodan.io |
-| `EMAILREP_API_KEY` | `emailrep` module (raises rate limit) | https://emailrep.io |
-| `HUNTER_IO_API_KEY` | `hunter_io` module | https://hunter.io |
-| `VIRUSTOTAL_API_KEY` | Reserved for future module | https://virustotal.com |
-| `FULLCONTACT_API_KEY` | Reserved for future module | https://fullcontact.com |
-| `CLEARBIT_API_KEY` | Reserved for future module | https://clearbit.com |
+| `MAILACCESS_PRO_KEY` | Your MailAccess account key (free or Pro): hosted lead enrichment in `harvest-emails` | Run `mailaccess login` |
+| `HIBP_API_KEY` | `hibp`, HIBP pastes in `breach_aggregator` | https://haveibeenpwned.com/API/Key |
+| `SERPAPI_KEY` | `google_dork`, `email_discovery`, `linkedin_serp` | https://serpapi.com |
+| `BREACHDIRECTORY_API_KEY` | `breachdirectory` | https://rapidapi.com (BreachDirectory API) |
+| `INTELX_API_KEY` | `intelx_lookup` | https://intelx.io/signup |
+| `DEHASHED_API_KEY`, `SNUSBASE_API_KEY` | `breach_aggregator` (optional sources) | https://dehashed.com, https://snusbase.com |
+| `GITHUB_TOKEN` | `github_commits` (optional) | https://github.com/settings/tokens |
+| `COMPANIES_HOUSE_API_KEY` | `companies_house` | https://developer.company-information.service.gov.uk |
+| `SHODAN_API_KEY` | `shodan`, `domain_intel` (optional) | https://account.shodan.io |
+| `EMAILREP_API_KEY` | `emailrep` (raises rate limit) | https://emailrep.io |
+| `HUNTER_IO_API_KEY` | `hunter_io` | https://hunter.io |
+| `NETLAS_API_KEY` | `netlas_email_footprint`, `netlas_org_surface`, subdomain enumeration | https://netlas.io |
+| `IPGEOLOCATION_API_KEY` | `ip_intel` | https://ipgeolocation.io |
+| `WHOISFREAKS_API_KEY` | `whoisfreaks_intel` | https://whoisfreaks.com |
+| `OXYLABS_SEARCH_TOKEN` | `social_discovery` (Instagram, Facebook, LinkedIn) | https://oxylabs.io |
+| `GOOGLE_MASTER_TOKEN`, `GOOGLE_MASTER_EMAIL` | `google_account_intel` profile name and photo (operator credential) | Run `mailaccess google-auth --email <operator-account>` |
+
+`google_account_intel` returns its MX and domain signal without a credential.
+Name and photo enrichment needs the operator Google credential above and
+returns nothing without it. Use a dedicated account you control. Copy both
+values to every engine host.
+
+`MAILACCESS_INDEX_URL` and `MA_INDEX_SERVICE_KEY` are operator settings used by
+the hosted service for the MailAccess Index harvest source. The index is not
+public, so self-hosted installs leave both unset and nothing changes.
+
+See [api-keys.md](api-keys.md) for details on each key.
 
 ---
 
 ## Enabling Opt-in Modules
 
-Five opt-in features require explicit enabling per run or via `.env`:
+These opt-in features need explicit enabling per run or via `.env`:
 
 | Module | Description |
 |--------|-------------|
 | `breach_deep` | Probes 100 breach sites (slow, ~90 s) |
 | `press_intel` | Press release contact extraction for business domains |
-| `email_discovery` | Name → email dorks (requires `SERPAPI_KEY`) |
-| `username_platforms` | Native username-platform engine over a 5,300+ platform corpus (set `ENABLE_USERNAME_PLATFORMS=true`) |
+| `email_discovery` | Name to email dorks (requires `SERPAPI_KEY`, set `ENABLE_EMAIL_DISCOVERY=true`) |
 | `username_platforms` Wave 2 | Slower and more fragile username-platform sweep (set `ENABLE_USERNAME_WAVE2=true`) |
+
+`username_platforms` Wave 1 (the 746 core platforms), `account_discovery`,
+`username_pivot` and `permutation_discovery` are on by default.
 
 **Enable for one run** using the `-m` / `--enable` flag:
 
 ```bash
-mailaccess investigate email -m breach_deep
-mailaccess investigate email -m press_intel
-mailaccess investigate email -m all
+mailaccess investigate jane@example.com -m breach_deep
+mailaccess investigate jane@example.com -m press_intel
+mailaccess investigate jane@example.com -m all
 ```
 
 **Enable permanently** via `.env`:
 
 ```env
 ENABLE_BREACH_DEEP=true
-ENABLE_USERNAME_PLATFORMS=true
+ENABLE_EMAIL_DISCOVERY=true
 ```
 
 `-m all` enables all opt-in modules for the current run only.

@@ -11,35 +11,50 @@ MailAccess is supported by the following partners.
 
 ---
 
-## Proxies / Residential IPs
+## Powered by
 
-<a href="https://scrapingant.com/?ref=mzliyzh">
-  <img src="../assets/sponsors/scrapingant.png" alt="ScrapingAnt" height="60">
-</a>
+### [Netlas](https://netlas.io)
 
-### [ScrapingAnt](https://scrapingant.com/?ref=mzliyzh)
+Internet scan data. Powers `netlas_email_footprint`, `netlas_org_surface` and
+subdomain enumeration (`NETLAS_API_KEY`).
 
-Rotating residential and datacenter proxies for platform checks and search dorking.
+### [ipgeolocation.io](https://ipgeolocation.io/?utm_source=github&utm_medium=referral&utm_campaign=mailaccess)
 
-> **Accepting partners in this category** — [become a sponsor](../SPONSORSHIP.md)
+IP geolocation and threat intel. Powers `ip_intel` (`IPGEOLOCATION_API_KEY`).
 
----
+### [WhoisFreaks](https://whoisfreaks.com/?utm_source=github&utm_medium=referral&utm_campaign=mailaccess)
 
-## Breach / Compromised-Credential Data
-
-> **Accepting partners in this category** — [become a sponsor](../SPONSORSHIP.md)
+WHOIS history, reverse WHOIS and dated subdomains. Powers `whoisfreaks_intel`
+(`WHOISFREAKS_API_KEY`).
 
 ---
 
-## IP Intelligence
+## Partnered with
 
-> **Accepting partners in this category** — [become a sponsor](../SPONSORSHIP.md)
+Proxy providers for platform checks and large harvests.
+
+### [IPBurger](https://www.ipburger.com/?utm_source=mailaccess&utm_medium=github_readme&utm_campaign=sponsorship)
+
+Dedicated ISP IPs.
+
+### [Mango Proxy](https://mangoproxy.com/?utm_source=katrielmoses&utm_medium=partner&utm_campaign=katrielmoses_github)
+
+Residential IPs for large harvests.
+
+### [Swiftproxy](https://www.swiftproxy.net/?ref=MailAccess)
+
+Residential IPs for email harvesting at scale.
+
+### [Rapidproxy](https://www.rapidproxy.io/?ref=MailAccess)
+
+Rotating residential IPs.
 
 ---
 
-## Email / Identity Verification
+## Open categories
 
-> **Accepting partners in this category** — [become a sponsor](../SPONSORSHIP.md)
+> **Breach / Compromised-Credential Data** and **Email / Identity Verification**
+> are accepting partners. [Become a sponsor](../SPONSORSHIP.md).
 
 ---
 

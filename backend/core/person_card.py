@@ -23,7 +23,7 @@ _LOG = logging.getLogger(__name__)
 
 # Modules whose findings describe an account/profile of the subject.
 _ACCOUNT_MODULES = (
-    "username_platforms", "username_pivot", "account_discovery", "linkedin_brightdata",
+    "username_platforms", "username_pivot", "account_discovery",
     "github_commits", "github_domain_commits", "linkedin_serp", "google_account_intel",
     "hackernews", "gravatar", "keybase",
     # UC7.3: a verified provider mailbox (Google/Microsoft) is a first-class Class-1
@@ -34,12 +34,19 @@ _ACCOUNT_MODULES = (
 )
 # Modules keyed on the email/commit identity itself (tie to the subject on their own).
 _EMAIL_LINKED_MODULES = frozenset(
-    {"account_discovery", "github_commits", "github_domain_commits", "linkedin_brightdata",
+    {"account_discovery", "github_commits", "github_domain_commits",
      "linkedin_serp", "google_account_intel", "gravatar",
      "outlook_autodiscover", "m365_active_intel", "m365_passive_intel", "imap_existence",
      "alternate_email_anchor"}
 )
 _PHOTO_DISTANCE = 6  # perceptual-hash Hamming distance for "same photo"
+# Primary avatar = the most recently-active account's photo; this ranks platforms
+# whose avatar is most likely a real, current face, used only to break ties when
+# last-active dates are equal or absent. Lower = preferred.
+_AVATAR_PLATFORM_RANK = {
+    "linkedin": 0, "github": 1, "google": 2, "gravatar": 3,
+    "x (twitter)": 4, "twitter": 4, "facebook": 5, "instagram": 6,
+}
 _AVATAR_FETCH_CAP = 8
 _AVATAR_TIMEOUT_S = 5.0
 
@@ -81,7 +88,7 @@ def _name_words(name: Any) -> list[str]:
 
 def names_match(a: Any, b: Any) -> bool:
     """First and last name agree (case-insensitive); middle names ignored; an initial
-    matches a full first name. Reused from the LinkedIn module's rule."""
+    matches a full first name. Same rule as ``identity_match.names_match``."""
     wa, wb = _name_words(a), _name_words(b)
     if len(wa) < 2 or len(wb) < 2 or wa[-1] != wb[-1]:
         return False
@@ -426,18 +433,35 @@ def _phash_groups(photos: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return kept
 
 
+def _account_last_active(a: dict[str, Any]) -> str:
+    """Latest ``last_active_at`` across the account's sources (ISO strings sort
+    chronologically); "" when the account carries no activity date."""
+    return max((str(m["last_active_at"]) for _m, m, _f in a["_metas"]
+                if m.get("last_active_at")), default="")
+
+
 def _build_photos(accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    photos: list[dict[str, Any]] = []
-    for a in accounts:
-        if not a["in_aggregates"]:
-            continue
+    """Avatars first, ordered so the primary (``photos[0]``) is an identity-rich
+    platform's photo (GitHub/LinkedIn/Google/Gravatar) when present, and the most
+    recently-active one among them — so a live GitHub/LinkedIn is the face, not a
+    dormant or throwaway profile. Everyone else follows by recency. Banners last;
+    near-duplicates dropped, keeping the first. (Stable sorts applied
+    least-significant first: platform rank, then recency desc, then identity tier.)"""
+    tied = [a for a in accounts if a["in_aggregates"]]
+    tied.sort(key=lambda a: _AVATAR_PLATFORM_RANK.get(str(a["platform"]).lower(), 50))
+    tied.sort(key=_account_last_active, reverse=True)
+    tied.sort(key=lambda a: 0 if str(a["platform"]).lower() in _AVATAR_PLATFORM_RANK else 1)
+    avatars: list[dict[str, Any]] = []
+    banners: list[dict[str, Any]] = []
+    for a in tied:
         for _m, meta, _f in a["_metas"]:
-            for kind, key in (("avatar", "avatar_url"), ("banner", "banner_url")):
+            for kind, key, bucket in (("avatar", "avatar_url", avatars),
+                                      ("banner", "banner_url", banners)):
                 url = meta.get(key)
                 if url:
-                    photos.append({"url": str(url), "source": str(a["platform"]), "kind": kind,
+                    bucket.append({"url": str(url), "source": str(a["platform"]), "kind": kind,
                                    "phash": meta.get("avatar_phash") if kind == "avatar" else None})
-    return _phash_groups(photos)
+    return _phash_groups(avatars + banners)
 
 
 def _build_timeline(accounts: list[dict[str, Any]]) -> dict[str, Any]:

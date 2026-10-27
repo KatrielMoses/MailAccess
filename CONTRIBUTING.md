@@ -71,7 +71,7 @@ PDF exports use an async `generate()` method instead of `export()`; see `PdfExpo
 
 ## Code Style
 
-- Python 3.11+, `from __future__ import annotations` at the top of every file
+- Python 3.10+, `from __future__ import annotations` at the top of every file
 - Type annotations on all function signatures
 - `async`/`await` throughout — no blocking I/O on the event loop
 - No comments that describe *what* the code does — only comments explaining *why* when the reason is non-obvious
@@ -144,8 +144,8 @@ equivalent post-primary pipeline; core reasoning files are not discovered throug
   `cache_path=tmp_path / "x.json"` instead of mutating global cache files.
 - Build result fixtures with
   `ModuleResult(status=ModuleStatus.SUCCESS, findings=[...])`; see
-  `tests/test_platform_dedup.py`.
-- Use `caplog` for log assertions; see `tests/test_breach_normalizer.py`.
+  `tests/test_alternate_email_anchor.py`.
+- Use `caplog` for log assertions; see `tests/core/test_scrapingant.py`.
 - Follow the async orchestration patterns in `tests/test_phase_runner.py`.
 
 ---

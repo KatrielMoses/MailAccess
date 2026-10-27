@@ -39,8 +39,17 @@ _NONLATIN_TOKEN = r"[Ѐ-ӿ؀-ۿ一-鿿ऀ-ॿ]+"
 # Two separate top-level patterns because Latin tokens require
 # whitespace between them (real names), while non-Latin runs (e.g.
 # Japanese / Chinese / Korean) frequently arrive space-less.
+# A "real" name word (capital + at least one lowercase) — used to require that a name
+# with initials still contains an actual word, so pure-initials strings don't pass.
+_LATIN_TOKEN_RE = re.compile(rf"^{_LATIN_TOKEN}$", re.UNICODE)
+# An initials cluster: 2-3 uppercase letters, optionally dot-separated ("MKL", "A.K.",
+# "J.R.M"). Admits initials-style names like "MKL Lindqvist" that fingerprint surfaces, which
+# the all-lowercase-required token rule used to drop. Guarded in is_plausible_person_name:
+# at least one real word must be present, and a known acronym (AWS/GCP/CEH) is never initials.
+_INITIALS_TOKEN = r"[A-Z](?:\.?[A-Z]){1,2}\.?"
+_NAME_TOKEN = rf"(?:{_LATIN_TOKEN}|{_INITIALS_TOKEN})"
 _LATIN_PERSON_RE = re.compile(
-    rf"^{_LATIN_TOKEN}(?:\s+{_LATIN_TOKEN}){{1,3}}$",
+    rf"^{_NAME_TOKEN}(?:\s+{_NAME_TOKEN}){{1,3}}$",
     re.UNICODE,
 )
 # Non-Latin allows whitespace-less runs so "王小明" / "山田太郎"
@@ -856,6 +865,16 @@ def is_plausible_person_name(text: str) -> bool:
         tokens = [t for t in cleaned.split() if t]
         if tokens:
             token_count = len(tokens)
+            # Initials support ("MKL Lindqvist"): the person RE now admits short all-caps tokens.
+            # (a) require at least one real word so pure-initials ("MKL A.K.") don't pass;
+            # (b) never accept a known acronym/stopword as initials ("AWS Lindqvist" → out, since
+            #     the all-caps rule below only rejects 4+ letters and aws/gcp/ceh are 3).
+            if not any(_LATIN_TOKEN_RE.match(t.strip(".,;:'-")) for t in tokens):
+                return False
+            for t in tokens:
+                tok = t.strip(".,;:'-")
+                if tok and tok.isupper() and tok.lower() in _STOPWORD_TOKENS:
+                    return False
             # Apply the same Phase 4 ALL-stopwords rule to role words.
             # "Chief Executive Officer" → all 3 tokens role words → reject.
             # "Chief John Smith" → 1 role word / 3 tokens → 33 % → allowed

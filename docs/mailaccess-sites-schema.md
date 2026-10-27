@@ -22,7 +22,7 @@
     "schema_version": 2,
     "source": "mailaccess",
     "description": "Unified MailAccess site corpus for email-existence and username-url probing.",
-    "site_count": 5365,
+    "site_count": 5360,
     "provenance": "MailAccess-assembled compilation of publicly-observable account-existence facts (probe URL + existence marker per platform). Endpoints, markers and detection logic are original MailAccess implementations, verified live by the MailAccess probe engine. Not a copy of any third-party list.",
     "detection": "All rows route through the unified probe_detector across both check paradigms."
   },
@@ -113,6 +113,7 @@ to the probe response **on a hit**:
 | `health_key` | platform key for `platform_health` (default `"account_discovery:{id}"`). Chosen so health stats line up across tools as they migrate onto shared ids. |
 | `frequent_rate_limit` | hint that the site rate-limits aggressively. |
 | `disabled` + `disabled_reason` | exclude from probing but keep the row (documents coverage of a dead/broken upstream site, same convention as `mailaccess-extra-sites.json`). |
+| `intrusive` | `true` for a password-reset / account-recovery check that can make the service email or text the subject. Skipped unless `ENABLE_FORGOT_PASSWORD_PROBES=true`. |
 
 ## Forward-compatibility proof — a `username-url` row
 
@@ -195,7 +196,9 @@ reconciled its incoming site definitions against the existing corpus by `dedup_k
   request. `strip_bad_char` (username character stripping) is applied by `probe_platform`. The two
   legacy probe detectors were collapsed into the single `probe_detector`.
 
-Final corpus: **5,365 sites**.
+Corpus as of 0.19.0: **5,360 sites** (5,100 `username-url`, 260 `email-existence`).
+The account-existence checks defined in code (`backend/core/account_probe_ported.py`)
+are merged in at load time, so the loaded `email-existence` set is larger than the file's 260.
 
 ## Runtime fold (no schema/data change)
 

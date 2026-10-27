@@ -5,7 +5,12 @@ import asyncio
 import httpx
 import pytest
 
-from backend.core.probe_detector import _detect_message, detect_hit, probe_platform
+from backend.core.probe_detector import (
+    _detect_message,
+    detect_hit,
+    is_non_discriminating_url,
+    probe_platform,
+)
 
 
 async def _probe(defn: dict[str, object], body: str) -> tuple[str, str | None]:
@@ -191,3 +196,48 @@ async def test_response_url_error_url_username_is_substituted() -> None:
 
     # final_url == probe_url (no redirect) == the substituted errorUrl → miss.
     assert await _probe(defn, "x" * 600) == ("miss", None)
+
+
+# ── null-marker / soft-200 false positives (username-pivot FP fixes) ──
+
+
+def test_message_404_is_a_miss_not_an_absence_fallback() -> None:
+    # A ``message`` site whose only marker is a (now stale) absence string must NOT fall
+    # back to "hit" when that marker is simply missing from a 404 not-found page: the 404
+    # settles it (no such account). FilmWeb: /user/<anyone> → 404, and its old marker
+    # ``top.location.href = '/404';`` is long gone, so every handle looked like a hit.
+    defn = {"checkType": "message", "absenceStrs": ["top.location.href = '/404';"]}
+    assert detect_hit(defn, "<html>Nie znaleziono strony</html>" * 100, 404, "") == "miss"
+    # a real profile still answers 200 and still hits (absence marker genuinely absent).
+    assert detect_hit(defn, "<html>a real profile page</html>" * 100, 200, "") == "hit"
+
+
+def test_soft_200_mediawiki_user_page_is_a_miss() -> None:
+    # A MediaWiki ``User:`` page soft-200s for ANY username (a missing user gets a 200
+    # page), so a bare status check reads every handle as a hit. The content gate — the
+    # presence of ``ns-2`` + ``mw-body-content``, the absence of the userdoesnotexist
+    # marker — is what tells exists from missing. A maintenance / not-registered 200 that
+    # lacks the presence markers is a miss, never a confirmed account hit.
+    defn = {
+        "checkType": "message",
+        "presenseStrs": ["ns-2", "mw-body-content"],
+        "absenceStrs": ["mw-userpage-userdoesnotexist"],
+    }
+    maintenance = "<title>The Guild Wars Wikis are undergoing maintenance.</title>" + "x" * 6000
+    assert detect_hit(defn, maintenance, 200, "") == "miss"
+    missing = "<div class='mw-userpage-userdoesnotexist'>no such user</div>"
+    assert detect_hit(defn, missing, 200, "") == "miss"
+    real = "<body class='ns-2'><div class='mw-body-content'>hi</div></body>" + "x" * 600
+    assert detect_hit(defn, real, 200, "") == "hit"
+
+
+def test_truncated_handle_redirect_is_non_discriminating() -> None:
+    # A soft-200 that redirected to a SHORTER prefix of the probed handle (domestika:
+    # /maya.lindqvist → /en/maya) landed on a different, pre-existing account, not ours.
+    assert is_non_discriminating_url("https://www.domestika.org/en/maya", "maya.lindqvist")
+    # the handle itself in the final path is still discriminating.
+    assert not is_non_discriminating_url(
+        "https://cyberdefenders.org/p/maya.lindqvist", "maya.lindqvist"
+    )
+    # a numeric-id redirect (not a prefix of the handle) is left alone.
+    assert not is_non_discriminating_url("https://example.test/u/12345", "foo")

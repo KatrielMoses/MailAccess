@@ -387,7 +387,8 @@ async def test_google_timeout_path_export_has_honest_provider_statuses(monkeypat
     assert smtp_summary["provider"] == "google"
     assert smtp_summary["candidates_routed"] == 3
     assert smtp_summary["gravatar_checked"] == 3
-    assert "checked" not in smtp_summary
+    # ``checked`` (v0.14.2) counts candidates actually contacted, never just routed.
+    assert smtp_summary["checked"] == smtp_summary["gravatar_checked"]
     assert "probes_attempted" not in smtp_summary
 
     # The export itself: populated provider_verification_* on every record.
@@ -479,7 +480,8 @@ async def test_provider_dispatch_candidates_routed_counts_unique_candidates(monk
     monkeypatch.setattr(orchestrator, "M365Verifier", DuplicatingVerifier)
     summary = await _dispatch_provider_verifier("example.com", findings, detection)
     assert summary["candidates_routed"] == 2
-    assert "checked" not in summary
+    # ``checked`` (v0.14.2) counts candidates the M365 verifier actually probed.
+    assert summary["checked"] == 2
 
 
 @pytest.mark.asyncio

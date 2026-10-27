@@ -39,6 +39,10 @@ class GravatarLookupModule(BaseModule):
                 resp = await client.get(
                     f"https://www.gravatar.com/{email_hash}.json",
                     headers={"Accept": "application/json"},
+                    # Gravatar now 302s www -> a locale host (en.gravatar.com/<hash>.json),
+                    # which serves the identical {"entry":[...]} JSON. Follow it, else every
+                    # lookup degrades to an "unexpected 302" and we lose a top identity source.
+                    follow_redirects=True,
                 )
         except Exception as exc:
             return ModuleResult(

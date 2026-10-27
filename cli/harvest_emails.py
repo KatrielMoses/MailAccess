@@ -203,11 +203,27 @@ def _format_progress_table(
     return table
 
 
-def calculate_eta(elapsed: float, completed_modules: int, total_modules: int) -> str:
-    """Estimate remaining wall time from completed module throughput."""
+def estimate_remaining_seconds(
+    elapsed: float, completed_modules: int, total_modules: int
+) -> float | None:
+    """Raw remaining-time estimate in seconds, or ``None`` while it's too early to tell.
+
+    A plain count-based extrapolation: per-completed-module throughput projected over
+    the modules still outstanding. The fast modules finish first, so this under-counts
+    the slow tail (``username_pivot``, ``account_discovery``, ...) — the live display
+    floors and smooths it (see :meth:`LiveHarvestDisplay._eta_line`) instead of showing
+    this figure raw.
+    """
     if completed_modules <= 0:
+        return None
+    return max(0.0, (total_modules - completed_modules) * (elapsed / completed_modules))
+
+
+def calculate_eta(elapsed: float, completed_modules: int, total_modules: int) -> str:
+    """Back-compat string form of :func:`estimate_remaining_seconds` (no flooring)."""
+    remaining = estimate_remaining_seconds(elapsed, completed_modules, total_modules)
+    if remaining is None:
         return "calculating..."
-    remaining = max(0.0, (total_modules - completed_modules) * (elapsed / completed_modules))
     minutes, seconds = divmod(int(round(remaining)), 60)
     return f"~{minutes}m{seconds:02d}s"
 
@@ -228,6 +244,10 @@ class LiveHarvestDisplay:
         # event can report "(N emails, 12.3s)" without re-deriving it
         # from the orchestrator.
         self._module_started_at: dict[str, float] = {}
+        # Smoothed-ETA state: a non-increasing countdown so the figure never jumps
+        # around between renders (see _eta_line). None until the first estimate shows.
+        self._eta_shown: float | None = None
+        self._eta_at: float = 0.0
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.touch(exist_ok=True)
 
@@ -363,12 +383,21 @@ class LiveHarvestDisplay:
             state["status"] in {"success", "done", "failed", "partial", "skipped"}
             for state in self.states.values()
         )
-        eta = calculate_eta(elapsed, completed, len(self.states))
+        now = time.monotonic()
+        running_elapsed = [now - started for started in self._module_started_at.values()]
+        eta_text = self._eta_line(
+            now,
+            elapsed,
+            estimate_remaining_seconds(elapsed, completed, len(self.states)),
+            running_elapsed,
+            completed,
+            len(self.states),
+        )
         ticker = Text()
         ticker.append(
             f"Emails found: {self.counts['email']}  ·  Names: {self.counts['name']}  ·  "
             f"Subdomains: {self.counts['subdomain']}  ·  Elapsed: {int(elapsed // 60)}m"
-            f"{int(elapsed % 60):02d}s  ·  ETA: {eta}\n\n"
+            f"{int(elapsed % 60):02d}s  ·  {eta_text}\n\n"
         )
         ticker.append("Latest finds:\n", style="bold")
         for kind, value, source, confidence in self.latest_finds:
@@ -380,6 +409,48 @@ class LiveHarvestDisplay:
             Layout(Panel(ticker, title="Live ticker"), ratio=2),
         )
         return layout
+
+    def _eta_line(
+        self,
+        now: float,
+        elapsed: float,
+        remaining: float | None,
+        running_elapsed: list[float],
+        completed: int,
+        total: int,
+    ) -> str:
+        """Smoothed, floored, non-increasing ETA string with a module progress count.
+
+        The raw estimate collapses once the many fast modules finish, long before the
+        slow tail (``username_pivot``, ``account_discovery``) is done — so a lone
+        countdown looks stuck at a tiny number. Instead we: (1) floor the figure at a
+        bounded fraction of the longest in-flight module's runtime, so a module that is
+        plainly still grinding can't be implied to finish in the next blink; (2) only
+        ever let the shown value tick *down*, so it never jumps around; and (3) once the
+        estimate runs out with work still live, say "finishing up…" rather than "0s".
+        """
+        progress = f"({completed}/{total} modules)"
+        if completed >= total:
+            return f"finishing up…  {progress}"
+        if remaining is None:
+            return f"calculating…  {progress}"
+        # A module already running for T seconds will not vanish in the next blink.
+        floor = min(max(running_elapsed) * 0.5, 60.0) if running_elapsed else 0.0
+        candidate = max(remaining, floor)
+        if self._eta_shown is None:
+            shown = candidate
+        else:
+            decayed = self._eta_shown - max(0.0, now - self._eta_at)
+            shown = max(floor, min(candidate, decayed))
+        self._eta_shown, self._eta_at = shown, now
+        # "finishing up…" is the true tail only — not any small figure, or a slow module
+        # appearing later (which legitimately revises the estimate up) would un-say it.
+        if (total - completed) <= 2:
+            return f"finishing up…  {progress}"
+        display_secs = max(shown, 5.0)  # never flash a jumpy sub-5s number mid-run
+        minutes, seconds = divmod(int(round(display_secs)), 60)
+        disp = f"{minutes}m{seconds:02d}s" if minutes else f"{seconds}s"
+        return f"~{disp} left  {progress}"
 
     def __rich_console__(self, console: Console, options: Any):
         yield self.__rich__()
@@ -1356,6 +1427,9 @@ def run_harvest_emails(
     #    through to ``format_harvest_cli_output``.  ``full`` is the
     #    restore-legacy alias and is handled inside the formatter itself.
     # ------------------------------------------------------------------
+    # The formatter returns plain text (Rich's export_text), so it must not be
+    # re-parsed as markup: a row label like "[verified CONF 0.94]" would be
+    # swallowed as a style tag and the panel border would misalign.
     console.print(
         format_harvest_cli_output(
             result,
@@ -1366,7 +1440,8 @@ def run_harvest_emails(
             show_personal=show_personal,
             full=full,
             with_subdomains=with_subdomains,
-        )
+        ),
+        markup=False,
     )
     if result.employee_names_processed and not ml_enabled_for_run:
         console.print(

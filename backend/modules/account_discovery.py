@@ -133,6 +133,13 @@ def _make_finding(record: dict[str, Any]) -> dict[str, Any]:
         if "name" not in meta and extras.get("full_name"):
             meta["name"] = extras["full_name"]
 
+    # The person card's photo pipeline (``_build_photos`` / ``attach_avatar_hashes``)
+    # keys avatars on ``avatar_url``; account probes hoist to ``avatar``. Alias it so an
+    # email-anchored account page's picture becomes a candidate profile photo (then
+    # perceptual-hash dedup + recency ranking decide the primary), not just metadata.
+    if meta.get("avatar") and not meta.get("avatar_url"):
+        meta["avatar_url"] = meta["avatar"]
+
     return {
         "platform": record.get("name", "unknown"),
         "profile_url": profile_url,

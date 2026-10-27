@@ -9,9 +9,17 @@ MailAccess is designed for:
 - **Penetration testing** — with explicit written authorization from the target organization
 - **Personal exposure audits** — checking your own email addresses against breach databases and public sources
 
-## All Data Is from Public Sources
+## Where the Data Comes From
 
-Every data point MailAccess retrieves comes from publicly accessible sources: breach notification databases, public APIs, DNS records, WHOIS registries, and the open web. MailAccess does not exploit vulnerabilities, bypass authentication, or access any non-public system or dataset.
+By default, MailAccess reads public, logged-out sources: web pages, public APIs, DNS and WHOIS records, certificate logs, public code hosts and breach notification services. Account checks use each site's public sign-up, sign-in or lookup pages, the same pages anyone can open. Checks that could make a site send the person a password-reset message are off unless you turn them on (`ENABLE_FORGOT_PASSWORD_PROBES`).
+
+Some features use more than that, and only when they are set up:
+
+- **Provider keys you add.** Optional providers (for example breach databases, Netlas, ipgeolocation.io, WhoisFreaks, Oxylabs and Hunter) answer with their own data under their own terms. You are responsible for following those terms.
+- **Google profile enrichment.** With an operator Google credential, MailAccess signs in as that operator account to read the name and photo Google shows for an address. It never signs in as anyone else.
+- **The hosted service at mailaccess.pro** also uses MailAccess's own index of addresses found in public web crawls, and MailAccess Pro adds business contacts from public and third-party commercial sources.
+
+MailAccess does not exploit vulnerabilities, get around CAPTCHAs or bot checks, or access anyone else's accounts, messages or private data.
 
 ## Not a Hacking Tool
 

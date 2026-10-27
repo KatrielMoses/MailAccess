@@ -120,8 +120,6 @@ _PROFILE_INFERENCE_BLOCKED = _USERNAME_ENUM_MODULES | frozenset(
         "social_links",
         "twitter_profile",
         "marketplace_profile",
-        # A full LinkedIn profile card (Bright Data): profiling a person.
-        "linkedin_brightdata",
         "phone_intel",
         "messaging_hints",
         "hackernews",
@@ -199,7 +197,6 @@ _ALL_KNOWN_MODULES: frozenset[str] = frozenset(
         "intelx_lookup",
         "keybase",
         "leakcheck",
-        "linkedin_brightdata",
         "linkedin_serp",
         "username_platforms",
         "marketplace_profile",

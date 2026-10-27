@@ -6,9 +6,11 @@ the service's own publicly-observable authentication behaviour. It runs as part 
 the `account_discovery` step of `mailaccess investigate`, with **no third-party
 API keys and no runtime dependencies**.
 
-As of 0.18.0 the catalogue covers **357 email-checkable services** — consumer apps,
-SaaS and developer tools, and community forums. This page lists every one and the
-method used for it.
+As of 0.19.0 the catalogue enables **349 email-checkable services**: consumer apps,
+SaaS and developer tools, and community forums. **343 run by default**; the other 6
+are password-reset checks that run only with `ENABLE_FORGOT_PASSWORD_PROBES=true`.
+This page lists every one and the method used for it. Checks that went dead or stopped giving a reliable signal are
+disabled in the catalogue and not listed here.
 
 ## What "checking" means
 
@@ -27,18 +29,21 @@ methods, from least to most sensitive:
   address is already associated with an account. *No email is sent.*
 - **Key-directory lookup** — a public key/profile directory returns a record for
   the address. *No email is sent.*
-- **Password-reset differential** — a reset form returns a distinct "no account
-  found" message for an unknown address. Because submitting a *registered* address
-  triggers a real reset email, these are marked **intrusive** and are **off by
-  default** — enable with `ENABLE_FORGOT_PASSWORD_PROBES=true` for authorized,
+- **Account lookup**: the public lookup a sign-in page uses returns the accounts
+  linked to the address, or an empty list. *No email is sent.*
+- **Password-reset differential** — a reset or account-recovery form returns a
+  distinct "no account found" message for an unknown address. Because submitting a
+  *registered* address can trigger a real reset email or SMS, these are marked
+  **intrusive** and are **off by default** — enable with `ENABLE_FORGOT_PASSWORD_PROBES=true` for authorized,
   consented testing only. Only oracles that expose a reliable negative ("no account
   found") marker are included; positive "we sent you a reset" pages are rejected as
   unreliable.
 
 ## Honesty and safety
 
-- **Default-on checks send no email.** Every method except the gated
-  password-reset differential is non-intrusive.
+- **Default-on checks send no email or SMS.** Every method except the gated
+  password-reset differential is non-intrusive. A test fails the build if a
+  default-on check points at a reset or recovery flow.
 - **Verdicts are explicit:** `exists`, `absent`, `rate_limited` (the service
   throttled us), `transport_error` (DNS/timeout/TLS — not the platform's fault),
   or `inconclusive`. Transport failures are never mislabelled as rate-limiting.
@@ -68,7 +73,7 @@ Default installs are unaffected — the browser code is imported lazily.
 
 <!-- GENERATED: do not hand-edit tables below; regenerate from the catalogue. -->
 
-## Consumer, SaaS &amp; developer services (201)
+## Consumer, SaaS &amp; developer services (198)
 
 | Platform | Domain | Category | Check method |
 |---|---|---|---|
@@ -114,14 +119,14 @@ Default installs are unaffected — the browser code is imported lazily.
 | HackerRank | www.hackerrank.com | dev | Signup availability |
 | How-To Geek | www.howtogeek.com | dev | Existence probe |
 | Hugging Face | huggingface.co | dev | Signup availability |
-| LuaRocks | luarocks.org | dev | Password-reset differential |
+| LuaRocks | luarocks.org | dev | Password-reset differential (intrusive, gated) |
 | Qiita | qiita.com | dev | Signup availability |
 | RubyGems | rubygems.org | dev | Signup availability |
 | Wix | users.wix.com | dev | Signup availability |
 | Wondershare | accounts.wondershare.com | dev | Signup availability |
 | XDA Developers | www.xda-developers.com | dev | Existence probe |
 | Edx | edx.org | education | Signup-validation API |
-| AniList | anilist.co | entertainment | Password-reset differential |
+| AniList | anilist.co | entertainment | Password-reset differential (intrusive, gated) |
 | Apple TV | tv.apple.com | entertainment | Login-error differential |
 | Dreame | dreame.com | entertainment | Login-error differential |
 | Girls' Life | girlslife.com | entertainment | Signup availability |
@@ -164,7 +169,7 @@ Default installs are unaffected — the browser code is imported lazily.
 | Quizlet | quizlet.com | learning | Signup availability |
 | Vedantu | vedantu.com | learning | Login-error differential |
 | Laposte | laposte.fr | mails | Signup availability |
-| Mail Ru | mail.ru | mails | Password-reset differential |
+| Mail Ru | mail.ru | mails | Password-reset differential (intrusive, gated) |
 | Protonmail | protonmail.com | mails | Key-directory lookup |
 | Ello | ello.co | medias | Signup availability |
 | Flickr | flickr.com | medias | Login-error differential |
@@ -172,7 +177,6 @@ Default installs are unaffected — the browser code is imported lazily.
 | Rambler | rambler.ru | medias | Login-error differential |
 | Caringbridge | caringbridge.org | medical | Login-error differential |
 | Sevencups | 7cups.com | medical | Signup availability |
-| Blip | blip.fm | music | Signup availability |
 | Deezer | deezer.com | music | Signup availability |
 | Gaana | gaana.com | music | Login-error differential |
 | JioSaavn | jiosaavn.com | music | Signup availability |
@@ -213,7 +217,6 @@ Default installs are unaffected — the browser code is imported lazily.
 | Teamtreehouse | teamtreehouse.com | programing | Signup availability |
 | Vrbo | vrbo.com | real_estate | Login-error differential |
 | Armurerieauxerre | armurerie-auxerre.com | shopping | Signup availability |
-| Deliveroo | deliveroo.com | shopping | Signup availability |
 | Dominosfr | dominos.fr | shopping | Signup availability |
 | Ebay | ebay.com | shopping | Login-error differential |
 | Envato | envato.com | shopping | Signup availability |
@@ -223,7 +226,6 @@ Default installs are unaffected — the browser code is imported lazily.
 | Garmin | garmin.com | shopping | Signup availability |
 | Haute Sauce | buyhautesauce.com | shopping | Signup availability |
 | Naturabuy | naturabuy.fr | shopping | Signup availability |
-| Nike | nike.com | shopping | Signup availability |
 | Nykaa Man | nykaaman.com | shopping | Signup availability |
 | Rappi | rappi.com | shopping | Login-error differential |
 | Tata CLiQ | tatadigital.com | shopping | Login-error differential |
@@ -241,7 +243,7 @@ Default installs are unaffected — the browser code is imported lazily.
 | MEEFF | meeff.com | social_media | Login-error differential |
 | MeWe | mewe.com | social_media | Signup availability |
 | Myspace | myspace.com | social_media | Signup availability |
-| Odnoklassniki | ok.ru | social_media | Password-reset differential |
+| Odnoklassniki | ok.ru | social_media | Password-reset differential (intrusive, gated) |
 | Parler | parler.com | social_media | Login-error differential |
 | Patreon | patreon.com | social_media | Signup availability |
 | Pinterest | pinterest.com | social_media | Signup availability |
@@ -252,7 +254,7 @@ Default installs are unaffected — the browser code is imported lazily.
 | Vsco | vsco.co | social_media | Signup availability |
 | Wattpad | wattpad.com | social_media | Signup availability |
 | Xing | xing.com | social_media | Signup availability |
-| Adobe | adobe.com | software | Password-reset differential |
+| Adobe | adobe.com | software | Account lookup |
 | Archive | archive.org | software | Signup availability |
 | Docker | docker.com | software | Signup availability |
 | Firefox | firefox.com | software | Login-error differential |
@@ -268,7 +270,7 @@ Default installs are unaffected — the browser code is imported lazily.
 | Playtomic | playtomic.io | sport | Login-error differential |
 | Sporcle | sporcle.com | sport | Signup availability |
 | Strava | strava.com | sport | Signup availability |
-| Uniscore | uniscore.com | sport | Password-reset differential |
+| Uniscore | uniscore.com | sport | Password-reset differential (intrusive, gated) |
 | Blablacar | blablacar.com | transport | Signup availability |
 | Emirates | emirates.com | travel | Signup availability |
 | Polarsteps | polarsteps.com | travel | Signup availability |
@@ -325,18 +327,16 @@ All checked by the same **non-intrusive login-error differential** (a login atte
 | weblogistics.vn | windows10forums.com | worldofplayers.ru |
 | xen-concept.com | xentr.net |  |
 
-## Other community forums (25)
+## Other community forums (20)
 
 Checked by the same non-intrusive login-error differential (MyBB and similar forum software).
 
 | | | |
 |---|---|---|
-| community.mybb.com | cracked.to | demonforums.net |
-| discussion.cambridge-mt.com | drachenhort.user.stunet.tu-freiberg.de | forum.blitzortung.org |
-| forum.codeigniter.com | forum.kodi.tv | forum.ndemiccreations.com |
-| forums.nextpvr.com | forums.therian-guide.com | nattyornotforum.nattyornot.com |
-| onlinesequencer.net | thecardboard.org | www.babeshows.co.uk |
-| www.badeggsonline.com | www.bios-mods.com | www.biotechnologyforums.com |
-| www.blackworldforum.com | www.bluegrassrivals.com | www.chinaphonearena.com |
-| www.clashfarmer.com | www.cpaelites.com | www.cpahero.com |
-| www.thevapingforum.com |  |  |
+| community.mybb.com | demonforums.net | discussion.cambridge-mt.com |
+| drachenhort.user.stunet.tu-freiberg.de | forum.blitzortung.org | forum.codeigniter.com |
+| forum.kodi.tv | forum.ndemiccreations.com | forums.nextpvr.com |
+| forums.therian-guide.com | onlinesequencer.net | thecardboard.org |
+| www.babeshows.co.uk | www.bios-mods.com | www.biotechnologyforums.com |
+| www.blackworldforum.com | www.bluegrassrivals.com | www.clashfarmer.com |
+| www.cpaelites.com | www.thevapingforum.com |  |

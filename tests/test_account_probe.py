@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 import httpx
 import pytest
@@ -233,6 +234,82 @@ def test_username_url_row_is_representable():
     row = sites.get("github_username")
     assert row and row["check_type"] == "username-url"
     assert "{username}" in row["uri_check"]
+
+
+# --------------------------------------------------------------------------- #
+# Default-on checks never drive a password-reset / recovery flow               #
+# --------------------------------------------------------------------------- #
+
+# Request surfaces that point at a reset/recovery flow: the endpoint path, a native
+# handler's name, or a GraphQL operation. Scanned instead of every payload string so an
+# unrelated value (e.g. an A/B-test flag named "...FORGOT...") does not trip it.
+_RESET_FLOW_RE = re.compile(r"forgot|reset|restore|recover", re.IGNORECASE)
+# A positive marker that reads "reset link sent" means the probe's hit path IS the send.
+_RESET_SENT_RE = re.compile(r"(reset|recover)\w*.{0,40}\bsent\b|\bsent\b.{0,40}(reset|recover)",
+                            re.IGNORECASE)
+_KNOWN_RESET_CHECKS = {"kompas", "luarocks", "anilist", "mail_ru", "odnoklassniki", "uniscore"}
+
+
+def _default_on_email_checks(sites):
+    """Same filter account_discovery applies with every opt-in flag off."""
+    return {
+        sid: d for sid, d in sites.items()
+        if d.get("check_type") == "email-existence"
+        and not d.get("disabled")
+        and not d.get("intrusive")
+        and not d.get("default_off")
+    }
+
+
+def _reset_flow_surfaces(defn):
+    spec = defn.get("spec") or {}
+    urls = [defn.get("uri_check"), (defn.get("pre_check") or {}).get("url"),
+            spec.get("url"), (spec.get("prefetch") or {}).get("url")]
+    surfaces = [u for u in urls if u]
+    if defn.get("handler"):
+        surfaces.append(defn["handler"])
+    for body in (defn.get("requestPayload"), spec.get("json")):
+        if isinstance(body, dict):
+            surfaces += [str(body[k]) for k in ("query", "operationName") if body.get(k)]
+    return surfaces
+
+
+def test_default_enabled_checks_never_drive_a_reset_flow():
+    """Docs + README promise default checks never send the subject a reset email/SMS:
+    reset/recovery flows must be ``intrusive`` (ENABLE_FORGOT_PASSWORD_PROBES only)."""
+    sites, _ = load_mailaccess_sites()
+    default_on = _default_on_email_checks(sites)
+    assert default_on, "no default-on email checks loaded"
+    offenders = {}
+    for sid, defn in default_on.items():
+        hits = [s for s in _reset_flow_surfaces(defn) if _RESET_FLOW_RE.search(s)]
+        marker = str(defn.get("e_string") or "")
+        if _RESET_SENT_RE.search(marker):
+            hits.append(f"e_string={marker!r}")
+        if hits:
+            offenders[sid] = hits
+    assert not offenders, f"default-on checks hit a reset/recovery flow: {offenders}"
+
+
+def test_known_reset_checks_are_gated():
+    sites, _ = load_mailaccess_sites()
+    default_on = _default_on_email_checks(sites)
+    for sid in _KNOWN_RESET_CHECKS:
+        assert sites[sid].get("intrusive") is True, sid
+        assert sid not in default_on, sid
+
+
+def test_reset_flow_scan_catches_an_ungated_reset_check():
+    """Guard the guard: the scan must flag the shapes the audit found."""
+    luarocks = {"uri_check": "https://luarocks.example/user/forgot_password"}
+    anilist = {"uri_check": "https://anilist.example/graphql",
+               "requestPayload": {"query": "mutation($email:String){ResetPassword(email:$email)}"}}
+    okru = {"handler": "odnoklassniki_recovery"}
+    mailru = {"handler": "ported_spec",
+              "spec": {"url": "https://account.example/api/v1/user/password/restore"}}
+    for defn in (luarocks, anilist, okru, mailru):
+        assert any(_RESET_FLOW_RE.search(s) for s in _reset_flow_surfaces(defn)), defn
+    assert _RESET_SENT_RE.search("password reset link has been sent")
 
 
 # --------------------------------------------------------------------------- #

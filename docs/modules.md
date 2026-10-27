@@ -11,92 +11,110 @@
 
 ### Modules
 
+MailAccess ships 82 modules over a 5,300+ platform corpus. 71 of them need no API key. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with the others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
+
+Investigation modules:
+
 | Module | Coverage | Key Required | Opt-in |
 |--------|----------|--------------|--------|
+| email_credibility | Normalization, aliases, disposable domains, reputation | No | No (runs first) |
 | gravatar | Profile hash lookup | No | No |
-| hibp | Breach check | Yes | No |
-| breach_deep | Probes top 100 highest-severity breached sites for account existence | No (HIBP corpus fetched automatically) | Yes |
-| emailrep | Reputation + blacklist | No | No |
+| gravatar_lookup | Extended Gravatar profile extraction | No | No |
+| hibp | Breach check | Yes (`HIBP_API_KEY`) | No |
+| breachdirectory | Second breach source | Yes (`BREACHDIRECTORY_API_KEY`) | No |
+| xposedornot | Email-to-breach lookup with breach names, data classes and risk indicators | No | No |
+| leakcheck | Public breach lookup with regional coverage and stealer routing | No | No |
+| breach_aggregator | Scylla, HIBP Pastes, Dehashed, Snusbase (existence flags only) | No (paid sources optional) | No |
+| breach_deep | Account existence on the top 100 highest-severity breached sites | No | Yes |
 | hudson_rock | Infostealer logs (free) | No | No |
-| google_dork | 5 automated dorks | Yes (SerpAPI) | No |
-| email_discovery | Recovers other email addresses owned by same person via name dorks | Yes (SERPAPI_KEY) | No |
-| domain_intel | Domain + Shodan | No (Shodan optional) | No |
-| dns_lookup | MX/SPF/DMARC/DKIM/A/NS extraction | No | No |
-| whois_lookup | Domain WHOIS, privacy detection | No | No |
-| wayback | Finds historical pages where email appeared publicly via Wayback Machine CDX | No | No |
-| github_commits | Finds repos committed to with this email, surfaces real name from git config. Requires GITHUB_TOKEN for commit search; user profile search works without token. | No (GITHUB_TOKEN optional, required for commit search) | No |
+| intelx_lookup | IntelligenceX leak and paste records | Yes (`INTELX_API_KEY`, free tier) | No |
+| pastebin_search | Paste search via psbdmp.ws | No | No |
+| ransomware_intel | Company-domain match against ransomware victim lists; skips free providers | No | No |
+| emailrep | Reputation and blacklist | No | No |
+| hunter_io | Deliverability verdict and score | Yes (`HUNTER_IO_API_KEY`) | No |
+| outlook_autodiscover | Consumer Microsoft mailbox check | No | No |
+| google_account_intel | Google-hosted account detection; name and photo with an operator credential | No (enrichment needs `GOOGLE_MASTER_TOKEN`) | No |
+| account_discovery | Native account-existence checks, about 350 enabled | No | No |
+| browser_account_probe | Headless-browser existence checks for JS-only flows | No (needs Playwright) | No |
+| username_platforms | Native username sweep over the 5,300+ platform corpus (~750 validated core sites by default) | No | No |
+| username_pivot | Username sweep for usernames recovered by other modules | No | No |
+| permutation_discovery | Up to 60 address variants from a recovered name | No | No |
+| social | Platform checks defined in YAML | No | No |
+| social_links | Username extraction, feeds the pivot | No | No |
+| social_discovery | Instagram, Facebook and LinkedIn profiles via Oxylabs Web Search | Yes (`OXYLABS_SEARCH_TOKEN`) | No |
+| linkedin_serp | LinkedIn search from a confirmed name | No (`SERPAPI_KEY` optional) | No |
+| twitter_profile | Profile data for a confirmed Twitter/X username | No | No |
+| marketplace_profile | Etsy and eBay profile data for confirmed usernames | No | No |
+| fediverse_discovery | Fediverse and ActivityPub profiles | No | No |
+| keybase | Keybase profile and identity proofs | No | No |
+| hackernews | Hacker News profile name | No | No |
+| github_commits | Repos committed to with this email, real name from git config | No (`GITHUB_TOKEN` needed for commit search) | No |
+| github_code_search | Public GitHub code and commits mentioning the email | No (`GITHUB_TOKEN` optional) | No |
+| npm_discovery | npm packages by this email | No | No |
+| pypi_discovery | PyPI packages by this email | No | No |
 | pgp_keyserver | PGP key UID name lookup | No | No |
 | orcid_lookup | ORCID researcher identity | No | No |
-| hackernews | HackerNews profile name | No | No |
-| sec_edgar | SEC EDGAR filing contact extraction | No | No |
-| companies_house | UK Companies House officers | Yes (COMPANIES_HOUSE_API_KEY, free) | No |
-| press_intel | Press release contact extraction | No | Yes |
-| xposedornot | Default-on direct email-to-breach corpus lookup with breach names, data classes, and risk indicators | No | No |
-| leakcheck | Default-on public breach corpus lookup with regional coverage and stealer routing | No | No |
-| ransomware_intel | Default-on domain victim correlation against ransomware lists; skips free providers | No | No |
-| social | 13 platforms via YAML | No | No |
-| social_links | Username extraction, feeds pivot | No | No |
-| account_discovery | Native 250+ platform existence probes | No | Yes |
-| username_platforms | Native username-platform engine over the MailAccess corpus, 5,300+ platform definitions (two-marker detection; no runtime dependency) | No | No (disable via `ENABLE_USERNAME_PLATFORMS=false`) |
-| breachdirectory | 2nd breach source | Yes | No |
-| username_pivot | Native username sweep via recovered usernames | No | Yes |
-| permutation_discovery | 60 email variants | No | Yes |
-| phone_intel | Phone validation + WA/TG hints | No | No |
-| messaging_hints | Telegram/WhatsApp username check | No | No |
-| google_account_intel | Unauthenticated Gmail/Google account existence + public profile intel | No | No (on by default) |
-| identity_graph | Cross-platform cluster analysis | No | No (automatic) |
-| platform_health | Persistent probe health, fragility, and skip decisions | No | No (automatic) |
-| temporal_cluster | Coordinated account-creation windows | No | No (automatic) |
-| shadow_profiles | Same-name accounts tied to alternate emails | No | No (automatic) |
-| avatar_clusters | Cross-platform perceptual-avatar clusters | No | No (automatic) |
-| breach_corpus | Cached and severity-ranked public HIBP breach catalog | No | No (used by `breach_deep`) |
-| common_names | Common-name and username false-positive controls | No | No (automatic) |
-| disposable_domains | Disposable-email confidence controls | No | No (automatic) |
+| wayback | Archived pages where the email appeared | No | No |
+| google_dork | 5 automated dorks | Yes (`SERPAPI_KEY`) | No |
+| email_discovery | Other addresses owned by the same person, via name dorks | Yes (`SERPAPI_KEY`) | Yes |
+| alternate_email | Alternate addresses from commits, Gravatar, breaches and permutations | No | No |
+| alternate_email_anchor | Re-checks strong alternates (bounded, depth 1) | No | No |
+| phone_intel | Phone validation and WhatsApp/Telegram hints | No | No |
+| messaging_hints | Telegram username check | No | No |
+| domain_intel | Domain context (Shodan optional) | No | No |
+| dns_lookup | MX, SPF, DMARC, DKIM, A and NS records | No | No |
+| whois_lookup | Domain WHOIS, privacy detection | No | No |
+| whoisfreaks_intel | Domains registered with this email, pre-redaction WHOIS owners | Yes (`WHOISFREAKS_API_KEY`) | No |
+| ip_intel | Location, owner, risk and abuse contact for collected IPs | Yes (`IPGEOLOCATION_API_KEY`) | No |
+| netlas_email_footprint | Where the email appears online (pages, certs, reverse WHOIS) | Yes (`NETLAS_API_KEY`) | No |
+| netlas_org_surface | Company-domain subdomains, panels, ports and CVEs | Yes (`NETLAS_API_KEY`) | No |
+| shodan | Shodan domain lookup (stub) | Yes (`SHODAN_API_KEY`) | No |
+| domain_cluster | Shared-infrastructure clusters across found platforms | No | No |
+| domain_harvester | Multi-source email harvest for the company domain | No | No |
+| sec_edgar | SEC EDGAR filing contacts | No | No |
+| companies_house | UK Companies House officers | Yes (`COMPANIES_HOUSE_API_KEY`, free) | No |
+| opencorporates | Company registration data for business domains | No | No |
+| press_intel | Press release contacts | No | Yes |
 
-> 75 modules · 5,300+ platform corpus (~700 vetted platforms probed in the default wave)
+The remaining modules are domain-harvest sources for `mailaccess harvest-emails`; see [Domain Email Harvesting Modules](#domain-email-harvesting-modules). Reasoning components such as `identity_graph`, `platform_health` and `name_consensus` are not modules; see [Reasoning components](#reasoning-components).
+
+The count of 71 keyless modules follows each module's `requires_key` flag. `ip_intel` and `whoisfreaks_intel` count as keyless but do nothing until their key is set, so the table lists that key. `permutation_discovery` is a pipeline phase rather than a registered module; it is listed here because it runs on every investigation.
 
 ### Platform Coverage
 
-MailAccess checks usernames derived from the target email across multiple platform databases:
+MailAccess checks the target email and the usernames derived from it against its own platform corpus, `data/mailaccess_sites.json` (5,360 sites: 5,100 username-url rows and 260 email-existence rows).
 
-| Source | Platforms | Default |
-|--------|-----------|---------|
-| Native two-marker username sweep | 700+ | On |
-| Native account-existence engine | 250+ | On |
-| Username-platform native engine | 5,000+ | On |
+| Source | What it checks | Platforms | Default |
+|--------|----------------|-----------|---------|
+| `username_platforms` | Username derived from the email local part | ~750 validated core sites per run (5,300+ in the corpus) | On |
+| `username_pivot` | Usernames recovered by other modules | Same corpus | On |
+| `account_discovery` | Whether the email itself is registered | About 350 enabled checks | On |
+| `browser_account_probe` | Email existence in JS-only sign-in flows | 11 email-first checks (more opt-in) | On, needs Playwright |
 
-Total with the username-platform engine enabled: 5,000+ unique platforms after deduplication.
+Findings from these sources are deduplicated by URL domain. When two sources confirm the same platform, the finding is marked dual-confirmed with high confidence.
 
-Enable the username-platform sweep:
-
-```bash
-ENABLE_USERNAME_PLATFORMS=true mailaccess investigate email
-```
-
-Enable username-platform + Wave 2, the slower platform sweep:
+Widen the username sweep with Wave 2, the slower and more fragile sites:
 
 ```bash
-ENABLE_USERNAME_PLATFORMS=true ENABLE_USERNAME_WAVE2=true mailaccess investigate email
+ENABLE_USERNAME_WAVE2=true mailaccess investigate jane@example.com
 ```
 
-The platform site data ships locally in `data/mailaccess_sites.json` (the unified corpus) and is loaded offline — no network fetch, no external tool, and no cache. Custom platforms can be added to the same unified `data/mailaccess_sites.json` (schema in [docs/mailaccess-sites-schema.md](mailaccess-sites-schema.md)).
-
-Findings from the native two-marker sweep and the full username-platform engine are deduplicated by URL domain. When both confirm the same platform, the finding is marked dual-confirmed with high confidence.
+The platform site data ships locally in `data/mailaccess_sites.json` and is loaded offline: no network fetch, no external tool and no cache. Custom platforms can be added to the same file (schema in [docs/mailaccess-sites-schema.md](mailaccess-sites-schema.md)).
 
 | Variable | Module | Key Required | Default | Description |
 |----------|--------|--------------|---------|-------------|
-| `ENABLE_USERNAME_PLATFORMS` | `username_platforms` | None | `true` | On by default; the ~700-platform default wave adds ~35-90s. Set `false` to disable. |
+| `ENABLE_USERNAME_PLATFORMS` | `username_platforms` | None | `true` | On by default; the default wave adds ~35-90s. Set `false` to disable. |
 | `ENABLE_USERNAME_WAVE2` | `username_platforms` (Wave 2) | None | `false` | Enable slow/fragile platform sweep. Requires `ENABLE_USERNAME_PLATFORMS=true`. Adds ~90-150s. |
 | `USERNAME_FORCE_{PLATFORM}` | `username_platforms` | None | _(unset)_ | Override auto-demotion for one platform. |
+| `ENABLE_ACCOUNT_DISCOVERY` | `account_discovery` | None | `true` | Set `false` to skip account-existence checks. |
+| `ENABLE_USERNAME_PIVOT` | `username_pivot` | None | `true` | Set `false` to skip the pivot sweep. |
+| `ENABLE_PERMUTATION_DISCOVERY` | `permutation_discovery` | None | `true` | Set `false` to skip address permutations. |
 | `MAILACCESS_SHARE_HEALTH` | `platform-health` | None | `false` | Opt in to anonymized health sharing; sharing still requires `--share`. |
 | `DOMAIN_CLUSTER_CAP` | `domain_cluster` | None | `20` | Maximum domains checked per infrastructure cluster pass. |
 
 ---
 
-
-MailAccess ships 75 modules over a 5,300+ platform corpus. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with all others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
-
-A module marked **key required** skips itself with `status: skipped` when its API key is absent — it does not cause the investigation to fail.
+A module marked **key required** skips itself with `status: skipped` when its API key is absent. It does not cause the investigation to fail.
 
 ---
 
@@ -169,7 +187,7 @@ Uses the unauthenticated ORCID public API to search by email, then fetches each 
     "credit_name": null,
     "biography": "Researcher biography...",
     "researcher_urls": ["https://example.edu/~jane"],
-    "additional_emails": ["jane@university.edu"]
+    "additional_emails": ["jane@example.org"]
   }
 }
 ```
@@ -515,13 +533,13 @@ Post-primary module that dorks for other email addresses owned by the same perso
 
 | | |
 |--|--|
-| **Gate** | `ENABLE_EMAIL_DISCOVERY=true` (default) |
+| **Gate** | `ENABLE_EMAIL_DISCOVERY=true` (opt-in, default `false`) |
 | **Requires key** | Yes - `SERPAPI_KEY` |
 | **Runs** | Post-primary; needs a name from primary modules |
 | **Skips** | Automatically if no name was recovered |
 | **Status** | Implemented |
 
-Enabled by default (`ENABLE_EMAIL_DISCOVERY=true`) and self-gating: it skips when `SERPAPI_KEY` is missing or no usable real name was recovered. It does not recursively investigate discovered addresses.
+Off by default. Set `ENABLE_EMAIL_DISCOVERY=true` to turn it on. Once on, it still skips when `SERPAPI_KEY` is missing or no usable real name was recovered. It does not recursively investigate discovered addresses.
 
 For up to 3 recovered names, it runs these SerpAPI dorks concurrently:
 - `"{full_name}" "@gmail.com" OR "@outlook.com" OR "@yahoo.com" OR "@protonmail.com"`
@@ -944,16 +962,18 @@ Runs in the primary phase alongside other modules. Findings are username candida
 
 ## `account_discovery`
 
-Check account existence across 250+ platforms via MailAccess's native account-existence probe engine (no third-party dependency — the email-to-account existence probes are a native MailAccess implementation as of 0.15.0).
+Check whether the email is registered on about 350 platforms with MailAccess's native account-existence engine. As of 0.19.0, 394 checks are defined and 349 are enabled; 343 run by default, and the 6 password-reset checks run only with `ENABLE_FORGOT_PASSWORD_PROBES=true`. The probes are a native MailAccess implementation with no third-party dependency.
 
 | | |
 |--|--|
 | **Requires key** | No |
+| **Default** | On |
+| **Disable** | `ENABLE_ACCOUNT_DISCOVERY=false` |
 | **Status** | Implemented |
 
 Platform coverage is data-driven from `data/mailaccess_sites.json` (the unified site corpus — see [the schema](mailaccess-sites-schema.md)). Add or update a site by editing that file; declarative sites need no code. A handful of sites whose upstream flows are broken or bot-protected are present but marked `disabled` with a reason.
 
-Enable via `ENABLE_ACCOUNT_DISCOVERY=true` (opt-in — runs 250+ probes, expect 30–90 s per investigation).
+On by default (`ENABLE_ACCOUNT_DISCOVERY=true`). It runs about 350 checks, so expect 30-90 s per investigation. Set `ENABLE_ACCOUNT_DISCOVERY=false` to skip it. Checks that send a password-reset email stay off unless `ENABLE_FORGOT_PASSWORD_PROBES=true`.
 
 **Finding example (account confirmed):**
 ```json
@@ -989,7 +1009,7 @@ Findings with `email_recovery` or `phone_hint` in metadata are flagged `high_val
 
 ## `username_platforms`
 
-MailAccess's native username-platform checking engine. It draws on a 5,300+ platform corpus via MailAccess's own `httpx` engine, and by default probes an evidence-first, precision-ranked wave of ~700 vetted platforms (two-marker detection) rather than the whole corpus. The platform site data is the native MailAccess corpus, and the runtime has no third-party dependency.
+MailAccess's native username-platform checking engine. It draws on a 5,300+ platform corpus via MailAccess's own `httpx` engine, and by default probes the ~750 validated core sites (two-marker detection) rather than the whole corpus. Other validated sites run after the core list only when `USERNAME_TAIL_BUDGET_SECONDS` is set (default `0`, off), and their hits are marked low confidence. The platform site data is the native MailAccess corpus, and the runtime has no third-party dependency.
 
 | | |
 |--|--|
@@ -1000,9 +1020,9 @@ MailAccess's native username-platform checking engine. It draws on a 5,300+ plat
 | **Runtime** | ~35-90s for Wave 1, plus ~90-150s for Wave 2 |
 | **Platform database** | Ships locally in `data/mailaccess_sites.json` (the unified corpus), loaded offline — no network fetch, no external tool, no cache |
 | **Custom additions** | `data/mailaccess_sites.json` (schema in [docs/mailaccess-sites-schema.md](mailaccess-sites-schema.md)) |
-| **Status** | Implemented, opt-in |
+| **Status** | Implemented |
 
-Wave 1 covers roughly 1500 fast and reliable platforms: `status_code` checks, no bot protection, and higher Alexa rank. Wave 2 adds roughly 1000 slower, protected, regional, or message-based platforms.
+Wave 1, the default, is the ~750 validated core sites. Wave 2 (opt-in) adds slower, protected, regional or message-based platforms.
 
 Before the sweep, MailAccess validates the top 50 `status_code` platforms against known-unclaimed usernames. Sites that return hits for non-existent users are treated as catch-alls and excluded from results.
 
@@ -1026,16 +1046,16 @@ a specific platform to run in its native wave regardless of health stats, set
 uppercase, prefix with `USERNAME_FORCE_`).
 
 Username variants used by default:
-- raw local-part, such as `katriel.moses`
-- separators stripped, such as `katrielmoses`
-- underscore separator, such as `katriel_moses`
+- raw local-part, such as `jane.doe`
+- separators stripped, such as `janedoe`
+- underscore separator, such as `jane_doe`
 
 **Finding schema:**
 ```json
 {
   "platform": "Example",
-  "profile_url": "https://example.com/katriel.moses",
-  "username": "katriel.moses",
+  "profile_url": "https://example.com/jane.doe",
+  "username": "jane.doe",
   "confidence": "high",
   "tags": ["social"],
   "check_type": "status_code",
@@ -1056,7 +1076,7 @@ Username variants used by default:
   "platforms_confirmed": 5,
   "platforms_not_found": 1480,
   "platforms_errored": 3,
-  "username_variants_used": ["katriel.moses", "katrielmoses", "katriel_moses"],
+  "username_variants_used": ["jane.doe", "janedoe", "jane_doe"],
   "dual_confirmed": 2,
   "unique_platforms": 5
 }
@@ -1119,17 +1139,19 @@ Post-primary phase: collects up to five unique usernames from primary findings (
 | | |
 |--|--|
 | **Requires key** | No |
+| **Default** | On |
+| **Disable** | `ENABLE_USERNAME_PIVOT=false` |
 | **Status** | Implemented |
 
-Opt-in (`ENABLE_USERNAME_PIVOT=true`). Runs after primary modules complete and before `permutation_discovery`. Reads platform definitions from the unified corpus (`data/mailaccess_sites.json`).
+On by default (`ENABLE_USERNAME_PIVOT=true`). Runs after primary modules complete and before `permutation_discovery`. Reads platform definitions from the unified corpus (`data/mailaccess_sites.json`).
 
 **Finding example:**
 ```json
 {
   "platform": "GitHub",
-  "profile_url": "https://github.com/katriel_moses",
+  "profile_url": "https://github.com/jane_doe",
   "metadata": {
-    "matched_username": "katriel_moses",
+    "matched_username": "jane_doe",
     "category": "dev",
     "source": "username_pivot"
   },
@@ -1140,7 +1162,7 @@ Opt-in (`ENABLE_USERNAME_PIVOT=true`). Runs after primary modules complete and b
 **Module metadata:**
 ```json
 {
-  "usernames_pivoted": ["katriel.moses", "katriel_moses"],
+  "usernames_pivoted": ["jane.doe", "jane_doe"],
   "platforms_checked": 1600,
   "platforms_confirmed": 2,
   "corpus_version": "1.4.0"
@@ -1251,16 +1273,18 @@ Post-primary-phase orchestrator: if any upstream module recovered a real name (f
 | | |
 |--|--|
 | **Requires key** | No (HIBP key enables breach-check sub-probes) |
+| **Default** | On |
+| **Disable** | `ENABLE_PERMUTATION_DISCOVERY=false` |
 | **Status** | Implemented |
 
-Opt-in (`ENABLE_PERMUTATION_DISCOVERY=true`) because it adds 30–60 seconds and up to 120 extra API calls. Skips automatically if no name was recovered. The original email address is never re-checked.
+On by default (`ENABLE_PERMUTATION_DISCOVERY=true`). It adds 30-60 seconds and up to 120 extra API calls, so set it to `false` when speed matters. The `public-business-contact` product mode blocks it. Skips automatically if no name was recovered. The original email address is never re-checked.
 
 **Finding example (match):**
 ```json
 {
   "platform": "permutation_match",
   "metadata": {
-    "matched_email": "jane.doe@outlook.com",
+    "matched_email": "jane.doe@example.com",
     "source_module": "hibp",
     "match_type": "breach",
     "breach_count": 2
@@ -1275,7 +1299,7 @@ Opt-in (`ENABLE_PERMUTATION_DISCOVERY=true`) because it adds 30–60 seconds and
   "names_found": ["Jane Doe"],
   "permutations_checked": 60,
   "related_emails_found": true,
-  "matched_emails": ["jane.doe@outlook.com"]
+  "matched_emails": ["jane.doe@example.com"]
 }
 ```
 
@@ -1410,31 +1434,34 @@ never degrades result quality.
 
 ## `google_account_intel`
 
-Native, unauthenticated Google account intelligence: Gmail/Google account existence plus public profile data (GAIA ID, display name, profile photo, YouTube channel, public Drive files, Maps review history, and active Google services). No credentials, no login, no setup.
+Detects whether an address is a Google-hosted account (Gmail, or a Google Workspace domain found from its MX records). With an operator Google credential it also adds the public profile name, photo and GAIA ID.
 
 | | |
 |--|--|
-| **Requires key** | No |
+| **Requires key** | No for the hosting signal. Profile enrichment needs `GOOGLE_MASTER_TOKEN` + `GOOGLE_MASTER_EMAIL` |
+| **Setup** | `mailaccess google-auth` stores the operator credential |
+| **Default** | On |
 | **Status** | Implemented |
 
-On by default (`ENABLE_GOOGLE_ACCOUNT_INTEL=true`). Runs only against `@gmail.com`, `@googlemail.com`, and domains whose MX records route through Google (Google Workspace). All other domains are skipped immediately.
+On by default (`ENABLE_GOOGLE_ACCOUNT_INTEL=true`). Runs only against `@gmail.com`, `@googlemail.com`, and domains whose MX records route through Google. Other domains return an empty result.
 
-**Finding example:**
+The hosting signal alone is `medium` confidence: it proves the domain is Google-served, not that a specific mailbox is active. Name and photo enrichment uses an operator Google session minted from the master token. Without that credential, enrichment returns nothing and the module keeps the MX signal only. The enrichment source is health-registered, so a Google endpoint change degrades to the MX signal instead of failing.
+
+**Finding example (enriched):**
 ```json
 {
   "platform": "google_account",
-  "profile_url": "https://plus.google.com/123456789",
+  "username": "jane",
   "metadata": {
+    "source": "google_account_intel",
+    "google_hosted": true,
+    "hosting_kind": "gmail",
+    "email_domain": "gmail.com",
+    "signal": "mx_domain",
     "gaia_id": "123456789",
     "display_name": "Jane Doe",
-    "account_creation_date": "2011-03-15",
-    "profile_photo_url": "https://lh3.googleusercontent.com/...",
-    "custom_profile_photo": true,
-    "youtube_channel_url": "https://www.youtube.com/channel/...",
-    "maps_reviews_count": 12,
-    "public_drive_files": 3,
-    "google_services_active": ["YouTube", "Maps", "Drive"],
-    "possible_location_hint": "London, Shoreditch"
+    "avatar_url": "https://lh3.googleusercontent.com/...",
+    "custom_profile_photo": true
   },
   "confidence": "high"
 }
@@ -1618,321 +1645,11 @@ Performs extended Gravatar profile extraction. It requires no API key and runs b
 
 ## `intelx_lookup`
 
-Queries the IntelligenceX free tier. It requires no key for free-tier access and runs by default.
+Queries IntelligenceX for public leak and paste records. It needs a free-tier key (`INTELX_API_KEY`) and skips without one. On by default once the key is set.
 
 ## `pastebin_search`
 
 Searches paste data through `psbdmp.ws`. It requires no API key and runs by default.
-
-## `name_consensus` (built-in)
-
-Not a standalone module: this is a core engine in `backend/core/` that runs after all modules complete. It reads name signals from profile, key, researcher, social, package, and commit findings, then emits one defensible identity result for the report and CLI.
-
-| | |
-|--|--|
-| **Requires key** | No |
-| **Execution** | Automatic after collection |
-| **Status** | Implemented |
-
-Sources include:
-- `github_user`
-- `gravatar_profile`
-- `keybase_profile`
-- `twitter_profile`
-- `linkedin_snippet`
-- `pgp_keyserver`
-- `orcid_profile`
-- `hackernews_profile`
-- `pypi_discovery`
-- `npm_discovery`
-- Git commit author names
-
-The engine outputs `confirmed_name`, `name_confidence`, `name_reasoning`, and `name_sources`. Role/system email addresses such as `noreply@`, `admin@`, `support@`, `postmaster@`, and `notifications@` are automatically skipped so service accounts do not receive inferred identities.
-
-Candidate names are Unicode-normalized and clustered with RapidFuzz so minor
-spelling and transliteration differences can corroborate one another. Timestamped
-signals receive temporal decay, while Cyrillic, Arabic, CJK, Devanagari, and other
-Unicode names remain eligible. Common-name matches are capped to avoid overconfident
-identity claims.
-
-**Result schema:**
-```json
-{
-  "confirmed_name": "Jane Doe",
-  "name_confidence": "probable",
-  "confidence_score": 2.18,
-  "name_sources": ["github_profile", "orcid_profile"],
-  "name_source_classes": ["developer", "institutional"],
-  "name_reasoning": "GitHub Profile, Orcid Profile support this name across 2 independent source classes.",
-  "conflicting_names": []
-}
-```
-
-**Result fields:** `confirmed_name`, `name_confidence`, `confidence_score`,
-`name_sources`, `name_source_classes`, `name_reasoning`, `conflicting_names`.
-
-No standalone `ModuleResult` metadata is emitted. Implementation settings:
-```json
-{
-  "fuzzy_threshold": 88,
-  "temporal_decay_time_constant_days": 1095,
-  "confidence_bands": ["confirmed", "probable", "possible", "unknown"]
-}
-```
-
----
-
-## `identity_graph` (built-in)
-
-Not a standalone module — the identity graph is built automatically after all primary and post-primary modules complete. It cross-references findings by shared usernames, profile photos, display names, and breach data to produce confidence-scored identity clusters.
-
-Perceptual-avatar clusters add `same_avatar` edges, fuzzy bio clusters add
-`same_bio` edges, and coordinated account dates add `same_signup_window` edges.
-The graph also surfaces shadow-profile pairs when the same multi-token display name
-appears under different non-anchor email addresses.
-
-| | |
-|--|--|
-| **Requires key** | No |
-| **Opt-in** | No — always runs |
-| **Status** | Implemented |
-
-The graph is available at:
-- CLI: displayed automatically (use `--show-collisions` to expand low-confidence clusters)
-- Web UI: `/investigation/:id/graph`
-- API: `GET /api/report/{id}/clusters` (clusters) and `GET /api/report/{id}/graph` (D3 nodes/links)
-
-**Cluster schema:**
-```json
-{
-  "id": "cluster-1",
-  "confidence": "high",
-  "score": 0.91,
-  "reasoning": "Shared username 'janedoe' across GitHub, HackerNews, and Twitter findings",
-  "members": [
-    {"module": "social", "platform": "GitHub", "username": "janedoe"},
-    {"module": "username_platforms", "platform": "HackerNews", "username": "janedoe"}
-  ]
-}
-```
-
-**Cluster fields:** `confidence`, `label`, `reasoning`, `findings`,
-`finding_count`, `is_collision`.
-
-**Graph schema (D3 endpoint):**
-```json
-{
-  "nodes": [
-    {"id": "platform:github", "type": "platform", "label": "github", "degree": 4}
-  ],
-  "links": [
-    {"source": "platform:github", "target": "platform:twitter", "type": "same_avatar"}
-  ]
-}
-```
-
----
-
-## `platform_health` (built-in)
-
-Persists platform probe outcomes and feeds rolling health decisions back into the
-enumeration and reset-probe paths.
-
-| | |
-|--|--|
-| **Requires key** | No |
-| **Execution** | Automatic; inspect with `mailaccess platform-health` |
-| **Status** | Implemented |
-
-Records live in `~/.mailaccess/platform_health.db`. A platform is skipped after 10
-consecutive misses, or after at least 30 probes in 30 days with a hit rate below
-0.05. Set `MAILACCESS_DISABLE_HEALTH=1` to bypass decisions without deleting
-history.
-
-The self-healing selectors are `get_skip_set()`, `get_demote_set()`, and
-`get_upgrade_set()`. Enumerators use `should_probe_async()` and
-`record_probe_async()` so SQLite work does not block the event loop.
-
-**Finding schema (health row):**
-```json
-{
-  "platform": "reset_prober:example.com",
-  "total_probes": 42,
-  "hits": 1,
-  "misses": 36,
-  "inconclusive": 5,
-  "hit_rate": 0.024,
-  "fragility": 0.31,
-  "consecutive_misses": 11,
-  "window_days": 30,
-  "first_seen": "2026-05-01T09:00:00+00:00",
-  "last_seen": "2026-06-22T10:30:00+00:00"
-}
-```
-
-**Finding fields:** `platform`, `total_probes`, `hits`, `misses`, `inconclusive`,
-`hit_rate`, `fragility`, `consecutive_misses`, `window_days`, `first_seen`,
-`last_seen`.
-
-**Module metadata (enumerator integration):**
-```json
-{
-  "health_tracked": 2180,
-  "health_skipped": 14,
-  "auto_demoted_skipped": 5,
-  "auto_demoted_to_wave2": 12,
-  "auto_upgraded_to_wave1": 3,
-  "auto_demotion_overrides": {
-    "NoisySite.com": "USERNAME_FORCE_NOISYSITECOM"
-  }
-}
-```
-
-### Phase 6D audit trail
-
-Every auto-demotion / auto-upgrade event appends one JSONL line to
-`~/.mailaccess/platform_demotion.log`:
-
-```json
-{"timestamp": "2026-06-24T10:00:00Z", "platform": "NoisySite.com", "action": "skip",
- "reason": "inconclusive_rate=0.82, probes=134",
- "stats": {"inconclusive_rate": 0.82, "hit_rate": 0.08, "total_probes": 134},
- "reversible_via": "USERNAME_FORCE_NOISYSITECOM"}
-```
-
-The log is the user-visible audit trail behind
-`mailaccess platform-audit --show-demotions`.
-
-### Phase 6D.3 community health sharing (opt-in)
-
-```bash
-mailaccess platform-health --share
-```
-
-Posts anonymized platform stats (hit / miss / inconclusive rates, average
-latency, total probes, last probed) to a public GitHub Gist. **Strictly
-opt-in**: the `--share` flag is the only way this code path runs. No
-background-job sharing, no scheduled sharing, no auto-share on investigation
-completion. The payload contains platform-level metadata only — no user
-data, no email addresses, no investigation targets, no finding content.
-
----
-
-## `temporal_cluster` (built-in)
-
-Clusters account creation dates into coordinated signup windows and adds temporal
-corroboration to the identity graph.
-
-| | |
-|--|--|
-| **Requires key** | No |
-| **Execution** | Automatic during identity-graph construction |
-| **Status** | Implemented |
-
-The default window is 60 days and the default minimum cluster size is five.
-
-**Finding schema:**
-```json
-{
-  "platforms": ["github", "reddit", "twitter", "steam", "discord"],
-  "earliest": "2026-01-02T00:00:00+00:00",
-  "latest": "2026-02-10T00:00:00+00:00",
-  "span_days": 39,
-  "cluster_size": 5,
-  "score": 1.0
-}
-```
-
-**Finding fields:** `platforms`, `earliest`, `latest`, `span_days`,
-`cluster_size`, `score`.
-
-No standalone `ModuleResult` metadata is emitted. Implementation defaults:
-```json
-{
-  "window_days": 60,
-  "min_cluster_size": 5
-}
-```
-
----
-
-## `shadow_profiles` (built-in)
-
-Finds same-name accounts associated with different non-anchor email addresses.
-
-| | |
-|--|--|
-| **Requires key** | No |
-| **Execution** | Automatic during identity-graph construction |
-| **Status** | Implemented |
-
-Two or more normalized display-name tokens are required. Matching usernames raise
-confidence to `high`; display-name-only pairs remain `medium`.
-
-V2 is gated on a non-null `confirmed_name` and requires at least two platforms
-shared with the primary identity. V1 and V2 findings are rendered in the
-`IDENTITY ANALYSIS` section.
-
-**Finding schema:**
-```json
-{
-  "primary_email": "jane@gmail.com",
-  "primary_platform": "twitter",
-  "shadow_email": "jane@proton.me",
-  "shadow_platform": "steam",
-  "display_name": "Jane Doe",
-  "shared_username": "janedoe",
-  "confidence": "high"
-}
-```
-
-**Finding fields:** `primary_email`, `primary_platform`, `shadow_email`,
-`shadow_platform`, `display_name`, `shared_username`, `confidence`.
-
-No standalone `ModuleResult` metadata is emitted. Implementation defaults:
-```json
-{
-  "min_name_token_count": 2,
-  "anchor_email_excluded": true
-}
-```
-
----
-
-## `avatar_clusters` (built-in)
-
-Groups cross-platform avatar observations by exact URL or perceptual-hash
-similarity.
-
-| | |
-|--|--|
-| **Requires key** | No |
-| **Execution** | Automatic during identity-graph construction |
-| **Status** | Implemented |
-
-`backend/core/avatar_hasher.py` normalizes images to 8x8 grayscale pHashes. The
-clusterer accepts a maximum Hamming distance of five and omits singletons.
-This default-on post-primary enrichment is bounded to 20 avatar fetches per
-domain per run and feeds its clusters into the identity graph.
-
-**Finding schema:**
-```json
-{
-  "phash": "8f0f0f0f0f0f0f0f",
-  "platforms": ["github", "twitter", "reddit"],
-  "cluster_size": 3
-}
-```
-
-**Finding fields:** `phash`, `platforms`, `cluster_size`.
-
-No standalone `ModuleResult` metadata is emitted. Implementation limits:
-```json
-{
-  "max_hamming_distance": 5,
-  "max_avatar_urls_per_client": 20
-}
-```
 
 ---
 
@@ -2013,7 +1730,555 @@ applies a 1.10× boost at 3+ member platforms and 1.15× at 5+.
 
 ---
 
-## `shadow_profile_v2` (built-in, Phase 6B.2)
+## `alternate_email`
+
+Post-primary module that collects other addresses tied to the same person from GitHub commits, Gravatar, breach records and Gravatar-checked permutations. Role accounts (`info@`, `support@` and similar) are dropped.
+
+| | |
+|--|--|
+| **Requires key** | No (`GITHUB_TOKEN` optional) |
+| **Runs** | Post-primary |
+| **Status** | Implemented |
+
+---
+
+## `alternate_email_anchor`
+
+Re-runs the cheap email-anchored checks (registration and Gravatar) on alternates that `alternate_email` found through a strong source (a breach record, a commit email or a Gravatar profile). Bounded: at most 2 alternates, depth 1. Accounts are merged under one person and tagged with the address that anchored them.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Status** | Implemented |
+
+---
+
+## `breach_aggregator`
+
+Post-primary breach lookup across Scylla (free), HIBP Pastes, Dehashed and Snusbase. Each source runs only when it is enabled or keyed, and one failing source never stops the others. Only existence flags are kept (`has_plaintext_password`, `has_hash`); passwords, hashes and salts are discarded at parse time.
+
+| | |
+|--|--|
+| **Requires key** | No for Scylla. Optional: `HIBP_API_KEY`, `DEHASHED_API_KEY` + `DEHASHED_ACCOUNT_EMAIL`, `SNUSBASE_API_KEY` |
+| **Runs** | Post-primary |
+| **Status** | Implemented |
+
+---
+
+## `browser_account_probe`
+
+Headless-browser email-existence checks for platforms whose signal only shows up in a JavaScript flow. Email-first login checks send no email and are on by default. Forgot-password checks email the subject, so they run only with `ENABLE_FORGOT_PASSWORD_PROBES=true`, and the run reports how many reset emails it sent. Hits are `medium` confidence.
+
+| | |
+|--|--|
+| **Requires key** | No. Needs Playwright: `pip install "mailaccess[browser]" && playwright install chromium`. Skips without it |
+| **Default** | On (`ENABLE_BROWSER_PROBES`); XenForo forum checks opt-in via `ENABLE_BROWSER_XENFORO=true` |
+| **Status** | Implemented |
+
+---
+
+## `email_credibility`
+
+Runs first. Normalizes the address, detects aliases and disposable domains, and gives a reputation verdict. A disposable address limits the primary phase to breach modules.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Runs** | Before the primary phase |
+| **Status** | Implemented |
+
+---
+
+## `hunter_io`
+
+Verifies one address against the Hunter.io email verifier and maps the verdict to confidence: deliverable with score 80+ is 0.85, deliverable below 80 is 0.70, risky is 0.45. Undeliverable is reported as not found.
+
+| | |
+|--|--|
+| **Requires key** | Yes: `HUNTER_IO_API_KEY` |
+| **Status** | Implemented |
+
+---
+
+## `ip_intel`
+
+Post-primary enrichment of IPs that breach and DNS modules already collected: location, owner, risk and abuse contact via ipgeolocation.io. It discovers no new IPs. Capped at `IPGEO_INVESTIGATE_IP_CAP` (default 10) per run. Disable per run with `--no-ipgeo`.
+
+| | |
+|--|--|
+| **Requires key** | Yes: `IPGEOLOCATION_API_KEY`; does nothing without it |
+| **Runs** | Post-primary |
+| **Status** | Implemented |
+
+---
+
+## `keybase`
+
+Looks up a Keybase profile by the email's local part (Keybase's email lookup needs a login, so it is not used) and lists its verified cross-platform identity proofs. Names from Keybase feed name consensus.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Default** | On (`ENABLE_KEYBASE_LOOKUP`) |
+| **Status** | Implemented |
+
+---
+
+## `linkedin_serp`
+
+Post-primary LinkedIn profile search using a confirmed real name. Uses SerpAPI when `SERPAPI_KEY` is set and DuckDuckGo otherwise. Skips when no name is confirmed, and for free-provider addresses unless the name comes from 2+ independent sources.
+
+| | |
+|--|--|
+| **Requires key** | No (`SERPAPI_KEY` optional) |
+| **Runs** | Post-primary |
+| **Status** | Implemented |
+
+---
+
+## `marketplace_profile`
+
+Post-primary. For Etsy and eBay usernames already confirmed by the username sweep, fetches the public shop or profile page and extracts profile data.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Runs** | Post-primary |
+| **Status** | Implemented |
+
+---
+
+## `netlas_email_footprint`
+
+Shows where one exact address appears online via Netlas: public pages and FTP banners, TLS certificates, and reverse-WHOIS (domains where the address is a registration contact). Exactly 3 Netlas calls per investigation. Reverse-WHOIS domains are reported, never auto-harvested. Disable per run with `--no-netlas`.
+
+| | |
+|--|--|
+| **Requires key** | Yes: `NETLAS_API_KEY` |
+| **Status** | Implemented |
+
+---
+
+## `netlas_org_surface`
+
+Context about the email's company domain via Netlas: subdomains, exposed login and admin panels, open ports and services, and known CVEs. Kept separate from the person's own findings. Skips free-provider domains. About 2 Netlas calls by default; `--org-surface-deep` adds subdomain enumeration (up to 500).
+
+| | |
+|--|--|
+| **Requires key** | Yes: `NETLAS_API_KEY` |
+| **Status** | Implemented |
+
+---
+
+## `npm_discovery`
+
+Finds npm packages authored or maintained by the target address. Author names feed name consensus.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Status** | Implemented |
+
+---
+
+## `opencorporates`
+
+Looks up company registration data for the email's business domain via the OpenCorporates API. Skips free-provider domains.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Status** | Implemented |
+
+---
+
+## `outlook_autodiscover`
+
+Confirms a consumer Microsoft mailbox (`@outlook.com`, `@hotmail.com`, `@live.com`, `@msn.com`) with the unauthenticated Autodiscover v1 endpoint. Sends no mail. Other domains are skipped. The `public-business-contact` product mode blocks it.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Default** | On (`ENABLE_OUTLOOK_AUTODISCOVER`) |
+| **Status** | Implemented |
+
+---
+
+## `pypi_discovery`
+
+Finds PyPI packages authored or maintained by the target address. Author names feed name consensus.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Status** | Implemented |
+
+---
+
+## `shodan`
+
+Placeholder for a Shodan domain lookup. It skips without `SHODAN_API_KEY` and, with a key, currently returns only the domain (no host data yet). For open ports and CVEs on resolved IPs, see `shodan_internetdb` in harvest mode and `netlas_org_surface`.
+
+| | |
+|--|--|
+| **Requires key** | Yes: `SHODAN_API_KEY` |
+| **Status** | Stub |
+
+---
+
+## `social_discovery`
+
+Profile-phase search for the subject's public Instagram, Facebook and LinkedIn profiles via the Oxylabs Web Search API. One search per platform. A result is attached only when its handle matches a variant of the email local part or a confirmed handle (`high`), or, for freemail addresses, when the profile name matches the confirmed name (`medium`, unverified). Adds Instagram follower counts and LinkedIn headline, employer and location when present.
+
+| | |
+|--|--|
+| **Requires key** | Yes: `OXYLABS_SEARCH_TOKEN` |
+| **Runs** | Profile phase; skips without a confirmed name |
+| **Status** | Implemented (new in 0.19.0) |
+
+---
+
+## `twitter_profile`
+
+Post-primary. For a Twitter/X username already confirmed by other modules, fetches the public profile page and extracts profile data and bio signals.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Runs** | Post-primary |
+| **Status** | Implemented |
+
+---
+
+## `whoisfreaks_intel`
+
+Post-primary WHOIS lookups via WhoisFreaks: domains registered with this address (reverse WHOIS), and for a company domain, the historical owners from before WHOIS redaction. Results are cached. Disable per run with `--no-whoisfreaks`.
+
+| | |
+|--|--|
+| **Requires key** | Yes: `WHOISFREAKS_API_KEY`; does nothing without it |
+| **Runs** | Post-primary |
+| **Status** | Implemented |
+
+---
+
+## Reasoning components
+
+These are not registered modules and do not count toward the 82. They are engines in `backend/core/` that run automatically after or during collection to merge, score and explain findings. They need no keys and have no enable flag unless noted.
+
+### `name_consensus` (built-in)
+
+Not a standalone module: this is a core engine in `backend/core/` that runs after all modules complete. It reads name signals from profile, key, researcher, social, package, and commit findings, then emits one defensible identity result for the report and CLI.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic after collection |
+| **Status** | Implemented |
+
+Sources include:
+- `github_user`
+- `gravatar_profile`
+- `keybase_profile`
+- `twitter_profile`
+- `linkedin_snippet`
+- `pgp_keyserver`
+- `orcid_profile`
+- `hackernews_profile`
+- `pypi_discovery`
+- `npm_discovery`
+- Git commit author names
+
+The engine outputs `confirmed_name`, `name_confidence`, `name_reasoning`, and `name_sources`. Role/system email addresses such as `noreply@`, `admin@`, `support@`, `postmaster@`, and `notifications@` are automatically skipped so service accounts do not receive inferred identities.
+
+Candidate names are Unicode-normalized and clustered with RapidFuzz so minor
+spelling and transliteration differences can corroborate one another. Timestamped
+signals receive temporal decay, while Cyrillic, Arabic, CJK, Devanagari, and other
+Unicode names remain eligible. Common-name matches are capped to avoid overconfident
+identity claims.
+
+**Result schema:**
+```json
+{
+  "confirmed_name": "Jane Doe",
+  "name_confidence": "probable",
+  "confidence_score": 2.18,
+  "name_sources": ["github_profile", "orcid_profile"],
+  "name_source_classes": ["developer", "institutional"],
+  "name_reasoning": "GitHub Profile, Orcid Profile support this name across 2 independent source classes.",
+  "conflicting_names": []
+}
+```
+
+**Result fields:** `confirmed_name`, `name_confidence`, `confidence_score`,
+`name_sources`, `name_source_classes`, `name_reasoning`, `conflicting_names`.
+
+No standalone `ModuleResult` metadata is emitted. Implementation settings:
+```json
+{
+  "fuzzy_threshold": 88,
+  "temporal_decay_time_constant_days": 1095,
+  "confidence_bands": ["confirmed", "probable", "possible", "unknown"]
+}
+```
+
+---
+
+### `identity_graph` (built-in)
+
+Not a standalone module — the identity graph is built automatically after all primary and post-primary modules complete. It cross-references findings by shared usernames, profile photos, display names, and breach data to produce confidence-scored identity clusters.
+
+Perceptual-avatar clusters add `same_avatar` edges, fuzzy bio clusters add
+`same_bio` edges, and coordinated account dates add `same_signup_window` edges.
+The graph also surfaces shadow-profile pairs when the same multi-token display name
+appears under different non-anchor email addresses.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Opt-in** | No — always runs |
+| **Status** | Implemented |
+
+The graph is available at:
+- CLI: displayed automatically (use `--show-collisions` to expand low-confidence clusters)
+- Web UI: `/investigation/:id/graph`
+- API: `GET /api/report/{id}/clusters` (clusters) and `GET /api/report/{id}/graph` (D3 nodes/links)
+
+**Cluster schema:**
+```json
+{
+  "id": "cluster-1",
+  "confidence": "high",
+  "score": 0.91,
+  "reasoning": "Shared username 'janedoe' across GitHub, HackerNews, and Twitter findings",
+  "members": [
+    {"module": "social", "platform": "GitHub", "username": "janedoe"},
+    {"module": "username_platforms", "platform": "HackerNews", "username": "janedoe"}
+  ]
+}
+```
+
+**Cluster fields:** `confidence`, `label`, `reasoning`, `findings`,
+`finding_count`, `is_collision`.
+
+**Graph schema (D3 endpoint):**
+```json
+{
+  "nodes": [
+    {"id": "platform:github", "type": "platform", "label": "github", "degree": 4}
+  ],
+  "links": [
+    {"source": "platform:github", "target": "platform:twitter", "type": "same_avatar"}
+  ]
+}
+```
+
+---
+
+### `platform_health` (built-in)
+
+Persists platform probe outcomes and feeds rolling health decisions back into the
+enumeration and reset-probe paths.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic; inspect with `mailaccess platform-health` |
+| **Status** | Implemented |
+
+Records live in `~/.mailaccess/platform_health.db`. A platform is skipped after 10
+consecutive misses, or after at least 30 probes in 30 days with a hit rate below
+0.05. Set `MAILACCESS_DISABLE_HEALTH=1` to bypass decisions without deleting
+history.
+
+The self-healing selectors are `get_skip_set()`, `get_demote_set()`, and
+`get_upgrade_set()`. Enumerators use `should_probe_async()` and
+`record_probe_async()` so SQLite work does not block the event loop.
+
+**Finding schema (health row):**
+```json
+{
+  "platform": "reset_prober:example.com",
+  "total_probes": 42,
+  "hits": 1,
+  "misses": 36,
+  "inconclusive": 5,
+  "hit_rate": 0.024,
+  "fragility": 0.31,
+  "consecutive_misses": 11,
+  "window_days": 30,
+  "first_seen": "2026-05-01T09:00:00+00:00",
+  "last_seen": "2026-06-22T10:30:00+00:00"
+}
+```
+
+**Finding fields:** `platform`, `total_probes`, `hits`, `misses`, `inconclusive`,
+`hit_rate`, `fragility`, `consecutive_misses`, `window_days`, `first_seen`,
+`last_seen`.
+
+**Module metadata (enumerator integration):**
+```json
+{
+  "health_tracked": 2180,
+  "health_skipped": 14,
+  "auto_demoted_skipped": 5,
+  "auto_demoted_to_wave2": 12,
+  "auto_upgraded_to_wave1": 3,
+  "auto_demotion_overrides": {
+    "NoisySite.com": "USERNAME_FORCE_NOISYSITECOM"
+  }
+}
+```
+
+#### Phase 6D audit trail
+
+Every auto-demotion / auto-upgrade event appends one JSONL line to
+`~/.mailaccess/platform_demotion.log`:
+
+```json
+{"timestamp": "2026-06-24T10:00:00Z", "platform": "NoisySite.com", "action": "skip",
+ "reason": "inconclusive_rate=0.82, probes=134",
+ "stats": {"inconclusive_rate": 0.82, "hit_rate": 0.08, "total_probes": 134},
+ "reversible_via": "USERNAME_FORCE_NOISYSITECOM"}
+```
+
+The log is the user-visible audit trail behind
+`mailaccess platform-audit --show-demotions`.
+
+#### Phase 6D.3 community health sharing (opt-in)
+
+```bash
+mailaccess platform-health --share
+```
+
+Posts anonymized platform stats (hit / miss / inconclusive rates, average
+latency, total probes, last probed) to a public GitHub Gist. **Strictly
+opt-in**: the `--share` flag is the only way this code path runs. No
+background-job sharing, no scheduled sharing, no auto-share on investigation
+completion. The payload contains platform-level metadata only — no user
+data, no email addresses, no investigation targets, no finding content.
+
+---
+
+### `temporal_cluster` (built-in)
+
+Clusters account creation dates into coordinated signup windows and adds temporal
+corroboration to the identity graph.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic during identity-graph construction |
+| **Status** | Implemented |
+
+The default window is 60 days and the default minimum cluster size is five.
+
+**Finding schema:**
+```json
+{
+  "platforms": ["github", "reddit", "twitter", "steam", "discord"],
+  "earliest": "2026-01-02T00:00:00+00:00",
+  "latest": "2026-02-10T00:00:00+00:00",
+  "span_days": 39,
+  "cluster_size": 5,
+  "score": 1.0
+}
+```
+
+**Finding fields:** `platforms`, `earliest`, `latest`, `span_days`,
+`cluster_size`, `score`.
+
+No standalone `ModuleResult` metadata is emitted. Implementation defaults:
+```json
+{
+  "window_days": 60,
+  "min_cluster_size": 5
+}
+```
+
+---
+
+### `shadow_profiles` (built-in)
+
+Finds same-name accounts associated with different non-anchor email addresses.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic during identity-graph construction |
+| **Status** | Implemented |
+
+Two or more normalized display-name tokens are required. Matching usernames raise
+confidence to `high`; display-name-only pairs remain `medium`.
+
+V2 is gated on a non-null `confirmed_name` and requires at least two platforms
+shared with the primary identity. V1 and V2 findings are rendered in the
+`IDENTITY ANALYSIS` section.
+
+**Finding schema:**
+```json
+{
+  "primary_email": "jane@example.com",
+  "primary_platform": "twitter",
+  "shadow_email": "jane.doe@example.net",
+  "shadow_platform": "steam",
+  "display_name": "Jane Doe",
+  "shared_username": "janedoe",
+  "confidence": "high"
+}
+```
+
+**Finding fields:** `primary_email`, `primary_platform`, `shadow_email`,
+`shadow_platform`, `display_name`, `shared_username`, `confidence`.
+
+No standalone `ModuleResult` metadata is emitted. Implementation defaults:
+```json
+{
+  "min_name_token_count": 2,
+  "anchor_email_excluded": true
+}
+```
+
+---
+
+### `avatar_clusters` (built-in)
+
+Groups cross-platform avatar observations by exact URL or perceptual-hash
+similarity.
+
+| | |
+|--|--|
+| **Requires key** | No |
+| **Execution** | Automatic during identity-graph construction |
+| **Status** | Implemented |
+
+`backend/core/avatar_hasher.py` normalizes images to 8x8 grayscale pHashes. The
+clusterer accepts a maximum Hamming distance of five and omits singletons.
+This default-on post-primary enrichment is bounded to 20 avatar fetches per
+domain per run and feeds its clusters into the identity graph.
+
+**Finding schema:**
+```json
+{
+  "phash": "8f0f0f0f0f0f0f0f",
+  "platforms": ["github", "twitter", "reddit"],
+  "cluster_size": 3
+}
+```
+
+**Finding fields:** `phash`, `platforms`, `cluster_size`.
+
+No standalone `ModuleResult` metadata is emitted. Implementation limits:
+```json
+{
+  "max_hamming_distance": 5,
+  "max_avatar_urls_per_client": 20
+}
+```
+
+---
+
+### `shadow_profile_v2` (built-in, Phase 6B.2)
 
 Extension to the Phase 2E `shadow_profile` detector.  V1 grouped findings by
 display name and emitted any pair with different non-anchor emails; V2 adds
@@ -2038,9 +2303,9 @@ signal.
 **Finding schema (V2):**
 ```json
 {
-  "primary_email": "john@acmecorp.com",
-  "shadow_email": "alt@gmail.com",
-  "shared_name": "John Doe",
+  "primary_email": "jane@company.com",
+  "shadow_email": "jane.alt@example.com",
+  "shared_name": "Jane Doe",
   "name_confidence": "confirmed",
   "shared_platforms": ["twitter", "steam", "github"],
   "platform_overlap_count": 3
@@ -2059,7 +2324,7 @@ Each line reads:
 ```
 ─── SHADOW PROFILES ──────────────────────────
   Possible alternate identity detected:
-    alt@gmail.com shares name "John Doe" and 3 platforms with john@acmecorp.com
+    jane.alt@example.com shares name "Jane Doe" and 3 platforms with jane@company.com
     Confidence: MEDIUM
 ```
 
@@ -2079,7 +2344,7 @@ Implementation defaults:
 
 ---
 
-## `breach_corpus` (built-in cache)
+### `breach_corpus` (built-in cache)
 
 Fetches and severity-ranks the public HIBP breach catalog used by `breach_deep`.
 
@@ -2120,7 +2385,7 @@ data, and 1.5 for phone numbers.
 
 ---
 
-## `common_names` (built-in filter)
+### `common_names` (built-in filter)
 
 Loads `data/common_names.json` to reduce confidence from common display names and
 usernames that lack independent corroboration.
@@ -2157,7 +2422,7 @@ No standalone `ModuleResult` metadata is emitted. Filter configuration:
 
 ---
 
-## `disposable_domains` (built-in filter)
+### `disposable_domains` (built-in filter)
 
 Loads `data/disposable_domains.json` and downweights enumerator findings tied to a
 known disposable email domain.
@@ -2194,7 +2459,7 @@ No standalone `ModuleResult` metadata is emitted. Filter configuration:
 
 ---
 
-## `reset_prober` (built-in helper)
+### `reset_prober` (built-in helper)
 
 Classifies generic password-reset responses for breached domains that have no
 dedicated YAML probe.
@@ -2227,7 +2492,7 @@ true
 
 ---
 
-## `probe_detector` (built-in helper)
+### `probe_detector` (built-in helper)
 
 Applies `status_code`, message, and response-URL rules with redirect and
 regex safeguards.
@@ -2273,7 +2538,7 @@ status-code sites against their known-unclaimed usernames before the main sweep.
 
 ---
 
-## `probe_detector` — the single probe engine
+### `probe_detector`: the single probe engine
 
 In 0.15.0 the previously separate probe helpers collapsed into one. Every username-url /
 email-existence probe now runs through `backend/core/probe_detector.py`
@@ -2286,7 +2551,7 @@ request. All findings surface through `username_platforms` as ordinary `username
 
 ---
 
-## `platform_dedup` (built-in)
+### `platform_dedup` (built-in)
 
 Merges cross-enumerator findings by normalized profile URL domain before report
 persistence.
@@ -2328,7 +2593,7 @@ enumeration sources set `metadata.dual_confirmed: true` and raise confidence to
 
 ---
 
-## `breach_normalizer` (built-in)
+### `breach_normalizer` (built-in)
 
 Collapses duplicate breach events into canonical records with complete source
 attribution.
@@ -2377,18 +2642,18 @@ No standalone `ModuleResult` metadata is emitted. Normalized finding metadata:
 
 ---
 
-## Domain Email Harvesting Modules (0.10.2)
+## Domain Email Harvesting Modules
 
-The eight modules below run **only** in `mailaccess harvest-emails` mode.
-They do not run during `mailaccess investigate` and have no effect on
-single-email investigations. They are described in detail in
+The modules below are built for `mailaccess harvest-emails`. In
+`mailaccess investigate`, the domain-wide ones are skipped for free-provider
+addresses (gmail.com, outlook.com and similar). They are described in detail in
 [docs/harvest-emails.md](harvest-emails.md); this section is a quick
 reference for each module's role, key requirements, and source weight
 in the confidence-scoring model.
 
 Proxy routing note: when `mailaccess harvest-emails --use-proxies` is set,
 only `email_search_dork` and `employee_name_discovery` are routed through the
-configured ScrapingAnt transport. The other six harvest modules stay direct,
+configured ScrapingAnt transport. The other harvest modules stay direct,
 and SMTP verification is never proxied.
 
 ### `commoncrawl_email`
@@ -2537,6 +2802,32 @@ propagation, every name would consume probes on every pattern.
 | **Source weight** | 0.65 (SMTP verified) / 0.10 (catch-all) / 0.30 (MX valid) / 0.00 (unverified) |
 | **Safety** | Mandatory catch-all detection before any probe; hard cap 100 probes/domain |
 | **Status** | Implemented |
+
+---
+
+### Other domain-harvest sources
+
+Short reference for the remaining harvest sources. None needs a key unless noted.
+
+| Module | What it does |
+|--------|--------------|
+| `email_identity_enrichment` | Runs Gravatar and GitHub-commit enrichment on discovered emails and keeps the link to the triggering email |
+| `github_domain_commits` | Searches public GitHub commit history for authors on the target domain |
+| `github_org_members` | Finds the company's GitHub org and lists public members whose profile names the domain (`GITHUB_TOKEN` optional: 5,000 vs 60 requests/hour) |
+| `hackertarget_hosts` | Free HackerTarget host search for subdomains and IPs |
+| `name_to_github_profile` | Finds a discovered person's GitHub profile by name and extracts their public email and blog URL |
+| `package_ecosystems` | RubyGems and Packagist maintainer metadata, filtered to the exact domain (`ENABLE_PACKAGE_ECOSYSTEMS`, default on) |
+| `person_email_pivot` | Finds public email evidence (GitHub or a search snippet) for discovered employee names; never emits a guessed address |
+| `persona_email_pivot` | Dorks public search snippets for a specific person's email addresses |
+| `public_forge` | Bounded GitLab.com public project and commit metadata (`ENABLE_PUBLIC_FORGE`, default on) |
+| `public_surface_sweeper` | Bounded sweep of well-known, contact, support and machine-readable pages (`ENABLE_PUBLIC_SURFACE_SWEEPER`, default on) |
+| `ripe_stat_asn` | RIPE Stat IP-to-ASN and announced-prefix enrichment |
+| `security_txt` | Reads RFC 9116 `/.well-known/security.txt` contacts |
+| `shodan_internetdb` | Open ports, hostnames and CVEs for resolved IPs from Shodan InternetDB (no key) |
+| `subdomain_intel` | Passive subdomain discovery (crt.sh, CertSpotter, subdomain.center, Wayback, OTX, Anubis); `--with-subdomains` and `--subdomain-deep` add active tiers |
+| `syndication_feed_sweeper` | Extracts feed authors from RSS and Atom feeds (`ENABLE_SYNDICATION_FEED_SWEEPER`, default on) |
+| `wayback_domain_harvest` | Domain-wide Wayback Machine sweep: fetches archived high-signal pages and extracts emails and people (`ENABLE_WAYBACK_HARVEST`, default on) |
+| `wordpress_rest` | Public WordPress author data from `wp-json` users endpoints |
 
 ---
 

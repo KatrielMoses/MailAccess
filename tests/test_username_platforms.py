@@ -10,10 +10,10 @@ from backend.modules.username_platforms import _name_split_variant, _username_va
 
 
 def test_message_detection_uses_presense_spelling() -> None:
-    defn = {"checkType": "message", "presenseStrs": ["profile-card", "katriel"]}
-    url = "https://x.test/u/katriel"
+    defn = {"checkType": "message", "presenseStrs": ["profile-card", "maya"]}
+    url = "https://x.test/u/maya"
 
-    assert detect_hit(defn, "<div>profile-card katriel</div>", 200, url) == "hit"
+    assert detect_hit(defn, "<div>profile-card maya</div>", 200, url) == "hit"
     assert detect_hit(defn, "<div>profile-card</div>", 200, url) == "miss"
 
 
@@ -31,14 +31,14 @@ def test_response_url_main_page_redirect_is_miss() -> None:
     defn = {"checkType": "response_url", "urlMain": "https://example.com"}
 
     assert detect_hit(defn, "", 200, "https://example.com/") == "miss"
-    assert detect_hit(defn, "", 200, "https://example.com/u/katriel") == "hit"
+    assert detect_hit(defn, "", 200, "https://example.com/u/maya") == "hit"
 
 
 def test_regex_filter_rejects_invalid_username() -> None:
     defn = {"regexCheck": r"[a-z0-9_]{3,16}"}
 
-    assert username_matches_regex(defn, "katriel_1") is True
-    assert username_matches_regex(defn, "Katriel Moses") is False
+    assert username_matches_regex(defn, "maya_1") is True
+    assert username_matches_regex(defn, "Maya Lindqvist") is False
 
 
 def test_supported_site_filter_honors_disabled_and_wave1_protections() -> None:
@@ -132,7 +132,7 @@ def test_platform_dedup_merges_enumeration_and_pivot_by_domain() -> None:
             findings=[
                 {
                     "platform": "GitHub",
-                    "profile_url": "https://github.com/katriel",
+                    "profile_url": "https://github.com/maya",
                     "confidence": "medium",
                     "metadata": {"source": "pivot"},
                 }
@@ -143,7 +143,7 @@ def test_platform_dedup_merges_enumeration_and_pivot_by_domain() -> None:
             findings=[
                 {
                     "platform": "GitHub",
-                    "profile_url": "https://www.github.com/katriel",
+                    "profile_url": "https://www.github.com/maya",
                     "confidence": "medium",
                     "metadata": {"source": "username_platforms"},
                 }
@@ -153,7 +153,7 @@ def test_platform_dedup_merges_enumeration_and_pivot_by_domain() -> None:
 
     stats = deduplicate_platform_findings(results)
 
-    assert dedup_key("https://www.github.com/katriel") == "github.com"
+    assert dedup_key("https://www.github.com/maya") == "github.com"
     assert stats["dual_confirmed"] == 0  # two username-derived sources: merged, not promoted
     # username_platforms outranks the pivot, so it keeps the merged finding.
     assert len(results["username_platforms"].findings) == 1

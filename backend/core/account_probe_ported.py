@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from .account_probe import _empty_record
+from .platform_dedup import dedup_key
 
 
 def _retry_after_seconds(response: Any) -> float | None:
@@ -244,11 +245,15 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 def _site(site_id: str, domain: str, category: str, flow: str, spec: dict[str, Any],
           *, high_value: bool = False, default_off: bool = False,
-          disabled: bool = False) -> dict[str, Any]:
+          disabled: bool = False, intrusive: bool = False) -> dict[str, Any]:
     defn = {
         "id": site_id,
         "name": site_id,
         "domain": domain,
+        # Derive the cross-source dedup key from the domain via the canonical normalizer
+        # (same as curated file entries + profile-URL hosts), so a ported email-existence
+        # hit collapses with a username finding on the same host instead of bucketing to None.
+        "dedup_key": dedup_key(domain),
         "category": category,
         "check_type": "email-existence",
         "flow": flow,
@@ -266,6 +271,11 @@ def _site(site_id: str, domain: str, category: str, flow: str, spec: dict[str, A
     # datacenter IP (those still work on prod — leave them enabled).
     if disabled:
         defn["disabled"] = True
+    # A check that drives a password-reset / account-recovery flow can make the service
+    # email or text the subject. It runs only with ENABLE_FORGOT_PASSWORD_PROBES
+    # (account_discovery skips ``intrusive`` defs otherwise).
+    if intrusive:
+        defn["intrusive"] = True
     return defn
 
 
@@ -620,6 +630,9 @@ _SITES: list[dict[str, Any]] = [
         "default": "rate_limited",
     }, high_value=True),
 
+    # Mail.ru — first step of the password-restore wizard: returns the masked recovery
+    # phones/emails for a registered address. The code cannot prove the service sends
+    # nothing at this step, so it is intrusive/gated like the other reset-flow checks.
     _site("mail_ru", "mail.ru", "mails", "password-recovery", {
         "method": "POST",
         "url": "https://account.mail.ru/api/v1/user/password/restore",
@@ -634,7 +647,7 @@ _SITES: list[dict[str, Any]] = [
             {"when": {"status": 200}, "verdict": "absent"},
         ],
         "default": "rate_limited",
-    }),
+    }, intrusive=True),
 
     _site("protonmail", "protonmail.com", "mails", "pgp-index", {
         "method": "GET",
@@ -1762,10 +1775,8 @@ _SITES.extend(_xenforo_site(h) for h in _XENFORO_FORUMS)
 # renders unconditionally (anti-enumeration) and yields false positives.
 # ---------------------------------------------------------------------------
 def _fp_site(site_id: str, domain: str, spec: dict[str, Any]) -> dict[str, Any]:
-    entry = _site(site_id, domain, "forgot-password", "password-recovery", spec,
-                  high_value=True)
-    entry["intrusive"] = True
-    return entry
+    return _site(site_id, domain, "forgot-password", "password-recovery", spec,
+                 high_value=True, intrusive=True)
 
 
 # NOTE: pluralsight and skillshare forgot-password oracles were REMOVED. Both

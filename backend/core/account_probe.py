@@ -30,6 +30,7 @@ import httpx
 from .phone_extractor import mask_phone
 from .pre_check import apply_pre_check_values, cookie_header, run_pre_check
 from .probe_detector import detect_hit
+from .profile_extractor import extract_profile
 from .user_agents import random_user_agent
 
 _LOG = logging.getLogger(__name__)
@@ -272,7 +273,20 @@ async def _probe_declarative(
         extracted = apply_extract_fields(defn, response, text)
         record["emailrecovery"] = extracted["emailrecovery"]
         record["phoneNumber"] = extracted["phoneNumber"]
-        record["others"] = extracted["others"]
+        # Generic, keyless profile extraction over the hit page's
+        # OG / Twitter-card / JSON-LD / <title> metadata, so an email-anchored
+        # account yields the person's name/avatar even when the site has no
+        # bespoke ``extract_fields`` rule. A site's own rule always wins; the
+        # generic extractor only fills a gap. ``extract_profile`` never raises and
+        # only returns a ``display_name`` that passes the shared person-name gate,
+        # so a plain "Log in - <Site>" title contributes nothing.
+        others = dict(extracted["others"] or {})
+        profile = extract_profile(text, str(response.url))
+        for src_key, dst_key in (("display_name", "name"), ("avatar_url", "avatar")):
+            value = profile.get(src_key)
+            if value and not others.get(dst_key):
+                others[dst_key] = value
+        record["others"] = others or None
     elif verdict == "miss":
         record["exists"] = False
     else:

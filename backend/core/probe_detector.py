@@ -194,6 +194,15 @@ def detect_hit(defn: dict[str, Any], body: str, status: int, final_url: str) -> 
     if check_type != "json" and defn.get("missingStatus") and status in defn["missingStatus"]:
         return "miss"
 
+    # A 404/410 is a definitive "no such resource" for the body-based detectors too.
+    # ``message``/``tags`` otherwise ignore the status entirely, so a stale or absent
+    # absence marker turned a not-found page into a false hit — FilmWeb's 404 page no
+    # longer carries ``top.location.href = '/404';``, and Chatujme's alternate not-found
+    # page (``Stránka nebyla nalezena``) lacks ``nelze zobrazit``. A real profile answers
+    # 200, so this never suppresses a genuine hit.
+    if check_type in ("message", "tags") and status in (404, 410):
+        return "miss"
+
     if check_type == "json":
         return _detect_json(defn, raw_body, status)
 
@@ -292,6 +301,21 @@ def is_non_discriminating_url(url: str, token: str | None = None) -> bool:
         return False  # user-specific profile path → discriminating
     if not path:
         return True  # bare-domain 200
+    # A redirect that TRUNCATED the probed handle to a shorter prefix landed on a
+    # DIFFERENT, pre-existing account, not the handle we asked for (domestika:
+    # ``/maya.lindqvist`` → ``/en/maya``). The final path's own handle is a strict
+    # prefix of the token, cut at a separator — a soft-200 for a handle that does not
+    # exist as written. A numeric-id redirect (``/user/12345``) is not a prefix of the
+    # token, so it is left alone.
+    if tok and tok not in path:
+        last_seg = path.rsplit("/", 1)[-1]
+        if (
+            last_seg
+            and len(last_seg) < len(tok)
+            and tok.startswith(last_seg)
+            and tok[len(last_seg)] in "._-"
+        ):
+            return True  # truncated-handle redirect → a different account
     if any(marker in path for marker in ("search", "find", "lookup", "results")):
         return True  # search-results page
     from urllib.parse import parse_qs

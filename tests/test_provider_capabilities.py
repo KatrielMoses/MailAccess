@@ -81,13 +81,13 @@ async def _capabilities() -> httpx.Response:
     "ip_key,wf_key,netlas_key,expected",
     [
         (IPGEO_KEY, WF_KEY, "netlas-secret-key-1122334455",
-         {"ipgeolocation": True, "whoisfreaks": True, "netlas": True, "own_index": False, "brightdata": False}),
+         {"ipgeolocation": True, "whoisfreaks": True, "netlas": True, "own_index": False}),
         (None, WF_KEY, None,
-         {"ipgeolocation": False, "whoisfreaks": True, "netlas": False, "own_index": False, "brightdata": False}),
+         {"ipgeolocation": False, "whoisfreaks": True, "netlas": False, "own_index": False}),
         (IPGEO_KEY, None, None,
-         {"ipgeolocation": True, "whoisfreaks": False, "netlas": False, "own_index": False, "brightdata": False}),
+         {"ipgeolocation": True, "whoisfreaks": False, "netlas": False, "own_index": False}),
         (None, None, None,
-         {"ipgeolocation": False, "whoisfreaks": False, "netlas": False, "own_index": False, "brightdata": False}),
+         {"ipgeolocation": False, "whoisfreaks": False, "netlas": False, "own_index": False}),
     ],
 )
 async def test_capabilities_are_booleans_per_key_with_no_key_material(
@@ -96,7 +96,6 @@ async def test_capabilities_are_booleans_per_key_with_no_key_material(
     monkeypatch.setattr(settings, "ipgeolocation_api_key", ip_key)
     monkeypatch.setattr(settings, "netlas_api_key", netlas_key)
     _set(monkeypatch, "whoisfreaks_api_key", wf_key)
-    _set(monkeypatch, "brightdata_api_key", None)
     response = await _capabilities()
     assert response.status_code == 200
     assert response.json() == {"providers": expected}
@@ -124,18 +123,15 @@ async def test_capabilities_needs_the_api_key_like_the_rest_of_the_api(monkeypat
         assert ok.status_code == 200
 
 
-async def test_brightdata_capability_and_module_visibility(monkeypatch) -> None:
+async def test_brightdata_is_gone_from_capabilities_and_modules(monkeypatch) -> None:
+    """Bright Data was scrapped (2026-10-23): no capability flag, no module."""
     from backend.main import app
 
     import backend.api.routes.modules as modules_route
 
-    bd_key = "bd-secret-key-5566778899"
-    _set(monkeypatch, "brightdata_api_key", bd_key)
     response = await _capabilities()
-    assert response.json()["providers"]["brightdata"] is True
-    assert bd_key not in response.text
+    assert "brightdata" not in response.json()["providers"]
     monkeypatch.setattr(modules_route, "get_all_modules", REAL_MODULES)
-    _set(monkeypatch, "brightdata_api_key", None)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
     ) as client:

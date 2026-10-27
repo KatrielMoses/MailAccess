@@ -287,7 +287,7 @@ def test_path_printed_at_end_of_harvest(
     assert ".json" in flat
     # The count is a distinct final footer, after all export messages.
     assert "Total email addresses found: 0" in output
-    assert output.rstrip().endswith("┘")
+    assert output.rstrip().endswith("╯")  # rounded box corner (CLI style)
     # And the file should exist on disk.
     matching = list(isolated_results_dir.glob("ine.com_*.json"))
     assert matching, f"expected at least one JSON; got {list(isolated_results_dir.iterdir())}"
