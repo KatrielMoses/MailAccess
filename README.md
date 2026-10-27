@@ -113,6 +113,8 @@ Pro contacts stay in their own view. They never enter your exports, local databa
 
 MailAccess checks PyPI for a newer release (cached, never blocking) and prints a hint when you're behind. Update with `mailaccess upgrade`. Silence it with `MAILACCESS_NO_UPDATE_CHECK=1`, or [get release notes by email](https://mailaccess.pro/updates?src=readme).
 
+To stop the calls MailAccess makes on its own (the coverage teaser, the sponsor feed, the founder-seat counter and this update check), run `mailaccess --local-only <command>`, or turn it on for good with `mailaccess local-only enable`. OSINT checks still run. With a Pro key set, Pro enrichment still runs, and the CLI tells you before it sends anything.
+
 ## Sponsors
 
 MailAccess is free and MIT licensed. Sponsors keep the corpus and the infrastructure running. [Sponsor this project](https://mailaccess.pro/sponsors?src=readme).

@@ -322,6 +322,14 @@ def main_callback(
     no_banner: bool = typer.Option(
         False, "--no-banner", help="Skip the ASCII banner (for CI/scripting)"
     ),
+    local_only: bool = typer.Option(
+        False,
+        "--local-only",
+        help=(
+            "Skip unsolicited mailaccess.pro calls (coverage teaser, sponsor "
+            "feed, founder counter) and the PyPI update check."
+        ),
+    ),
     version_flag: bool = typer.Option(
         False,
         "--version",
@@ -343,6 +351,10 @@ def main_callback(
         raise typer.Exit()
     from cli import partners
 
+    if local_only:
+        from backend.core.local_only import activate as activate_local_only
+
+        activate_local_only()
     partners.set_no_banner(no_banner)
     if sys.stderr.isatty() and not no_banner:
         _render_banner()
@@ -967,6 +979,76 @@ netlas_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(netlas_app)
+
+local_only_app = typer.Typer(
+    name="local-only",
+    help=(
+        "Skip unsolicited mailaccess.pro and PyPI calls "
+        "(coverage teaser, sponsor feed, update check)."
+    ),
+    invoke_without_command=True,
+    no_args_is_help=True,
+)
+app.add_typer(local_only_app)
+
+
+@local_only_app.callback(invoke_without_command=True)
+def local_only_callback(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit()
+
+
+@local_only_app.command("enable")
+def local_only_enable() -> None:
+    """Persist local-only mode in ~/.mailaccess/.env."""
+    from backend.core.local_only import ENV_VAR, activate
+
+    _set_env_key(ENV_VAR, "true")
+    activate()
+    _reload_settings()
+    console.print(
+        "[green]✓ Local-only on[/green] — coverage teaser, sponsor feed, "
+        "founder counter, and PyPI update check are skipped."
+    )
+    console.print("[dim]OSINT modules and a configured Pro key still run.[/dim]")
+
+
+@local_only_app.command("disable")
+def local_only_disable() -> None:
+    """Turn local-only mode off (restore teaser, sponsor feed, update check)."""
+    from backend.core.local_only import ENV_VAR
+
+    _set_env_key(ENV_VAR, "false")
+    os.environ.pop(ENV_VAR, None)
+    settings = _reload_settings()
+    settings.mailaccess_local_only = False
+    console.print("[green]✓ Local-only off.[/green]")
+
+
+@local_only_app.command("status")
+def local_only_status() -> None:
+    """Show whether local-only mode is active and what it suppresses."""
+    from backend.core.local_only import ENV_VAR, env_flag, is_enabled
+
+    settings = _reload_settings()
+    on = is_enabled()
+    table = Table(title="Local-only mode")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    table.add_row("active", "[green]yes[/green]" if on else "no")
+    table.add_row(ENV_VAR, "true" if env_flag() else "false")
+    table.add_row(
+        "settings.mailaccess_local_only",
+        "true" if getattr(settings, "mailaccess_local_only", False) else "false",
+    )
+    table.add_row("coverage teaser", "skipped" if on else "runs (sends domain)")
+    table.add_row("sponsor feed", "skipped" if on else "runs")
+    table.add_row("founder counter", "skipped" if on else "runs")
+    table.add_row("PyPI update check", "skipped" if on else "runs")
+    table.add_row("OSINT modules", "unchanged")
+    table.add_row("Pro enrich (keyed)", "unchanged")
+    console.print(table)
 
 
 @netlas_app.command("set-key")
@@ -1808,6 +1890,14 @@ def harvest_emails_command(
             "ANDed. Dimensions: mail_provider, cms, analytics, ecommerce, framework."
         ),
     ),
+    local_only: bool = typer.Option(
+        False,
+        "--local-only",
+        help=(
+            "Skip the coverage teaser (does not send the domain to mailaccess.pro), "
+            "sponsor feed, and founder counter for this run."
+        ),
+    ),
 ) -> None:
     """Harvest email addresses associated with a domain.
 
@@ -1819,6 +1909,10 @@ def harvest_emails_command(
     """
     from cli import update_check
 
+    if local_only:
+        from backend.core.local_only import activate as activate_local_only
+
+        activate_local_only()
     update_check.enforce_or_exit("harvest-emails", err_console)
     if refresh:
         from backend.config import settings as _rs
@@ -2509,6 +2603,23 @@ async def _collect_doctor_checks() -> list[DoctorCheck]:
                 "run one harvest or create the directory with 0700 permissions",
             )
         )
+        from backend.core.local_only import is_enabled as local_only_enabled
+
+        local_on = local_only_enabled()
+        checks.append(
+            DoctorCheck(
+                "Privacy",
+                "local-only mode",
+                True,
+                (
+                    "on — coverage teaser, sponsor feed, founder counter, "
+                    "and PyPI update check skipped"
+                    if local_on
+                    else "off"
+                ),
+                "mailaccess local-only enable",
+            )
+        )
         checks.append(
             DoctorCheck(
                 "Configuration",
@@ -3042,6 +3153,7 @@ def commands_overview() -> None:
         "  [cyan]keys set <k> <v>[/cyan]      Save an API key to ~/.mailaccess/.env\n"
         "  [cyan]keys unset <k>[/cyan]        Remove an API key\n"
         "  [cyan]configure set-url <url>[/cyan] Set backend server URL\n"
+        "  [cyan]local-only enable[/cyan]    Skip unsolicited vendor calls\n"
         "  [cyan]modules[/cyan]               List available investigation modules\n"
         "  [cyan]commands[/cyan]              Show this help panel"
     )
@@ -5401,11 +5513,23 @@ def investigate(
         False, "--no-cache",
         help="Ignore the 7-day probe cache on read (it is still written). For debugging.",
     ),
+    local_only: bool = typer.Option(
+        False,
+        "--local-only",
+        help=(
+            "Skip unsolicited mailaccess.pro calls and the PyPI update check "
+            "for this run."
+        ),
+    ),
 ) -> None:
     """Run a full OSINT investigation against an email address.
     Exit codes: 0=completed 1=failed 2=invalid input 3=server unavailable"""
     from cli import update_check
 
+    if local_only:
+        from backend.core.local_only import activate as activate_local_only
+
+        activate_local_only()
     update_check.enforce_or_exit("investigate", err_console)
     if mode is not None and mode not in _PRODUCT_MODES:
         raise typer.BadParameter(f"--mode must be one of: {', '.join(_PRODUCT_MODES)}")

@@ -193,6 +193,7 @@ docs/audit/
 !tests/test_doctor_command.py
 !tests/test_auto_export.py
 !tests/test_html_exporter.py
+!tests/test_local_only.py
 !tests/test_live_log.py
 !tests/test_keys_test_command.py
 !tests/test_toolchain_output.py

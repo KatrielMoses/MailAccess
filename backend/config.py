@@ -948,6 +948,11 @@ class Settings(BaseSettings):
     # "N seats left" urgency line can never go stale. Hidden while the tier is dark.
     mailaccess_pro_founder_seats_total: int = 100
     mailaccess_pro_founder_price_label: str = "$5/mo"
+    # Skip unsolicited mailaccess.pro / PyPI calls (coverage teaser, sponsor
+    # feed, founder counter, update check). OSINT modules and keyed Pro
+    # enrichment still run. CLI: ``mailaccess --local-only`` or
+    # ``mailaccess local-only enable``.
+    mailaccess_local_only: bool = False
 
     # Proxy (single static endpoint — legacy; superseded by the Phase 5B egress
     # pool below, which treats a single configured proxy as a pool of one).

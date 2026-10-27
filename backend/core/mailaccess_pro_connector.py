@@ -204,6 +204,10 @@ async def fetch_coverage_count(domain: str) -> int | None:
     with Pro"). Returns the corpus contact count (>= 0), or ``None`` on any failure
     or an ``available: false`` response. Fail-open, hard: never raises into the CLI.
     """
+    from .local_only import is_enabled as local_only_enabled
+
+    if local_only_enabled():
+        return None
     base = _api_url()
     if not base:
         return None
@@ -235,6 +239,10 @@ async def fetch_founder_status() -> dict[str, Any] | None:
     non-negative int; the other two may be ``None``), or ``None`` on any failure or
     an ``available: false`` response. Fail-open, hard: never raises into the CLI.
     """
+    from .local_only import is_enabled as local_only_enabled
+
+    if local_only_enabled():
+        return None
     base = _api_url()
     if not base:
         return None
