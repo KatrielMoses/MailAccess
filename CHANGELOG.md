@@ -1,5 +1,11 @@
 # Changelog
 
+### 0.19.1 (2026-10-27)
+
+#### Fixed
+
+- **Profiles recorded as breaches.** Breach de-duplication treated any finding with a `name` field as a breach, so Instagram, Facebook and LinkedIn profiles from `social_discovery`, and GitHub profiles, could be stored as a "breach" named after the person and lose their platform. A bare `name` now counts only for breach modules or breach-shaped findings; explicit breach fields work as before. Reports saved before this fix keep the old rows.
+
 ### 0.19.0 (2026-10-27)
 
 #### Added

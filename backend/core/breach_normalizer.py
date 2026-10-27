@@ -269,6 +269,18 @@ def _load_catalog() -> tuple[dict[str, str], dict[str, str]]:
     return alias_to_id, canonical_name_by_id
 
 
+# Modules whose findings are breaches, so a bare "name" there is a breach name.
+_BREACH_MODULES = frozenset({
+    "hibp", "breachdirectory", "leakcheck", "xposedornot", "breach_aggregator",
+    "breach_deep", "intelx_lookup",
+})
+# Fields only a breach record carries; their presence makes a bare "name" a breach name.
+_BREACH_SHAPE_KEYS = (
+    "breach_date", "data_classes", "pwn_count", "exposed_records", "exposed_data",
+    "breached_date", "added_date", "BreachDate", "DataClasses", "PwnCount",
+)
+
+
 def resolve_breach_identity(
     payload: dict[str, Any], module_name: str | None = None
 ) -> BreachIdentity | None:
@@ -281,14 +293,19 @@ def resolve_breach_identity(
     if module_name and module_name.lower() == "hudson_rock":
         return None
 
-    # Only process findings with at least one breach-specific indicator.
-    # "name" is included because modules like HIBP store breach names under
-    # the generic "name" field in metadata rather than "breach_name".
+    # Only process findings with at least one breach-specific indicator. The
+    # generic "name" counts only for breach modules (HIBP and IntelX store the
+    # breach under "name") or a finding that is breach-shaped: elsewhere "name" is
+    # a person's name (GitHub, social profiles) and must not become a "breach".
     meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    generic_ok = (str(module_name or "").lower() in _BREACH_MODULES) or any(
+        k in src for src in (payload, meta) for k in _BREACH_SHAPE_KEYS
+    )
+    indicator_keys = ("breach_name", "breach_id", "breach_source") + (("name",) if generic_ok else ())
     _has_breach_indicator = any(
         bool(src.get(k))
         for src in (payload, meta)
-        for k in ("breach_name", "breach_id", "breach_source", "name")
+        for k in indicator_keys
     )
     if not _has_breach_indicator:
         return None
