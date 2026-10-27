@@ -24,6 +24,15 @@ _SUPPRESSION_UNAVAILABLE = HTTPException(
     status_code=503, detail="suppression store unavailable"
 )
 
+_EXPORT_FILENAME_EXT = {
+    "stix": "stix.json",
+    "maltego": "maltego.csv",
+}
+
+
+def _export_filename_ext(format_name: str) -> str:
+    return _EXPORT_FILENAME_EXT.get(format_name, format_name)
+
 
 def _parse_iso(value: object) -> object | None:
     """Parse an ISO-8601 timestamp string to a datetime (R12 provenance
@@ -338,7 +347,7 @@ async def get_report(
 @router.get("/report/{investigation_id}/export")
 async def export_report(
     investigation_id: str,
-    format: str = Query("json", pattern="^(json|csv|markdown|pdf|stix|maltego)$"),
+    format: str = Query("json", pattern="^(json|csv|markdown|pdf|html|stix|maltego)$"),
     session: AsyncSession = Depends(get_db),
 ) -> Response:
     """Export the investigation report in the requested format."""
@@ -381,7 +390,7 @@ async def export_report(
         headers={
             "Content-Disposition": (
                 f'attachment; filename="mailaccess_{email}_{investigation_id}'
-                f'.{"stix.json" if format == "stix" else "maltego.csv" if format == "maltego" else format}"'
+                f'.{_export_filename_ext(format)}"'
             )
         },
     )

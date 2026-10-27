@@ -11,6 +11,7 @@ const FORMATS: Format[] = [
   { id: 'json',     label: 'JSON',     available: true  },
   { id: 'csv',      label: 'CSV',      available: true  },
   { id: 'markdown', label: 'Markdown', available: true  },
+  { id: 'html',     label: 'HTML',     available: true  },
   { id: 'pdf',      label: 'PDF',      available: true  },
   { id: 'stix',     label: 'STIX',     available: true  },
   { id: 'maltego',  label: 'Maltego',  available: true  },

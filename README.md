@@ -54,7 +54,7 @@ Python 3.10+. The CLI starts and stops its backend for each run. Use `mailaccess
 
 ```bash
 mailaccess investigate jane@example.com                  # every account behind an email
-mailaccess investigate jane@example.com -o report.pdf    # save the report
+mailaccess investigate jane@example.com -o report.html   # save the report (also .pdf, .md, .json)
 mailaccess harvest-emails --domain example.com           # every public email at a domain
 mailaccess find-email --name "Jane Doe" --domain example.com
 mailaccess login                                         # sign in for your free key
@@ -73,7 +73,7 @@ Pipelines, stdin, JSONL and CI: [docs/integrations.md](docs/integrations.md#pipe
 - **What it means.** A Defender's Brief with the next action, an exposure score, a credential risk score and public breach records.
 - **Email scraper.** `harvest-emails` finds the public addresses at a domain from Common Crawl, GitHub, certificate logs, keyservers, team pages and patterns, then grades each one.
 - **Company patterns.** `find-email` turns a name and an employer domain into one graded likely address, offline, from a bundled 384K-domain pattern index.
-- **Exports.** JSON, CSV, PDF, Markdown, STIX 2.1 and Maltego XML.
+- **Exports.** JSON, CSV, HTML, PDF, Markdown, STIX 2.1 and Maltego XML.
 
 ## Email scraper
 

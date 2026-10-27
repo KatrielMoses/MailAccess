@@ -49,6 +49,22 @@ Best for: spreadsheet analysis, import into case management tools.
 
 ---
 
+## HTML
+
+| | |
+|--|--|
+| `?format=` | `html` |
+| MIME type | `text/html; charset=utf-8` |
+| Extension | `.html` |
+
+Self-contained HTML report with the same sections as PDF (exposure score, Defender's Brief, timeline, findings, module log). Opens in a browser, includes in-page navigation and clickable finding URLs, and does not require weasyprint or other extras.
+
+CLI: `mailaccess investigate you@example.com -o report.html`
+
+Best for: sharing a readable report when PDF extras are not installed, opening the report locally, or attaching HTML to a ticket.
+
+---
+
 ## PDF
 
 | | |
@@ -121,6 +137,7 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md#adding-an-exporter) for the `BaseExport
 |--------|-----------------|----------|
 | JSON | `json` | Programmatic use, archiving |
 | CSV | `csv` | Spreadsheet analysis |
+| HTML | `html` | Browser-readable reports (no extra libraries) |
 | PDF | `pdf` | Human-readable reports |
 | Markdown | `markdown` | Wikis, issue trackers |
 | STIX 2.1 | `stix` | Threat intelligence platforms |

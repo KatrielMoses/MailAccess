@@ -1,5 +1,6 @@
 from .base import BaseExporter
 from .csv_exporter import CsvExporter
+from .html_exporter import HtmlExporter
 from .json_exporter import JsonExporter
 from .maltego_exporter import MaltegoExporter
 from .markdown_exporter import MarkdownExporter
@@ -13,6 +14,7 @@ EXPORTERS: dict[str, type[BaseExporter]] = {
         CsvExporter,
         PdfExporter,
         MarkdownExporter,
+        HtmlExporter,
         StixExporter,
         MaltegoExporter,
     ]
@@ -22,6 +24,7 @@ __all__ = [
     "BaseExporter",
     "CsvExporter",
     "EXPORTERS",
+    "HtmlExporter",
     "JsonExporter",
     "MaltegoExporter",
     "MarkdownExporter",

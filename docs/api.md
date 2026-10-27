@@ -285,7 +285,7 @@ Export a completed investigation in the requested format as a file download.
 
 | Param | Values | Default |
 |-------|--------|---------|
-| `format` | `json` `csv` `markdown` `pdf` `stix` `maltego` | `json` |
+| `format` | `json` `csv` `markdown` `pdf` `html` `stix` `maltego` | `json` |
 
 **Response** — binary file with `Content-Disposition: attachment` header.
 
@@ -297,6 +297,7 @@ Filename pattern: `mailaccess_{email}_{id}.{ext}`
 | CSV | `.csv` |
 | Markdown | `.markdown` |
 | PDF | `.pdf` |
+| HTML | `.html` |
 | STIX 2.1 | `.stix.json` |
 | Maltego | `.maltego.csv` |
 
