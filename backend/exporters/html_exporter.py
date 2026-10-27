@@ -62,6 +62,9 @@ class HtmlExporter(PdfExporter):
         return self._for_browser(html, str(data.get("email") or "unknown")).encode("utf-8")
 
     async def generate(self, investigation_id: str, data: dict[str, Any]) -> bytes:
+        # Fetch avatars on the server and embed them, as the PDF does, so opening the
+        # saved report never contacts a host the target may control.
+        await self._embed_avatars(data)
         return self.export(investigation_id, data)
 
     def _finding_card(self, f_data: dict[str, Any]) -> str:
@@ -69,7 +72,11 @@ class HtmlExporter(PdfExporter):
         profile_url = f_data.get("profile_url") or f_data.get("url") or ""
         confidence = str(f_data.get("confidence", "")).lower()
         metadata = f_data.get("metadata") or {}
-        avatar_src = f_data.get("_pdf_avatar") or self._avatar_url(f_data) or _PLACEHOLDER
+        # Embedded images only: a remote avatar URL would make the analyst's browser
+        # contact the target's infrastructure when the report is opened.
+        avatar_src = f_data.get("_pdf_avatar")
+        if not (isinstance(avatar_src, str) and avatar_src.startswith("data:image/")):
+            avatar_src = _PLACEHOLDER
 
         if isinstance(profile_url, str) and profile_url.startswith(("http://", "https://")):
             url_html = (
@@ -129,8 +136,12 @@ class HtmlExporter(PdfExporter):
             )
             nav = f'<nav class="toc" aria-label="Report sections">{links}</nav>'
         extra_head = (
+            # Nothing in a saved report may load or send anything: only inline styles and
+            # embedded images. Links still open normally.
+            '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
+            "img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\">\n"
             '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-            f"<title>MailAccess report — {_e(email)}</title>\n"
+            f"<title>MailAccess report: {_e(email)}</title>\n"
             f"<style>{_SCREEN_CSS}</style>\n"
         )
         html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8">\n' + extra_head, 1)

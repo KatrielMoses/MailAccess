@@ -92,7 +92,7 @@ def test_html_report_contains_sections_and_nav() -> None:
 
     assert html.startswith("<!DOCTYPE html>")
     assert 'name="viewport"' in html
-    assert "<title>MailAccess report — analyst@example.com</title>" in html
+    assert "<title>MailAccess report: analyst@example.com</title>" in html
     assert "analyst@example.com" in html
     assert "42" in html
     assert "Defender's Brief" in html
@@ -191,3 +191,39 @@ def test_export_filename_ext_html() -> None:
     assert investigation_routes._export_filename_ext("html") == "html"
     assert investigation_routes._export_filename_ext("json") == "json"
     assert investigation_routes._export_filename_ext("stix") == "stix.json"
+
+
+# --- privacy: a saved report must never make the analyst's browser contact anyone ---
+
+def _avatar_report() -> dict:
+    finding = {"platform": "Gravatar", "profile_url": "https://gravatar.com/janedoe",
+               "metadata": {"avatar_url": "https://tracker.attacker.test/p.png"}}
+    return {"email": "jane@example.com", "module_runs": [],
+            "findings_by_module": {"gravatar_lookup": [finding]},
+            "findings": [{"module_name": "gravatar_lookup", "data": finding}]}
+
+
+def test_remote_avatar_never_loaded_and_csp_blocks_remote() -> None:
+    import re
+
+    from backend.exporters.html_exporter import HtmlExporter
+
+    html = HtmlExporter().export("x", _avatar_report()).decode()
+    assert not re.search(r'(src|href)="[^"]*tracker\.attacker\.test', html)
+    assert all(src.startswith("data:image/") for src in re.findall(r'<img[^>]+src="([^"]+)"', html))
+    assert "Content-Security-Policy" in html and "default-src 'none'" in html and "img-src data:" in html
+
+
+def test_generate_embeds_avatars_server_side(monkeypatch) -> None:
+    import asyncio
+    import re
+
+    from backend.exporters.html_exporter import HtmlExporter
+
+    async def fake_embed(self, data):
+        for finding in data["findings_by_module"]["gravatar_lookup"]:
+            finding["_pdf_avatar"] = "data:image/png;base64,AAAA"
+
+    monkeypatch.setattr(HtmlExporter, "_embed_avatars", fake_embed)
+    html = asyncio.run(HtmlExporter().generate("x", _avatar_report())).decode()
+    assert "data:image/png;base64,AAAA" in re.findall(r'<img[^>]+src="([^"]+)"', html)

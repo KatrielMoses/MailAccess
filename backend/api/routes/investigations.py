@@ -382,6 +382,9 @@ async def export_report(
         except Exception:
             print(traceback.format_exc())
             raise
+    elif format == "html":
+        # Embeds avatars server-side (see HtmlExporter.generate).
+        content = await exporter.generate(investigation_id, data)
     else:
         content = exporter.export(investigation_id, data)
     return Response(
