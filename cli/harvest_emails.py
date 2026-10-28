@@ -1603,6 +1603,31 @@ def run_harvest_emails(
         )
     )
 
+    # The MailAccess Index: with a key, say what it added (or why it was skipped:
+    # the plan's limit, a rejected key); without one, how many addresses it holds
+    # for this domain and that signing in (free) adds them. Never in local-only.
+    try:
+        from backend.core.own_index_client import (
+            index_outcome_line,
+            own_index_mode,
+            site_coverage_count,
+        )
+
+        _idx_result = (result.module_results or {}).get("own_index")
+        _idx_meta = (getattr(_idx_result, "metadata", None) or {}).get("own_index")
+        _idx_line = index_outcome_line(_idx_meta)
+        if _idx_line:
+            console.print(f"[#B86A73]{_idx_line}[/]")
+        elif own_index_mode() is None and not no_own_index:
+            _count = site_coverage_count(cleaned_domain)
+            if _count:
+                console.print(
+                    f"\n[bold #B86A73]{_count:,} addresses for {cleaned_domain} in the MailAccess Index.[/] "
+                    "Sign in free to add them: [bold]mailaccess login[/]"
+                )
+    except Exception:
+        pass
+
     # Pro upsell — free-tier users (no MailAccess Pro key) see the EXACT number of
     # business contacts Pro would add for this domain, fetched count-only (no data)
     # from the public /v1/coverage endpoint, plus the live founder-pricing counter

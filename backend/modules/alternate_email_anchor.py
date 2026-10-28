@@ -48,8 +48,8 @@ class AlternateEmailAnchorModule(BaseModule):
     name = "alternate_email_anchor"
     email_linked = True
     description = (
-        "Re-anchor Class-1 discovery on alternate emails found via a Class-1 signal, "
-        "merged under one person (UC7.3, bounded depth-1)."
+        "Checks other emails linked to this person for more accounts, "
+        "merged under one person (one level deep)."
     )
     requires_key = False
 

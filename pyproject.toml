@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mailaccess"
-version = "0.19.2"
+version = "0.19.3"
 description = "Open-source OSINT email intelligence tool"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -142,6 +142,7 @@ exclude = [
   # Dev-only material: eval harnesses, research notes, old reports, README media
   # (the README loads its images from GitHub).
   "/eval",
+  "/eval/scorecards/.gitkeep",  # re-included by a .gitignore negation otherwise
   "/research",
   "/docs/research",
   "/report-*.md",

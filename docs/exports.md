@@ -109,15 +109,15 @@ Best for: ingesting into threat intelligence platforms (OpenCTI, MISP, Anomali),
 
 ---
 
-## Maltego XML
+## Maltego (CSV)
 
 | | |
 |--|--|
 | `?format=` | `maltego` |
-| MIME type | `application/xml` |
+| MIME type | `text/csv` |
 | Extension | `.maltego.csv` |
 
-Maltego-compatible entity export. Can be imported directly into a Maltego graph.
+Maltego-compatible entity table (CSV). Import it into a Maltego graph with the table import.
 
 Best for: graph-based OSINT analysis in Maltego Desktop.
 
@@ -141,4 +141,4 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md#adding-an-exporter) for the `BaseExport
 | PDF | `pdf` | Human-readable reports |
 | Markdown | `markdown` | Wikis, issue trackers |
 | STIX 2.1 | `stix` | Threat intelligence platforms |
-| Maltego XML | `maltego` | Maltego graph import |
+| Maltego (CSV) | `maltego` | Maltego graph import |

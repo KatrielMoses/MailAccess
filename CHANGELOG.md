@@ -1,5 +1,26 @@
 # Changelog
 
+### 0.19.3 (2026-10-28)
+
+#### Added
+
+- **The MailAccess Index with your key.** After `mailaccess login`, `harvest-emails` adds the MailAccess Index (our own index of emails seen on the public web) through mailaccess.pro: 5 harvests a day and 30 a month on the free plan, more on Pro. Each harvest is one lookup, however many pages it reads. When the limit is reached, the harvest says so and when it resets; a rejected key says to sign in again. Off in local-only mode and with `--no-own-index`.
+- **Without a key**, a harvest ends with how many addresses the index holds for that domain and that signing in (free) adds them. It sends only the domain, and never in local-only mode.
+
+#### Fixed
+
+- **A free key from `mailaccess login` was treated as a Pro key.** 0.19.0 to 0.19.2 stored the account key as `MAILACCESS_PRO_KEY`, which switched harvests to the Pro business-contact mode. The account key is now `MAILACCESS_KEY`; `MAILACCESS_PRO_KEY` stays the paid corpus key. Signing in again moves you over and removes the old key.
+- **`mailaccess login` for Pro accounts** now saves your account key too, so the index uses your Pro allowance. An existing paid key is left in place. `mailaccess logout` removes only the account key.
+- **A repeat harvest could miss the index.** With the index on, a cached harvest is no longer served (index rows are never stored), so every harvest asks the index.
+- **A traceback on some first harvests.** A finding carrying a date (PGP keys) could not be written to the local observation ledger, and the error printed in full. Those findings are now stored.
+- **Live view wording.** Two checks showed internal descriptions; they now read "Checking other emails linked to this person for more accounts." and "Searching the web for this person's Instagram, Facebook and LinkedIn."
+
+#### Changed
+
+- **`mailaccess pro`** also lists what Pro adds in the hosted app (photos, location, every export, 30 investigations and 10 scrapes a day) and says when the founder seats are taken.
+- **`mailaccess commands`** lists `harvest-emails`, `find-email`, `login`/`logout`, `pro` and `doctor`.
+- **Docs.** The Maltego export is described as what it is (CSV for graph import), and `docs/api-keys.md` explains `MAILACCESS_KEY` and `MAILACCESS_PRO_KEY`.
+
 ### 0.19.2 (2026-10-28)
 
 #### Fixed

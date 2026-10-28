@@ -4405,8 +4405,10 @@ async def run_domain_harvest(
         ):
             cached = None
         # Same rule for the MailAccess Index: a snapshot with index rows is not
-        # served when it is off; one taken without it re-runs when it is on.
-        if cached is not None and (holds_own_index_data(cached) != own_index_enabled):
+        # served when it is off. When it is on, the index answers per query (its
+        # rows are never stored, and each harvest is one metered lookup), so a
+        # snapshot can't stand in for it: the run goes fresh.
+        if cached is not None and (holds_own_index_data(cached) or own_index_enabled):
             cached = None
         if cached is not None:
             # F8: even on a native cache-hit (no modules re-run, no Netlas fetch),
@@ -5305,7 +5307,9 @@ async def _run_own_index(
             "pages": answer.pages,
             "truncated": answer.truncated,
             "calls": client.calls,
+            "mode": client.mode,
             **({"error": answer.error} if answer.error else {}),
+            **({"refusal": client.refusal} if client.refusal else {}),
         },
         "older_source_count": sum(
             1 for f in findings if (f.get("metadata") or {}).get("older_source")

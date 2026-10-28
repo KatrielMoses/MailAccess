@@ -73,13 +73,17 @@ Pipelines, stdin, JSONL and CI: [docs/integrations.md](https://github.com/Katrie
 - **What it means.** A Defender's Brief with the next action, an exposure score, a credential risk score and public breach records.
 - **Email scraper.** `harvest-emails` finds the public addresses at a domain from Common Crawl, GitHub, certificate logs, keyservers, team pages and patterns, then grades each one.
 - **Company patterns.** `find-email` turns a name and an employer domain into one graded likely address, offline, from a bundled 384K-domain pattern index.
-- **Exports.** JSON, CSV, HTML, PDF, Markdown, STIX 2.1 and Maltego XML.
+- **Exports.** JSON, CSV, HTML, PDF, Markdown, STIX 2.1 and Maltego (CSV for graph import).
 
 ## Email scraper
 
 <img src="https://raw.githubusercontent.com/KatrielMoses/MailAccess/main/assets/demo-scraper.gif" alt="Example run in the terminal: mailaccess harvest-emails --domain example.com runs 19 sources live, then lists graded addresses, people and role accounts" width="100%">
 
 <sub>Example run with fictional data (example.com).</sub>
+
+## Sign in for the MailAccess Index
+
+`mailaccess login` (free) saves your account key. Harvests then add the MailAccess Index, our own index of emails seen on the public web: 5 harvests a day and 30 a month on the free plan, more with Pro.
 
 ## MailAccess Pro
 
@@ -97,6 +101,7 @@ $ mailaccess harvest-emails --domain example.com
 
 - **See the gap first.** Every free harvest prints how many contacts Pro would add for that domain.
 - **Company names work too.** `--company "Example Corp"` resolves the domain for you.
+- **The hosted app too.** Photos, location and every export on any report at [mailaccess.pro](https://mailaccess.pro), 30 investigations and 10 scrapes a day.
 - **$5 a month, locked for life, for the first 100 subscribers. Then $9.** Run `mailaccess pro` for seats left.
 
 Pro contacts stay in their own view. They never enter your exports, local database or history. Without a key, nothing changes.

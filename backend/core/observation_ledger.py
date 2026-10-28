@@ -239,7 +239,9 @@ def build_observation(
         "module_version": module_version(extraction_method, module_obj),
         "subject_type": subject_type,
         "subject": subject,
-        "claim": claim,
+        # JSON-safe: a module can put a datetime in its finding (PGP key dates),
+        # which the JSON column can't store and the whole batch would be dropped.
+        "claim": _json_safe(claim),
         "claim_key": _extract_claim_key(claim),
         "source_type": source_type,
         "source_url": source_url,
@@ -265,6 +267,14 @@ def build_observation(
         record["_raw_payload"] = raw_payload
         record["_media_type"] = media_type
     return record
+
+
+def _json_safe(value: Any) -> Any:
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return json.loads(json.dumps(value, default=str))
 
 
 def observations_from_results(

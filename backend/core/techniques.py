@@ -58,6 +58,14 @@ TECHNIQUES: dict[str, tuple[str, str]] = {
     "keybase": ("keybase_lookup", "Looking up Keybase profiles and their verified proofs."),
     "pgp_keyserver": ("pgp_key_lookup", "Searching public PGP key servers for this email."),
     "pgp_domain_email": ("pgp_key_lookup", "Searching public PGP key servers for this domain's emails."),
+    "alternate_email_anchor": (
+        "alternate_email_check",
+        "Checking other emails linked to this person for more accounts.",
+    ),
+    "social_discovery": (
+        "social_profile_search",
+        "Searching the web for this person's Instagram, Facebook and LinkedIn.",
+    ),
     "google_account_intel": (
         "provider_account_intel",
         "Checking whether this is a Google account and reading its public profile.",

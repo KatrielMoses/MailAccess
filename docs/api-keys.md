@@ -19,7 +19,8 @@ For a server, put the same names in `.env` (see [self-hosting.md](self-hosting.m
 
 | Key | Used by | How to get it |
 |-----|---------|---------------|
-| `MAILACCESS_PRO_KEY` | Your MailAccess account (free or Pro). Used for hosted lead enrichment in `harvest-emails` and `mailaccess pro`. | Run `mailaccess login` (email code, or `--google`). It writes the key to `~/.mailaccess/.env`. `mailaccess logout` removes it. Works for free and Pro accounts. |
+| `MAILACCESS_KEY` | Your MailAccess account key (free or Pro). `harvest-emails` adds the MailAccess Index with it: 5 harvests a day and 30 a month on free, more on Pro. | Run `mailaccess login` (email code, or `--google`). It writes the key to `~/.mailaccess/.env`. `mailaccess logout` removes it. |
+| `MAILACCESS_PRO_KEY` | The paid key for the business-contact corpus (`--mode public-business-contact`, `--company`). | Shown once at checkout, and at mailaccess.pro/platform/api-keys. `mailaccess keys set MAILACCESS_PRO_KEY <key>`. |
 
 ## Data source keys
 

@@ -10,6 +10,7 @@ injects Pro. A keyless / security-mode run is unchanged (no channel, no note).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from backend.config import settings
 from backend.core import (
@@ -128,6 +129,8 @@ def test_run_domain_harvest_attaches_pro_on_live_path(monkeypatch) -> None:
 
 def test_run_domain_harvest_cache_hit_still_injects_pro(monkeypatch) -> None:
     monkeypatch.setattr(settings, "mailaccess_pro_key", "structural-test")
+    # A key also turns on the MailAccess Index (0.19.3); keep it out of this cache test.
+    monkeypatch.setattr(settings, "own_index_disabled", True)
     monkeypatch.setattr(settings, "harvest_cache_enabled", True)
     monkeypatch.setattr(settings, "enable_company_pattern_index", False)
     monkeypatch.setattr(suppression, "load_index_sync", lambda: suppression._EMPTY_INDEX)
@@ -202,3 +205,43 @@ def test_bulk_ledger_and_history_use_native_export_only(monkeypatch) -> None:
     assert [row["email"] for row in format_harvest_json_export(result)["emails"]] == [
         "native@acme.com",
     ]
+
+
+def test_index_on_never_serves_the_native_cache(monkeypatch) -> None:
+    """0.19.3: index rows are per query and never stored, so with the index on a
+    cached snapshot can't stand in for it; the harvest runs fresh (and the index
+    is asked, one metered lookup)."""
+    monkeypatch.setattr(settings, "mailaccess_pro_key", None)
+    monkeypatch.setattr(settings, "mailaccess_key", "account-key")
+    monkeypatch.setattr(settings, "mailaccess_pro_api_url", "https://site.test")
+    monkeypatch.setattr(settings, "mailaccess_index_url", None)
+    monkeypatch.setattr(settings, "ma_index_service_key", None)
+    monkeypatch.setattr(settings, "own_index_disabled", False)
+    monkeypatch.setattr(settings, "mailaccess_local_only", False)
+    monkeypatch.delenv("MAILACCESS_LOCAL_ONLY", raising=False)
+    monkeypatch.setattr(settings, "harvest_cache_enabled", True)
+    monkeypatch.setattr(settings, "enable_company_pattern_index", False)
+    monkeypatch.setattr(suppression, "load_index_sync", lambda: suppression._EMPTY_INDEX)
+
+    from backend.core import corpus_store
+
+    async def fake_read(domain, scope):
+        # What write-back stores after an index run: the index's module record
+        # stays, its index-only emails are stripped.
+        cached = _native_only_result()
+        cached.module_results["own_index"] = ModuleResult(
+            status=ModuleStatus.SUCCESS, findings=[], metadata={"own_index": {"status": "ok", "returned": 3}}
+        )
+        return cached
+
+    ran = {"n": 0}
+
+    async def fake_adaptive(**_kw):
+        ran["n"] += 1
+        raise RuntimeError("stop here: the fresh run started")
+
+    monkeypatch.setattr(corpus_store, "read_fresh_crawl", fake_read)
+    monkeypatch.setattr(harvest_runner, "run_adaptive_harvest", fake_adaptive)
+    with contextlib.suppress(Exception):
+        asyncio.run(orchestrator.run_domain_harvest("acme.com"))
+    assert ran["n"] == 1, "the cached snapshot was served instead of a fresh run"

@@ -607,3 +607,77 @@ async def test_github_pivot_uses_opportunistic_track():
     )
     assert len(items) == 1
     assert items[0].track == TRACK_OPPORTUNISTIC
+
+
+# ------------------------------------------------------------------ key mode (0.19.3)
+SITE = "https://site.test"
+USER_KEY = "ma_user_key_123"
+
+
+@pytest.fixture
+def keyed(monkeypatch):
+    monkeypatch.setattr(settings, "mailaccess_index_url", None)
+    monkeypatch.setattr(settings, "ma_index_service_key", None)
+    monkeypatch.setattr(settings, "mailaccess_pro_key", USER_KEY)
+    monkeypatch.setattr(settings, "mailaccess_pro_api_url", SITE)
+    monkeypatch.setattr(settings, "mailaccess_local_only", False)
+    monkeypatch.setattr(settings, "own_index_disabled", False)
+    monkeypatch.delenv("MAILACCESS_LOCAL_ONLY", raising=False)
+
+
+class SiteIndex(Index):
+    """The website's /api/index mirror of the index paths."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        routed = request
+        if path.startswith("/api/index/"):
+            routed = httpx.Request(request.method, request.url.copy_with(path="/v1/index/" + path[len("/api/index/"):]),
+                                   headers=request.headers)
+        response = super().__call__(routed)
+        self.requests[-1] = request
+        return response
+
+
+def test_mode_selection(monkeypatch, keyed):
+    assert oic.own_index_mode() == "key"
+    assert oic.own_index_active() is True
+    monkeypatch.setenv("MAILACCESS_LOCAL_ONLY", "1")
+    assert oic.own_index_mode() is None, "local-only never sends the domain to the site"
+    monkeypatch.delenv("MAILACCESS_LOCAL_ONLY")
+    monkeypatch.setattr(settings, "mailaccess_index_url", URL)
+    monkeypatch.setattr(settings, "ma_index_service_key", KEY)
+    assert oic.own_index_mode() == "service", "our boxes go direct"
+    monkeypatch.setattr(settings, "mailaccess_index_url", None)
+    monkeypatch.setattr(settings, "mailaccess_pro_key", "")
+    assert oic.own_index_mode() is None
+
+
+async def test_key_mode_pages_through_the_site_with_the_user_key(monkeypatch, keyed):
+    index = _serve(monkeypatch, SiteIndex(pages=[[_row("a@acme.io")], [_row("b@acme.io")]]))
+    client = oic.OwnIndexClient()
+    answer = await client.domain_emails(DOMAIN)
+    assert client.mode == "key"
+    assert [r["email"] for r in answer.emails] == ["a@acme.io", "b@acme.io"]
+    assert all(str(r.url).startswith(f"{SITE}/api/index/domain/") for r in index.requests)
+    assert all(r.headers.get("X-API-Key") == USER_KEY and "X-Index-Key" not in r.headers for r in index.requests)
+    assert (await client.email("a@acme.io"))[0] == "skipped"
+
+
+async def test_key_mode_quota_refusal_is_explained(monkeypatch, keyed):
+    def refuse(request):
+        return httpx.Response(429, json={"error": "index_quota", "window": "day", "used": 5, "limit": 5,
+                                         "plan": "free", "message": "MailAccess Index limit reached (5 a day)."})
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(**{**kw, "transport": httpx.MockTransport(refuse)}))
+    client = oic.OwnIndexClient()
+    answer = await client.domain_emails(DOMAIN)
+    assert answer.status == "error" and answer.error == "quota"
+    line = oic.index_outcome_line({"mode": "key", "status": "error", "error": "quota", "refusal": client.refusal})
+    assert "5 index harvests a day are used" in line and "midnight UTC" in line and "Pro gets more" in line
+    pro = oic.index_outcome_line({"mode": "key", "status": "error", "error": "quota",
+                                  "refusal": {**client.refusal, "plan": "pro", "window": "month", "limit": 300}})
+    assert "300 index harvests a month" in pro and "Pro gets more" not in pro
+    assert "mailaccess login" in oic.index_outcome_line({"mode": "key", "status": "error", "error": "bad_key"})
+    assert oic.index_outcome_line({"mode": "service", "status": "ok"}) is None
+    assert "3 addresses" in oic.index_outcome_line({"mode": "key", "status": "ok", "returned": 3})

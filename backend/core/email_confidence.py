@@ -120,7 +120,6 @@ SOURCE_WEIGHTS: dict[str, float] = {
     # Phase 5 — breach aggregation. Corroborates that an email existed at
     # breach time (not necessarily current); ages via freshness_factor and
     # is never a PERMANENT source.
-    "scylla_breach": 0.55,
     "hibp_paste": 0.50,
     "dehashed_breach": 0.70,  # paid aggregator, higher data quality
     "snusbase_breach": 0.68,
@@ -237,7 +236,6 @@ SOURCE_CLASS: dict[str, str] = {
     "breach_recent": "corroboration",
     "breach_historical": "corroboration",
     # Phase 5 — breach aggregation sources share the "breach" family.
-    "scylla_breach": "breach",
     "hibp_paste": "breach",
     "dehashed_breach": "breach",
     "snusbase_breach": "breach",

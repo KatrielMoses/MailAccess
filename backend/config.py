@@ -933,6 +933,11 @@ class Settings(BaseSettings):
     # CLI sets it in Phase 3. Distinct from ``mailaccess_api_key`` (the self-host
     # API gate): this is the paid-tier entitlement presented to /v1/enrich.
     mailaccess_pro_key: str | None = None
+    # The user's MailAccess account key (free or Pro), written by `mailaccess
+    # login`. It unlocks the MailAccess Index through mailaccess.pro with the
+    # plan's allowance. Not a Pro entitlement by itself: the paid corpus key is
+    # ``mailaccess_pro_key``.
+    mailaccess_key: str | None = None
     # Shared secret for the internal provisioning bridge (POST /internal/pro/keys),
     # which the website BFF calls to keep its Pro-key store in sync with THIS
     # entitlement store (what /v1/enrich validates against). Fail-closed: while this

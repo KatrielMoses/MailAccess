@@ -4,7 +4,8 @@ Investigations and harvests still talk to the OSINT sources the operator
 chose. What this gate stops is product-network chatter that is not part of
 the lookup itself: the free-tier coverage teaser (sends the harvested
 domain), the founder-seat counter, the CLI sponsor feed, and the PyPI
-update check.
+update check. It also turns off the MailAccess Index for a signed-in key
+(``MAILACCESS_KEY``), since that lookup sends the domain to mailaccess.pro.
 
 A configured Pro key still reaches ``/v1/enrich`` — that call is opt-in.
 ``mailaccess pro`` still prints the pitch; live seat counts are omitted.

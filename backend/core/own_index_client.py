@@ -1,9 +1,16 @@
 """Client for the MailAccess Index: our own index of emails on the public web.
 
 The index is a separate private service (built from Common Crawl and GH Archive).
-It exists for the engine only when BOTH ``MAILACCESS_INDEX_URL`` and
-``MA_INDEX_SERVICE_KEY`` are set, the same rule as the other key-gated providers,
-and a per-run ``--no-own-index`` turns it fully off (no calls, no events).
+The engine reaches it one of two ways:
+
+- **service**: ``MAILACCESS_INDEX_URL`` + ``MA_INDEX_SERVICE_KEY`` are set (our own
+  hosted boxes). Direct to the index, key in ``X-Index-Key``.
+- **key**: a user's MailAccess account key (``MAILACCESS_KEY``, written by
+  ``mailaccess login``; a paid ``MAILACCESS_PRO_KEY`` works too). Through mailaccess.pro (``/api/index``), key in
+  ``X-API-Key``; the site meters it per plan (free 5 a day / 30 a month, Pro more).
+  Off in local-only mode, since it sends the domain to mailaccess.pro.
+
+A per-run ``--no-own-index`` turns it fully off (no calls, no events).
 
 Every failure (bad key, rejected domain, bad input, timeout, unreachable service,
 unexpected shape) is "no results": nothing here ever raises into a harvest. The
@@ -12,6 +19,7 @@ key travels only in the ``X-Index-Key`` header and is never logged.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import time
@@ -41,12 +49,39 @@ def set_no_own_index(value: bool):
     return _NO_OWN_INDEX.set(bool(value))
 
 
-def own_index_configured(cfg: Any = None) -> bool:
-    """Both the URL and the key are set (the module exists for this engine)."""
+def _local_only(cfg: Any) -> bool:
+    from .local_only import env_flag
+
+    return env_flag() or bool(getattr(cfg, "mailaccess_local_only", False))
+
+
+def _user_key(cfg: Any) -> str:
+    """The account key from `mailaccess login`, else a paid key (it works too)."""
+    for name in ("mailaccess_key", "mailaccess_pro_key"):
+        value = str(getattr(cfg, name, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def own_index_mode(cfg: Any = None) -> str | None:
+    """``"service"`` (direct, our boxes), ``"key"`` (a user's MailAccess key via
+    mailaccess.pro) or ``None`` (no index for this engine)."""
     cfg = cfg if cfg is not None else settings
     url = str(getattr(cfg, "mailaccess_index_url", "") or "").strip()
-    key = str(getattr(cfg, "ma_index_service_key", "") or "").strip()
-    return bool(url and key)
+    service_key = str(getattr(cfg, "ma_index_service_key", "") or "").strip()
+    if url and service_key:
+        return "service"
+    user_key = _user_key(cfg)
+    site = str(getattr(cfg, "mailaccess_pro_api_url", "") or "").strip()
+    if user_key and site and not _local_only(cfg):
+        return "key"
+    return None
+
+
+def own_index_configured(cfg: Any = None) -> bool:
+    """The index is reachable for this engine (the module exists)."""
+    return own_index_mode(cfg) is not None
 
 
 def own_index_active(*, no_own_index: bool | None = None, cfg: Any = None) -> bool:
@@ -70,16 +105,32 @@ class IndexAnswer:
     http_status: int | None = None
 
 
-_ERROR_CODES = {401: "bad_key", 422: "domain_rejected", 400: "invalid_input"}
+_ERROR_CODES = {
+    401: "bad_key", 422: "domain_rejected", 400: "invalid_input",
+    429: "quota", 409: "cursor_expired",
+}
 
 
 class OwnIndexClient:
     """Thin async client. Methods return ``(status, data)`` and never raise."""
 
     def __init__(self, base_url: str | None = None, key: str | None = None) -> None:
-        self.base_url = str(base_url or settings.mailaccess_index_url or "").strip().rstrip("/")
-        self._key = str(key or settings.ma_index_service_key or "").strip()
+        self.mode = "service" if (base_url or key) else (own_index_mode() or "service")
+        if self.mode == "key":
+            site = str(getattr(settings, "mailaccess_pro_api_url", "") or "").strip().rstrip("/")
+            self.base_url = site
+            self._prefix = "/api/index"
+            self._key = _user_key(settings)
+            self._header = "X-API-Key"
+        else:
+            self.base_url = str(base_url or settings.mailaccess_index_url or "").strip().rstrip("/")
+            self._prefix = "/v1/index"
+            self._key = str(key or settings.ma_index_service_key or "").strip()
+            self._header = "X-Index-Key"
         self.calls = 0
+        # The site's explanation of the last refusal (quota window and limit,
+        # plan), so the CLI can say exactly why the index was skipped.
+        self.refusal: dict[str, Any] | None = None
 
     def _timeout(self, deadline: float | None) -> float | None:
         per_request = max(0.1, float(getattr(settings, "own_index_timeout_seconds", 10.0)))
@@ -106,7 +157,7 @@ class OwnIndexClient:
             response = await client.get(
                 f"{self.base_url}{path}",
                 params=params or None,
-                headers={"X-Index-Key": self._key, "Accept": "application/json"},
+                headers={self._header: self._key, "Accept": "application/json"},
                 timeout=timeout,
             )
         except httpx.TimeoutException:
@@ -116,6 +167,11 @@ class OwnIndexClient:
             return "unreachable", None, None
         code = response.status_code
         if code != 200:
+            if self.mode == "key":
+                with contextlib.suppress(ValueError):
+                    body = response.json()
+                    if isinstance(body, dict):
+                        self.refusal = {k: body.get(k) for k in ("error", "message", "window", "limit", "used", "plan")}
             return _ERROR_CODES.get(code, f"http_{code}"), None, code
         try:
             return "ok", response.json(), code
@@ -136,7 +192,7 @@ class OwnIndexClient:
         """All emails for ``domain``, following ``next_cursor`` up to ``max_emails``."""
         page_limit = int(limit or getattr(settings, "own_index_page_limit", 500) or 500)
         cap = int(max_emails or getattr(settings, "own_index_max_emails", 2000) or 2000)
-        path = f"/v1/index/domain/{quote(domain.strip().lower(), safe='')}"
+        path = f"{self._prefix}/domain/{quote(domain.strip().lower(), safe='')}"
         out: list[dict[str, Any]] = []
         answer = IndexAnswer(status="empty")
         cursor: str | None = None
@@ -185,10 +241,13 @@ class OwnIndexClient:
         return answer
 
     async def email(self, email: str, *, deadline: float | None = None) -> tuple[str, Any]:
-        """One email with ALL its sources (not used by the harvest module)."""
+        """One email with ALL its sources (not used by the harvest module).
+        Service mode only: the site exposes domain lookups, not single emails."""
+        if self.mode == "key":
+            return "skipped", None
         async with self._client() as client:
             status, data, _ = await self._get(
-                client, f"/v1/index/email/{quote(email.strip().lower(), safe='')}",
+                client, f"{self._prefix}/email/{quote(email.strip().lower(), safe='')}",
                 deadline=deadline,
             )
         return status, data
@@ -196,7 +255,7 @@ class OwnIndexClient:
     async def coverage(self, domain: str, *, deadline: float | None = None) -> tuple[str, Any]:
         async with self._client() as client:
             status, data, _ = await self._get(
-                client, f"/v1/index/coverage/{quote(domain.strip().lower(), safe='')}",
+                client, f"{self._prefix}/coverage/{quote(domain.strip().lower(), safe='')}",
                 deadline=deadline,
             )
         return status, data
@@ -399,3 +458,51 @@ def strip_own_index_blobs(blobs: list[tuple[Any, Any]]) -> list[tuple[Any, Any]]
         )))
         for stamp, blob in blobs or []
     ]
+
+
+def site_coverage_count(domain: str, *, timeout: float = 4.0) -> int | None:
+    """How many addresses the MailAccess Index holds for ``domain`` (a count, never
+    the addresses), from mailaccess.pro's public coverage route. Best effort: None
+    on any failure, and never called in local-only mode."""
+    if _local_only(settings):
+        return None
+    site = str(getattr(settings, "mailaccess_pro_api_url", "") or "").strip().rstrip("/")
+    if not site:
+        return None
+    try:
+        r = httpx.get(
+            f"{site}/api/index/coverage/{quote(domain.strip().lower(), safe='')}",
+            timeout=timeout, follow_redirects=False, headers={"Accept": "application/json"},
+        )
+        if r.status_code != 200:
+            return None
+        count = r.json().get("count")
+        return int(count) if isinstance(count, (int, float)) and count > 0 else 0
+    except Exception:  # noqa: BLE001 - a teaser never breaks a harvest
+        return None
+
+
+def index_outcome_line(meta: dict[str, Any] | None) -> str | None:
+    """One plain line about the index for the end of a keyed CLI harvest, or None.
+    ``meta`` is the own_index module's ``metadata["own_index"]``."""
+    if not isinstance(meta, dict) or meta.get("mode") != "key":
+        return None
+    error = meta.get("error")
+    refusal = meta.get("refusal") or {}
+    if meta.get("status") in ("ok", "empty") and not error:
+        n = int(meta.get("returned") or 0)
+        return f"MailAccess Index: {n:,} address{'es' if n != 1 else ''} with your key."
+    if error == "quota":
+        window = refusal.get("window") or "day"
+        limit = refusal.get("limit")
+        resets = "at midnight UTC" if window == "day" else "on the 1st (UTC)"
+        line = (
+            f"MailAccess Index skipped: your {limit} index harvests a {window} are used. "
+            f"They reset {resets}."
+        )
+        if refusal.get("plan") != "pro":
+            line += " Pro gets more: mailaccess.pro/pricing?src=cli-index"
+        return line
+    if error == "bad_key":
+        return "MailAccess Index skipped: your key was rejected. Run `mailaccess login` for a new one."
+    return "MailAccess Index unavailable right now. The other sources still ran."

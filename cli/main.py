@@ -140,7 +140,8 @@ _API_KEYS: list[tuple[str, str, str]] = [
     ("GOOGLE_CSE_API_KEY", "email_search_dork", "Google CSE (programableseach.google.com)"),
     ("GOOGLE_CSE_CX", "email_search_dork", "Google CSE Engine ID"),
     ("COMPANIES_HOUSE_API_KEY", "companies_house", "developer.company-information.service.gov.uk"),
-    ("MAILACCESS_PRO_KEY", "mailaccess_pro", "mailaccess.pro — paid lead-enrichment tier"),
+    ("MAILACCESS_KEY", "own_index", "mailaccess.pro — your account key (mailaccess login): the MailAccess Index"),
+    ("MAILACCESS_PRO_KEY", "mailaccess_pro", "mailaccess.pro — paid key for the business-contact corpus"),
     ("SLACK_WEBHOOK_URL", "notifications", "Slack app webhooks"),
     ("DISCORD_WEBHOOK_URL", "notifications", "Discord server webhooks"),
 ]
@@ -2279,6 +2280,10 @@ def pro_command() -> None:
     console.print(
         "[dim]Aggregated from publicly-available and third-party commercial sources.[/dim]"
     )
+    console.print(
+        "In the hosted app: [bold]photos, location and every export[/] on any report, "
+        "30 investigations and 10 scrapes a day. More MailAccess Index harvests with your key."
+    )
     console.print()
 
     founder = None
@@ -2288,7 +2293,9 @@ def pro_command() -> None:
         founder = asyncio.run(mailaccess_pro_connector.fetch_founder_status())
     except Exception:
         founder = None
-    if founder and isinstance(founder.get("seats_left"), int):
+    if founder and founder.get("seats_left") == 0:
+        console.print(f"[bold]{founder.get('price_label') or '$9/mo'}[/] · the founder seats are taken")
+    elif founder and isinstance(founder.get("seats_left"), int):
         price = founder.get("price_label") or "$5/mo"
         total = founder.get("seats_total") or 100
         console.print(
@@ -2316,6 +2323,12 @@ def pro_command() -> None:
         )
 
 
+def _s_login_settings():
+    from backend.config import settings as _settings
+
+    return _settings
+
+
 def _cli_provision_and_store(base: str, token: str) -> None:
     """Exchange a CLI session token for the user's key and write it to ~/.mailaccess/.env."""
     try:
@@ -2328,20 +2341,40 @@ def _cli_provision_and_store(base: str, token: str) -> None:
         err_console.print(f"[red]Couldn't fetch your key (HTTP {r.status_code}).[/]")
         raise typer.Exit(1)
     prov = r.json()
-    if prov.get("tier") == "pro":
-        console.print(f"[green]Signed in as {prov.get('email')}[/] — you're [bold]Pro[/].")
-        if prov.get("message"):
-            console.print(f"[dim]{prov['message']}[/]")
-        return
     api_key = prov.get("api_key")
-    env_var = prov.get("env_var") or "MAILACCESS_PRO_KEY"
     if not api_key:
+        if prov.get("tier") == "pro":
+            # An older site answers Pro without a key: nothing to store.
+            console.print(f"[green]Signed in as {prov.get('email')}[/] — you're [bold]Pro[/].")
+            if prov.get("message"):
+                console.print(f"[dim]{prov['message']}[/]")
+            return
         err_console.print("[red]No key returned by the server.[/]")
         raise typer.Exit(1)
+    env_var = prov.get("env_var") or "MAILACCESS_KEY"
     _set_env_key(env_var, api_key)
+    # 0.19.0-0.19.2 stored the account key as MAILACCESS_PRO_KEY (the paid corpus
+    # key), which switched harvests into Pro mode. Logging in again retires that
+    # key, so drop it from MAILACCESS_PRO_KEY when it is the one just retired.
+    retired = {str(x) for x in (prov.get("retired_last4") or []) if x}
+    old = (os.environ.get("MAILACCESS_PRO_KEY") or getattr(_s_login_settings(), "mailaccess_pro_key", "") or "").strip()
+    if env_var != "MAILACCESS_PRO_KEY" and old and old[-4:] in retired:
+        with contextlib.suppress(Exception):
+            unset_key(str(ENV_FILE), "MAILACCESS_PRO_KEY")
+        console.print("[dim]Removed your old key from MAILACCESS_PRO_KEY (it was retired by this sign-in).[/]")
+    pro = prov.get("tier") == "pro"
     console.print(
-        f"[green]Signed in as {prov.get('email')}.[/] Key saved to ~/.mailaccess/.env — you're all set."
+        f"[green]Signed in as {prov.get('email')}[/]"
+        + (" — you're [bold]Pro[/]." if pro else ".")
+        + f" Key saved to ~/.mailaccess/.env as {env_var}."
     )
+    console.print(
+        "[dim]Harvests now add the MailAccess Index"
+        + (" with your Pro allowance." if pro else ": 5 harvests a day, 30 a month on the free plan.")
+        + "[/]"
+    )
+    if pro and prov.get("message"):
+        console.print(f"[dim]{prov['message']}[/]")
 
 
 def _google_cli_login(base: str) -> str | None:
@@ -2461,16 +2494,21 @@ def login_command(
 
 @app.command(name="logout")
 def logout_command() -> None:
-    """Remove the stored MailAccess key from ~/.mailaccess/.env."""
+    """Remove your MailAccess account key from ~/.mailaccess/.env."""
     removed = False
     if ENV_FILE.exists():
-        for var in ("MAILACCESS_PRO_KEY",):
-            with contextlib.suppress(Exception):
-                if unset_key(str(ENV_FILE), var)[0]:
-                    removed = True
+        with contextlib.suppress(Exception):
+            removed = bool(unset_key(str(ENV_FILE), "MAILACCESS_KEY")[0])
     console.print(
         "[green]Logged out — key removed.[/]" if removed else "[dim]No stored key to remove.[/]"
     )
+    from backend.config import settings as _logout_settings
+
+    if (getattr(_logout_settings, "mailaccess_pro_key", "") or "").strip():
+        console.print(
+            "[dim]MAILACCESS_PRO_KEY is still set. Remove it with "
+            "`mailaccess keys unset MAILACCESS_PRO_KEY` if you want it gone too.[/]"
+        )
 
 
 @app.command(name="google-auth")
@@ -3195,6 +3233,11 @@ def commands_overview() -> None:
     """Show all available commands with descriptions."""
     content = (
         "  [cyan]investigate <email>[/cyan]   Run full OSINT on an email address\n"
+        "  [cyan]harvest-emails -d <dom>[/cyan] Find every email at a company domain\n"
+        "  [cyan]find-email[/cyan]            Find one person's work email\n"
+        "  [cyan]login[/cyan] / [cyan]logout[/cyan]        Sign in free for the MailAccess Index\n"
+        "  [cyan]pro[/cyan]                   What MailAccess Pro adds\n"
+        "  [cyan]doctor[/cyan]                Check your setup\n"
         "  [cyan]serve[/cyan]                 Start the backend server locally\n"
         "  [cyan]history[/cyan]               View past investigations\n"
         "  [cyan]keys list[/cyan]             Show API key status\n"
