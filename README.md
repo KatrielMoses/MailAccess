@@ -30,8 +30,6 @@ Open-source email OSINT and email scraper. One email in, every account behind it
 <a href="https://whoisfreaks.com/?utm_source=github&utm_medium=referral&utm_campaign=mailaccess"><img src="https://raw.githubusercontent.com/KatrielMoses/MailAccess/main/assets/sponsor-whoisfreaks.png" alt="Powered by WhoisFreaks: who owned a domain, and what else they registered" width="100%"></a>
 <a href="https://www.ipburger.com/?utm_source=mailaccess&utm_medium=github_readme&utm_campaign=sponsorship"><img src="https://raw.githubusercontent.com/KatrielMoses/MailAccess/main/assets/sponsor-ipburger.png" alt="Partnered with IPBurger: dedicated ISP IPs that stay yours, built for recon" width="100%"></a>
 <a href="https://mangoproxy.com/?utm_source=katrielmoses&utm_medium=partner&utm_campaign=katrielmoses_github"><img src="https://raw.githubusercontent.com/KatrielMoses/MailAccess/main/assets/sponsor-mango.png" alt="Partnered with Mango Proxy: residential IPs that keep big harvests clean" width="100%"></a>
-<a href="https://www.swiftproxy.net/?ref=MailAccess"><img src="https://raw.githubusercontent.com/KatrielMoses/MailAccess/main/assets/sponsor-swiftproxy.png" alt="Partnered with Swiftproxy: reliable residential IPs for scalable email harvesting" width="100%"></a>
-<a href="https://www.rapidproxy.io/?ref=MailAccess"><img src="https://raw.githubusercontent.com/KatrielMoses/MailAccess/main/assets/sponsor-rapidproxy.png" alt="Partnered with Rapidproxy: 90M+ rotating residential IPs for scalable scraping" width="100%"></a>
 
 Built for security researchers, OSINT analysts and penetration testers working under authorization. Read [DISCLAIMER.md](https://github.com/KatrielMoses/MailAccess/blob/main/DISCLAIMER.md) before use.
 

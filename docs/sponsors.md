@@ -41,14 +41,6 @@ Dedicated ISP IPs.
 
 Residential IPs for large harvests.
 
-### [Swiftproxy](https://www.swiftproxy.net/?ref=MailAccess)
-
-Residential IPs for email harvesting at scale.
-
-### [Rapidproxy](https://www.rapidproxy.io/?ref=MailAccess)
-
-Rotating residential IPs.
-
 ---
 
 ## Open categories
