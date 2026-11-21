@@ -7,7 +7,7 @@
 
 # API Keys
 
-Every key is optional. 70 of the 82 modules need no key at all. A module whose
+Every key is optional. 70 of the 83 modules need no key at all. A module whose
 key is missing is skipped, and the run continues without it.
 
 Set a key with `mailaccess keys set <NAME> <value>` (stored in
@@ -34,6 +34,7 @@ For a server, put the same names in `.env` (see [self-hosting.md](self-hosting.m
 | `SHODAN_API_KEY` | `shodan`, `domain_intel` | https://account.shodan.io | Yes for `shodan` |
 | `EMAILREP_API_KEY` | `emailrep` | https://emailrep.io | No |
 | `HUNTER_IO_API_KEY` | `hunter_io` | https://hunter.io | Yes for `hunter_io` |
+| `DARKEYE_HIBR_API_KEY`, `DARKEYE_BREACHHOUSE_API_KEY` | `darkeye` (HaveIBeenRansom and Breach House) | https://haveibeenransom.com, https://breach.house | At least one for `darkeye` (each product skips without its key) |
 | `NETLAS_API_KEY` | `netlas_email_footprint`, `netlas_org_surface`, subdomain enumeration | [netlas.io](https://netlas.io) | Yes for the Netlas modules |
 | `IPGEOLOCATION_API_KEY` | `ip_intel` (IP geolocation and threat intel) | [ipgeolocation.io](https://ipgeolocation.io/?utm_source=github&utm_medium=referral&utm_campaign=mailaccess) | Yes for `ip_intel` |
 | `WHOISFREAKS_API_KEY` | `whoisfreaks_intel` (WHOIS history, reverse WHOIS, dated subdomains) | [whoisfreaks.com](https://whoisfreaks.com/?utm_source=github&utm_medium=referral&utm_campaign=mailaccess) | Yes for `whoisfreaks_intel` |

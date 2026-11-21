@@ -100,6 +100,10 @@ TECHNIQUES: dict[str, tuple[str, str]] = {
     "xposedornot": ("breach_lookup", "Searching the XposedOrNot breach list for this email."),
     "leakcheck": ("breach_lookup", "Searching LeakCheck's public breach list for this email."),
     "intelx_lookup": ("leak_search", "Searching leaks, pastes and dark-web dumps for this email."),
+    "darkeye": (
+        "exposure_lookup",
+        "Searching ransomware, breach, leak and stealer listings for this email.",
+    ),
     "hudson_rock": ("infostealer_lookup", "Checking infostealer malware logs for this email."),
     "pastebin_search": ("paste_search", "Searching public paste sites for this email."),
     "ransomware_intel": ("ransomware_listing", "Checking ransomware leak sites for this email's domain."),

@@ -802,6 +802,10 @@ class Settings(BaseSettings):
     serpapi_key: str | None = None
     github_token: str | None = None
     companies_house_api_key: str | None = None
+    # DarkEye (darkeye.io): one optional key per product. The darkeye module queries
+    # each product that has a key and skips with neither.
+    darkeye_hibr_api_key: str | None = None
+    darkeye_breachhouse_api_key: str | None = None
 
     # Hunter.io usage tracking (Phase 6). Free tier is 25 searches/month and
     # 25 verifications/month with no CC. ``hunter_usage_tracking`` gates the

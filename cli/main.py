@@ -129,6 +129,14 @@ _API_KEYS: list[tuple[str, str, str]] = [
     ("EMAILREP_API_KEY", "emailrep", "emailrep.io"),
     ("HUNTER_IO_API_KEY", "hunter_io", "hunter.io"),
     (
+        "DARKEYE_HIBR_API_KEY", "darkeye",
+        "haveibeenransom.com (DarkEye): ransomware, breaches",
+    ),
+    (
+        "DARKEYE_BREACHHOUSE_API_KEY", "darkeye",
+        "breach.house (DarkEye): ransomware, breaches, leads, stealers",
+    ),
+    (
         "IPGEOLOCATION_API_KEY", "ipgeo",
         "ipgeolocation.io — existing IP enrichment (optional, BYOK)",
     ),

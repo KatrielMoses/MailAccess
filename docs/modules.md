@@ -11,7 +11,7 @@
 
 ### Modules
 
-MailAccess ships 82 modules over a 5,300+ platform corpus. 71 of them need no API key. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with the others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
+MailAccess ships 83 modules over a 5,300+ platform corpus. 71 of them need no API key. Modules are auto-discovered from `backend/modules/` at startup. Each module runs concurrently with the others, subject to `MAX_CONCURRENT_MODULES` and `MODULE_TIMEOUT_SECONDS`.
 
 Investigation modules:
 
@@ -27,6 +27,7 @@ Investigation modules:
 | breach_aggregator | HIBP Pastes, Dehashed, Snusbase (existence flags only) | Yes (any one of the three) | No |
 | breach_deep | Account existence on the top 100 highest-severity breached sites | No | Yes |
 | hudson_rock | Infostealer logs (free) | No | No |
+| darkeye | DarkEye HaveIBeenRansom and Breach House: ransomware, breach, leak, stealer and lead listings | Yes (`DARKEYE_HIBR_API_KEY` and/or `DARKEYE_BREACHHOUSE_API_KEY`) | No |
 | intelx_lookup | IntelligenceX leak and paste records | Yes (`INTELX_API_KEY`, free tier) | No |
 | pastebin_search | Paste search via psbdmp.ws | No | No |
 | ransomware_intel | Company-domain match against ransomware victim lists; skips free providers | No | No |
@@ -1773,6 +1774,47 @@ Headless-browser email-existence checks for platforms whose signal only shows up
 |--|--|
 | **Requires key** | No. Needs Playwright: `pip install "mailaccess[browser]" && playwright install chromium`. Skips without it |
 | **Default** | On (`ENABLE_BROWSER_PROBES`); XenForo forum checks opt-in via `ENABLE_BROWSER_XENFORO=true` |
+| **Status** | Implemented |
+
+---
+
+## `darkeye`
+
+Looks the address up in two DarkEye products (https://darkeye.io): HaveIBeenRansom (ransomware leaks and data breaches) and Breach House (ransomware victims, breaches, leads and stealer logs). Each product has its own optional key and is queried only when its key is set; with neither key the module reports skipped and sends nothing.
+
+Only listing metadata is read: title, website, group, country and date. HaveIBeenRansom's stealer-log endpoint is not used (it returns saved credentials), and no password or credential field is read from either product. The address is sent only as the search term; its domain is never sent separately.
+
+- HaveIBeenRansom: `GET /api/metadata/email/<email>`, up to 5 pages of 20 records (each page counts as one request against your daily limit).
+- Breach House: `GET /api/v1/search?q=<email>`. Its search is free text over victim and listing fields, so a record is kept only when the exact address appears in its text; other hits are dropped.
+- Redirects are not followed, so the `Authorization` header never leaves the API host. At most 100 records are kept per product.
+
+Each finding carries `product` (`haveibeenransom` or `breach_house`) and `category` (`ransomware`, `breach`, `leak`, `stealer` or `lead`). HaveIBeenRansom records are `leak` unless the response says `ransomware_leak` or `traditional_breach`. A match is a listing to verify, not proof of compromise.
+
+```json
+{
+  "platform": "breach_house",
+  "product": "breach_house",
+  "category": "stealer",
+  "source": "darkeye",
+  "confidence": "medium",
+  "severity": "medium",
+  "metadata": {
+    "product": "breach_house",
+    "category": "stealer",
+    "title": "Example listing",
+    "summary": "Breach House (stealer): Example listing",
+    "record_id": "123",
+    "country": "ES",
+    "discovered": "2026-01-15"
+  }
+}
+```
+
+Status: `skipped` with no usable key; `failed` when every queried product errored; `partial` when one product errored (a wrong key, the daily limit, a timeout) or a record limit was hit; otherwise `success`. `metadata.products` reports `ok`, `error` or `skipped` for each product.
+
+| | |
+|--|--|
+| **Requires key** | At least one of `DARKEYE_HIBR_API_KEY`, `DARKEYE_BREACHHOUSE_API_KEY` |
 | **Status** | Implemented |
 
 ---

@@ -538,6 +538,7 @@ _KEY_SETTINGS: dict[str, tuple[str, ...]] = {
     "hibp": ("hibp_api_key", "haveibeenpwned_api_key"),
     "breachdirectory": ("breachdirectory_api_key",),
     "hunter_io": ("hunter_io_api_key",),
+    "darkeye": ("darkeye_hibr_api_key", "darkeye_breachhouse_api_key"),
     "shodan": ("shodan_api_key",),
     "intelx_lookup": ("intelx_api_key",),
     "google_dork": ("serpapi_key",),
