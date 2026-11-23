@@ -299,6 +299,7 @@ All API keys are optional. Modules that require a missing key skip themselves wi
 | `SHODAN_API_KEY` | `shodan`, `domain_intel` (optional) | https://account.shodan.io |
 | `EMAILREP_API_KEY` | `emailrep` (raises rate limit) | https://emailrep.io |
 | `HUNTER_IO_API_KEY` | `hunter_io` | https://hunter.io |
+| `DARKEYE_HIBR_API_KEY`, `DARKEYE_BREACHHOUSE_API_KEY` | `darkeye` (each product is queried only with its own key) | https://haveibeenransom.com, https://breach.house |
 | `NETLAS_API_KEY` | `netlas_email_footprint`, `netlas_org_surface`, subdomain enumeration | https://netlas.io |
 | `IPGEOLOCATION_API_KEY` | `ip_intel` | https://ipgeolocation.io |
 | `WHOISFREAKS_API_KEY` | `whoisfreaks_intel` | https://whoisfreaks.com |

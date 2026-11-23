@@ -23,7 +23,7 @@
   &nbsp;·&nbsp; <a href="https://github.com/KatrielMoses/MailAccess/blob/main/CHANGELOG.md">Changelog</a>
 </p>
 
-Open-source email OSINT and email scraper. One email in, every account behind it: 82 modules check 5,300+ platforms, and every finding says how it was found and how sure we are. One domain in, every public email at the company. Run it on your own machine, or use it hosted at [mailaccess.pro](https://mailaccess.pro).
+Open-source email OSINT and email scraper. One email in, every account behind it: 83 modules check 5,300+ platforms, and every finding says how it was found and how sure we are. One domain in, every public email at the company. Run it on your own machine, or use it hosted at [mailaccess.pro](https://mailaccess.pro).
 
 <a href="https://netlas.io"><img src="https://raw.githubusercontent.com/KatrielMoses/MailAccess/main/assets/sponsor-netlas.png" alt="Powered by Netlas: see what runs on every host behind a domain" width="100%"></a>
 <a href="https://ipgeolocation.io/?utm_source=github&utm_medium=referral&utm_campaign=mailaccess"><img src="https://raw.githubusercontent.com/KatrielMoses/MailAccess/main/assets/sponsor-ipgeolocation-io.png" alt="Powered by ipgeolocation.io: IP geolocation and threat intel for every IP" width="100%"></a>
@@ -108,7 +108,7 @@ Pro contacts stay in their own view. They never enter your exports, local databa
 
 ## Modules and API keys
 
-82 modules, and 70 of them need no API key. Investigations probe a bounded, evidence-first set of the highest-signal platforms rather than the whole corpus. Optional keys (HIBP, Netlas, ipgeolocation.io, WhoisFreaks, Oxylabs and others) add coverage: set them with `mailaccess keys set`.
+83 modules, and 70 of them need no API key. Investigations probe a bounded, evidence-first set of the highest-signal platforms rather than the whole corpus. Optional keys (HIBP, Netlas, ipgeolocation.io, WhoisFreaks, Oxylabs and others) add coverage: set them with `mailaccess keys set`.
 
 [Module reference](https://github.com/KatrielMoses/MailAccess/blob/main/docs/modules.md) · [API keys](https://github.com/KatrielMoses/MailAccess/blob/main/docs/api-keys.md) · [Export formats](https://github.com/KatrielMoses/MailAccess/blob/main/docs/exports.md) · [Self-hosting](https://github.com/KatrielMoses/MailAccess/blob/main/docs/self-hosting.md)
 

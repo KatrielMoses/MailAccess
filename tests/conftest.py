@@ -105,6 +105,7 @@ PROVIDER_KEY_SETTINGS = (
     "hibp_api_key", "haveibeenpwned_api_key", "breachdirectory_api_key",
     "hunter_io_api_key", "emailrep_api_key", "shodan_api_key", "serpapi_key",
     "github_token", "companies_house_api_key", "apollo_api_key", "pdl_api_key",
+    "darkeye_hibr_api_key", "darkeye_breachhouse_api_key",
     "intelx_api_key", "dehashed_api_key", "snusbase_api_key", "brave_search_api_key",
     "google_cse_api_key", "google_cse_cx", "google_intel_api_key", "otx_api_key",
     "slack_webhook_url", "discord_webhook_url", "integration_webhook_url",

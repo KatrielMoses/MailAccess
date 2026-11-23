@@ -90,7 +90,7 @@ def normalize_mode(value: str | ProductMode | None) -> ProductMode:
 _CREDENTIAL_BLOCKED = (
     _BREACH_MODULES
     | _INFOSTEALER_MODULES
-    | frozenset({"leakcheck", "ransomware_intel", "xposed_or_not"})
+    | frozenset({"leakcheck", "ransomware_intel", "xposed_or_not", "darkeye"})
 )
 
 # Personal-email pivots — deriving a person's *personal* address / cross-account
@@ -170,6 +170,7 @@ _ALL_KNOWN_MODULES: frozenset[str] = frozenset(
         "code_and_cert_email",
         "commoncrawl_email",
         "companies_house",
+        "darkeye",
         "dns_lookup",
         "domain_cluster",
         "domain_harvester",
